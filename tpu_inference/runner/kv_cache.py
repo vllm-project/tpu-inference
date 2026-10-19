@@ -23,14 +23,9 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 import tpu_inference.envs as envs
 import tpu_inference.kernels.mla.v2.kernel as mla
-import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
-
-if envs.USE_BATCHED_RPA_KERNEL:
-    import tpu_inference.kernels.experimental.batched_rpa.wrapper as rpa
-else:
-    import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
-
 from tpu_inference import utils
+from tpu_inference.layers.common.attention_backend import (AttentionBackend,
+                                                           RPAAttentionBackend)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import to_jax_dtype
@@ -59,10 +54,13 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
                                  actual_num_kv_heads: int,
                                  actual_head_dim: int,
                                  kv_dtype: any,
-                                 use_mla: bool = False):
+                                 use_mla: bool = False,
+                                 attention_backend: AttentionBackend
+                                 | None = None):
     """Gets the KV cache shape based on the mesh configuration.
 
     This function scales block_size by the CONTEXT (DCP, PCP) axis and num_heads by duplicate kv heads.
+    attention_backend is the runner's TPU attention backend; None runs RPA.
 
     """
 
@@ -71,10 +69,6 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
                                                ShardingAxisName.KV_CONTEXT)
     physical_block_size = block_size * context_cnt
 
-    # NOTE(chengjiyao): Currently, the attention kernel is tailored to the
-    # specific model, rather than being determined by the head_dim. If new
-    # models are introduced with a head_dim of 64, this will require additional
-    # model-specific adjustments.
     if use_mla:
         # No assertion needed: MLA compresses all KV into a single latent vector,
         # so actual_num_kv_heads is never used in mla.get_kv_cache_shape().
@@ -89,14 +83,10 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
                 transpose_kv_cache=envs.MLA_TRANSPOSE_KV_CACHE))
     else:
         assert actual_num_kv_heads % model_cnt == 0
-        get_kv_cache_shape_fn = (
-            rpa_hd64.get_kv_cache_shape if actual_head_dim == 64 \
-                else rpa.get_kv_cache_shape
-        )
         shape = list(
-            get_kv_cache_shape_fn(total_num_pages, physical_block_size,
-                                  actual_num_kv_heads // model_cnt,
-                                  actual_head_dim, kv_dtype))
+            (attention_backend or RPAAttentionBackend()).get_kv_cache_shape(
+                total_num_pages, physical_block_size,
+                actual_num_kv_heads // model_cnt, actual_head_dim, kv_dtype))
         shape[2] *= model_cnt
     return tuple(shape)
 
@@ -146,6 +136,7 @@ def create_kv_caches(
     layer_names: List[str],
     cache_dtype: jnp.dtype = DEFAULT_KV_CACHE_DTYPE,
     use_mla: bool = False,
+    attention_backend: AttentionBackend | None = None,
 ) -> List[jax.Array]:
     """
     Creates a list of KV cache where each array mapps to single attention layer.
@@ -172,7 +163,8 @@ def create_kv_caches(
 
     cache_shape = get_kv_cache_shape_with_mesh(mesh, num_blocks, block_size,
                                                num_kv_heads, head_size,
-                                               cache_dtype, use_mla)
+                                               cache_dtype, use_mla,
+                                               attention_backend)
 
     # num_blocks --> shard by data batch
     # block_size --> shard by context
@@ -205,8 +197,14 @@ def create_kv_cache_of_shape(
     return _get_kv_cache_allocator(tuple(cache_shape), cache_dtype, sharding)()
 
 
-def get_attention_page_size_bytes(mesh, block_size, num_kv_heads, head_size,
-                                  dtype, use_mla) -> int:
+def get_attention_page_size_bytes(
+        mesh,
+        block_size,
+        num_kv_heads,
+        head_size,
+        dtype,
+        use_mla,
+        attention_backend: AttentionBackend | None = None) -> int:
     jax_dtype = to_jax_dtype(dtype)
     bits = dtypes.itemsize_bits(jax_dtype)
     kv_cache_shape = get_kv_cache_shape_with_mesh(
@@ -217,5 +215,6 @@ def get_attention_page_size_bytes(mesh, block_size, num_kv_heads, head_size,
         actual_head_dim=head_size,
         kv_dtype=jax_dtype,
         use_mla=use_mla,
+        attention_backend=attention_backend,
     )
     return int(bits * np.prod(kv_cache_shape)) // 8

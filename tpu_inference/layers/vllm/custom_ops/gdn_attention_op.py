@@ -23,6 +23,8 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import \
     QwenGatedDeltaNetAttention
 
+from tpu_inference.layers.common.attention_backend import (
+    attention_backend_name, create_linear_attention_backend)
 from tpu_inference.layers.common.gdn_attention import run_jax_gdn_attention
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import (
@@ -170,6 +172,7 @@ def gdn_attention_core_tpu(
                                                        dp_size)
         read_state_indices_sliced = state_indices_sliced
 
+    linear_attention_backend = layer_module.linear_attention_backend
     (new_conv_state_extracted,
      new_recurrent_state), j_output = run_jax_gdn_attention(
          j_mixed_qkv,
@@ -192,6 +195,7 @@ def gdn_attention_core_tpu(
          kernel_size,
          mesh=mesh,
          read_state_indices=read_state_indices_sliced,
+         conv1d_gdn_kernel=linear_attention_backend.conv1d_gdn_kernel(),
      )
     if state_len > kernel_size - 1:
         remaining_old_state = conv_state[:, kernel_size - 1:, :]
@@ -208,6 +212,13 @@ def gdn_attention_core_tpu(
 
 @QwenGatedDeltaNetAttention.register_oot
 class VllmGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
+
+    def __init__(self, config, vllm_config, *args, **kwargs) -> None:
+        super().__init__(config, vllm_config, *args, **kwargs)
+        # The linear attention backend --attention-backend selects, whose
+        # kernel gdn_attention_core_tpu runs.
+        self.linear_attention_backend = create_linear_attention_backend(
+            attention_backend_name(vllm_config))
 
     def forward(
         self,

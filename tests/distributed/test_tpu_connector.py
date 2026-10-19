@@ -125,6 +125,17 @@ class TestTPUConnector(unittest.TestCase):
         connector.get_finished(set())
         mock_worker_instance.get_finished.assert_called_once_with()
 
+        mock_worker_instance.get_block_ids_with_load_errors.return_value = {3}
+        self.assertEqual(connector.get_block_ids_with_load_errors(), {3})
+
+    def test_scheduler_reports_no_load_errors(self, mock_scheduler_cls,
+                                              mock_worker_cls):
+        """The scheduler-role connector has no worker and no load errors."""
+        connector = tpu_connector.TPUConnector(self.vllm_config,
+                                               KVConnectorRole.SCHEDULER,
+                                               _make_test_kv_cache_config())
+        self.assertEqual(connector.get_block_ids_with_load_errors(), set())
+
 
 @patch("tpu_inference.distributed.tpu_connector_hma.TPUConnectorHMAWorker")
 @patch("tpu_inference.distributed.tpu_connector_hma.TPUConnectorHMAScheduler")
@@ -764,6 +775,126 @@ class TestTPUConnectorWorker(unittest.TestCase):
         worker.get_finished()
 
         self.assertEqual(worker._early_pull_done, {8: 990.0})
+
+    def _make_consumer_for_pull(self):
+        self.vllm_config.kv_transfer_config.is_kv_producer = False
+        worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
+        worker._get_kv_spec = MagicMock(return_value="kv_spec")
+        self.all_mocks[
+            "jax"].profiler.TraceAnnotation.is_enabled.return_value = False
+        load_meta = tpu_connector.LoadMeta(uuid=7,
+                                           local_block_ids=[1, 2],
+                                           remote_block_ids=[10, 11],
+                                           remote_host="host",
+                                           remote_port=123)
+        return worker, load_meta
+
+    @patch(
+        'tpu_inference.distributed.tpu_connector.dist_utils.get_p2p_wait_pull_timeout',
+        return_value=180)
+    @patch(
+        'tpu_inference.distributed.tpu_connector.dist_utils.get_enable_block_kv_transfer',
+        return_value=True)
+    def test_pull_kv_returns_kv_when_ready(self, *_):
+        worker, load_meta = self._make_consumer_for_pull()
+        chunk = MagicMock(nbytes=1024 * 1024)
+        chunk.is_ready.return_value = True
+        conn = MagicMock()
+        conn.pull.return_value = [chunk]
+        self.all_mocks["time"].perf_counter.return_value = 0.0
+
+        self.assertEqual(worker._pull_kv("req1", conn, load_meta), [chunk])
+
+    @patch(
+        'tpu_inference.distributed.tpu_connector.dist_utils.get_p2p_wait_pull_timeout',
+        return_value=180)
+    @patch(
+        'tpu_inference.distributed.tpu_connector.dist_utils.get_enable_block_kv_transfer',
+        return_value=True)
+    def test_pull_kv_returns_none_on_timeout(self, *_):
+        """A pull whose KV never arrives must not hand back unready arrays."""
+        worker, load_meta = self._make_consumer_for_pull()
+        chunk = MagicMock(nbytes=1024 * 1024)
+        chunk.is_ready.return_value = False
+        conn = MagicMock()
+        conn.pull.return_value = [chunk]
+        # start, end of prepare, then past the 180s timeout.
+        self.all_mocks["time"].perf_counter.side_effect = [0.0, 0.0, 181.0]
+
+        self.assertIsNone(worker._pull_kv("req1", conn, load_meta))
+
+    def test_pull_kv_returns_none_when_pull_raises(self):
+        worker, load_meta = self._make_consumer_for_pull()
+        conn = MagicMock()
+        conn.pull.side_effect = RuntimeError("connection refused")
+        self.all_mocks["time"].perf_counter.return_value = 0.0
+
+        self.assertIsNone(worker._pull_kv("req1", conn, load_meta))
+
+    def _assert_failed_pull_reported(self, future):
+        self.vllm_config.kv_transfer_config.is_kv_producer = False
+        worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
+        ok_future = MagicMock()
+        ok_future.done.return_value = True
+        ok_future.result.return_value = "kv_ok"
+        worker.reqs_pulling = {
+            "req_failed": [future, None, [1, 2]],
+            "req_ok": [ok_future, None, [3]],
+        }
+
+        _, done_recving = worker.get_finished()
+
+        # Both finish receiving; only the failed one reports its blocks and
+        # drops its pull state, so its KV is never inserted.
+        self.assertEqual(done_recving, {"req_failed", "req_ok"})
+        self.assertNotIn("req_failed", worker.reqs_pulling)
+        self.assertEqual(worker.reqs_pulling["req_ok"][1], "kv_ok")
+        self.assertEqual(worker.get_block_ids_with_load_errors(), {1, 2})
+        # Reported once.
+        self.assertEqual(worker.get_block_ids_with_load_errors(), set())
+        return worker
+
+    def test_get_finished_reports_failed_pull(self):
+        future = MagicMock()
+        future.done.return_value = True
+        future.result.return_value = None
+        self._assert_failed_pull_reported(future)
+
+    def test_get_finished_reports_pull_that_raised(self):
+        future = MagicMock()
+        future.done.return_value = True
+        future.result.side_effect = RuntimeError("boom")
+        self._assert_failed_pull_reported(future)
+
+    def test_failed_pull_is_not_inserted(self):
+        """After a failed pull, a later load step only notifies P."""
+        future = MagicMock()
+        future.done.return_value = True
+        future.result.return_value = None
+        worker = self._assert_failed_pull_reported(future)
+        worker._maybe_build_notif_socket = MagicMock(return_value="socket")
+        worker._notify_pull_done = MagicMock()
+        meta = tpu_connector.TPUConnectorMetadata()
+        meta.reqs_to_load = {
+            "req_failed":
+            tpu_connector.LoadMeta(uuid=7,
+                                   local_block_ids=[1, 2],
+                                   remote_block_ids=None,
+                                   remote_host="host",
+                                   remote_port=123)
+        }
+
+        worker.process_send_load(meta)
+
+        self.all_mocks["insert_kv_chunks"].assert_not_called()
+        worker._notify_pull_done.assert_called_once_with(
+            "socket", "req_failed", 7)
+
+    def test_flatten_block_ids(self):
+        self.assertEqual(tpu_connector._flatten_block_ids([1, 2]), [1, 2])
+        self.assertEqual(tpu_connector._flatten_block_ids([[1], [2, 3]]),
+                         [1, 2, 3])
+        self.assertEqual(tpu_connector._flatten_block_ids([]), [])
 
 
 class TestTPUConnectorUtils(unittest.TestCase):
