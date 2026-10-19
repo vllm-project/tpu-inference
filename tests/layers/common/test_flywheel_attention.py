@@ -63,11 +63,10 @@ def build_metadata() -> tuple[AttentionMetadata, SharedAttentionMetadata]:
                            query_start_loc=query_start_loc,
                            request_distribution=distribution,
                            backend_metadata=fa.FlywheelMetadata(
-                               attention_phase=fa._PREFILL_PHASE,
                                kv_write_slices=jnp.zeros(
                                    (3 * KV_WRITE_BOUND, ), jnp.int32),
                                kv_write_num_slices=jnp.zeros((1, ), jnp.int32),
-                               varlen_block_span=TOTAL_TOKENS))
+                               kernel_index=jnp.zeros((1, ), jnp.int32)))
     shared = SharedAttentionMetadata(input_positions=jnp.arange(
         TOTAL_TOKENS, dtype=jnp.int32),
                                      seq_lens=seq_lens,
@@ -117,18 +116,14 @@ class TestDispatch:
         wrapper, (kv_cache, output) = self.run_attention(mesh, monkeypatch)
         wrapper.assert_called_once()
         args, kwargs = wrapper.call_args
-        *_, kv_write_slices, kv_write_num_slices, distribution = args
+        *_, kv_write_slices, kv_write_num_slices, distribution, kernel_index = args
         assert args[0] is mesh
-        assert len(args) == 11
+        assert len(args) == 12
+        assert kernel_index.shape == (1, )
         assert kv_write_slices.shape == (3 * KV_WRITE_BOUND, )
         assert kv_write_num_slices.shape == (1, )
         np.testing.assert_array_equal(distribution, [0, 0, NUM_SEQS])
-        assert kwargs == {
-            "phase": fa._PREFILL_PHASE,
-            "sm_scale": HEAD_DIM**-0.5,
-            "dense_prefill": False,
-            "varlen_block_span": TOTAL_TOKENS,
-        }
+        assert kwargs == {"sm_scale": HEAD_DIM**-0.5}
         assert output.shape == (TOTAL_TOKENS, NUM_HEADS, HEAD_DIM)
         assert kv_cache.shape == (NUM_BLOCKS, BLOCK_SIZE, 2 * NUM_KV_HEADS,
                                   HEAD_DIM)
@@ -397,6 +392,12 @@ def prepare(
     return fields, DeviceBuffer.unpack_arrays(jnp.asarray(blob), layout)
 
 
+def step_kernel(arrays: dict[str, jax.Array], bucket: int) -> str | int:
+    """The kernel prepare_step picked, the same on every DP rank."""
+    (index, ) = set(np.asarray(arrays[fa._KERNEL_INDEX_KEY]).tolist())
+    return fa.step_kernels(bucket)[index]
+
+
 class TestPrepareStep:
 
     def test_dp_ranks_that_disagree_run_extend(self):
@@ -404,9 +405,7 @@ class TestPrepareStep:
 
         fields, arrays = prepare(step)
 
-        assert fields.attention_phase == fa._EXTEND_PHASE
-        assert not fields.dense_prefill
-        assert fields.varlen_block_span is None
+        assert step_kernel(arrays, 256) == fa._EXTEND_PHASE
 
     def test_each_attention_group_gets_its_ranks_slice_tables(self):
         seq_lens_per_rank = [[(1, 300), (1, 129)], [(40, 700), (200, 457)]]
@@ -418,31 +417,31 @@ class TestPrepareStep:
         for gid, page_size in enumerate(PAGE_SIZES):
             md = fields(arrays, gid)
             assert isinstance(md, fa.FlywheelMetadata)
-            assert md.attention_phase == fa._EXTEND_PHASE
             bound = fa.kv_write_slice_bound(256, MAX_REQS_PER_RANK, page_size)
             slices = np.asarray(md.kv_write_slices).reshape(2, 3, bound)
             for rank, requests in enumerate(seq_lens_per_rank):
                 q_lens = [q_len for q_len, _ in requests]
-                req_offset = rank * MAX_REQS_PER_RANK
+                # The decode kernel appends the decode rows itself.
+                num_decode = int(step.request_distribution[3 * rank])
+                req_offset = rank * MAX_REQS_PER_RANK + num_decode
                 expected = naive_kv_write_slices(
-                    [0, *np.cumsum(q_lens).tolist()],
-                    [kv_len for _, kv_len in requests],
+                    [0, *np.cumsum(q_lens).tolist()][num_decode:],
+                    [kv_len for _, kv_len in requests][num_decode:],
                     step.block_tables[gid][req_offset:], page_size)
                 assert md.kv_write_num_slices[rank] == len(expected)
                 np.testing.assert_array_equal(
-                    slices[rank][:, :len(expected)].T, np.array(expected))
+                    slices[rank][:, :len(expected)].T,
+                    np.array(expected, np.int32).reshape(-1, 3))
 
-    @pytest.mark.parametrize(("seq_lens_per_rank", "dense", "span"), [
-        ([[(1000, 1000)], [(700, 700)]], True, None),
-        ([[(500, 500), (500, 500)], [(700, 700)]], False, 512),
+    @pytest.mark.parametrize(("seq_lens_per_rank", "kernel"), [
+        ([[(1000, 1000)], [(700, 700)]], fa._DENSE_KERNEL),
+        ([[(500, 500), (500, 500)], [(700, 700)]], 512),
+        ([[(1, 300), (1, 129)], [(1, 50)]], fa._DECODE_PHASE),
     ])
-    def test_prefill_picks_its_kernel_on_the_host(self, seq_lens_per_rank,
-                                                  dense, span):
-        fields, _ = prepare(host_step(seq_lens_per_rank, bucket=1024))
+    def test_picks_its_kernel_on_the_host(self, seq_lens_per_rank, kernel):
+        _, arrays = prepare(host_step(seq_lens_per_rank, bucket=1024))
 
-        assert fields.attention_phase == fa._PREFILL_PHASE
-        assert fields.dense_prefill is dense
-        assert fields.varlen_block_span == span
+        assert step_kernel(arrays, 1024) == kernel
 
     # A decode step's bucket is the smallest one that fits a full
     # request batch, 2 * MAX_REQS_PER_RANK tokens over both ranks.
@@ -454,7 +453,7 @@ class TestPrepareStep:
         ([[(128, 128)] * 4, [(1000, 1000)]], 1024),
     ])
     def test_the_warmup_covers_the_step(self, seq_lens_per_rank, bucket):
-        fields, _ = prepare(host_step(seq_lens_per_rank, bucket))
+        fields, arrays = prepare(host_step(seq_lens_per_rank, bucket))
 
         variants = fa.FlywheelAttentionBackend().warmup_variants(
             kv_cache_groups(),
@@ -462,4 +461,5 @@ class TestPrepareStep:
             num_tokens_paddings=[16, 2048],
             max_num_reqs=2 * MAX_REQS_PER_RANK,
             dp_size=2)
-        assert fields in variants
+        assert variants == [fields]
+        assert step_kernel(arrays, bucket) in fa.step_kernels(bucket)

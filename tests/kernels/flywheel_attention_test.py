@@ -45,7 +45,7 @@ class FlywheelTpuWrapperTest(jtu.JaxTestCase):
                  *,
                  max_num_seqs: int = 8,
                  num_tokens: int = 1024,
-                 should_check_cache_copies: bool = False,
+                 should_check_cache_copies: bool = True,
                  is_dense: bool = False,
                  phase: str | None = None) -> None:
         """Run one step of seq_lens [(q_len, kv_len)], decode rows first, and
@@ -87,9 +87,9 @@ class FlywheelTpuWrapperTest(jtu.JaxTestCase):
             np.pad(kv_lens, (0, max_num_seqs - len(kv_lens))).astype(np.int32))
         distribution = jnp.array(
             [num_decode, num_decode, len(seq_lens)], jnp.int32)
-        # Note: the runner decides the phase, the ragged kernel's
-        # block span and the writer's slice table on the host, and the wrapper
-        # takes them as static arguments, so the test has to do the same.
+        # Note: the runner decides the kernel, an index into the bucket's
+        # step_kernels, and the writer's slice table on the host, so the test
+        # has to do the same.
         if phase is None:
             phase = fa.select_attention_phase(num_decode, np.asarray(cu_q),
                                               np.asarray(kv_lens))
@@ -97,12 +97,15 @@ class FlywheelTpuWrapperTest(jtu.JaxTestCase):
         slice_table = np.zeros(
             (3, fa.kv_write_slice_bound(num_tokens, max_num_seqs, page_size)),
             np.int32)
-        num_slices = fa.build_kv_write_slices(np.asarray(cu_q_lens),
-                                              np.asarray(kv_lens_arr),
-                                              np.asarray(page_indices).reshape(
-                                                  max_num_seqs, pages_per_seq),
-                                              page_size=page_size,
-                                              out=slice_table)
+        # Note: the decode kernel appends the leading decode rows itself,
+        # so the writer's table holds only the rows after them.
+        num_slices = fa.build_kv_write_slices(
+            np.asarray(cu_q_lens)[num_decode:],
+            np.asarray(kv_lens_arr)[num_decode:],
+            np.asarray(page_indices).reshape(max_num_seqs,
+                                             pages_per_seq)[num_decode:],
+            page_size=page_size,
+            out=slice_table)
         kv_write_slices = jnp.asarray(slice_table.reshape(-1))
         kv_write_num_slices = jnp.array([num_slices], jnp.int32)
 
@@ -117,14 +120,17 @@ class FlywheelTpuWrapperTest(jtu.JaxTestCase):
             distribution,
             sm_scale=sm_scale)
 
-        static_kwargs = dict(phase=phase, sm_scale=sm_scale)
+        kernel = phase
         if is_dense:
             assert num_decode == 0 and len(seq_lens) == 1
             assert seq_lens[0][0] == seq_lens[0][1]
-            static_kwargs["dense_prefill"] = True
+            kernel = fa._DENSE_KERNEL
         elif phase == fa._PREFILL_PHASE:
-            static_kwargs["varlen_block_span"] = fa.varlen_block_span(
-                [[q_len for q_len, _ in seq_lens]], num_tokens)
+            kernel = fa.varlen_block_span([[q_len for q_len, _ in seq_lens]],
+                                          num_tokens)
+        kernel_index = jnp.array([fa.step_kernels(num_tokens).index(kernel)],
+                                 jnp.int32)
+        static_kwargs = dict(sm_scale=sm_scale)
         run = jax.jit(fa.flywheel_tpu_attention,
                       static_argnames=tuple(static_kwargs),
                       donate_argnums=(3, ))
@@ -136,7 +142,8 @@ class FlywheelTpuWrapperTest(jtu.JaxTestCase):
         if should_check_cache_copies:
             hlo = run.lower(q, k, v, cache, kv_lens_arr, page_indices,
                             cu_q_lens, kv_write_slices, kv_write_num_slices,
-                            distribution, **static_kwargs).compile().as_text()
+                            distribution, kernel_index,
+                            **static_kwargs).compile().as_text()
             cache_type = "bf16[" + ",".join(map(str, cache.shape)) + "]"
             copies = [
                 line for line in hlo.splitlines()
@@ -146,7 +153,7 @@ class FlywheelTpuWrapperTest(jtu.JaxTestCase):
         pointer = cache.unsafe_buffer_pointer()
         output, updated = run(q, k, v, cache, kv_lens_arr, page_indices,
                               cu_q_lens, kv_write_slices, kv_write_num_slices,
-                              distribution, **static_kwargs)
+                              distribution, kernel_index, **static_kwargs)
         self.assertEqual(updated.unsafe_buffer_pointer(), pointer)
 
         total = cu_q[-1]
