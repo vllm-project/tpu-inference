@@ -14,7 +14,7 @@
 > [!IMPORTANT]
 > **`tpu-inference` is now vLLM JAX (`vllm-jax`)** and is focused on serving JAX models on TPU with vLLM.
 >
-> The repository is moving to **[vllm-project/vllm-jax](https://github.com/vllm-project/vllm-jax)**. Until the move is complete, development continues in [vllm-project/tpu-inference](https://github.com/vllm-project/tpu-inference); open issues and pull requests there.
+> This repository is moving to **[vllm-project/vllm-jax](https://github.com/vllm-project/vllm-jax)**. Until the move is complete, development continues in [vllm-project/tpu-inference](https://github.com/vllm-project/tpu-inference); open issues and pull requests there.
 >
 > PyTorch-native TPU serving has moved to its own project, **[vllm-torchtpu](https://github.com/vllm-project/vllm-torchtpu)**, which ships its own releases and is where all future PyTorch-native TPU support in vLLM will live. If you are serving PyTorch models on TPU, head there.
 
