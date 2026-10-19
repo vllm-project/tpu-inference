@@ -241,19 +241,11 @@ def test_default_backend_skips_the_process_check(monkeypatch):
 def test_default_backend_has_no_step_metadata():
     backend = RPAAttentionBackend()
 
-    assert (backend.prepare_step(None, None)
-            is attention_backend.no_attention_fields)
-    assert backend.warmup_variants([],
-                                   num_tokens=16,
-                                   num_tokens_paddings=[16],
-                                   max_num_reqs=8,
-                                   dp_size=1) == [
-                                       attention_backend.no_attention_fields
-                                   ]
+    assert backend.prepare_step(None, None) is None
+    assert backend.backend_metadata({}, 0) is None
     assert backend.warmup_arrays([],
                                  num_tokens=16,
                                  max_num_reqs=8,
                                  dp_size=1,
                                  mesh=None,
                                  sharding=None) == {}
-    assert attention_backend.no_attention_fields({}, 0) is None

@@ -3078,7 +3078,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     self.kv_cache_config.kv_cache_groups):
                 block_tables_views[gid] = build_block_table_host(gid)
 
-        attention_fields = self.attention_backend.prepare_step(
+        self.attention_backend.prepare_step(
             HostStepInputs(
                 kv_cache_groups=self.kv_cache_config.kv_cache_groups,
                 block_tables=block_tables_views,
@@ -3154,7 +3154,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=attn_padded_num_reqs,
                 pcp=pcp_metadata,
-                backend_metadata=attention_fields(metadata, gid),
+                backend_metadata=self.attention_backend.backend_metadata(
+                    metadata, gid),
             )
 
             return attention_metadata_gid

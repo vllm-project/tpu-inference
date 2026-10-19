@@ -36,7 +36,6 @@ from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheGroupSpec,
 
 from tpu_inference import envs
 from tpu_inference.layers.common.attention_backend import (AttentionBackend,
-                                                           AttentionFields,
                                                            HostStepInputs)
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, SharedAttentionMetadata)
@@ -672,23 +671,6 @@ class FlywheelMetadata:
     kernel_index: jax.Array
 
 
-@dataclass(frozen=True)
-class FlywheelStepFields:
-    """The AttentionFields of every step: each attention KV cache group in
-    attention_gids gets a FlywheelMetadata from the unpacked device buffer,
-    any other group (mamba) None."""
-    attention_gids: frozenset[int]
-
-    def __call__(self, metadata: Mapping[str, jax.Array],
-                 gid: int) -> FlywheelMetadata | None:
-        if gid not in self.attention_gids:
-            return None
-        return FlywheelMetadata(
-            kv_write_slices=metadata[f"kv_write_slices_gid_{gid}"],
-            kv_write_num_slices=metadata[f"kv_write_num_slices_gid_{gid}"],
-            kernel_index=metadata[_KERNEL_INDEX_KEY])
-
-
 class FlywheelAttentionBackend(AttentionBackend):
     """--attention-backend flywheel."""
 
@@ -826,7 +808,7 @@ class FlywheelAttentionBackend(AttentionBackend):
         return kv_cache, output
 
     def prepare_step(self, step: HostStepInputs,
-                     device_buffer: DeviceBuffer) -> AttentionFields:
+                     device_buffer: DeviceBuffer) -> None:
         """Decide the step's kernel, and append its index and each attention
         group's KV write slice table to device_buffer."""
 
@@ -895,18 +877,17 @@ class FlywheelAttentionBackend(AttentionBackend):
         kernel_index_view = device_buffer.get_view((step.dp_size, ),
                                                    key=_KERNEL_INDEX_KEY)
         kernel_index_view[:] = step_kernels(bucket).index(kernel)
-        return FlywheelStepFields(attention_gids=frozenset(page_sizes))
 
-    def warmup_variants(self, kv_cache_groups: Sequence[KVCacheGroupSpec], *,
-                        num_tokens: int, num_tokens_paddings: Sequence[int],
-                        max_num_reqs: int,
-                        dp_size: int) -> list[AttentionFields]:
-        # Note: the step's kernel is a data index into the backbone's
-        # lax.switch, so one backbone per bucket serves every step, as RPA's.
-        return [
-            FlywheelStepFields(attention_gids=frozenset(
-                attention_group_page_sizes(kv_cache_groups)))
-        ]
+    def backend_metadata(self, metadata: Mapping[str, jax.Array],
+                         gid: int) -> FlywheelMetadata | None:
+        # Note: prepare_step and warmup_arrays write a slice table for
+        # each attention group only; a mamba group has no pages to write.
+        if f"kv_write_slices_gid_{gid}" not in metadata:
+            return None
+        return FlywheelMetadata(
+            kv_write_slices=metadata[f"kv_write_slices_gid_{gid}"],
+            kv_write_num_slices=metadata[f"kv_write_num_slices_gid_{gid}"],
+            kernel_index=metadata[_KERNEL_INDEX_KEY])
 
     def warmup_arrays(self, kv_cache_groups: Sequence[KVCacheGroupSpec], *,
                       num_tokens: int, max_num_reqs: int, dp_size: int,

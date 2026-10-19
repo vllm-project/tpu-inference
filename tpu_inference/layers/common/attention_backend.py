@@ -43,28 +43,6 @@ if TYPE_CHECKING:
         AttentionMetadata, SharedAttentionMetadata)
     from tpu_inference.utils import DeviceBuffer
 
-# Builds a backend's own metadata for one KV cache group in one step.
-# prepare_step returns one; warmup_variants returns one per executable.
-#   Input:
-#     Mapping[str, jax.Array]: the step's device buffer, unpacked on the
-#       device. It maps each key written with DeviceBuffer.get_view, by the
-#       runner (e.g. "seq_lens") or by prepare_step (e.g. a backend's own
-#       "kv_write_slices_gid_0"), to its array. In the warmup it holds the
-#       dummy arrays of warmup_arrays instead.
-#     int: the KV cache group id, the index of a KVCacheGroupSpec in the KV
-#       cache config. A group is a set of layers that share one KV cache spec
-#       and one block table.
-#   Output:
-#     object: the group's metadata, which the runner puts in
-#       AttentionMetadata.backend_metadata: a pytree of the backend's own
-#       type, or None.
-AttentionFields = Callable[[Mapping[str, "jax.Array"], int], object]
-
-
-def no_attention_fields(metadata: Mapping[str, "jax.Array"], gid: int) -> None:
-    """The AttentionFields of a backend without metadata of its own."""
-    return None
-
 
 @dataclass(frozen=True)
 class HostStepInputs:
@@ -93,9 +71,10 @@ class AttentionBackend(abc.ABC):
     """The kernel of the attention layers and the layout of their KV cache.
 
     A backend that needs metadata of its own in each step, beyond the
-    AttentionMetadata RPA uses, overrides prepare_step, warmup_variants and
-    warmup_arrays; by default it has none, and the warmup compiles one
-    executable per token bucket, as for RPA."""
+    AttentionMetadata RPA uses, overrides prepare_step, backend_metadata and
+    warmup_arrays; by default it has none. Either way the warmup compiles one
+    executable per token bucket, as for RPA, so the metadata holds only device
+    arrays: a static field would compile one executable per value."""
 
     @abc.abstractmethod
     def get_kv_cache_shape(self, total_num_pages: int, page_size: int,
@@ -135,27 +114,34 @@ class AttentionBackend(abc.ABC):
         TpuPlatform.check_and_update_config, before any worker starts."""
 
     def prepare_step(self, step: HostStepInputs,
-                     device_buffer: "DeviceBuffer") -> AttentionFields:
-        """The backend's metadata of one step, decided on the host. Arrays the
-        device needs go into device_buffer, which reaches the device in the
-        step's one transfer; the returned AttentionFields reads them back from
-        the unpacked buffer, per KV cache group."""
-        return no_attention_fields
+                     device_buffer: "DeviceBuffer") -> None:
+        """Decide the backend's metadata of one step on the host, and write
+        the arrays the device needs into device_buffer, each under its own key
+        (DeviceBuffer.get_view). The buffer reaches the device in the step's
+        one transfer, and backend_metadata reads them back."""
 
-    def warmup_variants(self, kv_cache_groups: "Sequence[KVCacheGroupSpec]", *,
-                        num_tokens: int, num_tokens_paddings: Sequence[int],
-                        max_num_reqs: int,
-                        dp_size: int) -> list[AttentionFields]:
-        """The AttentionFields of every executable a step at this token bucket
-        can run; the warmup compiles each one. Each value of a static (meta)
-        field of the backend's metadata compiles its own executable."""
-        return [no_attention_fields]
+    def backend_metadata(self, metadata: Mapping[str, "jax.Array"],
+                         gid: int) -> object:
+        """Build the backend's own metadata of one KV cache group, which the
+        runner puts in AttentionMetadata.backend_metadata.
+          Input:
+            metadata: the step's device buffer, unpacked on the device. It
+              maps each key written with DeviceBuffer.get_view, by the runner
+              (e.g. "seq_lens") or by prepare_step (e.g. a backend's own
+              "kv_write_slices_gid_0"), to its array. In the warmup it holds
+              the dummy arrays of warmup_arrays instead.
+            gid: the KV cache group id, the index of a KVCacheGroupSpec in the
+              KV cache config. A group is a set of layers that share one KV
+              cache spec and one block table.
+          Output:
+            a pytree of the backend's own type, or None."""
+        return None
 
     def warmup_arrays(self, kv_cache_groups: "Sequence[KVCacheGroupSpec]", *,
                       num_tokens: int, max_num_reqs: int, dp_size: int,
                       mesh: "Mesh",
                       sharding: "NamedSharding") -> Mapping[str, "jax.Array"]:
-        """Dummy device arrays for warmup_variants' AttentionFields to read,
+        """Dummy device arrays for backend_metadata to read in the warmup,
         shaped like the ones prepare_step puts into the device buffer, so that
         serving reuses the warmed up executables. "seq_lens" and
         "query_start_loc", if present, replace the warmup's own dummy ones

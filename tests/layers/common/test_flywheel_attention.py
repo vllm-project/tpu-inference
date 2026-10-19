@@ -382,14 +382,12 @@ def host_step(seq_lens_per_rank: list[list[tuple[int, int]]],
         padded_num_scheduled_tokens_per_dp_rank=bucket)
 
 
-def prepare(
-    step: HostStepInputs
-) -> tuple[fa.FlywheelStepFields, dict[str, jax.Array]]:
+def prepare(step: HostStepInputs) -> dict[str, jax.Array]:
     """prepare_step, and the device buffer unpacked as the runner does."""
     device_buffer = DeviceBuffer()
-    fields = fa.FlywheelAttentionBackend().prepare_step(step, device_buffer)
+    fa.FlywheelAttentionBackend().prepare_step(step, device_buffer)
     blob, layout = device_buffer.build()
-    return fields, DeviceBuffer.unpack_arrays(jnp.asarray(blob), layout)
+    return DeviceBuffer.unpack_arrays(jnp.asarray(blob), layout)
 
 
 def step_kernel(arrays: dict[str, jax.Array], bucket: int) -> str | int:
@@ -403,7 +401,7 @@ class TestPrepareStep:
     def test_dp_ranks_that_disagree_run_extend(self):
         step = host_step([[(1, 300), (1, 129)], [(256, 256)]], bucket=256)
 
-        fields, arrays = prepare(step)
+        arrays = prepare(step)
 
         assert step_kernel(arrays, 256) == fa._EXTEND_PHASE
 
@@ -411,11 +409,12 @@ class TestPrepareStep:
         seq_lens_per_rank = [[(1, 300), (1, 129)], [(40, 700), (200, 457)]]
         step = host_step(seq_lens_per_rank, bucket=256)
 
-        fields, arrays = prepare(step)
+        arrays = prepare(step)
 
-        assert fields(arrays, len(PAGE_SIZES)) is None
+        backend = fa.FlywheelAttentionBackend()
+        assert backend.backend_metadata(arrays, len(PAGE_SIZES)) is None
         for gid, page_size in enumerate(PAGE_SIZES):
-            md = fields(arrays, gid)
+            md = backend.backend_metadata(arrays, gid)
             assert isinstance(md, fa.FlywheelMetadata)
             bound = fa.kv_write_slice_bound(256, MAX_REQS_PER_RANK, page_size)
             slices = np.asarray(md.kv_write_slices).reshape(2, 3, bound)
@@ -439,7 +438,7 @@ class TestPrepareStep:
         ([[(1, 300), (1, 129)], [(1, 50)]], fa._DECODE_PHASE),
     ])
     def test_picks_its_kernel_on_the_host(self, seq_lens_per_rank, kernel):
-        _, arrays = prepare(host_step(seq_lens_per_rank, bucket=1024))
+        arrays = prepare(host_step(seq_lens_per_rank, bucket=1024))
 
         assert step_kernel(arrays, 1024) == kernel
 
@@ -452,14 +451,22 @@ class TestPrepareStep:
         ([[(500, 500), (500, 500)], [(700, 700)]], 1024),
         ([[(128, 128)] * 4, [(1000, 1000)]], 1024),
     ])
-    def test_the_warmup_covers_the_step(self, seq_lens_per_rank, bucket):
-        fields, arrays = prepare(host_step(seq_lens_per_rank, bucket))
+    def test_the_warmup_primes_the_step(self, mesh, seq_lens_per_rank, bucket):
+        arrays = prepare(host_step(seq_lens_per_rank, bucket))
 
-        variants = fa.FlywheelAttentionBackend().warmup_variants(
+        backend = fa.FlywheelAttentionBackend()
+        warmup_arrays = backend.warmup_arrays(
             kv_cache_groups(),
             num_tokens=2 * bucket,
-            num_tokens_paddings=[16, 2048],
             max_num_reqs=2 * MAX_REQS_PER_RANK,
-            dp_size=2)
-        assert variants == [fields]
+            dp_size=2,
+            mesh=mesh,
+            sharding=NamedSharding(mesh, P()))
+        # Every group's metadata has the shapes serving passes, so the
+        # bucket's one warmed up backbone serves the step.
+        for gid in range(len(PAGE_SIZES) + 1):
+            assert (jax.tree.map(
+                jnp.shape,
+                backend.backend_metadata(arrays, gid)) == jax.tree.map(
+                    jnp.shape, backend.backend_metadata(warmup_arrays, gid)))
         assert step_kernel(arrays, bucket) in fa.step_kernels(bucket)
