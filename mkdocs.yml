@@ -94,6 +94,8 @@ markdown_extensions:
   - attr_list
   - md_in_html
   - admonition
+  # GitHub-style `> [!NOTE]` callouts (shared with the GitHub README)
+  - github-callouts
   - pymdownx.details
   # For content tabs
   - pymdownx.superfences
