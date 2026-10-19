@@ -530,26 +530,21 @@ def sharded_ragged_paged_attention(
             orig_kv_shape = local_kv_cache.shape
             local_num_kv_heads = local_k.shape[1]
             local_head_dim = local_k.shape[2]
-            kv_packing = orig_kv_shape[3]
-            expected_kh_x2_pack = max(
-                1, ((local_num_kv_heads * 2) + kv_packing - 1) // kv_packing)
-            if not envs.USE_BATCHED_RPA_KERNEL:
-                expected_kh_x2_pack = 1 << (expected_kh_x2_pack -
-                                            1).bit_length()
-            expected_head_dim = ((local_head_dim + 127) // 128) * 128
-            if (orig_kv_shape[2], orig_kv_shape[4]) != (expected_kh_x2_pack,
-                                                        expected_head_dim):
-                block_elems = (orig_kv_shape[1] * orig_kv_shape[2] *
-                               orig_kv_shape[3] * orig_kv_shape[4])
-                expected_page_size = block_elems // (
-                    expected_kh_x2_pack * kv_packing * expected_head_dim)
-                reshaped_kv_cache = local_kv_cache.reshape(
-                    orig_kv_shape[0],
-                    expected_page_size,
-                    expected_kh_x2_pack,
-                    kv_packing,
-                    expected_head_dim,
-                )
+            token_kv_shape = get_kv_cache_shape(1, 1, local_num_kv_heads,
+                                                local_head_dim,
+                                                local_kv_cache.dtype)
+            elems_per_token = math.prod(token_kv_shape[1:])
+            block_elems = math.prod(orig_kv_shape[1:])
+            expected_page_size = block_elems // elems_per_token
+            expected_kv_shape = get_kv_cache_shape(
+                orig_kv_shape[0],
+                expected_page_size,
+                local_num_kv_heads,
+                local_head_dim,
+                local_kv_cache.dtype,
+            )
+            if orig_kv_shape != expected_kv_shape:
+                reshaped_kv_cache = local_kv_cache.reshape(expected_kv_shape)
                 call_args = (*args[:3], reshaped_kv_cache, *args[4:])
                 out_q, out_kv_cache = func(*call_args, **kwargs)
                 return out_q, out_kv_cache.reshape(orig_kv_shape)
