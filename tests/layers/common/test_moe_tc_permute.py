@@ -59,6 +59,24 @@ def test_capacity(num_rows, num_shards, factor, expected):
                                                  num_shards) == expected
 
 
+def _banded_case(rng, num_tokens, num_rows, hot_block):
+    """Random rows for _tc_banded_combine and their scatter-add reference."""
+    row_tokens = rng.integers(0, num_tokens, num_rows)
+    if hot_block is not None:
+        hot = rng.integers(hot_block * 512, (hot_block + 1) * 512, num_rows)
+        row_tokens = np.where(rng.random(num_rows) < 0.75, hot, row_tokens)
+    row_valid = rng.random(num_rows) < 0.9
+    rows = jnp.asarray(rng.standard_normal((num_rows, 256)), jnp.bfloat16)
+    weights = jnp.asarray(rng.random(num_rows), jnp.float32)
+    weighted = (np.asarray(rows, np.float32) *
+                np.asarray(weights.astype(jnp.bfloat16), np.float32)[:, None])
+    expected = np.zeros((num_tokens, 256), np.float32)
+    np.add.at(expected, row_tokens[row_valid], weighted[row_valid])
+    args = (rows, jnp.asarray(row_tokens,
+                              jnp.int32), weights, jnp.asarray(row_valid))
+    return args, expected
+
+
 @pytest.mark.parametrize(
     "num_tokens, num_rows, hot_block",
     [
@@ -67,23 +85,21 @@ def test_capacity(num_rows, num_shards, factor, expected):
         (4096, 1024, 3),  # most rows in block 3: several windows
     ])
 def test_banded_combine(num_tokens, num_rows, hot_block):
-    """_tc_banded_combine against a scatter-add of the weighted rows."""
+    """_tc_banded_combine against a scatter-add of the weighted rows, alone
+    and added into an accumulator holding another chunk's sums."""
     rng = np.random.default_rng(0)
-    row_tokens = rng.integers(0, num_tokens, num_rows)
-    if hot_block is not None:
-        hot = rng.integers(hot_block * 512, (hot_block + 1) * 512, num_rows)
-        row_tokens = np.where(rng.random(num_rows) < 0.75, hot, row_tokens)
-    row_valid = rng.random(num_rows) < 0.9
-    rows = jnp.asarray(rng.standard_normal((num_rows, 256)), jnp.bfloat16)
-    weights = jnp.asarray(rng.random(num_rows), jnp.float32)
+    args, expected = _banded_case(rng, num_tokens, num_rows, hot_block)
+    args2, expected2 = _banded_case(rng, num_tokens, num_rows, hot_block)
     combine = jax.jit(fused_moe_gmm._tc_banded_combine, static_argnums=4)
-    out = combine(rows, jnp.asarray(row_tokens, jnp.int32), weights,
-                  jnp.asarray(row_valid), num_tokens)
-    weighted = (np.asarray(rows, np.float32) *
-                np.asarray(weights.astype(jnp.bfloat16), np.float32)[:, None])
-    expected = np.zeros((num_tokens, 256), np.float32)
-    np.add.at(expected, row_tokens[row_valid], weighted[row_valid])
-    np.testing.assert_allclose(np.asarray(out), expected, rtol=1e-5, atol=1e-5)
+    out = combine(*args, num_tokens)
+    assert out.shape == fused_moe_gmm._tc_banded_blocks(num_tokens) + (256, )
+    flat = lambda x: np.asarray(x).reshape(-1, 256)[:num_tokens]  # noqa: E731
+    np.testing.assert_allclose(flat(out), expected, rtol=1e-5, atol=1e-5)
+    both = combine(*args2, num_tokens, out)
+    np.testing.assert_allclose(flat(both),
+                               expected + expected2,
+                               rtol=1e-5,
+                               atol=1e-5)
 
 
 def _moe_inputs(mesh: Mesh,

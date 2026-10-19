@@ -239,9 +239,18 @@ def tc_permute_capacity(num_rows: int, num_ep_shards: int) -> int:
     return min(num_rows, max(512, capacity))
 
 
-def _tc_banded_combine(rows: jax.Array, row_tokens: jax.Array,
-                       row_weights: jax.Array, row_valid: jax.Array,
-                       num_tokens: int) -> jax.Array:
+def _tc_banded_blocks(num_tokens: int) -> tuple[int, int]:
+    """(number of blocks, tokens per block) of _tc_banded_combine's output."""
+    block = min(_TC_PERMUTE_COMBINE_BLOCK_TOKENS, num_tokens)
+    return math.ceil(num_tokens / block), block
+
+
+def _tc_banded_combine(rows: jax.Array,
+                       row_tokens: jax.Array,
+                       row_weights: jax.Array,
+                       row_valid: jax.Array,
+                       num_tokens: int,
+                       acc: jax.Array | None = None) -> jax.Array:
     """out[t] = sum of row_weights[j] * rows[j] over the valid rows j of token t.
 
     Sorted by token, the rows of each block of B consecutive tokens are
@@ -252,11 +261,15 @@ def _tc_banded_combine(rows: jax.Array, row_tokens: jax.Array,
     window, against tokens x rows x hidden for one one-hot over all the rows.
 
     Every row must be finite, invalid ones too: windows read past their
-    block's rows with zero weights. Returns [num_tokens, hidden] in float32.
+    block's rows with zero weights.
+
+    Returns [blocks, B, hidden] float32 (see _tc_banded_blocks): flattened,
+    row t is token t, and rows past num_tokens are padding. With acc (that
+    shape), the windows add into it, so combining several chunks needs no
+    float32 result per chunk.
     """
     num_rows, hidden = rows.shape
-    block = min(_TC_PERMUTE_COMBINE_BLOCK_TOKENS, num_tokens)
-    num_blocks = math.ceil(num_tokens / block)
+    num_blocks, block = _tc_banded_blocks(num_tokens)
     window = min(num_rows,
                  math.ceil(num_rows * block / num_tokens / 128) * 128)
     block_starts = jnp.arange(num_blocks + 1, dtype=row_tokens.dtype) * block
@@ -283,9 +296,12 @@ def _tc_banded_combine(rows: jax.Array, row_tokens: jax.Array,
                           rows[order[pos]],
                           preferred_element_type=jnp.float32)
 
-    out = jax.lax.fori_loop(1, num_windows, lambda m, acc: acc + window_sum(m),
-                            window_sum(0))
-    return out.reshape(num_blocks * block, hidden)[:num_tokens]
+    if acc is None:
+        acc, first = window_sum(0), 1
+    else:
+        first = 0
+    return jax.lax.fori_loop(first, num_windows,
+                             lambda m, a: a + window_sum(m), acc)
 
 
 def _tc_local_moe(tokens: jax.Array, topk_argsort_indices: jax.Array,
@@ -307,8 +323,9 @@ def _tc_local_moe(tokens: jax.Array, topk_argsort_indices: jax.Array,
     _TC_PERMUTE_BANDED_COMBINE_MIN_TOKENS tokens, _tc_banded_combine computes
     the same sum blockwise. Usually one chunk holds all of the shard's rows; a
     shard with more loops over chunks, so no buffer is ever larger than
-    `capacity` rows. topk_argsort_indices maps each expert-sorted row to its
-    flattened [token, k] position.
+    `capacity` rows. In that loop the banded combine adds every chunk into one
+    float32 accumulator. topk_argsort_indices maps each expert-sorted row to
+    its flattened [token, k] position.
 
     Returns the shard's partial sums, [num_tokens, hidden].
     """
@@ -329,8 +346,12 @@ def _tc_local_moe(tokens: jax.Array, topk_argsort_indices: jax.Array,
     weights = topk_weights.reshape(num_tokens, topk).astype(tokens.dtype)
     banded = num_tokens >= _TC_PERMUTE_BANDED_COMBINE_MIN_TOKENS
 
-    def chunk(k: jax.Array) -> jax.Array:
-        """Partial sums from shard rows [k * capacity, (k + 1) * capacity)."""
+    def chunk(k: jax.Array, acc: jax.Array | None = None) -> jax.Array:
+        """Partial sums from shard rows [k * capacity, (k + 1) * capacity).
+
+        One-hot: [num_tokens, hidden] float32. Banded: added into acc, in
+        _tc_banded_combine's layout.
+        """
         lo = k * capacity
         flat_idx = jax.lax.dynamic_slice(padded_indices, (start + lo, ),
                                          (capacity, ))
@@ -362,17 +383,26 @@ def _tc_local_moe(tokens: jax.Array, topk_argsort_indices: jax.Array,
         if banded:
             return _tc_banded_combine(gmm2_res, idx,
                                       topk_weights.reshape(-1)[flat_idx],
-                                      valid, num_tokens)
+                                      valid, num_tokens, acc)
         rel = jnp.where((revert >= lo) & (revert < lo + capacity), revert - lo,
                         -1)
         sel = (jax.nn.one_hot(rel, capacity, dtype=tokens.dtype) *
                weights[..., None]).sum(axis=1)
         return jnp.dot(sel, gmm2_res, preferred_element_type=jnp.float32)
 
+    num_chunks = (end - start + capacity - 1) // capacity
+
     def all_chunks() -> jax.Array:
+        if banded:
+            # One accumulator for every chunk and window: a float32 result per
+            # chunk on top of it cost ~1 GiB of temporaries at 16,384 tokens.
+            return jax.lax.fori_loop(
+                0, num_chunks, chunk,
+                jnp.zeros(
+                    _tc_banded_blocks(num_tokens) + (w2.shape[2], ),
+                    jnp.float32))
         return jax.lax.fori_loop(
-            0, (end - start + capacity - 1) // capacity,
-            lambda k, acc: acc + chunk(k),
+            0, num_chunks, lambda k, acc: acc + chunk(k),
             jnp.zeros((num_tokens, w2.shape[2]), jnp.float32))
 
     if capacity == num_rows:
@@ -380,6 +410,8 @@ def _tc_local_moe(tokens: jax.Array, topk_argsort_indices: jax.Array,
     else:
         out = jax.lax.cond(end - start <= capacity, lambda: chunk(0),
                            all_chunks)
+    if banded:
+        out = out.reshape(-1, out.shape[-1])[:num_tokens]
     return out.astype(tokens.dtype)
 
 
