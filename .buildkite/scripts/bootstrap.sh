@@ -407,9 +407,10 @@ else
     API_URL="https://api.github.com/repos/vllm-project/tpu-inference/pulls/$BUILDKITE_PULL_REQUEST"
     echo "Fetching PR details from: $API_URL"
 
-    # Fetch the response body and save to a temporary file
+    # Fetch the response body and save to a temporary file. -L follows the
+    # 301 GitHub's API returns for a renamed repository.
     GITHUB_PR_RESPONSE_FILE="github_api_logs.json"
-    curl -s "$API_URL" -o "$GITHUB_PR_RESPONSE_FILE"
+    curl -sL "$API_URL" -o "$GITHUB_PR_RESPONSE_FILE"
     
     # Upload the full response body as a Buildkite artifact
     echo "Uploading GitHub API response as artifact..."
