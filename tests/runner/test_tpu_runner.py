@@ -1284,6 +1284,47 @@ class TestTPUJaxRunnerDisableMM:
         assert entry.block_ids == [3, 4]
         np.testing.assert_array_equal(entry.rows, expert_indices[:2, :, 0, :])
 
+    def test_process_continue_decode_outputs_routed_experts_async_snapshot(
+            self):
+        """_process_continue_decode_outputs builds routed_experts_entries from
+        snapshotted block_ids_by_req even after req_state is popped from runner.requests."""
+        from tpu_inference.runner.tpu_runner import \
+            _process_continue_decode_outputs
+
+        generated_tokens = np.array([[101], [102]], dtype=np.int32)
+        actual_steps = 2
+        req_ids = ["req1"]
+        eos_token_id = 999
+        expert_indices = np.ones((2, 2, 1, 4), dtype=np.int32)
+
+        scheduler_output = SimpleNamespace(
+            scheduled_cached_reqs=SimpleNamespace(
+                req_ids=["req1"],
+                num_computed_tokens=[20],
+            ))
+
+        _, _, routed_experts_entries, _, _ = _process_continue_decode_outputs(
+            generated_tokens=generated_tokens,
+            actual_steps=actual_steps,
+            req_ids=req_ids,
+            eos_token_id=eos_token_id,
+            expert_indices=expert_indices,
+            enable_return_routed_experts=True,
+            requests={},  # req1 already popped by next step's update_states
+            routed_experts_attn_gid=0,
+            scheduler_output=scheduler_output,
+            is_async=True,
+            block_ids_by_req={"req1": [7, 8]},
+        )
+
+        assert len(routed_experts_entries) == 1
+        entry = routed_experts_entries[0]
+        assert entry.req_id == "req1"
+        assert entry.token_start == 20
+        assert entry.num_accepted == 2
+        assert entry.block_ids == [7, 8]
+        np.testing.assert_array_equal(entry.rows, expert_indices[:2, :, 0, :])
+
     def test_get_min_remaining_slots_mamba_align_mode(self):
         """In mamba align mode, _get_min_remaining_slots caps steps at block boundaries."""
         runner = MagicMock()

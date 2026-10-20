@@ -230,6 +230,7 @@ def _process_continue_decode_outputs(
     max_model_len: int = 0,
     attn_metadata: Optional[Any] = None,
     is_async: bool = False,
+    block_ids_by_req: Optional[Dict[str, List[int]]] = None,
 ) -> Tuple[List[List[int]], Optional[Any], List[RoutedExpertsStepEntry], int,
            int]:
     """Process continue_decode TPU outputs into CPU data structures.
@@ -318,21 +319,6 @@ def _process_continue_decode_outputs(
             if not is_async:
                 req_state.output_token_ids.extend(valid_tokens)
 
-            if all_expert_indices_cpu is not None and actual_len > 0:
-                # The on-device burst is not yet reflected in
-                # num_computed_tokens, so it starts right there.
-                routed_experts_entries.append(
-                    RoutedExpertsStepEntry(
-                        req_id=req_id,
-                        rows=all_expert_indices_cpu[:actual_len, :,
-                                                    req_idx, :],
-                        token_start=chunk_start.get(
-                            req_id, req_state.num_computed_tokens),
-                        num_accepted=actual_len,
-                        block_ids=_block_ids_for_group(
-                            req_state, routed_experts_attn_gid),
-                        dp_rank=dp_rank_by_req.get(req_id, 0),
-                    ))
             if input_batch is not None:
                 start_idx = input_batch.num_tokens_no_spec[req_idx]
                 end_idx = start_idx + actual_len
@@ -341,6 +327,22 @@ def _process_continue_decode_outputs(
                                               start_idx:end_idx] = valid_tokens
                     input_batch.num_tokens_no_spec[req_idx] = end_idx
                     input_batch.num_tokens[req_idx] = end_idx
+
+        if all_expert_indices_cpu is not None and actual_len > 0:
+            # The on-device burst is not yet reflected in
+            # num_computed_tokens, so it starts right there.
+            routed_experts_entries.append(
+                RoutedExpertsStepEntry(
+                    req_id=req_id,
+                    rows=all_expert_indices_cpu[:actual_len, :, req_idx, :],
+                    token_start=(chunk_start[req_id] if req_id in chunk_start
+                                 else req_state.num_computed_tokens),
+                    num_accepted=actual_len,
+                    block_ids=(block_ids_by_req[req_id] if block_ids_by_req
+                               is not None else _block_ids_for_group(
+                                   req_state, routed_experts_attn_gid)),
+                    dp_rank=dp_rank_by_req.get(req_id, 0),
+                ))
 
         if (attn_metadata is not None
                 and hasattr(attn_metadata, "seq_lens_cpu")
@@ -443,6 +445,7 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
                                    None),
             scheduler_output=self._scheduler_output,
             is_async=True,
+            block_ids_by_req=self._routed_experts_block_ids,
         )
 
         _log_continue_decode_summary(
@@ -2056,6 +2059,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 logprobs_tensors=logprobs_tensors,
                 expert_indices=all_expert_indices,
                 scheduler_output=scheduler_output,
+                routed_experts_block_ids=(
+                    _snapshot_block_ids_for_routed_experts(
+                        self, model_runner_output.req_ids,
+                        self.routed_experts_attn_gid)
+                    if self.aux_output_worker is not None else None),
                 runner=self,
             )
             async_output._is_continue_decode = True
