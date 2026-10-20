@@ -28,7 +28,6 @@ if TYPE_CHECKING:
     USE_DENSE_MOE: bool = False
     NUM_SLICES: int = 1
     RAY_USAGE_STATS_ENABLED: bool = False
-    VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "shm"
     ENABLE_QUANTIZED_MATMUL_KERNEL: bool = False
     REQUANTIZE_BLOCK_SIZE: int | None = None
     REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
@@ -303,9 +302,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable/disable Ray usage statistics collection
     "RAY_USAGE_STATS_ENABLED":
     env_bool("RAY_USAGE_STATS_ENABLED"),
-    # Ray compiled DAG channel type for TPU
-    "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE":
-    env_with_choices("VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE", "shm", ["shm"]),
     "ENABLE_QUANTIZED_MATMUL_KERNEL":
     env_bool("ENABLE_QUANTIZED_MATMUL_KERNEL"),
     # Specify block quantization size

@@ -493,20 +493,13 @@ class TpuPlatform(Platform):
                     MultiprocExecutor
                 parallel_config.distributed_executor_backend = MultiprocExecutor
         elif multihost_backend == "ray":
-            # Check if we should use Ray Executor V2 (V1-multiproc compatible)
-            if vllm_envs.VLLM_USE_RAY_V2_EXECUTOR_BACKEND:
-                from tpu_inference.executors.ray_distributed_executor_v2 import \
-                    RayDistributedExecutorV2
-                parallel_config.distributed_executor_backend = RayDistributedExecutorV2
-                logger.info(
-                    "Force using RayDistributedExecutorV2 for JAX on multihost."
-                )
-            else:
-                from tpu_inference.executors.ray_distributed_executor import \
-                    RayDistributedExecutor
-                parallel_config.distributed_executor_backend = RayDistributedExecutor
-                logger.info(
-                    "Force using RayDistributedExecutor for JAX on multihost.")
+            # RayDistributedExecutorV2 is the only Ray executor; upstream vLLM
+            # removed the legacy compiled-graph RayDistributedExecutor.
+            from tpu_inference.executors.ray_distributed_executor_v2 import \
+                RayDistributedExecutorV2
+            parallel_config.distributed_executor_backend = RayDistributedExecutorV2
+            logger.info(
+                "Force using RayDistributedExecutorV2 for JAX on multihost.")
         else:
             logger.warning(
                 f"Unknown TPU multihost backend: {multihost_backend}. "
