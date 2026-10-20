@@ -93,13 +93,19 @@ def test_banded_combine(num_tokens, num_rows, hot_block):
     combine = jax.jit(fused_moe_gmm._tc_banded_combine, static_argnums=4)
     out = combine(*args, num_tokens)
     assert out.shape == fused_moe_gmm._tc_banded_blocks(num_tokens) + (256, )
-    flat = lambda x: np.asarray(x).reshape(-1, 256)[:num_tokens]  # noqa: E731
-    np.testing.assert_allclose(flat(out), expected, rtol=1e-5, atol=1e-5)
+    assert out.dtype == jnp.bfloat16
+
+    # bf16 sums: one rounding for the result, one more per added chunk.
+
+    def flat(x):
+        return np.asarray(x, np.float32).reshape(-1, 256)[:num_tokens]
+
+    np.testing.assert_allclose(flat(out), expected, rtol=1e-2, atol=1e-2)
     both = combine(*args2, num_tokens, out)
     np.testing.assert_allclose(flat(both),
                                expected + expected2,
-                               rtol=1e-5,
-                               atol=1e-5)
+                               rtol=1e-2,
+                               atol=2e-2)
 
 
 def _moe_inputs(mesh: Mesh,
@@ -169,11 +175,16 @@ def test_fused_moe_matches_onehot_permute(sizes, num_tokens, skew):
     """Same output as the one-hot permute. 512 tokens x top-2 over 8 shards
     gives a 512-row buffer, 1536 tokens a 768-row one; from 4096 tokens the
     combine is banded. With skew one shard has every row and takes the
-    all-rows fallback (combined in 2-4 chunks)."""
+    all-rows fallback (combined in 2-4 chunks).
+
+    Without skew the output is bit-identical. With it, the shard adds its
+    chunks' partial sums in bf16: each is rounded, and where terms cancel
+    that rounding (up to half a bf16 ulp of the partial) can exceed the
+    final value's, hence the looser atol."""
     mesh = _make_mesh(**sizes)
     expected = _run_fused_moe(mesh, False, num_tokens, skew)
     actual = _run_fused_moe(mesh, True, num_tokens, skew)
     np.testing.assert_allclose(np.asarray(actual, np.float32),
                                np.asarray(expected, np.float32),
                                rtol=2e-2,
-                               atol=2e-2)
+                               atol=6e-2 if skew else 2e-2)

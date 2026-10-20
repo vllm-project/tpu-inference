@@ -263,10 +263,11 @@ def _tc_banded_combine(rows: jax.Array,
     Every row must be finite, invalid ones too: windows read past their
     block's rows with zero weights.
 
-    Returns [blocks, B, hidden] float32 (see _tc_banded_blocks): flattened,
-    row t is token t, and rows past num_tokens are padding. With acc (that
-    shape), the windows add into it, so combining several chunks needs no
-    float32 result per chunk.
+    Returns [blocks, B, hidden] in rows.dtype (see _tc_banded_blocks):
+    flattened, row t is token t, and rows past num_tokens are padding. With
+    acc (that shape and dtype), the windows add into it, so combining several
+    chunks needs no result per chunk. Each matmul sums in float32 inside the
+    MXU; only adding windows or chunks rounds to rows.dtype.
     """
     num_rows, hidden = rows.shape
     num_blocks, block = _tc_banded_blocks(num_tokens)
@@ -294,7 +295,7 @@ def _tc_banded_combine(rows: jax.Array,
         return jnp.einsum("btw,bwh->bth",
                           sel,
                           rows[order[pos]],
-                          preferred_element_type=jnp.float32)
+                          preferred_element_type=rows.dtype)
 
     if acc is None:
         acc, first = window_sum(0), 1
@@ -324,8 +325,9 @@ def _tc_local_moe(tokens: jax.Array, topk_argsort_indices: jax.Array,
     the same sum blockwise. Usually one chunk holds all of the shard's rows; a
     shard with more loops over chunks, so no buffer is ever larger than
     `capacity` rows. In that loop the banded combine adds every chunk into one
-    float32 accumulator. topk_argsort_indices maps each expert-sorted row to
-    its flattened [token, k] position.
+    accumulator. Partial sums are in the activations' dtype, as in the expert
+    GMMs. topk_argsort_indices maps each expert-sorted row to its flattened
+    [token, k] position.
 
     Returns the shard's partial sums, [num_tokens, hidden].
     """
@@ -349,7 +351,7 @@ def _tc_local_moe(tokens: jax.Array, topk_argsort_indices: jax.Array,
     def chunk(k: jax.Array, acc: jax.Array | None = None) -> jax.Array:
         """Partial sums from shard rows [k * capacity, (k + 1) * capacity).
 
-        One-hot: [num_tokens, hidden] float32. Banded: added into acc, in
+        One-hot: [num_tokens, hidden]. Banded: added into acc, in
         _tc_banded_combine's layout.
         """
         lo = k * capacity
@@ -357,10 +359,10 @@ def _tc_local_moe(tokens: jax.Array, topk_argsort_indices: jax.Array,
                                          (capacity, ))
         idx = flat_idx // topk
         if num_tokens <= _TC_PERMUTE_ONEHOT_GATHER_MAX_TOKENS:
+            # Exact in any dtype: each output row is one input row times 1.
             x = jnp.dot(jax.nn.one_hot(idx, num_tokens, dtype=tokens.dtype),
                         tokens,
-                        preferred_element_type=jnp.float32).astype(
-                            tokens.dtype)
+                        preferred_element_type=tokens.dtype)
         else:
             x = tokens[idx]
         chunk_group_sizes = (jnp.clip(group_hi - lo, 0, capacity) -
@@ -388,22 +390,22 @@ def _tc_local_moe(tokens: jax.Array, topk_argsort_indices: jax.Array,
                         -1)
         sel = (jax.nn.one_hot(rel, capacity, dtype=tokens.dtype) *
                weights[..., None]).sum(axis=1)
-        return jnp.dot(sel, gmm2_res, preferred_element_type=jnp.float32)
+        return jnp.dot(sel, gmm2_res, preferred_element_type=tokens.dtype)
 
     num_chunks = (end - start + capacity - 1) // capacity
 
     def all_chunks() -> jax.Array:
         if banded:
-            # One accumulator for every chunk and window: a float32 result per
-            # chunk on top of it cost ~1 GiB of temporaries at 16,384 tokens.
+            # One accumulator for every chunk and window: a result per chunk on
+            # top of it cost ~1 GiB of temporaries at 16,384 tokens.
             return jax.lax.fori_loop(
                 0, num_chunks, chunk,
                 jnp.zeros(
                     _tc_banded_blocks(num_tokens) + (w2.shape[2], ),
-                    jnp.float32))
+                    tokens.dtype))
         return jax.lax.fori_loop(
             0, num_chunks, lambda k, acc: acc + chunk(k),
-            jnp.zeros((num_tokens, w2.shape[2]), jnp.float32))
+            jnp.zeros((num_tokens, w2.shape[2]), tokens.dtype))
 
     if capacity == num_rows:
         out = chunk(0)
