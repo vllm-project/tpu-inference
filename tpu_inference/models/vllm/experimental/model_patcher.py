@@ -259,7 +259,7 @@ def patch_mm_model(
         prefix = f"vllm_model.{'.'.join(module_names[1:])}"
         new_prefix = f"{prefix}._model"
         for k, v in params_and_buffers.items():
-            if not k.startswith(prefix):
+            if not k.startswith(prefix + "."):
                 new_params_and_buffers[k] = v
                 continue
 
@@ -267,7 +267,7 @@ def patch_mm_model(
             new_params_and_buffers[new_key] = v
             # Also update the params and buffers in the JittableModule
             # They are not using params_and_buffs in the function args
-            inner_k = k.replace(prefix + ".", "")
+            inner_k = k[len(prefix) + 1:]
             if inner_k in jitted_module.params:
                 jitted_module.params[inner_k] = torch_view(v)
             elif inner_k in jitted_module.buffers:
