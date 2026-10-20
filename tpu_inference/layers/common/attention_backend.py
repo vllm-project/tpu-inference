@@ -300,10 +300,13 @@ def check_attention_backend_config(vllm_config: "VllmConfig") -> None:
             f"--attention-backend {name} supports a single host with forked "
             f"processes only, not: {', '.join(reasons)}.")
     # A JAX (flax_nnx) model's attention layers run RPA, whatever KV cache
-    # layout the runner allocates. Under MODEL_IMPL_TYPE=auto a model whose
-    # default is the JAX one fails in the warmup instead, on RPA's KV cache
-    # shape.
-    if envs.MODEL_IMPL_TYPE == "flax_nnx":
-        raise ValueError(f"--attention-backend {name} runs in vLLM models "
-                         "only, not with MODEL_IMPL_TYPE=flax_nnx.")
+    # layout the runner allocates. Imported here: model_loader imports
+    # vllm.config, which loads TpuPlatform, which imports this module.
+    from tpu_inference.models.common.model_loader import \
+        resolve_model_impl_type
+    if resolve_model_impl_type(vllm_config) != "vllm":
+        raise ValueError(
+            f"--attention-backend {name} runs in vLLM models only, but "
+            f"MODEL_IMPL_TYPE={envs.MODEL_IMPL_TYPE} resolves to flax_nnx for "
+            "this model. Set MODEL_IMPL_TYPE=vllm.")
     create_attention_backend(name).check_config(vllm_config)

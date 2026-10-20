@@ -72,9 +72,14 @@ def test_the_attention_layers_run_flywheel():
     ).attention_backend == flywheel.FLYWHEEL_BACKEND_NAME
 
 
-def make_vllm_config() -> SimpleNamespace:
-    return SimpleNamespace(attention_config=AttentionConfig(
-        backend=flywheel.FLYWHEEL_BACKEND_NAME))
+def make_vllm_config(
+        architecture: str = "Qwen3_5ForConditionalGeneration"
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        attention_config=AttentionConfig(
+            backend=flywheel.FLYWHEEL_BACKEND_NAME),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(
+            architectures=[architecture])))
 
 
 def test_the_gdn_layers_run_flywheel(monkeypatch):
@@ -114,11 +119,31 @@ def test_rejects_a_config_that_crosses_a_process_boundary(
         attention_backend.check_attention_backend_config(make_vllm_config())
 
 
-def test_rejects_a_jax_model(monkeypatch):
-    monkeypatch.setenv("MODEL_IMPL_TYPE", "flax_nnx")
+@pytest.mark.parametrize(("impl_type", "architecture"), [
+    ("flax_nnx", "Qwen3_5ForConditionalGeneration"),
+    ("auto", "Qwen3ForCausalLM"),
+])
+def test_rejects_a_jax_model(monkeypatch, impl_type, architecture):
+    monkeypatch.setenv("MODEL_IMPL_TYPE", impl_type)
 
-    with pytest.raises(ValueError, match="MODEL_IMPL_TYPE=flax_nnx"):
-        attention_backend.check_attention_backend_config(make_vllm_config())
+    with pytest.raises(ValueError,
+                       match=f"MODEL_IMPL_TYPE={impl_type} resolves to "
+                       "flax_nnx"):
+        attention_backend.check_attention_backend_config(
+            make_vllm_config(architecture))
+
+
+@pytest.mark.parametrize(("impl_type", "architecture"), [
+    ("auto", "Qwen3_5ForConditionalGeneration"),
+    ("vllm", "Qwen3ForCausalLM"),
+])
+def test_accepts_a_vllm_model(monkeypatch, impl_type, architecture):
+    monkeypatch.setenv("MODEL_IMPL_TYPE", impl_type)
+    monkeypatch.setattr(FlywheelAttentionBackend, "check_config",
+                        lambda self, vllm_config: None)
+
+    attention_backend.check_attention_backend_config(
+        make_vllm_config(architecture))
 
 
 def test_config_check_runs_the_backend_check(monkeypatch):
