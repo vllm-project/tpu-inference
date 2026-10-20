@@ -141,7 +141,7 @@ _DENSE_MAX_BLOCK = max(FWD_BLOCKS)
 
 def select_attention_phase(num_decode: int, cu_q_lens: np.ndarray,
                            kv_lens: np.ndarray) -> str:
-    """A rank's static kernel choice, from this step's own host lengths.
+    """A rank's attention phase, from this step's own host lengths.
 
     PREFILL is a step of fresh prefill requests alone (kv_len == q_len and no
     decode row), which the prefill kernels serve from this step's K/V. A
@@ -196,9 +196,9 @@ def use_dense_prefill(
 
 # Note: the varlen kernel caps its q/kv block at max_seqlen_q/k, picking
 # from FWD_BLOCKS, so a span is one of those block sizes. The smallest, 128,
-# is left out, saving a backbone per bucket: on v6e 256 matched or beat it on
-# every sampled batch, and on v7x 128 won only small buckets packed with short
-# requests.
+# is left out, saving a kernel in every bucket's backbone: on v6e 256 matched
+# or beat it on every sampled batch, and on v7x 128 won only small buckets
+# packed with short requests.
 _VARLEN_BLOCK_SPANS = tuple(
     sorted(block for block in FWD_BLOCKS if block > min(FWD_BLOCKS)))
 
@@ -212,7 +212,7 @@ _VARLEN_STEP_OVERHEAD_TOKENS = 704
 
 def varlen_block_spans(padded_num_tokens_per_dp_rank: int) -> tuple[int, ...]:
     """Every block span varlen_block_span can return at this token bucket,
-    which is the set of ragged prefill backbones the warmup compiles."""
+    which is the set of ragged prefill kernels in the bucket's backbone."""
     spans = tuple(s for s in _VARLEN_BLOCK_SPANS
                   if s <= padded_num_tokens_per_dp_rank)
     return spans or (padded_num_tokens_per_dp_rank, )
@@ -704,8 +704,8 @@ class FlywheelAttentionBackend(AttentionBackend):
             problems.append("speculative decoding is not supported")
         if vllm_config.additional_config.get("enable_continue_decode", False):
             # Note: the fused on-device decode loop rebuilds
-            # AttentionMetadata without the KV write slice table or the static
-            # attention phase this backend reads.
+            # AttentionMetadata without the backend metadata (the KV write
+            # slice table and the kernel index) this backend reads.
             problems.append("continue_decode is not supported; drop "
                             "additional_config.enable_continue_decode")
         if vllm_config.kv_transfer_config is not None:
