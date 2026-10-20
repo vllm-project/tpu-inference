@@ -296,6 +296,10 @@ def apply_rope_scaling(freqs: jax.Array, rope_scaling: Dict[str,
                                                             Any]) -> jax.Array:
     # Values obtained from grid search
     scale_factor = rope_scaling.get("scale_factor", 8.0)
+    rope_type = rope_scaling.get("rope_type", rope_scaling.get("type"))
+    if rope_type == "linear":
+        return freqs / scale_factor
+
     low_freq_factor = rope_scaling.get("low_freq_factor", 1.0)
     high_freq_factor = rope_scaling.get("high_freq_factor", 4.0)
     old_context_len = rope_scaling.get("original_max_position_embeddings",

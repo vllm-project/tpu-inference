@@ -12,14 +12,83 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
+from types import SimpleNamespace
+
+import jax
 import jax.numpy as jnp
-from absl.testing import absltest
+import numpy as np
+from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 
-from tpu_inference.layers.jax.rope_interface import apply_rope
+from tpu_inference.layers.jax.rope_interface import (apply_rope,
+                                                     apply_rope_scaling,
+                                                     get_rope_scaling,
+                                                     normalize_rope_scaling)
 
 
 class RopeInterfaceTest(jtu.JaxTestCase):
+
+    @parameterized.product(
+        factor=[2.0, 8.0],
+        ordering=["split", "interleaved"],
+        config_field=["rope_parameters", "rope_scaling"],
+    )
+    def test_apply_rope_linear_scaling(self, factor, ordering, config_field):
+        head_dim = 8
+        positions = np.array([0, 1, 127, 4096], dtype=np.int32)
+        inputs = np.random.default_rng(0).normal(size=(4, 2, head_dim))
+        inputs = inputs.astype(np.float32)
+        config = SimpleNamespace(
+            **{config_field: {
+                "rope_type": "linear",
+                "factor": factor
+            }})
+        rope_scaling = get_rope_scaling(config)
+        rotate = jax.jit(
+            functools.partial(apply_rope,
+                              head_dim=head_dim,
+                              rope_scaling=rope_scaling,
+                              rope_input_ordering=ordering))
+        padded_inputs = np.pad(inputs, ((0, 0), (0, 0), (0, 4)))
+        output = rotate(jnp.array(padded_inputs), jnp.array(positions))
+
+        # Linear RoPE rotates at position / factor for every frequency.
+        frequencies = 10000.0**(-np.arange(0, head_dim, 2) / head_dim)
+        angles = positions[:, None, None] / factor * frequencies[None, None, :]
+        cos, sin = np.cos(angles), np.sin(angles)
+        if ordering == "split":
+            real, imag = np.split(inputs, 2, axis=-1)
+            expected = np.concatenate(
+                [real * cos - imag * sin, imag * cos + real * sin], axis=-1)
+        else:
+            real, imag = inputs[..., 0::2], inputs[..., 1::2]
+            expected = np.stack(
+                [real * cos - imag * sin, imag * cos + real * sin], axis=-1)
+            expected = expected.reshape(inputs.shape)
+        expected = np.pad(expected, ((0, 0), (0, 0), (0, 4)))
+        self.assertAllClose(output,
+                            expected.astype(np.float32),
+                            atol=1e-5,
+                            rtol=1e-5)
+
+    @parameterized.parameters("rope_type", "type")
+    def test_linear_rope_scaling_legacy_keys(self, type_key):
+        scaling = normalize_rope_scaling({type_key: "linear", "factor": 8.0})
+        frequencies = jnp.array([1.0, 0.1, 0.01, 0.001])
+        self.assertAllClose(apply_rope_scaling(frequencies, scaling),
+                            frequencies / 8.0)
+
+    @parameterized.parameters(None, "llama3")
+    def test_llama3_rope_scaling_preserved(self, rope_type):
+        scaling = {"scale_factor": 8.0}
+        if rope_type is not None:
+            scaling["rope_type"] = rope_type
+        frequencies = jnp.array([1.0, 0.001, 0.0001])
+        self.assertAllClose(apply_rope_scaling(frequencies, scaling),
+                            jnp.array([1.0, 0.00021360798, 0.0000125]),
+                            atol=1e-8,
+                            rtol=1e-6)
 
     def test_apply_rope_standard(self):
         seq_len = 2
