@@ -202,6 +202,7 @@ class SpeculativeDecodingManager:
             is_in_prefill,
             num_rejected_tokens,
             num_reqs_dp,
+            req_indices_dp=spec_decode_metadata.req_indices_dp,
         )
 
         self.runner.kv_caches, draft_token_ids = self.runner.drafter.propose(
@@ -298,6 +299,7 @@ class SpeculativeDecodingManager:
             is_in_prefill,
             num_rejected_tokens,
             num_reqs_dp,
+            req_indices_dp=spec_decode_metadata.req_indices_dp,
         )
 
         self.runner.kv_caches, draft_token_ids = self.runner.drafter.propose(
