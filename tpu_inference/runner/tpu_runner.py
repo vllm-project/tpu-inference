@@ -789,8 +789,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         is_last_rank: bool = True,
     ):
         self.vllm_config = vllm_config
-        # The step metadata, the warmup and the KV cache layout of the TPU
-        # attention backend --attention-backend selects.
+        # The KV cache layout etc. of the TPU attention backend
+        # --attention-backend selects.
         self.attention_backend = create_attention_backend(
             attention_backend_name(vllm_config))
         self.model_config = vllm_config.model_config

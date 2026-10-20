@@ -415,6 +415,44 @@ def _ragged_prefill_rows(q: jax.Array, k: jax.Array, v: jax.Array,
     ).transpose(1, 0, 2)
 
 
+def _step_kernel_rows(
+    kernel: str | int,
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    kv_cache: jax.Array,
+    kv_lens: jax.Array,
+    page_indices: jax.Array,
+    cu_q_lens: jax.Array,
+    num_decode: jax.Array,
+    num_active: jax.Array,
+    *,
+    sm_scale: float,
+) -> jax.Array:
+    """The rows after the decode rows, by one step_kernels entry. kernel is a
+    Python value, so each lax.switch branch traces only its own kernel."""
+    if kernel == _DECODE_PHASE:
+        return jnp.zeros_like(q)
+    elif kernel == _EXTEND_PHASE:
+        return _paged_extend_rows(q,
+                                  kv_cache,
+                                  kv_lens,
+                                  page_indices,
+                                  cu_q_lens,
+                                  num_decode,
+                                  num_active,
+                                  sm_scale=sm_scale)
+    elif kernel == _DENSE_KERNEL:
+        return _dense_prefill_rows(q, k, v, sm_scale=sm_scale)
+    else:
+        return _ragged_prefill_rows(q,
+                                    k,
+                                    v,
+                                    cu_q_lens,
+                                    span=kernel,
+                                    sm_scale=sm_scale)
+
+
 def step_kernels(padded_num_tokens_per_dp_rank: int) -> tuple[str | int, ...]:
     """The kernels one backbone holds at this token bucket for a step's rows
     after its decode rows, in lax.switch order: none (a decode step), the
@@ -487,38 +525,15 @@ def flywheel_tpu_attention(
                                               num_decode,
                                               sm_scale=sm_scale)
 
-    def _branch(kernel: str | int):
-
-        def run(q, k, v, cache, kv_lens, page_indices, cu_q_lens, num_decode,
-                num_active):
-            if kernel == _DECODE_PHASE:
-                return jnp.zeros_like(q)
-            elif kernel == _EXTEND_PHASE:
-                return _paged_extend_rows(q,
-                                          cache,
-                                          kv_lens,
-                                          page_indices,
-                                          cu_q_lens,
-                                          num_decode,
-                                          num_active,
-                                          sm_scale=sm_scale)
-            elif kernel == _DENSE_KERNEL:
-                return _dense_prefill_rows(q, k, v, sm_scale=sm_scale)
-            else:
-                return _ragged_prefill_rows(q,
-                                            k,
-                                            v,
-                                            cu_q_lens,
-                                            span=kernel,
-                                            sm_scale=sm_scale)
-
-        return run
-
-    output = lax.switch(
-        kernel_index[0],
-        [_branch(kernel) for kernel in step_kernels(padded_q.shape[0])],
-        padded_q, padded_k, padded_v, cache, kv_lens, page_indices, cu_q_lens,
-        num_decode, num_active)
+    # Note: each branch binds one step_kernels entry, a Python value, when
+    # the backbone is traced; the traced kernel_index only picks a branch.
+    branches = [
+        functools.partial(_step_kernel_rows, kernel, sm_scale=sm_scale)
+        for kernel in step_kernels(padded_q.shape[0])
+    ]
+    output = lax.switch(kernel_index[0], branches, padded_q, padded_k,
+                        padded_v, cache, kv_lens, page_indices, cu_q_lens,
+                        num_decode, num_active)
     # Note: the leading rows take the decode kernel's output below
     # num_decode and zeros past the scheduled tokens: a branch need not own
     # the rows below its first request (row num_decode), and a decode-only
