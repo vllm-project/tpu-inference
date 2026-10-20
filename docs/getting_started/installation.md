@@ -1,8 +1,8 @@
 # Installation
 
-This guide provides instructions for installing and running `tpu-inference`.
+This guide provides instructions for installing and running `vllm-jax`.
 
-There are three ways to install `tpu-inference`:
+There are three ways to install `vllm-jax`:
 
 - **uv pip** (Recommended): Fast installation of official stable releases into a Python virtual environment. Best for standard inference and serving.
 - **Docker**: Pre-built containers with shared memory configured. Best for reproducible environments and Kubernetes (GKE).
