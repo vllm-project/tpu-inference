@@ -492,7 +492,8 @@ def _random_rejection_sample_with_segment(
                   recovered_token_ids, PLACEHOLDER_TOKEN_ID))
 
     # --- Step 6: Handle Bonus Tokens ---
-    all_accepted = first_rejection_idx_per_segment == large_value
+    # Padding may reject after the last request's actual draft tokens.
+    all_accepted = first_rejection_idx_per_segment >= num_draft_tokens
     no_draft_tokens = num_draft_tokens == 0
     should_get_bonus = all_accepted | no_draft_tokens
     bonus_tokens = jnp.where(should_get_bonus, bonus_token_ids,
@@ -594,9 +595,8 @@ def _greedy_rejection_sample_with_segment(
 
     # --- Step 4: Handle Bonus Tokens ---
 
-    # A sequence gets its bonus token if there were no mismatches
-    # (first_mismatch_idx_per_segment == large_value)
-    all_accepted = first_mismatch_idx_per_segment == large_value
+    # Only mismatches within the request's actual draft tokens reject its bonus.
+    all_accepted = first_mismatch_idx_per_segment >= num_draft_tokens
 
     # For sequences with no draft tokens, we should still give them the bonus token
     # since there's nothing to reject
