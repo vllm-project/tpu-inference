@@ -430,7 +430,9 @@ def _step_kernel_rows(
     sm_scale: float,
 ) -> jax.Array:
     """The rows after the decode rows, by one step_kernels entry. kernel is a
-    Python value, so each lax.switch branch traces only its own kernel."""
+    Python value, so each lax.switch branch traces only its own kernel: the
+    string "decode", "extend" or "dense", or an int, the ragged prefill block
+    span."""
     if kernel == _DECODE_PHASE:
         return jnp.zeros_like(q)
     elif kernel == _EXTEND_PHASE:
@@ -444,7 +446,7 @@ def _step_kernel_rows(
                                   sm_scale=sm_scale)
     elif kernel == _DENSE_KERNEL:
         return _dense_prefill_rows(q, k, v, sm_scale=sm_scale)
-    else:
+    else:  # an int: the ragged prefill block span
         return _ragged_prefill_rows(q,
                                     k,
                                     v,
