@@ -67,9 +67,10 @@ class RopeInterfaceTest(jtu.JaxTestCase):
                 [real * cos - imag * sin, imag * cos + real * sin], axis=-1)
             expected = expected.reshape(inputs.shape)
         expected = np.pad(expected, ((0, 0), (0, 0), (0, 4)))
+        # Float32 frequency errors accumulate at large positions on TPU.
         self.assertAllClose(output,
                             expected.astype(np.float32),
-                            atol=1e-5,
+                            atol=1e-4,
                             rtol=1e-5)
 
     @parameterized.parameters("rope_type", "type")
