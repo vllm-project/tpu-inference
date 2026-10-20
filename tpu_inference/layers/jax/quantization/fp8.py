@@ -114,10 +114,21 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
                                           sharding=scale_sharding)
         layer.weight_scale.set_metadata(
             'weight_loader',
-            partial(load_nnx_param_from_reshaped_torch,
-                    reshape_dims=(out_features, ),
-                    permute_dims=None,
+            partial(self._load_weight_scale,
                     param_name=layer.prefix + ".weight_scale"))
+
+    @staticmethod
+    def _load_weight_scale(param, torch_tensor, shard_id=-1, *, param_name):
+        # Tensorwise checkpoints store one scale; the matmul uses one per
+        # output channel. Channelwise checkpoints already have that layout.
+        torch_tensor = torch_tensor.reshape(-1)
+        if torch_tensor.numel() == 1:
+            torch_tensor = torch_tensor.expand(param.shape[0]).contiguous()
+        load_nnx_param_from_reshaped_torch(param,
+                                           torch_tensor,
+                                           shard_id,
+                                           reshape_dims=param.shape,
+                                           param_name=param_name)
 
     def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
         bias = layer.bias[...] if layer.bias is not None else None
@@ -183,6 +194,24 @@ class Fp8TensorwiseMergedLinearMethod(Fp8TensorwiseLinearMethod):
                                          axis=-1)
         assign_and_shard_param(param, merged, param_name=param_name)
 
+    def _load_merged_scale(self,
+                           param,
+                           torch_tensor,
+                           shard_id=-1,
+                           *,
+                           param_name):
+        torch_tensor = torch_tensor.reshape(-1)
+        if torch_tensor.numel() == 1:
+            size = (param.shape[0] if shard_id == -1 else
+                    self.linear_config.output_sizes[shard_id])
+            torch_tensor = torch_tensor.expand(size).contiguous()
+        self._load_merged_shard(param,
+                                torch_tensor,
+                                shard_id,
+                                reshape_dims=(-1, ),
+                                permute_dims=None,
+                                param_name=param_name)
+
     def create_weights_jax(self, layer: JaxMergedColumnParallelLinear,
                            *weight_args, rngs, **extra_weight_attrs):
         assert isinstance(layer, JaxMergedColumnParallelLinear)
@@ -201,9 +230,7 @@ class Fp8TensorwiseMergedLinearMethod(Fp8TensorwiseLinearMethod):
         layer.weight_scale.set_metadata("_merged_shards", [None] * n_proj)
         layer.weight_scale.set_metadata(
             "weight_loader",
-            functools.partial(self._load_merged_shard,
-                              reshape_dims=(-1, ),
-                              permute_dims=None,
+            functools.partial(self._load_merged_scale,
                               param_name=layer.prefix + ".weight_scale"))
 
 
