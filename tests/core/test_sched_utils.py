@@ -44,6 +44,7 @@ def _make_request(num_computed_tokens=10, num_output_placeholders=1):
     request = mock.MagicMock()
     request.num_computed_tokens = num_computed_tokens
     request.num_output_placeholders = num_output_placeholders
+    request.async_tokens_to_discard = 0
     return request
 
 
@@ -131,3 +132,23 @@ class TestContinueDecodeSchedulerPatch:
             assert request.num_computed_tokens == 10
             # The flag must not leak past the call.
             assert scheduler._cd_stale_in_flight is False
+            assert scheduler._cd_in_async_update is False
+
+    def test_async_patch_stop_trimming_preserves_placeholders(self):
+        """When check_stop trims new_token_ids mid-burst (e.g., max_tokens hit on
+        token 2 of 4), num_output_placeholders must still decrement by 1."""
+        patch_vllm_scheduler_for_continue_decode()
+        from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+
+        scheduler = _make_scheduler(AsyncScheduler)
+        # Stop on the 2nd token so [10, 20, 30, 40] trims to [10, 20].
+        with mock.patch("vllm.v1.core.sched.scheduler.check_stop",
+                        side_effect=[False, True]):
+            request = _make_request(num_computed_tokens=10,
+                                    num_output_placeholders=2)
+            res, stopped = AsyncScheduler._update_request_with_output(
+                scheduler, request, [10, 20, 30, 40], is_stale=False)
+            assert stopped is True
+            assert res == [10, 20]
+            assert request.num_output_placeholders == 1
+            assert request.num_computed_tokens == 11
