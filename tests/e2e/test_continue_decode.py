@@ -33,6 +33,7 @@ class InferenceConfig:
     additional_config: dict = field(default_factory=dict)
     async_scheduling: bool = False
     enable_prefix_caching: bool = False
+    prefix_cache_retention_interval: int | None = None
     limit_mm_per_prompt: dict | None = None
 
 
@@ -45,6 +46,7 @@ def _run_inference_and_return_outputs(
         follow_up_prompts: list[str] | None = None):
     os.environ['MODEL_IMPL_TYPE'] = config.impl_type
 
+    enable_routed_experts = enable_export and "MoE" in config.model_name
     llm_kwargs = dict(
         model=config.model_name,
         max_model_len=config.max_model_len,
@@ -57,23 +59,17 @@ def _run_inference_and_return_outputs(
         enable_expert_parallel=config.enable_expert_parallel,
         additional_config=config.additional_config,
         async_scheduling=config.async_scheduling,
-        enable_prefix_caching=config.enable_prefix_caching,
+        enable_prefix_caching=(config.enable_prefix_caching
+                               or enable_routed_experts),
+        enable_return_routed_experts=enable_routed_experts,
     )
+    if config.prefix_cache_retention_interval is not None:
+        llm_kwargs["prefix_cache_retention_interval"] = (
+            config.prefix_cache_retention_interval)
     if config.limit_mm_per_prompt is not None:
         llm_kwargs["limit_mm_per_prompt"] = config.limit_mm_per_prompt
 
     llm = LLM(**llm_kwargs)
-
-    if enable_export:
-        # TODO(#3636): this no longer enables anything. vLLM #45635 moved the
-        # flag to AuxOutputConfig, and it must be set at construction (the
-        # model graph is built with R3 off), but passing
-        # enable_return_routed_experts=True to LLM() is rejected on TPU by
-        # _verify_aux_output_compatibility at the current LKG. The MoE
-        # routed-experts assertions below are therefore dead code -- every
-        # matrix_case is Llama-3.1-8B, so nothing fails today. Re-wire this to
-        # the LLM() kwarg once the gate is platform-aware upstream.
-        llm.llm_engine.vllm_config.aux_output_config.enable_return_routed_experts = True
 
     try:
         start_time = time.time()
@@ -295,6 +291,36 @@ def sampling_params(request):
             "max_num_batched_tokens": 8192,
             "async_scheduling": True,
         },
+        {
+            "id": "correctness_MoE_torchax",
+            "model": "Qwen/Qwen1.5-MoE-A2.7B",
+            "impl": "vllm",
+            "tp": 1,
+            "dp": 1,
+            "max_model_len": 1024,
+            "max_num_batched_tokens": 2048,
+            "async_scheduling": False,
+        },
+        {
+            "id": "correctness_MoE_torchax_async",
+            "model": "Qwen/Qwen1.5-MoE-A2.7B",
+            "impl": "vllm",
+            "tp": 1,
+            "dp": 1,
+            "max_model_len": 1024,
+            "max_num_batched_tokens": 2048,
+            "async_scheduling": True,
+        },
+        {
+            "id": "correctness_DP_MoE_torchax_async",
+            "model": "Qwen/Qwen1.5-MoE-A2.7B",
+            "impl": "vllm",
+            "tp": 1,
+            "dp": 2,
+            "max_model_len": 1024,
+            "max_num_batched_tokens": 2048,
+            "async_scheduling": True,
+        },
     ],
     ids=lambda x: x["id"],
 )
@@ -376,6 +402,22 @@ def test_continue_decode_correctness_matrix(matrix_case, sampling_params):
                 ("continue_decode prompt routed experts differ from the "
                  "single-step baseline; a slot-mapping regression can zero-fill "
                  "or shift prompt expert IDs while keeping the shape correct"))
+            assert np.all(cd_re[p:] >= 0), (
+                "continue_decode decode routed experts contain unpopulated (<0) slots"
+            )
+            common_decode_len = 0
+            for b_tok, c_tok in zip(base_req.token_ids[:-1],
+                                    cd_req.token_ids[:-1]):
+                if b_tok != c_tok:
+                    break
+                common_decode_len += 1
+            if sampling_params.temperature == 0.0 and common_decode_len > 0:
+                decode_match_rate = float(
+                    np.mean(cd_re[p:p + common_decode_len] ==
+                            base_re[p:p + common_decode_len]))
+                assert decode_match_rate >= 0.9, (
+                    f"continue_decode decode routed_experts match rate "
+                    f"{decode_match_rate:.2%} < 90%")
 
 
 # Scenarios 5-6: Performance evaluation on MMLU workloads with Qwen/Qwen1.5-MoE-A2.7B
@@ -478,6 +520,8 @@ def test_continue_decode_gdn_hybrid(enable_prefix_caching, async_scheduling):
         max_num_seqs=8,
         async_scheduling=async_scheduling,
         enable_prefix_caching=enable_prefix_caching,
+        prefix_cache_retention_interval=(64
+                                         if enable_prefix_caching else None),
         limit_mm_per_prompt={
             "image": 0,
             "video": 0,

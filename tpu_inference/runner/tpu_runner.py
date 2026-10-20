@@ -2062,8 +2062,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 routed_experts_block_ids=(
                     _snapshot_block_ids_for_routed_experts(
                         self, model_runner_output.req_ids,
-                        self.routed_experts_attn_gid)
-                    if self.aux_output_worker is not None else None),
+                        self.routed_experts_attn_gid) if
+                    (self.aux_output_worker is not None
+                     and all_expert_indices is not None) else None),
                 runner=self,
             )
             async_output._is_continue_decode = True
