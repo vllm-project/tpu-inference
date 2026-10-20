@@ -1124,3 +1124,52 @@ class TestTPUJaxRunnerDisableMM:
         TPUModelRunner._execute_model(runner, scheduler_output_normal)
         runner._execute_continue_decode.assert_called_once_with(
             scheduler_output_normal)
+
+    @patch('tpu_inference.runner.tpu_runner.set_forward_context')
+    def test_execute_model_keeps_token_ids_for_multimodal_spec_decode(
+            self, mock_set_forward_context):
+        """A multimodal step feeds the model inputs_embeds, so
+        _get_input_ids_embeds returns input_ids=None. Speculative decoding
+        still needs the token ids in _sample_from_logits, so the state handed
+        to sample_tokens must carry them."""
+        runner = MagicMock()
+        runner.enable_continue_decode = False
+        runner.input_batch.num_reqs = 1
+        runner.input_batch.request_distribution = [0, 1, 1]  # one prefill
+        token_ids = jnp.arange(8, dtype=jnp.int32)
+        spec_decode_metadata = MagicMock()
+        runner._prepare_inputs.return_value = (token_ids, MagicMock(),
+                                               MagicMock(), MagicMock(),
+                                               MagicMock(),
+                                               spec_decode_metadata, None, 1,
+                                               {}, 1, None, MagicMock())
+        runner.is_multimodal_model = True
+        runner.mm_manager.gather_mm_embeddings.return_value = ([MagicMock()],
+                                                               MagicMock())
+        inputs_embeds = MagicMock()
+        runner._get_input_ids_embeds.return_value = (None, inputs_embeds)
+        runner.compute_logits_fn = MagicMock()
+        runner.state_leaves = MagicMock()
+        runner.mesh = MagicMock()
+        runner.lora_utils.extract_lora_metadata.return_value = None
+        runner.input_batch.num_prompt_logprobs = 0
+        runner.model_fn.return_value = (MagicMock(), MagicMock(), None, None)
+        runner._select_from_array_fn = MagicMock()
+        runner.is_pooling_model = False
+        runner.is_last_rank = True
+        runner.speculative_config = MagicMock()
+        runner.execute_model_state = None
+
+        scheduler_output = MagicMock()
+        scheduler_output.has_structured_output_requests = False
+        scheduler_output.finished_req_ids = []
+        TPUModelRunner._execute_model(runner, scheduler_output)
+
+        # The backbone still gets embeddings and no token ids.
+        model_args = runner.model_fn.call_args.args
+        assert model_args[2] is None
+        assert model_args[4] is inputs_embeds
+        # The sampler gets the token ids.
+        state = runner.execute_model_state
+        assert state.spec_decode_metadata is spec_decode_metadata
+        assert state.input_ids is token_ids
