@@ -188,20 +188,6 @@ class TestCheckConfig:
                 make_vllm_config(**overrides))
 
 
-def test_warmup_starts_from_zero_lengths(mesh):
-    sharding = NamedSharding(mesh, P())
-
-    arrays = fa.FlywheelAttentionBackend().warmup_arrays([],
-                                                         num_tokens=16,
-                                                         max_num_reqs=4,
-                                                         dp_size=1,
-                                                         mesh=mesh,
-                                                         sharding=sharding)
-
-    np.testing.assert_array_equal(arrays["seq_lens"], np.zeros(4))
-    np.testing.assert_array_equal(arrays["query_start_loc"], np.zeros(5))
-
-
 def naive_kv_write_slices(cu_q_lens: list[int], kv_lens: list[int],
                           block_table: np.ndarray,
                           page_size: int) -> list[list[int]]:

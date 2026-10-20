@@ -434,14 +434,10 @@ class CompilationManager:
             dp_size=dp_size,
             mesh=self.runner.mesh,
             sharding=metadata_attn_sharding)
-        seq_lens = attention_arrays.get("seq_lens")
-        if seq_lens is None:
-            seq_lens = self._create_dummy_tensor((attn_seqs, ), jnp.int32,
-                                                 metadata_attn_sharding)
-        query_start_loc = attention_arrays.get("query_start_loc")
-        if query_start_loc is None:
-            query_start_loc = self._create_dummy_tensor(
-                (attn_seqs + dp_size, ), jnp.int32, metadata_attn_sharding)
+        seq_lens = self._create_dummy_tensor((attn_seqs, ), jnp.int32,
+                                             metadata_attn_sharding)
+        query_start_loc = self._create_dummy_tensor(
+            (attn_seqs + dp_size, ), jnp.int32, metadata_attn_sharding)
 
         # Keep existing pattern for specific value arrays
         request_distribution = np.array([0, 0, 0] * dp_size, dtype=np.int32)

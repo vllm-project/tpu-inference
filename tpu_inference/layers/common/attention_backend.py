@@ -143,9 +143,7 @@ class AttentionBackend(abc.ABC):
                       sharding: "NamedSharding") -> Mapping[str, "jax.Array"]:
         """Dummy device arrays for backend_metadata to read in the warmup,
         shaped like the ones prepare_step puts into the device buffer, so that
-        serving reuses the warmed up executables. "seq_lens" and
-        "query_start_loc", if present, replace the warmup's own dummy ones
-        (all ones), for a backend whose kernels need other values there."""
+        serving reuses the warmed up executables."""
         return {}
 
 

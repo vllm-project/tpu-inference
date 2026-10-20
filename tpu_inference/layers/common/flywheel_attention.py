@@ -893,22 +893,11 @@ class FlywheelAttentionBackend(AttentionBackend):
                       num_tokens: int, max_num_reqs: int, dp_size: int,
                       mesh: Mesh,
                       sharding: NamedSharding) -> Mapping[str, jax.Array]:
-        # Note: the primer stands for a step with no active request, and the
-        # extend kernel only clears the whole output bucket, first tile
-        # included, when query_start_loc[0] is zero.
-        arrays: dict[str, jax.Array] = {
-            "seq_lens":
-            device_array(mesh,
-                         np.zeros(max_num_reqs, dtype=np.int32),
-                         sharding=sharding),
-            "query_start_loc":
-            device_array(mesh,
-                         np.zeros(max_num_reqs + dp_size, dtype=np.int32),
-                         sharding=sharding),
-        }
         # Note: at runtime every attention group carries a KV write slice
         # table, so the primer must carry one of the same shape or the cached
-        # HLO is not reused.
+        # HLO is not reused. All zeros, with the kernel index at branch 0, the
+        # primer writes nothing and runs no attention kernel.
+        arrays: dict[str, jax.Array] = {}
         for gid, page_size in attention_group_page_sizes(
                 kv_cache_groups).items():
             max_num_slices = kv_write_slice_bound(num_tokens // dp_size,
