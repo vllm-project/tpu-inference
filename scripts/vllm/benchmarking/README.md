@@ -50,9 +50,9 @@ Once the server has begun -- you should see a message such as `INFO:     Applica
     --run_eval
 ```
 
-Note that you can also specify `mmlu` for the `dataset-name` (but your results will be different).
+Note that you can also specify `mmlu` for the `dataset-name` (but your results will be different). Depending on the model, it may also be necessary to set --[dataset]--output-len to a high number.
 
-If all goes well, you should an output similar to:
+If all goes well, you should see an output similar to:
 
 ```
 ============ Serving Benchmark Result ============
