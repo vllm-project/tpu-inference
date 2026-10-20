@@ -267,7 +267,7 @@ def patch_mm_model(
             new_params_and_buffers[new_key] = v
             # Also update the params and buffers in the JittableModule
             # They are not using params_and_buffs in the function args
-            inner_k = k[len(prefix) + 1:]
+            inner_k = k.replace(prefix + ".", "")
             if inner_k in jitted_module.params:
                 jitted_module.params[inner_k] = torch_view(v)
             elif inner_k in jitted_module.buffers:
