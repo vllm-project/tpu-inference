@@ -69,6 +69,21 @@ class _DummyRunner(nn.Module):
                       **kwargs.get("call_kwargs", {}))
 
 
+class _DummyLayeredVisionTower(nn.Module):
+
+    def __init__(self, hidden_size: int, num_layers: int):
+        super().__init__()
+        self.layers = nn.ModuleList(
+            [_DummyEncoder(hidden_size) for _ in range(num_layers)])
+
+
+class _DummyLayeredVllmModel(nn.Module):
+
+    def __init__(self, hidden_size: int, num_layers: int):
+        super().__init__()
+        self.vision_tower = _DummyLayeredVisionTower(hidden_size, num_layers)
+
+
 def _build_patched_runner_and_params(hidden_size: int = 8):
     vllm_model = _DummyVllmModel(hidden_size)
     runner = _DummyRunner(vllm_model)
@@ -166,4 +181,42 @@ def test_patch_mm_model_fallback_ignores_stale_init_torchax_tensor():
     with torchax.default_env():
         x_direct = torch_view(jnp.ones((2, hidden_size), dtype=jnp.float32))
         out_direct = jax_view(runner.vllm_model.vision_tower.encoder(x_direct))
+    np.testing.assert_allclose(np.asarray(out_direct), 25.5, rtol=1e-5)
+
+
+def test_patch_mm_module_matches_module_key_on_dot_boundary():
+    hidden_size = 4
+    num_layers = 11
+    runner = _DummyRunner(_DummyLayeredVllmModel(hidden_size, num_layers))
+    params_and_buffers = {}
+    for i in range(num_layers):
+        prefix = f"vllm_model.vision_tower.layers.{i}"
+        params_and_buffers.update({
+            f"{prefix}.proj.weight":
+            torch_view(
+                jnp.full((hidden_size, hidden_size), 2.0, dtype=jnp.float32)),
+            f"{prefix}.proj.bias":
+            torch_view(jnp.full((hidden_size, ), 0.5, dtype=jnp.float32)),
+            f"{prefix}.scale":
+            torch_view(jnp.full((hidden_size, ), 3.0, dtype=jnp.float32)),
+        })
+
+    runner, params_and_buffers = patch_mm_model(
+        runner,
+        params_and_buffers,
+        jitted_mm_module_keys=["model.vision_tower.layers.1"],
+        register_mm_module_custom_pytree_classes=[],
+    )
+
+    assert len(params_and_buffers) == 3 * num_layers
+    for name in ("proj.weight", "proj.bias", "scale"):
+        assert (f"vllm_model.vision_tower.layers.1._model.{name}"
+                in params_and_buffers)
+        assert (f"vllm_model.vision_tower.layers.10.{name}"
+                in params_and_buffers)
+
+    with torchax.default_env():
+        x_direct = torch_view(jnp.ones((2, hidden_size), dtype=jnp.float32))
+        out_direct = jax_view(
+            runner.vllm_model.vision_tower.layers[1](x_direct))
     np.testing.assert_allclose(np.asarray(out_direct), 25.5, rtol=1e-5)

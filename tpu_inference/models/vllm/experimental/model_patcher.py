@@ -259,7 +259,7 @@ def patch_mm_model(
         prefix = f"vllm_model.{'.'.join(module_names[1:])}"
         new_prefix = f"{prefix}._model"
         for k, v in params_and_buffers.items():
-            if not k.startswith(prefix):
+            if not k.startswith(prefix + "."):
                 new_params_and_buffers[k] = v
                 continue
 
