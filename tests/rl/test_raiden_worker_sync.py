@@ -150,6 +150,105 @@ class TestRaidenWorkerSyncMetadataDict(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             sync.metadata_dict()
 
+    def test_metadata_dict_dual_nic_partitions_shards_across_nics(self):
+        sync = rws.RaidenWorkerSync("rollout", bind_ip="10.11.0.5")
+        sync.names = ["w"]
+        mock_mesh = SimpleNamespace(
+            axis_names=("x", "y"),
+            shape={
+                "x": 2,
+                "y": 8
+            },
+            local_mesh=None,
+        )
+        mock_devices = [object() for _ in range(8)]
+        indices_map = {dev: (slice(0, 1), slice(0, 1)) for dev in mock_devices}
+        mock_sharding = SimpleNamespace(
+            mesh=mock_mesh,
+            spec=(),
+            shard_shape=lambda shape: shape,
+            devices_indices_map=lambda shape: indices_map,
+        )
+        sync.arrays = [
+            SimpleNamespace(
+                shape=(2, 4),
+                dtype=SimpleNamespace(itemsize=4),
+                sharding=mock_sharding,
+                ndim=2,
+                addressable_shards=[
+                    SimpleNamespace(device=d) for d in mock_devices
+                ],
+            )
+        ]
+        sync._sync = SimpleNamespace(
+            num_shards=8,
+            local_port=12345,
+            listener_port=23456,
+        )
+        with unittest.mock.patch.object(
+                rws,
+                "_resolve_data_nic_ips",
+                return_value=["10.11.0.5", "10.12.0.5"],
+        ):
+            meta = sync.metadata_dict()
+        self.assertEqual(
+            meta["shards"],
+            ["10.11.0.5:12345"] * 4 + ["10.12.0.5:12345"] * 4,
+        )
+        self.assertEqual(meta["control_plane_rpc_address"], "10.11.0.5:23456")
+
+    def test_metadata_dict_dual_nic_stripes_single_manager_get_local_endpoints(
+            self):
+        sync = rws.RaidenWorkerSync("rollout", bind_ip="10.11.0.5")
+        sync.names = ["w"]
+        mock_mesh = SimpleNamespace(
+            axis_names=("x", "y"),
+            shape={
+                "x": 2,
+                "y": 8
+            },
+            local_mesh=None,
+        )
+        mock_devices = [object() for _ in range(8)]
+        indices_map = {dev: (slice(0, 1), slice(0, 1)) for dev in mock_devices}
+        mock_sharding = SimpleNamespace(
+            mesh=mock_mesh,
+            spec=(),
+            shard_shape=lambda shape: shape,
+            devices_indices_map=lambda shape: indices_map,
+        )
+        sync.arrays = [
+            SimpleNamespace(
+                shape=(2, 4),
+                dtype=SimpleNamespace(itemsize=4),
+                sharding=mock_sharding,
+                ndim=2,
+                addressable_shards=[
+                    SimpleNamespace(device=d) for d in mock_devices
+                ],
+            )
+        ]
+        sync._sync = SimpleNamespace(
+            num_shards=8,
+            local_port=12345,
+            listener_port=23456,
+            get_local_endpoints=lambda: [{
+                "endpoint": "10.11.0.5:12345",
+                "shards": list(range(8)),
+            }],
+        )
+        with unittest.mock.patch.object(
+                rws,
+                "_resolve_data_nic_ips",
+                return_value=["10.11.0.5", "10.12.0.5"],
+        ):
+            meta = sync.metadata_dict()
+        self.assertEqual(
+            meta["shards"],
+            ["10.11.0.5:12345"] * 4 + ["10.12.0.5:12345"] * 4,
+        )
+        self.assertEqual(meta["control_plane_rpc_address"], "10.11.0.5:23456")
+
     def test_bound_is_false_until_bind(self):
         sync = rws.RaidenWorkerSync("rollout")
         self.assertFalse(sync.bound)
@@ -425,6 +524,56 @@ class TestRaidenWorkerSyncH2D(unittest.TestCase):
             mock_ws.h2d.assert_called_once()
             mock_block.assert_called_once_with(sync.arrays)
             mock_settle.assert_not_called()
+
+
+class TestRaidenWorkerSyncBindIp(unittest.TestCase):
+    """bind() hands the native layer an explicit source-bind policy.
+
+    With several data NICs and ENABLE_MULTI_NUMA off, the native default
+    binds every outbound socket to NIC 0's IP; packets then leave NIC 1 with
+    NIC 0's source address and VPC anti-spoofing drops them. "0.0.0.0" tells
+    the native layer to skip the bind and let the kernel route per peer.
+    """
+
+    def _bind_and_capture_bind_ip(self, env: dict, nic_ips: list) -> object:
+        mock_ws_cls = unittest.mock.MagicMock()
+        mock_ws_lib = SimpleNamespace(WeightSynchronizer=mock_ws_cls)
+        with unittest.mock.patch.dict("os.environ", env, clear=False), \
+             unittest.mock.patch.object(rws, "_ws_lib", mock_ws_lib), \
+             unittest.mock.patch.object(rws, "_resolve_data_nic_ips",
+                                        return_value=nic_ips), \
+             unittest.mock.patch.object(rws, "flatten_weights",
+                                        return_value=(["w"], [object()])), \
+             unittest.mock.patch.object(rws, "_filter_bindable",
+                                        side_effect=lambda n, a: (n, a)):
+            sync = rws.RaidenWorkerSync("rollout", bind_ip="10.11.0.5")
+            sync.bind({"w": object()})
+        mock_ws_cls.assert_called_once()
+        return mock_ws_cls.call_args.kwargs["bind_ip"]
+
+    def test_multi_nic_without_multi_numa_lets_kernel_route(self):
+        bind_ip = self._bind_and_capture_bind_ip(
+            {
+                "ENABLE_MULTI_NUMA": "0",
+                "TPU_RAIDEN_DATA_NICS": "eth0,eth1"
+            }, ["10.11.0.5", "10.10.0.5"])
+        self.assertEqual(bind_ip, "0.0.0.0")
+
+    def test_multi_nic_with_multi_numa_keeps_native_binding(self):
+        bind_ip = self._bind_and_capture_bind_ip(
+            {
+                "ENABLE_MULTI_NUMA": "1",
+                "TPU_RAIDEN_DATA_NICS": "eth0,eth1"
+            }, ["10.11.0.5", "10.10.0.5"])
+        self.assertIsNone(bind_ip)
+
+    def test_single_nic_keeps_native_binding(self):
+        bind_ip = self._bind_and_capture_bind_ip(
+            {
+                "ENABLE_MULTI_NUMA": "0",
+                "TPU_RAIDEN_DATA_NICS": ""
+            }, ["10.11.0.5"])
+        self.assertIsNone(bind_ip)
 
 
 if __name__ == "__main__":
