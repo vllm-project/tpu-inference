@@ -1,0 +1,68 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# CPU-only check: can a step depend on a key that a later
+# `buildkite-agent pipeline upload` adds (forward reference)? And does an
+# explicit depends_on bypass a `wait` above it?
+#
+#   slow         sleeps 120 s, above the wait
+#   uploader     after 20 s uploads `late_barrier` (sleeps 30 s)
+#   fwd_ref      defined now, depends on `late_barrier` (not yet in the build)
+#   wait
+#   after_wait   depends_on: uploader only; starts before `slow` ends iff
+#                explicit depends_on bypasses the wait
+
+x-cpu: &cpu
+  agents:
+    queue: cpu
+
+steps:
+  - label: "slow (120 s)"
+    key: slow
+    <<: *cpu
+    commands:
+      - sleep 120; date -u +%T
+
+  - label: "uploader"
+    key: uploader
+    <<: *cpu
+    commands:
+      - |
+        sleep 20
+        cat <<'YAML' | buildkite-agent pipeline upload
+        steps:
+          - label: "late_barrier (uploaded later)"
+            key: late_barrier
+            agents:
+              queue: cpu
+            commands:
+              - sleep 30; date -u +%T
+        YAML
+
+  - label: "fwd_ref (depends on late_barrier)"
+    key: fwd_ref
+    depends_on: late_barrier
+    <<: *cpu
+    commands:
+      - date -u +%T
+
+  - wait: ~
+    continue_on_failure: true
+
+  - label: "after_wait (explicit depends_on uploader)"
+    key: after_wait
+    depends_on: uploader
+    <<: *cpu
+    commands:
+      - date -u +%T
