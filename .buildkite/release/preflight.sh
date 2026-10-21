@@ -27,6 +27,7 @@
 set -euo pipefail
 # shellcheck source=/dev/null
 source "${RELEASE_TOOLS}/release/lib.sh"
+BUILDKITE_BRANCH=releases/v0.0.1 # TEST ONLY (jefft/test_auto)
 
 echo "--- :label: Release version"
 [[ "${BUILDKITE_BRANCH}" =~ ^releases/v([0-9]+\.[0-9]+\.[0-9]+)$ ]] \

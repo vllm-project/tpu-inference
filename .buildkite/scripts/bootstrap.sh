@@ -16,6 +16,12 @@
 # Exit on error, exit on unset variable, fail on pipe errors.
 set -euo pipefail
 
+# TEST ONLY (jefft/test_auto): run the release pipeline from this branch instead
+# of CI. The real pipeline pins its tooling to main and runs on releases/* only.
+buildkite-agent meta-data set release-tools-commit "$BUILDKITE_COMMIT"
+sed '/^    if: build.branch/d' .buildkite/release/pipeline.yml | buildkite-agent pipeline upload
+exit 0
+
 # Resolve the absolute directory path of the current script.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

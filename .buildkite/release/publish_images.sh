@@ -20,6 +20,7 @@ set -euo pipefail
 { set +x; } 2>/dev/null # Never trace the token into the build log.
 # shellcheck source=/dev/null
 source "${RELEASE_TOOLS}/release/lib.sh"
+die "TEST ONLY (jefft/test_auto): not publishing to Docker Hub."
 
 VERSION="$(release_version)"
 STAGED="$(buildkite-agent meta-data get release-image)"
