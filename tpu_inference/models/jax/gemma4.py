@@ -41,7 +41,8 @@ from tpu_inference.layers.jax.rope_interface import (apply_rope,
                                                      normalize_rope_scaling)
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
-from tpu_inference.models.common.kv_share import compute_kv_share_map
+from tpu_inference.models.common.kv_share import (compute_kv_share_map,
+                                                  drop_shared_kv_weights)
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (
@@ -311,6 +312,32 @@ class Gemma4Attention(JaxModule):
                            None) if _shard_kv_on_k else (None, None, "model")
         _kv_bias_spec = ("model", None) if _shard_kv_on_k else (None, "model")
 
+        # KV-cache sharing (mirrors vllm-pytorch `Gemma4Attention.__init__`
+        # KV-share derivation). Layers in the last `num_kv_shared_layers`
+        # reuse K/V from earlier layers of matching attention type. The
+        # runner side populates the redirect mapping; this layer just needs
+        # to set is_kv_shared_layer + kv_sharing_target_layer_name.
+        # Derived before the projections are built because shared layers do
+        # not own K/V parameters at all (see below).
+        kv_share_map = compute_kv_share_map(config)
+        self.is_kv_shared_layer = layer_idx in kv_share_map
+        self.kv_sharing_target_layer_name: Optional[str] = None
+        if self.is_kv_shared_layer:
+            # The runner uses unprefixed "layer.{i}" keys; this string must
+            # match the keys produced by KVCacheManager's spec-creation loop
+            # and Gemma4Model's layer-name iteration.
+            self.kv_sharing_target_layer_name = (
+                f"layer.{kv_share_map[layer_idx]}")
+            # Shared layers never use their own K/V: `__call__` reads the
+            # source layer's already-normed-and-roped K/V straight from the
+            # redirected cache slot, so nothing ever reads what k_proj/
+            # v_proj/k_norm would produce. Gemma 4 QAT exports omit them
+            # entirely for these layers, so allocating them makes those
+            # checkpoints fail to load (vllm-project/tpu-inference#3225).
+            # BF16 exports do ship them; every `load_weights` that builds
+            # this module drops them on the way in via
+            # `drop_shared_kv_weights`.
+
         self.q_proj = JaxEinsum(
             "TD,DNH->TNH",
             (self.hidden_size, self.num_heads, self.head_dim),
@@ -324,23 +351,11 @@ class Gemma4Attention(JaxModule):
             quant_config=quant_config,
             prefix=prefix + ".q_proj",
         )
-        self.k_proj = JaxEinsum(
-            "TD,DKH->TKH",
-            (self.hidden_size, self.num_kv_heads, self.head_dim),
-            bias_shape=(self.num_kv_heads,
-                        self.head_dim) if config.attention_bias else None,
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, _kv_kernel_spec),
-            bias_init=nnx.with_partitioning(init_fn, _kv_bias_spec)
-            if config.attention_bias else None,
-            rngs=rng,
-            quant_config=quant_config,
-            prefix=prefix + ".k_proj",
-        )
-        if use_k_eq_v:  # TODO: Add QKV fusion logic for k == v case.
+        if self.is_kv_shared_layer:
+            self.k_proj = None
             self.v_proj = None
         else:
-            self.v_proj = JaxEinsum(
+            self.k_proj = JaxEinsum(
                 "TD,DKH->TKH",
                 (self.hidden_size, self.num_kv_heads, self.head_dim),
                 bias_shape=(self.num_kv_heads,
@@ -351,8 +366,25 @@ class Gemma4Attention(JaxModule):
                 if config.attention_bias else None,
                 rngs=rng,
                 quant_config=quant_config,
-                prefix=prefix + ".v_proj",
+                prefix=prefix + ".k_proj",
             )
+            if use_k_eq_v:  # TODO: Add QKV fusion logic for k == v case.
+                self.v_proj = None
+            else:
+                self.v_proj = JaxEinsum(
+                    "TD,DKH->TKH",
+                    (self.hidden_size, self.num_kv_heads, self.head_dim),
+                    bias_shape=(self.num_kv_heads, self.head_dim)
+                    if config.attention_bias else None,
+                    param_dtype=dtype,
+                    kernel_init=nnx.with_partitioning(init_fn,
+                                                      _kv_kernel_spec),
+                    bias_init=nnx.with_partitioning(init_fn, _kv_bias_spec)
+                    if config.attention_bias else None,
+                    rngs=rng,
+                    quant_config=quant_config,
+                    prefix=prefix + ".v_proj",
+                )
 
         self.q_norm = JaxRmsNorm(
             self.head_dim,
@@ -364,15 +396,21 @@ class Gemma4Attention(JaxModule):
             prefix=prefix + ".q_norm",
         )
 
-        self.k_norm = JaxRmsNorm(
-            self.head_dim,
-            epsilon=self.rms_norm_eps,
-            param_dtype=dtype,
-            scale_init=nnx.with_partitioning(init_fn, (None, )),
-            rngs=rng,
-            quant_config=quant_config,
-            prefix=prefix + ".k_norm",
-        )
+        # Only non-shared layers norm their own K (see `__call__`); shared
+        # layers read K/V that the source layer already normed. Assigned once
+        # per branch: nnx rejects re-binding a static None to a Module.
+        if self.is_kv_shared_layer:
+            self.k_norm = None
+        else:
+            self.k_norm = JaxRmsNorm(
+                self.head_dim,
+                epsilon=self.rms_norm_eps,
+                param_dtype=dtype,
+                scale_init=nnx.with_partitioning(init_fn, (None, )),
+                rngs=rng,
+                quant_config=quant_config,
+                prefix=prefix + ".k_norm",
+            )
         # V norm: no learnable scale (pure normalization only)
         self.v_norm = JaxRmsNorm(
             self.head_dim,
@@ -405,21 +443,6 @@ class Gemma4Attention(JaxModule):
             self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
                 kv_cache_dtype)
 
-        # KV-cache sharing (mirrors vllm-pytorch `Gemma4Attention.__init__`
-        # KV-share derivation). Layers in the last `num_kv_shared_layers`
-        # reuse K/V from earlier layers of matching attention type. The
-        # runner side populates the redirect mapping; this layer just needs
-        # to set is_kv_shared_layer + kv_sharing_target_layer_name.
-        kv_share_map = compute_kv_share_map(config)
-        self.is_kv_shared_layer = layer_idx in kv_share_map
-        self.kv_sharing_target_layer_name: Optional[str] = None
-        if self.is_kv_shared_layer:
-            # The runner uses unprefixed "layer.{i}" keys; this string must
-            # match the keys produced by KVCacheManager's spec-creation loop
-            # and Gemma4Model's layer-name iteration.
-            self.kv_sharing_target_layer_name = (
-                f"layer.{kv_share_map[layer_idx]}")
-
     def __call__(
         self,
         kv_cache: Optional[jax.Array],
@@ -427,10 +450,19 @@ class Gemma4Attention(JaxModule):
         attention_metadata: AttentionMetadata,
     ) -> Tuple[jax.Array, jax.Array]:
         md = attention_metadata
-        k = self.k_proj(x)
-        v = self.v_proj(x) if self.v_proj is not None else k
         # q: (T, N, H)
         q = self.q_proj(x)
+        if self.is_kv_shared_layer:
+            # No K/V projection: the attention call below runs with
+            # update_kv_cache=False and reads the source layer's K/V from the
+            # redirected cache slot, so this layer's own k/v were never used
+            # for attention math. They are passed only to satisfy the
+            # `attention()` signature.
+            k = v = jnp.zeros((x.shape[0], self.num_kv_heads, self.head_dim),
+                              dtype=q.dtype)
+        else:
+            k = self.k_proj(x)
+            v = self.v_proj(x) if self.v_proj is not None else k
         # Q norm (always applied)
         q = self.q_norm(q)
 
@@ -462,8 +494,8 @@ class Gemma4Attention(JaxModule):
             # not overwrite the source slot with our raw k,v and (b) reads
             # everything from cache rather than mixing in the layer's own
             # input k,v. Shared's input k,v is therefore unused for attention
-            # math; we still allocate q_proj/k_proj/v_proj because gemma-4's
-            # checkpoint stores full Q/K/V weights for shared layers.
+            # math, which is why these layers allocate no k_proj/v_proj/k_norm
+            # at all — see `__init__`.
             q = apply_rope(q,
                            md.input_positions,
                            self.head_dim_original,
@@ -1070,6 +1102,9 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
                            if not hasattr(self, 'lm_head') else []),
             skip_substrs=["vision", "audio", "multi_modal"],
         )
+        # KV-shared layers own no K/V params; a BF16 export still ships them.
+        text_config = self.vllm_config.model_config.hf_config.text_config
+        weights = drop_shared_kv_weights(text_config, weights)
         return loader.load_weights(mapper.apply(weights))
 
     def __call__(
