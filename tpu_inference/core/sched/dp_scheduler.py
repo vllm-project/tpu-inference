@@ -67,6 +67,7 @@ class SchedulerCommand(Enum):
     RESET_PREFIX_CACHE = "reset_prefix_cache"
     GET_NUM_UNFINISHED_REQUESTS = "get_num_unfinished_requests"
     HAS_FINISHED_REQUESTS = "has_finished_requests"
+    HAS_REQUEST = "has_request"
     GET_REQUEST_COUNTS = "get_request_counts"
     GET_TOKEN_COUNT = "get_token_count"
     GET_PENDING_PREFILL_TOKENS = "get_pending_prefill_tokens"
@@ -272,6 +273,14 @@ def _scheduler_worker_process(
 
                 case SchedulerCommand.HAS_FINISHED_REQUESTS:
                     result = scheduler.has_finished_requests()
+                    _send_result(result)
+
+                case SchedulerCommand.HAS_REQUEST:
+                    request_id = data
+                    if hasattr(scheduler, "has_request"):
+                        result = scheduler.has_request(request_id)
+                    else:
+                        result = request_id in scheduler.requests
                     _send_result(result)
 
                 case SchedulerCommand.GET_REQUEST_COUNTS:
@@ -1388,6 +1397,16 @@ class DPScheduler(SchedulerInterface):
         """Remove finished requests from our DP rank assignment tracking."""
         for req_id in finished_req_ids:
             self.assigned_dp_rank.pop(req_id, None)
+
+    def has_request(self, request_id: str) -> bool:
+        """Check if the scheduler holds the request across pending and DP ranks."""
+        if any(r.request_id == request_id for r in self._pending_new_requests):
+            return True
+        rank = self.assigned_dp_rank.get(request_id)
+        if rank is None:
+            return False
+        self._send_command(rank, SchedulerCommand.HAS_REQUEST, request_id)
+        return self._get_result(rank, SchedulerCommand.HAS_REQUEST)
 
     def finish_requests(self, request_ids,
                         finished_status) -> List[FinishedRequestInfo]:
