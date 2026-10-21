@@ -647,3 +647,71 @@ class TestMultiModalManager:
         np.testing.assert_array_equal(
             self.runner.mrope_positions_cpu[:, 16:24], mrope_b)
         assert np.all(self.runner.mrope_positions_cpu[:, 24:32] == -7)
+
+    @pytest.mark.parametrize("with_is_embed", [False, True])
+    def test_gather_mm_embeddings_full_slice_fast_path(self,
+                                                       with_is_embed: bool):
+        """Verifies that gather_mm_embeddings returns the exact encoder_output
+        object without eager JAX slicing when the entire multimodal span is
+        scheduled in a single prefill step."""
+        import torch
+
+        self.runner.is_multimodal_model = True
+        req_id = "req-full"
+
+        encoder_embedding = jnp.arange(10 * 128, dtype=jnp.bfloat16).reshape(
+            (10, 128))
+        self.runner.encoder_cache = {req_id: encoder_embedding}
+
+        mock_sampling_params = MagicMock()
+        mock_sampling_params.sampling_type = SamplingType.GREEDY
+        mock_sampling_params.top_k = -1
+        mock_sampling_params.top_p = 1.0
+        mock_sampling_params.temperature = 0.0
+        mock_sampling_params.min_tokens = 0
+        mock_sampling_params.logprobs = None
+        mock_sampling_params.logit_bias = None
+        mock_sampling_params.allowed_token_ids = set()
+        mock_sampling_params.bad_words_token_ids = None
+        mock_sampling_params.all_stop_token_ids = set()
+
+        is_embed = torch.ones(10, dtype=torch.bool) if with_is_embed else None
+        mm_position = PlaceholderRange(offset=5, length=10, is_embed=is_embed)
+
+        req_state = CachedRequestState(
+            req_id=req_id,
+            prompt_token_ids=list(range(20)),
+            output_token_ids=[],
+            sampling_params=mock_sampling_params,
+            block_ids=([], ),
+            num_computed_tokens=0,
+            mm_features=[
+                MultiModalFeatureSpec(data=None,
+                                      identifier=req_id,
+                                      modality="image",
+                                      mm_position=mm_position)
+            ],
+            lora_request=None,
+            pooling_params=None,
+            generator=None,
+        )
+        self.runner.requests = {req_id: req_state}
+        self.runner.input_batch.add_request(req_state)
+
+        mock_scheduler_output = MagicMock(spec=VllmSchedulerOutput)
+        mock_scheduler_output.total_num_scheduled_tokens = 20
+        mock_scheduler_output.num_scheduled_tokens = {req_id: 20}
+
+        gathered_mm_embeds, gathered_is_mm_embed = (
+            self.runner.mm_manager.gather_mm_embeddings(
+                mock_scheduler_output,
+                target_pad_len=20,
+                req_ids_dp={0: [req_id]},
+                padded_num_scheduled_tokens_per_dp_rank=20,
+            ))
+
+        assert gathered_mm_embeds is not None
+        assert len(gathered_mm_embeds) == 1
+        assert gathered_mm_embeds[0] is encoder_embedding
+        assert gathered_is_mm_embed is not None
+        assert gathered_is_mm_embed.shape == (20, )
