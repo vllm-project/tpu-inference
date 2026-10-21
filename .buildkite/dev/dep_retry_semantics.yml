@@ -1,0 +1,136 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# CPU-only check of Buildkite dependency semantics after a failed-then-retried
+# image build, mirroring tpu-inference-ci #1675. No TPU, no docker.
+#
+#   img          fails on its first attempt, passes when retried by hand
+#   test_a       depends on img; passes          (like a kube test step)
+#   test_b       depends on img; fails, soft_fail (a real test failure)
+#   rec_a_old    today's Record: allow_failure on test_a only
+#   rec_a_new    proposed Record: hard on img + allow_failure on test_a
+#   rec_b_new    proposed Record for the failing test_b
+#   perf_b       hard dep on rec_b_new (must stay blocked: correctness failed)
+#   notify_new   proposed Notify: hard on img + allow_failure on rec_*_new
+#   wait + notify_old  today's Notify, ordered only by the wait
+#
+# Expected if the proposal works:
+#   (a) img fails  -> rec_a_new, rec_b_new, notify_new do NOT run; rec_a_old and
+#       notify_old DO run (reproduces #1675).
+#   (b) img retried and passes -> test_a, test_b, rec_a_new, rec_b_new run with
+#       no further retries.
+#   (c) notify_new runs only after rec_a_new and rec_b_new finish.
+
+x-cpu: &cpu
+  agents:
+    queue: cpu
+
+steps:
+  - label: "img (fails first attempt)"
+    key: img
+    <<: *cpu
+    commands:
+      - |
+        echo "BUILDKITE_RETRY_COUNT=$${BUILDKITE_RETRY_COUNT:-0}"
+        if [ "$${BUILDKITE_RETRY_COUNT:-0}" = "0" ]; then echo "simulated disk full"; exit 1; fi
+        echo "image ok"
+
+  - label: "test_a (passes)"
+    key: test_a
+    depends_on: img
+    <<: *cpu
+    commands:
+      - sleep 60; echo pass
+
+  - label: "test_b (fails, soft_fail)"
+    key: test_b
+    depends_on: img
+    soft_fail: true
+    <<: *cpu
+    commands:
+      - sleep 30; echo fail; exit 1
+
+  - label: "rec_a_old (today: allow_failure on test only)"
+    key: rec_a_old
+    depends_on:
+      - step: test_a
+        allow_failure: true
+    <<: *cpu
+    commands:
+      - |
+        O=$$(buildkite-agent step get outcome --step test_a || true)
+        echo "test_a outcome='$$O' at $$(date -u +%T)"
+        buildkite-agent meta-data set rec_a_old "$$O@$$(date -u +%T)"
+        [ "$$O" = "passed" ]
+
+  - label: "rec_a_new (proposed: hard img + allow_failure test)"
+    key: rec_a_new
+    depends_on:
+      - img
+      - step: test_a
+        allow_failure: true
+    <<: *cpu
+    commands:
+      - |
+        O=$$(buildkite-agent step get outcome --step test_a || true)
+        echo "test_a outcome='$$O' at $$(date -u +%T)"
+        buildkite-agent meta-data set rec_a_new "$$O@$$(date -u +%T)"
+        [ "$$O" = "passed" ]
+
+  - label: "rec_b_new (proposed, for failing test_b)"
+    key: rec_b_new
+    depends_on:
+      - img
+      - step: test_b
+        allow_failure: true
+    <<: *cpu
+    commands:
+      - |
+        O=$$(buildkite-agent step get outcome --step test_b || true)
+        echo "test_b outcome='$$O' at $$(date -u +%T)"
+        buildkite-agent meta-data set rec_b_new "$$O@$$(date -u +%T)"
+        [ "$$O" = "passed" ]
+
+  - label: "perf_b (must stay blocked)"
+    key: perf_b
+    depends_on: rec_b_new
+    <<: *cpu
+    commands:
+      - echo "perf_b ran -- unexpected"
+
+  - label: "notify_new (proposed: hard img + allow_failure records)"
+    key: notify_new
+    depends_on:
+      - img
+      - step: rec_a_new
+        allow_failure: true
+      - step: rec_b_new
+        allow_failure: true
+    <<: *cpu
+    commands:
+      - |
+        echo "notify_new at $$(date -u +%T)"
+        echo "rec_a_new=$$(buildkite-agent meta-data get rec_a_new --default MISSING)"
+        echo "rec_b_new=$$(buildkite-agent meta-data get rec_b_new --default MISSING)"
+
+  - wait: ~
+    continue_on_failure: true
+
+  - label: "notify_old (today: ordered only by the wait)"
+    key: notify_old
+    <<: *cpu
+    commands:
+      - |
+        echo "notify_old at $$(date -u +%T)"
+        echo "rec_a_old=$$(buildkite-agent meta-data get rec_a_old --default MISSING)"
