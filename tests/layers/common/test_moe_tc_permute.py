@@ -67,6 +67,50 @@ def test_capacity_rejects_non_positive_factor(factor):
         fused_moe_gmm.tc_permute_capacity(40960, 32)
 
 
+def _banded_case(rng, num_tokens, num_rows, hot_block):
+    """Random inputs for _tc_banded_combine, and its expected output from a
+    scatter-add. With hot_block, most rows go to that 512-token block."""
+    row_tokens = rng.integers(0, num_tokens, num_rows)
+    if hot_block is not None:
+        hot = rng.integers(hot_block * 512, (hot_block + 1) * 512, num_rows)
+        row_tokens = np.where(rng.random(num_rows) < 0.75, hot, row_tokens)
+    row_valid = rng.random(num_rows) < 0.9
+    rows = jnp.asarray(rng.standard_normal((num_rows, 256)), jnp.bfloat16)
+    weights = jnp.asarray(rng.random(num_rows), jnp.float32)
+    weighted = (np.asarray(rows, np.float32) *
+                np.asarray(weights.astype(jnp.bfloat16), np.float32)[:, None])
+    expected = np.zeros((num_tokens, 256), np.float32)
+    np.add.at(expected, row_tokens[row_valid], weighted[row_valid])
+    args = (rows, jnp.asarray(row_tokens,
+                              jnp.int32), weights, jnp.asarray(row_valid))
+    return args, expected
+
+
+@pytest.mark.parametrize(
+    "num_tokens, num_rows, hot_block",
+    [
+        (4096, 1024, None),  # rows spread over the blocks: one window each
+        (2304, 768, None),  # tokens not a multiple of the 512-token block
+        (4096, 1024, 3),  # most rows in block 3: several windows
+    ])
+def test_banded_combine(num_tokens, num_rows, hot_block):
+    """_tc_banded_combine matches a scatter-add, alone and when adding into
+    an accumulator that holds another chunk's result."""
+    rng = np.random.default_rng(0)
+    args, expected = _banded_case(rng, num_tokens, num_rows, hot_block)
+    args2, expected2 = _banded_case(rng, num_tokens, num_rows, hot_block)
+    combine = jax.jit(fused_moe_gmm._tc_banded_combine, static_argnums=4)
+    out = combine(*args, num_tokens)
+    assert out.shape == fused_moe_gmm._tc_banded_blocks(num_tokens) + (256, )
+    flat = lambda x: np.asarray(x).reshape(-1, 256)[:num_tokens]  # noqa: E731
+    np.testing.assert_allclose(flat(out), expected, rtol=1e-5, atol=1e-5)
+    both = combine(*args2, num_tokens, out)
+    np.testing.assert_allclose(flat(both),
+                               expected + expected2,
+                               rtol=1e-5,
+                               atol=1e-5)
+
+
 def _moe_inputs(mesh: Mesh,
                 num_tokens: int,
                 skew: bool,
@@ -124,17 +168,23 @@ def _run_fused_moe(mesh: Mesh, tc_permute: bool, num_tokens: int,
 @pytest.mark.parametrize("skew", [False, True], ids=["compact", "overflow"])
 @pytest.mark.parametrize(
     "num_tokens",
-    [512, 1536],
-    ids=["onehot-gather", "plain-gather"],
+    [512, 1536, 4096, 4352],
+    ids=[
+        "onehot-gather", "plain-gather", "banded-combine",
+        "banded-combine-partial-block"
+    ],
 )
 @pytest.mark.parametrize("sizes", _MESH_SIZES, ids=_mesh_id)
 def test_fused_moe_matches_onehot_permute(sizes, num_tokens, skew):
     """MOE_TC_PERMUTE gives the same output as the one-hot permute.
 
-    512 tokens use the one-hot gather, 1536 the plain gather. With skew, one
+    512 tokens use the one-hot gather, 1536 the plain gather, and 4096 and
+    4352 the banded combine (4352 ends in a partial block). With skew, one
     shard gets every row, more than its buffer holds, so it loops over 2-4
-    buffer-fulls. On the data=2 mesh each data shard gets half the tokens, so
-    at 512 its 512 rows fit the smallest buffer and nothing is compacted.
+    buffer-fulls. On the data=2 mesh each data shard gets half the tokens: at
+    512 its 512 rows fit the smallest buffer, so nothing is compacted, and
+    the combine is banded only from 8192 tokens (see
+    test_fused_moe_banded_data_mesh).
     """
     mesh = _make_mesh(**sizes)
     expected = _run_fused_moe(mesh, False, num_tokens, skew)
@@ -143,3 +193,12 @@ def test_fused_moe_matches_onehot_permute(sizes, num_tokens, skew):
                                np.asarray(expected, np.float32),
                                rtol=2e-2,
                                atol=2e-2)
+
+
+@requires_8_devices
+@pytest.mark.parametrize("skew", [False, True], ids=["compact", "overflow"])
+def test_fused_moe_banded_data_mesh(skew):
+    """The banded combine on the data=2 mesh: 8192 tokens give each data
+    shard 4096, where the banded combine starts."""
+    test_fused_moe_matches_onehot_permute(dict(data=2, attn_dp=2, model=2),
+                                          8192, skew)

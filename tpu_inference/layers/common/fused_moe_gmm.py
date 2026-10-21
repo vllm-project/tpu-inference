@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import functools
+import math
 from typing import Literal
 
 import jax
@@ -223,6 +224,11 @@ def _hierarchical_collect_plan(mesh: Mesh, hidden: int) -> tuple | None:
 # a one-hot matmul (capacity x tokens x hidden on the MXU); larger ones use a
 # plain gather, whose cost doesn't grow with the number of tokens.
 _TC_PERMUTE_ONEHOT_GATHER_MAX_TOKENS = 1024
+# Batches of at least this many tokens combine with _tc_banded_combine (linear
+# in the number of tokens) instead of one one-hot matmul over the whole buffer
+# (tokens x capacity x hidden, and capacity grows with the tokens).
+_TC_PERMUTE_BANDED_COMBINE_MIN_TOKENS = 4096
+_TC_PERMUTE_COMBINE_BLOCK_TOKENS = 512
 
 
 def tc_permute_capacity(num_rows: int, num_ep_shards: int) -> int:
@@ -241,7 +247,73 @@ def tc_permute_capacity(num_rows: int, num_ep_shards: int) -> int:
     return min(num_rows, max(512, capacity))
 
 
-def _tc_local_moe(tokens: jax.Array, token_indices_sorted: jax.Array,
+def _tc_banded_blocks(num_tokens: int) -> tuple[int, int]:
+    """How _tc_banded_combine splits the tokens: (blocks, tokens per block)."""
+    block = min(_TC_PERMUTE_COMBINE_BLOCK_TOKENS, num_tokens)
+    return math.ceil(num_tokens / block), block
+
+
+def _tc_banded_combine(rows: jax.Array,
+                       row_tokens: jax.Array,
+                       row_weights: jax.Array,
+                       row_valid: jax.Array,
+                       num_tokens: int,
+                       acc: jax.Array | None = None) -> jax.Array:
+    """Adds each valid row, times its weight, into its token's output.
+
+    Does the same as one one-hot matmul over all the rows, but cheaper when
+    there are many tokens. The rows are sorted by token and the tokens split
+    into blocks of 512, so each block's rows sit next to each other. Each block
+    multiplies only with its own rows, W at a time, where W is the block's
+    average share of the rows rounded up to 128. A block with more rows takes
+    more of these windows; every block runs as many as the fullest one.
+
+    All rows must be finite, invalid ones too: a window can read rows past its
+    block's (with weight 0), and 0 * NaN is NaN.
+
+    Returns [blocks, tokens per block, hidden] float32 (see _tc_banded_blocks);
+    reshaped to [-1, hidden], row t is token t, and rows past num_tokens are
+    padding. If acc is given (same shape), the result is added into it, so a
+    loop over chunks needs just one accumulator.
+    """
+    num_rows, hidden = rows.shape
+    num_blocks, block = _tc_banded_blocks(num_tokens)
+    window = min(
+        num_rows,
+        align_to((num_rows * block + num_tokens - 1) // num_tokens, 128))
+    block_starts = jnp.arange(num_blocks + 1, dtype=row_tokens.dtype) * block
+    # Invalid rows sort past the last block.
+    row_tokens = jnp.where(row_valid, row_tokens, block_starts[-1])
+    order = jnp.argsort(row_tokens, stable=True)
+    sorted_tokens = row_tokens[order]
+    sorted_weights = row_weights[order].astype(rows.dtype)
+    # Block b's rows are [bounds[b], bounds[b + 1]) of the token-sorted order.
+    bounds = (row_tokens[None, :] < block_starts[:, None]).sum(axis=1)
+    num_windows = ((bounds[1:] - bounds[:-1]).max() + window - 1) // window
+
+    def window_sum(m: jax.Array) -> jax.Array:
+        # [blocks, W]: window m of each block, in the token-sorted order.
+        pos = bounds[:-1, None] + m * window + jnp.arange(window)
+        in_block = pos < bounds[1:, None]
+        pos = jnp.minimum(pos, num_rows - 1)
+        local_token = sorted_tokens[pos] - block_starts[:-1, None]
+        weight = jnp.where(in_block, sorted_weights[pos], 0)
+        is_token = local_token[:, None, :] == jnp.arange(block)[:, None]
+        sel = jnp.where(is_token, weight[:, None, :], 0)  # [blocks, B, W]
+        return jnp.einsum("btw,bwh->bth",
+                          sel,
+                          rows[order[pos]],
+                          preferred_element_type=jnp.float32)
+
+    if acc is None:
+        acc, first = window_sum(0), 1
+    else:
+        first = 0
+    return jax.lax.fori_loop(first, num_windows,
+                             lambda m, a: a + window_sum(m), acc)
+
+
+def _tc_local_moe(tokens: jax.Array, topk_argsort_indices: jax.Array,
                   w1: jax.Array, w1_scale: jax.Array | None,
                   w1_bias: jax.Array | None, w2: jax.Array,
                   w2_scale: jax.Array | None, w2_bias: jax.Array | None,
@@ -257,16 +329,21 @@ def _tc_local_moe(tokens: jax.Array, token_indices_sorted: jax.Array,
        sum(group_sizes[:g]), so passing each group's row count within the
        buffer (0 for other shards' experts) makes it start at row 0.
     3. Combine: add each row's result, times its top-k weight, into its
-       token, with a one-hot matmul.
+       token. A one-hot matmul does this; from
+       _TC_PERMUTE_BANDED_COMBINE_MIN_TOKENS tokens, _tc_banded_combine does
+       it more cheaply.
 
     A shard with more rows than `capacity` repeats these steps one
-    buffer-full at a time and adds up the results, so the buffer never
-    grows.
+    buffer-full at a time and adds the results into one running total, so
+    the buffer never grows.
+
+    topk_argsort_indices maps each expert-sorted row to its position in the
+    flattened [token, k] array.
 
     Returns the shard's partial sums, [num_tokens, hidden]; adding them up
     over the EP shards gives the layer's output.
     """
-    num_rows = token_indices_sorted.shape[0]
+    num_rows = topk_argsort_indices.shape[0]
     num_tokens = tokens.shape[0]
     capacity = min(capacity, num_rows)
     group_start = group_offset[0]
@@ -278,15 +355,21 @@ def _tc_local_moe(tokens: jax.Array, token_indices_sorted: jax.Array,
     local = (groups >= group_start) & (groups < group_start + w1.shape[0])
     group_lo = jnp.where(local, group_offsets[:-1] - start, 0)
     group_hi = jnp.where(local, group_offsets[1:] - start, 0)
-    padded_indices = jnp.pad(token_indices_sorted, (0, capacity))
+    padded_indices = jnp.pad(topk_argsort_indices, (0, capacity))
     revert = topk_argsort_revert_indices.reshape(num_tokens, topk) - start
     weights = topk_weights.reshape(num_tokens, topk).astype(tokens.dtype)
+    banded = num_tokens >= _TC_PERMUTE_BANDED_COMBINE_MIN_TOKENS
 
-    def chunk(k: jax.Array) -> jax.Array:
-        """Steps 1-3 for the shard's k-th buffer-full of rows."""
+    def chunk(k: jax.Array, acc: jax.Array | None = None) -> jax.Array:
+        """Steps 1-3 for the shard's k-th buffer-full of rows.
+
+        One-hot combine: returns [num_tokens, hidden] float32. Banded:
+        adds into acc (in _tc_banded_combine's layout) and returns it.
+        """
         lo = k * capacity
-        idx = jax.lax.dynamic_slice(padded_indices, (start + lo, ),
-                                    (capacity, ))
+        flat_idx = jax.lax.dynamic_slice(padded_indices, (start + lo, ),
+                                         (capacity, ))
+        idx = flat_idx // topk
         if num_tokens <= _TC_PERMUTE_ONEHOT_GATHER_MAX_TOKENS:
             x = jnp.dot(jax.nn.one_hot(idx, num_tokens, dtype=tokens.dtype),
                         tokens,
@@ -309,18 +392,31 @@ def _tc_local_moe(tokens: jax.Array, token_indices_sorted: jax.Array,
                                chunk_group_sizes, group_offset)
         # gmm_v2 runs with zero_initialize=False: rows past the chunk's are
         # stale HBM, and 0 * NaN in the matmul below would spread.
-        gmm2_res = jnp.where((jnp.arange(capacity)
-                              < end - start - lo)[:, None], gmm2_res, 0)
+        valid = jnp.arange(capacity) < end - start - lo
+        gmm2_res = jnp.where(valid[:, None], gmm2_res, 0)
+        if banded:
+            return _tc_banded_combine(gmm2_res, idx,
+                                      topk_weights.reshape(-1)[flat_idx],
+                                      valid, num_tokens, acc)
         rel = jnp.where((revert >= lo) & (revert < lo + capacity), revert - lo,
                         -1)
         sel = (jax.nn.one_hot(rel, capacity, dtype=tokens.dtype) *
                weights[..., None]).sum(axis=1)
         return jnp.dot(sel, gmm2_res, preferred_element_type=jnp.float32)
 
+    num_chunks = (end - start + capacity - 1) // capacity
+
     def all_chunks() -> jax.Array:
+        if banded:
+            # One accumulator for every chunk and window: a float32 result per
+            # chunk on top of it cost ~1 GiB of temporaries at 16,384 tokens.
+            return jax.lax.fori_loop(
+                0, num_chunks, chunk,
+                jnp.zeros(
+                    _tc_banded_blocks(num_tokens) + (w2.shape[2], ),
+                    jnp.float32))
         return jax.lax.fori_loop(
-            0, (end - start + capacity - 1) // capacity,
-            lambda k, acc: acc + chunk(k),
+            0, num_chunks, lambda k, acc: acc + chunk(k),
             jnp.zeros((num_tokens, w2.shape[2]), jnp.float32))
 
     if capacity == num_rows:
@@ -328,6 +424,8 @@ def _tc_local_moe(tokens: jax.Array, token_indices_sorted: jax.Array,
     else:
         out = jax.lax.cond(end - start <= capacity, lambda: chunk(0),
                            all_chunks)
+    if banded:
+        out = out.reshape(-1, out.shape[-1])[:num_tokens]
     return out.astype(tokens.dtype)
 
 
@@ -342,7 +440,7 @@ def moe_gmm_local(x: jax.Array,
                   group_offset: jax.Array,
                   topk_argsort_revert_indices: jax.Array,
                   topk_weights: jax.Array,
-                  token_indices_sorted: jax.Array | None = None,
+                  topk_argsort_indices: jax.Array | None = None,
                   *,
                   activation: str,
                   topk: int,
@@ -358,13 +456,13 @@ def moe_gmm_local(x: jax.Array,
 
     Set parallelism for "tp" or "ep"
 
-    With MOE_TC_PERMUTE (EP only), token_indices_sorted is given and x holds
+    With MOE_TC_PERMUTE (EP only), topk_argsort_indices is given and x holds
     the tokens before the permute, [tokens, hidden]; _tc_local_moe then does
     the gather, the GMMs and the combine.
     """
 
     assert parallelism in ["tp", "ep"]
-    use_tc_permute = token_indices_sorted is not None
+    use_tc_permute = topk_argsort_indices is not None
     assert not use_tc_permute or (parallelism == "ep" and tc_capacity > 0)
 
     # GMM1 computes x @ (W_up | W_gate) together and activation, output is [tokens,padded_intermediate_size]
@@ -478,7 +576,7 @@ def moe_gmm_local(x: jax.Array,
 
         if use_tc_permute:
             chunk_hidden = _tc_local_moe(x,
-                                         token_indices_sorted,
+                                         topk_argsort_indices,
                                          w1,
                                          w1_scale,
                                          w1_bias,
@@ -653,11 +751,11 @@ def expert_parallel_gmm(
     moe_chunk_size: int = 0,
     scatter_results: bool = False,
     defer_all_reduce: bool = False,
-    token_indices_sorted: jax.Array | None = None,
+    topk_argsort_indices: jax.Array | None = None,
 ) -> jax.Array:
     """Runs the MoE experts with expert parallelism (see moe_gmm_local).
 
-    token_indices_sorted is given only with MOE_TC_PERMUTE; x then holds the
+    topk_argsort_indices is given only with MOE_TC_PERMUTE; x then holds the
     tokens before the permute.
     """
     ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
@@ -687,10 +785,10 @@ def expert_parallel_gmm(
         final_out_specs = data_p_spec
 
     tc_capacity = 0
-    if token_indices_sorted is not None:
+    if topk_argsort_indices is not None:
         # The rows of every data shard, concatenated; each device has one data
         # shard's rows, split over the EP shards by expert.
-        local_rows = token_indices_sorted.shape[0] // get_mesh_shape_product(
+        local_rows = topk_argsort_indices.shape[0] // get_mesh_shape_product(
             mesh, ShardingAxisName.MLP_DATA)
         tc_capacity = tc_permute_capacity(local_rows, ep_size)
         logger.info_once(
@@ -731,7 +829,7 @@ def expert_parallel_gmm(
             ep_p_spec,
             data_p_spec,
             data_p_spec,
-            None if token_indices_sorted is None else data_p_spec,
+            None if topk_argsort_indices is None else data_p_spec,
         ),
         out_specs=(final_out_specs),
         check_vma=False,
@@ -747,7 +845,7 @@ def expert_parallel_gmm(
         group_offset,
         topk_argsort_revert_indices,
         topk_weights,
-        token_indices_sorted,
+        topk_argsort_indices,
     )
 
 
@@ -1242,7 +1340,7 @@ def fused_moe_func(
             topk_indices, global_num_experts)
 
     # MOE_TC_PERMUTE: the permute moves into moe_gmm_local (_tc_local_moe), so
-    # the tokens and their expert-sorted indices are passed on as they are.
+    # the tokens and the expert sort's permutation are passed on as they are.
     use_tc_permute = use_ep and envs.MOE_TC_PERMUTE
     if use_tc_permute and num_valid_tokens is not None:
         logger.warning_once(
@@ -1301,7 +1399,7 @@ def fused_moe_func(
 
         if use_tc_permute:
             return (x, group_sizes_local, topk_argsort_revert_indices,
-                    token_indices_sorted)
+                    topk_argsort_indices)
         return x, group_sizes_local, topk_argsort_revert_indices
 
     if not fold_routing:
@@ -1321,7 +1419,7 @@ def fused_moe_func(
         check_vma=False,
     )(hidden_states, topk_indices)
     x, group_sizes, topk_argsort_revert_indices = outs[:3]
-    token_indices_sorted = outs[3] if use_tc_permute else None
+    topk_argsort_indices = outs[3] if use_tc_permute else None
 
     try:
         x = jnp.pad(x, ((0, 0), (0, padded_hidden_size - hidden_size)))
@@ -1350,7 +1448,7 @@ def fused_moe_func(
             scatter_results=scatter_results,
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
-            token_indices_sorted=token_indices_sorted,
+            topk_argsort_indices=topk_argsort_indices,
         )
     else:
         x = tensor_parallel_gmm(
