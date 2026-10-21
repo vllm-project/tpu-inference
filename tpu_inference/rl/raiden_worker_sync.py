@@ -14,6 +14,7 @@ tunix's `weight_sync.dict_to_metadata` defines the metadata shape.
 
 from __future__ import annotations
 
+import os
 import socket
 import time
 from typing import Any, List, Optional, Tuple
@@ -53,6 +54,40 @@ def local_ip() -> str:
         except OSError:
             continue
     return "localhost"
+
+
+_TRUTHY = ("1", "true", "yes", "on")
+
+
+def _resolve_data_nic_ips(default_ip: str) -> List[str]:
+    """Resolves IPv4 addresses for interfaces in TPU_RAIDEN_DATA_NICS."""
+    nics_env = os.environ.get("TPU_RAIDEN_DATA_NICS", "").strip()
+    if not nics_env:
+        return [default_ip]
+    ips: List[str] = []
+    try:
+        import fcntl  # pylint: disable=g-import-not-at-top
+        import struct  # pylint: disable=g-import-not-at-top
+
+        for nic in nics_env.split(","):
+            nic = nic.strip()
+            if not nic:
+                continue
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                info = fcntl.ioctl(
+                    s.fileno(),
+                    0x8915,  # SIOCGIFADDR
+                    struct.pack("256s", nic[:15].encode("utf-8")),
+                )
+                ips.append(socket.inet_ntoa(info[20:24]))
+            except OSError:
+                continue
+            finally:
+                s.close()
+    except ImportError:
+        pass
+    return ips if ips else [default_ip]
 
 
 def is_maxtext_model(model: Any) -> bool:
@@ -302,13 +337,21 @@ class RaidenWorkerSync:
                 f"{self.job_name}: tpu_sync is not importable, cannot bind "
                 f"weight_synchronizer. Original error: {_RAIDEN_IMPORT_ERROR}")
         if self._sync is None:
+            multi_numa_env = os.environ.get("ENABLE_MULTI_NUMA", "0")
+            is_multi_numa = multi_numa_env.strip().lower() in _TRUTHY
+            multi_nic = len(_resolve_data_nic_ips(self.ip)) > 1
+            bind_ip_arg = "0.0.0.0" if multi_nic and not is_multi_numa else None
             self._sync = _ws_lib.WeightSynchronizer(
                 self.arrays,
                 local_port=0,
                 parallelism=self._parallelism,
                 unsafe_skip_buffer_lock=True,
                 listener_port=0,
-                bind_ip=None,
+                # Under ENABLE_MULTI_NUMA=0 with several data NICs, leave the
+                # outbound source address to the kernel: binding to NIC 0's IP
+                # and routing out NIC 1 trips VPC anti-spoofing and the connect
+                # times out. Multi-NUMA keeps the per-submanager binding.
+                bind_ip=bind_ip_arg,
                 # Ingest each slice as it lands. At the default (False), h2d()
                 # unpacks whatever is staged when it is called, installing
                 # in-flight tensors torn -- silently, as checksums that are
@@ -436,20 +479,53 @@ class RaidenWorkerSync:
             for idx, (name, arr) in enumerate(zip(self.names, self.arrays))
         ]
 
-        data_addr = f"{self.ip}:{self._sync.local_port}" if self._sync else ""
-        control_addr = (f"{self.ip}:{self._sync.listener_port}"
-                        if self._sync and self._sync.listener_port else "")
         num_shards = self._sync.num_shards if self._sync else 1
-        shards = [data_addr] * num_shards if data_addr else []
+        shards_list = [""] * num_shards
+        nic_ips = _resolve_data_nic_ips(self.ip)
+        primary_ip = nic_ips[0] if nic_ips else self.ip
+        if self._sync and hasattr(self._sync, "get_local_endpoints"):
+            try:
+                for ep in self._sync.get_local_endpoints():
+                    ep_addr = ep.get("endpoint", "")
+                    if ep_addr.startswith(":"):
+                        ep_addr = f"{primary_ip}{ep_addr}"
+                    elif ":" in ep_addr:
+                        parts = ep_addr.split(":")
+                        if parts[0] in ("0.0.0.0", "127.0.0.1", ""):
+                            ep_addr = f"{primary_ip}:{parts[1]}"
+                    for s in ep.get("shards", []):
+                        if 0 <= s < num_shards:
+                            shards_list[s] = ep_addr
+            except Exception:
+                pass
+        # Only one distinct endpoint reported means the native layer did not
+        # stripe shards across NICs itself; do it here from the NIC list.
+        single_endpoint = len({s for s in shards_list if s}) <= 1
+        if (self._sync and self._sync.local_port and len(nic_ips) > 1
+                and num_shards >= len(nic_ips) and single_endpoint):
+            port = self._sync.local_port
+            shards_per_nic = max(1, num_shards // len(nic_ips))
+            shards_list = [
+                f"{nic_ips[min(i // shards_per_nic, len(nic_ips) - 1)]}:{port}"
+                for i in range(num_shards)
+            ]
+        elif not all(shards_list):
+            data_addr = (f"{primary_ip}:{self._sync.local_port}"
+                         if self._sync else "")
+            shards_list = [s or data_addr
+                           for s in shards_list] if data_addr else []
+
+        control_addr = (f"{primary_ip}:{self._sync.listener_port}"
+                        if self._sync and self._sync.listener_port else "")
         # The controller reads `global_shard_indices[j]` as the slice behind
         # `shards[j]`; a length mismatch would silently misplace every shard.
-        if shards:
+        if shards_list:
             for variable in variables:
-                if len(variable["global_shard_indices"]) != len(shards):
+                if len(variable["global_shard_indices"]) != len(shards_list):
                     raise RuntimeError(
                         f"{self.job_name}: variable {variable['name']!r}"
                         f" publishes {len(variable['global_shard_indices'])}"
-                        f" global_shard_indices for {len(shards)} shards")
+                        f" global_shard_indices for {len(shards_list)} shards")
         return {
             "unit": {
                 "job_name":
@@ -457,7 +533,7 @@ class RaidenWorkerSync:
                 "job_replica_id":
                 str(self.worker_index) if self.worker_index else "",
             },
-            "shards": shards,
+            "shards": shards_list,
             "control_plane_rpc_address": control_addr,
             "mesh_shape": list(mesh_shape),
             "variables": variables,
