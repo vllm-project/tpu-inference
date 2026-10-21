@@ -1,0 +1,73 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# CPU-only check: a step depends on a key whose step an `if:` removed, in the
+# same upload (skipped_same) and in a later upload (skipped_late). Does the
+# dependent run, wait, or fail? Also: does a build whose only non-passed job
+# is waiting on such a key end passed or failed?
+
+steps:
+  - label: "real (passes)"
+    key: real
+    agents:
+      queue: cpu
+    commands:
+      - sleep 5
+
+  - label: "skipped_same (if false)"
+    key: skipped_same
+    if: build.env("NOPE") == "1"
+    agents:
+      queue: cpu
+    commands:
+      - echo unexpected
+
+  - label: "uploader (uploads skipped_late with if false)"
+    key: uploader
+    agents:
+      queue: cpu
+    commands:
+      - |
+        cat <<'YAML' | buildkite-agent pipeline upload
+        steps:
+          - label: "skipped_late (if false)"
+            key: skipped_late
+            if: build.env("NOPE") == "1"
+            agents:
+              queue: cpu
+            commands:
+              - echo unexpected
+        YAML
+
+  - label: "dep_same_allow (real hard + skipped_same allow_failure)"
+    key: dep_same_allow
+    depends_on:
+      - real
+      - step: skipped_same
+        allow_failure: true
+    agents:
+      queue: cpu
+    commands:
+      - date -u +%T
+
+  - label: "dep_late_allow (real hard + skipped_late allow_failure)"
+    key: dep_late_allow
+    depends_on:
+      - real
+      - step: skipped_late
+        allow_failure: true
+    agents:
+      queue: cpu
+    commands:
+      - date -u +%T
