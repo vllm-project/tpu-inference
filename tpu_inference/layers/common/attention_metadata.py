@@ -14,6 +14,7 @@
 
 import functools
 from dataclasses import dataclass
+from typing import Any
 
 import jax
 
@@ -67,6 +68,7 @@ class PCPMetadata:
         "request_distribution",
         "mamba_state_indices",
         "pcp",
+        "backend_metadata",
     ],
     meta_fields=[
         "padded_num_reqs",
@@ -111,6 +113,10 @@ class AttentionMetadata(object):
 
     # STATIC: controls JIT specialization without adding a runtime array.
     use_causal_mask: bool = True
+
+    # The selected TPU attention backend's own metadata of this step, a pytree
+    # of its own type (AttentionBackend.prepare_step); None for RPA.
+    backend_metadata: Any = None
 
 
 @functools.partial(

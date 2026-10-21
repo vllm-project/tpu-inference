@@ -427,6 +427,14 @@ class CompilationManager:
         # Under PCP each request becomes two fused seqs, so the attention
         # metadata buffers are twice as wide (see runner.attn_max_num_seqs).
         attn_seqs = self.runner.attn_max_num_seqs
+        attention_backend = self.runner.attention_backend
+        attention_arrays = attention_backend.warmup_arrays(
+            self.runner.kv_cache_config.kv_cache_groups,
+            num_tokens=num_tokens,
+            max_num_reqs=self.runner.max_num_reqs,
+            dp_size=dp_size,
+            mesh=self.runner.mesh,
+            sharding=metadata_attn_sharding)
         seq_lens = self._create_dummy_tensor((attn_seqs, ), jnp.int32,
                                              metadata_attn_sharding)
         query_start_loc = self._create_dummy_tensor(
@@ -494,7 +502,8 @@ class CompilationManager:
                                         sharding=metadata_attn_sharding)
             return block_tables
 
-        def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
+        def build_attn(block_tables: jax.Array | None,
+                       gid: int) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
                 block_tables=block_tables,
@@ -504,6 +513,8 @@ class CompilationManager:
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=num_reqs,
                 pcp=pcp,
+                backend_metadata=attention_backend.backend_metadata(
+                    attention_arrays, gid),
             )
 
             return attention_metadata_gid
@@ -524,14 +535,14 @@ class CompilationManager:
             # Pooling model will not using kv cache
             no_kv_cache = len(self.runner.kv_cache_config.kv_cache_groups) == 0
             block_tables = build_block_table(0) if not no_kv_cache else None
-            attention_metadata = build_attn(block_tables)
+            attention_metadata = build_attn(block_tables, 0)
             shared_attention_metadata = build_shared_attn()
         else:
             # Must mirror the runtime structure built in `_prepare_inputs`, or
             # the precompiled executable does not match and we recompile.
             attention_metadata = GroupedAttentionMetadata(
                 groups=tuple(
-                    build_attn(build_block_table(gid)) for gid in range(
+                    build_attn(build_block_table(gid), gid) for gid in range(
                         len(self.runner.kv_cache_config.kv_cache_groups))),
                 layer_names_per_group=tuple(
                     tuple(group.layer_names)
