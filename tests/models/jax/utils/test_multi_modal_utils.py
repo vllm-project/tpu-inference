@@ -19,7 +19,8 @@ import pytest
 
 from tpu_inference.models.jax.utils.multi_modal_utils import (
     MultiModalEmbeddings, NestedTensors, flatten_embeddings,
-    merge_multimodal_embeddings, sanity_check_mm_encoder_outputs)
+    flatten_pad_mm_embeds, merge_multimodal_embeddings,
+    sanity_check_mm_encoder_outputs)
 
 # --- Tests for sanity_check_mm_encoder_outputs ---
 
@@ -210,3 +211,104 @@ def test_merge_mm_embeds_count_too_many_no_raise(placeholder_id, base_embeds):
     except Exception as e:
         pytest.fail(
             f"Did not expect an exception, but got {type(e).__name__}: {e}")
+
+
+# --- Tests for flatten_pad_mm_embeds ---
+
+
+def test_flatten_pad_mm_embeds_none_input():
+    """Tests that None input returns None."""
+    assert flatten_pad_mm_embeds(None, target_pad_len=10) is None
+
+
+def test_flatten_pad_mm_embeds_empty_list():
+    """Tests that an empty list returns None."""
+    assert flatten_pad_mm_embeds([], target_pad_len=10) is None
+
+
+def test_flatten_pad_mm_embeds_empty_arrays():
+    """Tests that a list of empty arrays returns a fully zero-padded tensor."""
+    empty_embeds = [jnp.empty((0, 128), dtype=jnp.float32)]
+    target_pad_len = 10
+
+    result = flatten_pad_mm_embeds(empty_embeds, target_pad_len=target_pad_len)
+
+    assert result is not None
+    assert result.shape == (10, 128)
+    np.testing.assert_array_equal(result, np.zeros((10, 128),
+                                                   dtype=np.float32))
+
+
+def test_flatten_pad_mm_embeds_with_padding():
+    """Tests flattening and padding of valid multimodal embeddings."""
+    embeds = [
+        jnp.ones((2, 128), dtype=jnp.float32),
+        jnp.ones((3, 128), dtype=jnp.float32) * 2
+    ]
+    target_pad_len = 8
+
+    result = flatten_pad_mm_embeds(embeds, target_pad_len=target_pad_len)
+
+    assert result is not None
+    assert result.shape == (8, 128)
+    assert result.dtype == jnp.float32
+
+    np.testing.assert_array_equal(result[:2],
+                                  np.ones((2, 128), dtype=np.float32))
+    np.testing.assert_array_equal(result[2:5],
+                                  np.ones((3, 128), dtype=np.float32) * 2)
+    np.testing.assert_array_equal(result[5:],
+                                  np.zeros((3, 128), dtype=np.float32))
+
+
+def test_flatten_pad_mm_embeds_exact_length():
+    """Tests behavior when the flattened array exactly matches the target length."""
+    embeds = [
+        jnp.ones((2, 128), dtype=jnp.float32),
+        jnp.ones((3, 128), dtype=jnp.float32) * 2
+    ]
+    target_pad_len = 5
+
+    result = flatten_pad_mm_embeds(embeds, target_pad_len=target_pad_len)
+
+    assert result is not None
+    assert result.shape == (5, 128)
+
+    expected = np.concatenate([np.ones((2, 128)), np.ones((3, 128)) * 2])
+    np.testing.assert_array_equal(result, expected)
+
+
+# --- Tests for convert_torch_tensor_to_jax ---
+
+
+def test_convert_torch_bf16_tensor_is_bit_exact():
+    """torch bf16 -> jax bf16 must be a bit-exact reinterpretation."""
+    import torch
+
+    from tpu_inference.models.jax.utils.multi_modal_utils import \
+        convert_torch_tensor_to_jax
+
+    t = torch.randn(2, 3, 14, 14, dtype=torch.float32).to(torch.bfloat16)
+    # Non-contiguous input must be handled too.
+    t_nc = t.transpose(1, 2)
+
+    out = convert_torch_tensor_to_jax(t_nc)
+
+    assert out.dtype == jnp.bfloat16
+    assert out.shape == tuple(t_nc.shape)
+    np.testing.assert_array_equal(np.asarray(out.view(jnp.int16)),
+                                  t_nc.contiguous().view(torch.int16).numpy())
+
+
+def test_convert_torch_f32_tensor():
+    import torch
+
+    from tpu_inference.models.jax.utils.multi_modal_utils import \
+        convert_torch_tensor_to_jax
+
+    t = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    out = convert_torch_tensor_to_jax(t)
+    assert out.dtype == jnp.bfloat16
+    np.testing.assert_allclose(np.asarray(out.astype(jnp.float32)),
+                               t.numpy(),
+                               rtol=1e-2)

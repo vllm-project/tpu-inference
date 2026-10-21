@@ -34,7 +34,10 @@ def get_spmd_mesh(num_devices: int = 1, enable_attn_dp: bool = False):
         axis_names = MESH_AXIS_NAMES
         attn_dp_size = 2
         model_size = num_devices // attn_dp_size
-        mesh_shape = (1, attn_dp_size, 1, 1, model_size)
+        # Derive the shape from the axis names so adding a mesh axis (e.g.
+        # 'pcp') doesn't silently desync this from MESH_AXIS_NAMES.
+        sizes = {"attn_dp": attn_dp_size, "model": model_size}
+        mesh_shape = tuple(sizes.get(a, 1) for a in axis_names)
     else:
         axis_names = MESH_AXIS_NAMES_2D
         mesh_shape = (1, len(devices))
@@ -122,6 +125,24 @@ def ref_moe(x: torch.Tensor,
     x = x[seq_indexes, expert_indices]
 
     return torch.einsum("tai,ta->ti", x, expert_weights)
+
+
+def ref_quantize_fp8(
+        x: torch.Tensor,
+        dtype: torch.dtype,
+        axis: Optional[int] = None) -> tuple[torch.Tensor, torch.Tensor]:
+    per_tensor = axis is None
+    dtype_info = torch.finfo(dtype)
+    dtype_max = float(dtype_info.max)
+    dtype_min = float(dtype_info.min)
+
+    dim = () if per_tensor else (axis, )
+    x_abs_max = torch.amax(torch.abs(x), dim=dim, keepdim=True)
+    if per_tensor:
+        x_abs_max = torch.squeeze(x_abs_max, dim=-1)
+    x_s = x_abs_max / dtype_max
+    x_q = torch.clip(x / x_s, dtype_min, dtype_max).to(dtype)
+    return x_q, x_s.to(torch.float32)
 
 
 def ref_moe_jax(x: jax.Array,

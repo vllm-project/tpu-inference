@@ -1,0 +1,919 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+from tpu_inference.layers.common.attention_metadata import (
+    AttentionMetadata, GroupedAttentionMetadata)
+from tpu_inference.layers.common.sharding import MESH_AXIS_NAMES
+from tpu_inference.layers.jax.sample.sampling_metadata import \
+    TPUSupportedSamplingMetadata
+from tpu_inference.runner.decode_loop import (TpuSamplingState,
+                                              _decode_core_impl, _split_rngs,
+                                              _update_loop_state,
+                                              continue_decode)
+
+
+def test_update_loop_state_basic():
+    # 2 requests, DP = 1, pad_len = 0
+    next_tokens = jnp.array([42, 99], dtype=jnp.int32)  # 99 is EOS
+    active_mask = jnp.array([True, True], dtype=jnp.bool_)
+    input_positions = jnp.array([10, 20], dtype=jnp.int32)
+    seq_lens = jnp.array([11, 21], dtype=jnp.int32)
+    eos_token_id = (99, )
+    padding_token_id = -1
+    dp_size = 1
+    pad_len = 0
+
+    (
+        new_active_mask,
+        next_input_ids,
+        new_positions,
+        new_seq_lens,
+        step_record_tokens,
+        any_hit_eos,
+    ) = _update_loop_state(
+        next_tokens,
+        active_mask,
+        input_positions,
+        seq_lens,
+        eos_token_id,
+        padding_token_id,
+        dp_size,
+        pad_len,
+    )
+
+    assert np.array_equal(new_active_mask, [True, False])
+    assert np.array_equal(next_input_ids, [42, -1])
+    assert np.array_equal(new_positions, [11, 20])
+    assert np.array_equal(new_seq_lens, [12, 21])
+    assert np.array_equal(step_record_tokens, [42, 99])
+    assert any_hit_eos
+
+
+def test_update_loop_state_dp_padding():
+    # 4 requests total (2 per DP rank), DP = 2, pad_len = 1
+    next_tokens = jnp.array([42, 99, 43, 44], dtype=jnp.int32)  # 99 is EOS
+    active_mask = jnp.array([True, True, True, True], dtype=jnp.bool_)
+    input_positions = jnp.array([10, 20, 30, 40], dtype=jnp.int32)
+    # seq_lens: [11, 21, 0,  31, 41, 0]  (last one in each DP rank is padding)
+    seq_lens = jnp.array([11, 21, 0, 31, 41, 0], dtype=jnp.int32)
+    eos_token_id = (99, )
+    padding_token_id = -1
+    dp_size = 2
+    pad_len = 1
+
+    (
+        new_active_mask,
+        next_input_ids,
+        new_positions,
+        new_seq_lens,
+        step_record_tokens,
+        any_hit_eos,
+    ) = _update_loop_state(
+        next_tokens,
+        active_mask,
+        input_positions,
+        seq_lens,
+        eos_token_id,
+        padding_token_id,
+        dp_size,
+        pad_len,
+    )
+
+    assert np.array_equal(new_active_mask, [True, False, True, True])
+    assert np.array_equal(next_input_ids, [42, -1, 43, 44])
+    assert np.array_equal(new_positions, [11, 20, 31, 41])
+    assert np.array_equal(new_seq_lens, [12, 21, 0, 32, 42, 0])
+    assert np.array_equal(step_record_tokens, [42, 99, 43, 44])
+    assert any_hit_eos
+
+
+def test_split_rngs():
+    rng = jax.random.PRNGKey(42)
+    static_size = 5
+    dynamic_size = 3
+
+    step_keys, final_key = _split_rngs(rng, static_size, dynamic_size)
+
+    assert step_keys.shape[0] == static_size
+    assert final_key.shape == rng.shape
+
+
+def test_continue_decode_early_exit():
+    batch_size = 2
+    max_decode_steps = 5
+    static_max_decode_steps = 5
+
+    init_tokens = jnp.array([10, 20], dtype=jnp.int32)
+    active_mask = jnp.array([True, True], dtype=jnp.bool_)
+
+    # attn_metadata
+    input_positions = jnp.array([0, 0], dtype=jnp.int32)
+    block_tables = jnp.zeros((2, 16), dtype=jnp.int32)
+    seq_lens = jnp.array([1, 1], dtype=jnp.int32)
+    query_start_loc = jnp.array([0, 1, 2], dtype=jnp.int32)
+    request_distribution = jnp.array([0, 0], dtype=jnp.int32)
+    mamba_state_indices = None
+
+    attn_metadata = AttentionMetadata(
+        input_positions=input_positions,
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        query_start_loc=query_start_loc,
+        request_distribution=request_distribution,
+        mamba_state_indices=mamba_state_indices,
+    )
+
+    init_state = TpuSamplingState(
+        current_tokens=init_tokens,
+        active_mask=active_mask,
+        attn_metadata=attn_metadata,
+        step_counter=jnp.array(0, dtype=jnp.int32),
+    )
+
+    kv_caches = [jnp.zeros((2, 10))]  # dummy kv caches
+
+    def mock_model_fn(state, kv_caches, current_tokens, attn_metadata, *args,
+                      **kwargs):
+        # Pass position in hidden_states so compute_logits can use it
+        hidden_states = attn_metadata.input_positions.astype(jnp.float32)[:,
+                                                                          None,
+                                                                          None]
+        return kv_caches, hidden_states, None, None
+
+    def mock_compute_logits_fn(state, hidden_states, _):
+        # Reshape to (batch_size, 1) and pad to (batch_size, 100)
+        pos = hidden_states[:, 0, 0]
+        logits = jnp.zeros((batch_size, 100))
+        logits = logits.at[:, 0].set(pos)
+        return logits
+
+    def mock_sample_fn(rng, mesh, logits, sampling_metadata, **kwargs):
+        pos = logits[:, 0].astype(jnp.int32)
+        token_table = jnp.array(
+            [
+                [42, 43],  # pos 0
+                [44, 99],  # pos 1 (req 1 hits EOS)
+                [99, 99],  # pos 2 (req 0 hits EOS)
+            ],
+            dtype=jnp.int32,
+        )
+        batch_idx = jnp.arange(batch_size)
+        next_tokens = token_table[pos, batch_idx]
+        return next_tokens, None
+
+    rng = jax.random.PRNGKey(0)
+
+    (
+        token_buffer,
+        final_kv_caches,
+        final_state,
+        current_rng,
+        all_expert_indices,
+        logprobs_tensors,
+    ) = continue_decode(
+        state={},
+        model_fn=mock_model_fn,
+        compute_logits_fn=mock_compute_logits_fn,
+        sample_fn=mock_sample_fn,
+        init_state=init_state,
+        kv_caches=kv_caches,
+        max_decode_steps=max_decode_steps,
+        static_max_decode_steps=static_max_decode_steps,
+        eos_token_id=(99, ),
+        padding_token_id=-1,
+        rng=rng,
+        mesh=None,
+        sampling_metadata=None,
+    )
+
+    # Verify early exit at step 2 (because step 1 hit EOS)
+    assert int(final_state.step_counter) == 2
+
+    # Expected tokens:
+    # Step 0: [42, 43]
+    # Step 1: [44, 99]
+    # Step 2: [-1, -1] (padding)
+    # Step 3: [-1, -1] (padding)
+    # Step 4: [-1, -1] (padding)
+    expected_tokens = np.array(
+        [
+            [42, 43],
+            [44, 99],
+            [-1, -1],
+            [-1, -1],
+            [-1, -1],
+        ],
+        dtype=np.int32,
+    )
+    assert np.array_equal(token_buffer, expected_tokens)
+
+    # Verify final state (state at the start of step 2, which did not run)
+    assert np.array_equal(final_state.active_mask, [True, False])
+    assert np.array_equal(final_state.current_tokens, [44, -1])
+    assert np.array_equal(final_state.attn_metadata.input_positions, [2, 1])
+    assert np.array_equal(final_state.attn_metadata.seq_lens, [3, 2])
+    assert all_expert_indices is None
+    assert logprobs_tensors is None
+
+
+def test_continue_decode_with_experts():
+    batch_size = 2
+    max_decode_steps = 3
+    static_max_decode_steps = 3
+
+    init_tokens = jnp.array([10, 20], dtype=jnp.int32)
+    active_mask = jnp.array([True, True], dtype=jnp.bool_)
+
+    attn_metadata = AttentionMetadata(
+        input_positions=jnp.array([0, 0], dtype=jnp.int32),
+        block_tables=jnp.zeros((2, 16), dtype=jnp.int32),
+        seq_lens=jnp.array([1, 1], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 1, 2], dtype=jnp.int32),
+        request_distribution=jnp.array([0, 0], dtype=jnp.int32),
+        mamba_state_indices=None,
+    )
+
+    init_state = TpuSamplingState(
+        current_tokens=init_tokens,
+        active_mask=active_mask,
+        attn_metadata=attn_metadata,
+        step_counter=jnp.array(0, dtype=jnp.int32),
+    )
+
+    kv_caches = [jnp.zeros((2, 10))]
+
+    def mock_model_fn(state, kv_caches, current_tokens, attn_metadata, *args,
+                      **kwargs):
+        hidden_states = current_tokens.astype(jnp.float32)[:, None, None]
+        pos = attn_metadata.input_positions
+        experts = (jnp.ones(
+            (2, batch_size, 4), dtype=jnp.int32) * pos[None, :, None])
+        return kv_caches, hidden_states, None, experts
+
+    def mock_compute_logits_fn(state, hidden_states, _):
+        return jnp.zeros((batch_size, 100))
+
+    def mock_sample_fn(rng, mesh, logits, sampling_metadata, **kwargs):
+        return jnp.array([42, 43], dtype=jnp.int32), None
+
+    rng = jax.random.PRNGKey(0)
+
+    (
+        token_buffer,
+        final_kv_caches,
+        final_state,
+        current_rng,
+        all_expert_indices,
+        logprobs_tensors,
+    ) = continue_decode(
+        state={},
+        model_fn=mock_model_fn,
+        compute_logits_fn=mock_compute_logits_fn,
+        sample_fn=mock_sample_fn,
+        init_state=init_state,
+        kv_caches=kv_caches,
+        max_decode_steps=max_decode_steps,
+        static_max_decode_steps=static_max_decode_steps,
+        eos_token_id=(99, ),
+        padding_token_id=-1,
+        rng=rng,
+        mesh=None,
+        sampling_metadata=None,
+        collect_expert_indices=True,
+    )
+
+    assert int(final_state.step_counter) == 3
+    assert all_expert_indices is not None
+    assert all_expert_indices.shape == (3, 2, 2, 4)
+
+    expected_experts = np.zeros((3, 2, 2, 4), dtype=np.int32)
+    expected_experts[1] = 1
+    expected_experts[2] = 2
+
+    assert np.array_equal(all_expert_indices, expected_experts)
+    assert logprobs_tensors is None
+
+
+def test_continue_decode_no_exit_on_eos():
+    batch_size = 2
+    max_decode_steps = 5
+    static_max_decode_steps = 5
+
+    init_tokens = jnp.array([10, 20], dtype=jnp.int32)
+    active_mask = jnp.array([True, True], dtype=jnp.bool_)
+
+    attn_metadata = AttentionMetadata(
+        input_positions=jnp.array([0, 0], dtype=jnp.int32),
+        block_tables=jnp.zeros((2, 16), dtype=jnp.int32),
+        seq_lens=jnp.array([1, 1], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 1, 2], dtype=jnp.int32),
+        request_distribution=jnp.array([0, 0], dtype=jnp.int32),
+        mamba_state_indices=None,
+    )
+
+    init_state = TpuSamplingState(
+        current_tokens=init_tokens,
+        active_mask=active_mask,
+        attn_metadata=attn_metadata,
+        step_counter=jnp.array(0, dtype=jnp.int32),
+    )
+
+    kv_caches = [jnp.zeros((2, 10))]
+
+    def mock_model_fn(state, kv_caches, current_tokens, attn_metadata, *args,
+                      **kwargs):
+        hidden_states = attn_metadata.input_positions.astype(jnp.float32)[:,
+                                                                          None,
+                                                                          None]
+        return kv_caches, hidden_states, None, None
+
+    def mock_compute_logits_fn(state, hidden_states, _):
+        pos = hidden_states[:, 0, 0]
+        logits = jnp.zeros((batch_size, 100))
+        logits = logits.at[:, 0].set(pos)
+        return logits
+
+    def mock_sample_fn(rng, mesh, logits, sampling_metadata, **kwargs):
+        pos = logits[:, 0].astype(jnp.int32)
+        token_table = jnp.array(
+            [
+                [42, 43],  # pos 0
+                [44, 99],  # pos 1 (req 1 hits EOS)
+                [99, 50],  # pos 2 (req 0 hits EOS)
+                [60, 61],  # pos 3
+                [70, 71],  # pos 4
+            ],
+            dtype=jnp.int32,
+        )
+        batch_idx = jnp.arange(batch_size)
+        next_tokens = token_table[pos, batch_idx]
+        return next_tokens, None
+
+    rng = jax.random.PRNGKey(0)
+
+    (
+        token_buffer,
+        final_kv_caches,
+        final_state,
+        current_rng,
+        all_expert_indices,
+        logprobs_tensors,
+    ) = continue_decode(
+        state={},
+        model_fn=mock_model_fn,
+        compute_logits_fn=mock_compute_logits_fn,
+        sample_fn=mock_sample_fn,
+        init_state=init_state,
+        kv_caches=kv_caches,
+        max_decode_steps=max_decode_steps,
+        static_max_decode_steps=static_max_decode_steps,
+        eos_token_id=(99, ),
+        padding_token_id=-1,
+        rng=rng,
+        mesh=None,
+        sampling_metadata=None,
+        continue_decode_eos_check_interval=-1,
+    )
+
+    # Verify loop ran all 5 steps despite EOS hit
+    assert int(final_state.step_counter) == 5
+
+    # Expected tokens:
+    # Step 0: [42, 43]
+    # Step 1: [44, 99] (req 1 hits EOS)
+    # Step 2: [99, -1] (req 0 hits EOS; req 1 inactive -> -1)
+    # Step 3: [-1, -1] (both inactive)
+    # Step 4: [-1, -1] (both inactive)
+    expected_tokens = np.array(
+        [
+            [42, 43],
+            [44, 99],
+            [99, -1],
+            [-1, -1],
+            [-1, -1],
+        ],
+        dtype=np.int32,
+    )
+    assert np.array_equal(token_buffer, expected_tokens)
+    assert np.array_equal(final_state.active_mask, [False, False])
+
+
+def _lower_decode_core(continue_decode_eos_check_interval):
+    """Lower the fused loop with stub model/sampler fns and return its HLO."""
+    batch_size = 2
+    static_argnames = (
+        "model_fn",
+        "compute_logits_fn",
+        "sample_fn",
+        "mesh",
+        "static_max_decode_steps",
+        "eos_token_id",
+        "padding_token_id",
+        "dp_size",
+        "pad_len",
+        "collect_expert_indices",
+        "layer_name_to_kvcache_index",
+        "is_first_rank",
+        "is_last_rank",
+        "max_logprobs",
+        "logprobs_mode",
+        "continue_decode_eos_check_interval",
+    )
+
+    def mock_model_fn(state, kv_caches, current_tokens, attn_metadata, *args,
+                      **kwargs):
+        hidden_states = attn_metadata.input_positions.astype(jnp.float32)[:,
+                                                                          None,
+                                                                          None]
+        return kv_caches, hidden_states, None, None
+
+    def mock_compute_logits_fn(state, hidden_states, _):
+        logits = jnp.zeros((batch_size, 100))
+        return logits.at[:, 0].set(hidden_states[:, 0, 0])
+
+    def mock_sample_fn(rng, mesh, logits, sampling_metadata, **kwargs):
+        pos = logits[:, 0].astype(jnp.int32)
+        token_table = jnp.array(
+            [[42, 43], [44, 99], [99, 50], [60, 61], [70, 71]],
+            dtype=jnp.int32)
+        return token_table[pos, jnp.arange(batch_size)], None
+
+    step_rngs, _ = _split_rngs(jax.random.PRNGKey(0), 5, 5)
+    # jit directly rather than through continue_decode(): its jit carries
+    # compiler_options, which JAX rejects on a nested jit under .lower().
+    lowered = jax.jit(
+        _decode_core_impl, static_argnames=static_argnames
+    ).lower(
+        state={},
+        kv_caches=[jnp.zeros((2, 10))],
+        step_rngs=step_rngs,
+        sampling_metadata=None,
+        inputs_embeds=None,
+        lora_metadata=None,
+        intermediate_tensors=None,
+        block_tables=jnp.zeros((2, 16), dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 1, 2], dtype=jnp.int32),
+        request_distribution=jnp.array([0, 0], dtype=jnp.int32),
+        mamba_state_indices=None,
+        current_tokens=jnp.array([10, 20], dtype=jnp.int32),
+        active_mask=jnp.array([True, True], dtype=jnp.bool_),
+        input_positions=jnp.array([0, 0], dtype=jnp.int32),
+        seq_lens=jnp.array([1, 1], dtype=jnp.int32),
+        model_fn=mock_model_fn,
+        compute_logits_fn=mock_compute_logits_fn,
+        sample_fn=mock_sample_fn,
+        mesh=None,
+        max_decode_steps=5,
+        static_max_decode_steps=5,
+        eos_token_id=(99, ),
+        padding_token_id=-1,
+        dp_size=1,
+        pad_len=0,
+        collect_expert_indices=False,
+        layer_name_to_kvcache_index=(),
+        is_first_rank=True,
+        is_last_rank=True,
+        max_logprobs=0,
+        logprobs_mode="raw",
+        continue_decode_eos_check_interval=continue_decode_eos_check_interval,
+    )
+    return lowered.compile().as_text()
+
+
+def test_continue_decode_no_exit_on_eos_drops_eos_reduction():
+    """With the EOS check disabled, the compiled loop body must not reduce
+    the per-request EOS hits: cond_fn never reads the flag, so the carried
+    value is left untouched and the reduction (a cross-DP all-reduce on every
+    decode step in the multi-device program) is dead code.
+    """
+    assert "reduce_or" in _lower_decode_core(1)
+    assert "reduce_or" not in _lower_decode_core(-1)
+
+
+def test_continue_decode_exit_on_eos_interval():
+    batch_size = 2
+    max_decode_steps = 10
+    static_max_decode_steps = 10
+
+    init_tokens = jnp.array([10, 20], dtype=jnp.int32)
+    active_mask = jnp.array([True, True], dtype=jnp.bool_)
+
+    attn_metadata = AttentionMetadata(
+        input_positions=jnp.array([0, 0], dtype=jnp.int32),
+        block_tables=jnp.zeros((2, 16), dtype=jnp.int32),
+        seq_lens=jnp.array([1, 1], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 1, 2], dtype=jnp.int32),
+        request_distribution=jnp.array([0, 0], dtype=jnp.int32),
+        mamba_state_indices=None,
+    )
+
+    init_state = TpuSamplingState(
+        current_tokens=init_tokens,
+        active_mask=active_mask,
+        attn_metadata=attn_metadata,
+        step_counter=jnp.array(0, dtype=jnp.int32),
+    )
+
+    kv_caches = [jnp.zeros((2, 10))]
+
+    def mock_model_fn(state, kv_caches, current_tokens, attn_metadata, *args,
+                      **kwargs):
+        hidden_states = attn_metadata.input_positions.astype(jnp.float32)[:,
+                                                                          None,
+                                                                          None]
+        return kv_caches, hidden_states, None, None
+
+    def mock_compute_logits_fn(state, hidden_states, _):
+        pos = hidden_states[:, 0, 0]
+        logits = jnp.zeros((batch_size, 100))
+        logits = logits.at[:, 0].set(pos)
+        return logits
+
+    def mock_sample_fn(rng, mesh, logits, sampling_metadata, **kwargs):
+        pos = logits[:, 0].astype(jnp.int32)
+        # Token table: step 0 (pos 0) produces 99 (EOS) for req 1
+        token_table = jnp.array(
+            [
+                [42, 99],  # pos 0: req 1 hits EOS
+                [43, -1],  # pos 1
+                [44, -1],  # pos 2
+                [45, -1],  # pos 3
+                [46, -1],  # pos 4
+            ],
+            dtype=jnp.int32,
+        )
+        batch_idx = jnp.arange(batch_size)
+        next_tokens = token_table[pos, batch_idx]
+        return next_tokens, None
+
+    rng = jax.random.PRNGKey(0)
+
+    (
+        token_buffer,
+        final_kv_caches,
+        final_state,
+        current_rng,
+        all_expert_indices,
+        logprobs_tensors,
+    ) = continue_decode(
+        state={},
+        model_fn=mock_model_fn,
+        compute_logits_fn=mock_compute_logits_fn,
+        sample_fn=mock_sample_fn,
+        init_state=init_state,
+        kv_caches=kv_caches,
+        max_decode_steps=max_decode_steps,
+        static_max_decode_steps=static_max_decode_steps,
+        eos_token_id=(99, ),
+        padding_token_id=-1,
+        rng=rng,
+        mesh=None,
+        sampling_metadata=None,
+        continue_decode_eos_check_interval=3,  # Only check exit every 3 steps
+    )
+
+    # EOS hit at step 0. Step checks at i=1, i=2 do not exit. Step check at i=3 (3 % 3 == 0) exits.
+    assert int(final_state.step_counter) == 3
+
+
+def _single_device_mesh():
+    shape = (1, ) * len(MESH_AXIS_NAMES)
+    return jax.sharding.Mesh(
+        np.array(jax.devices()[:1]).reshape(shape), MESH_AXIS_NAMES)
+
+
+def _run_decode_core_for_logprobs(logprobs_mode, raw_top, processed_top):
+    """Run one fused decode step and return its top-1 logprob token ids.
+
+    The stub compute_logits and sample fns peak at different vocab indices, so
+    the returned index says which of the two the loop fed to the logprobs jit.
+    """
+    batch_size = 2
+    vocab_size = 100
+
+    def mock_model_fn(state, kv_caches, current_tokens, attn_metadata, *args,
+                      **kwargs):
+        hidden_states = attn_metadata.input_positions.astype(jnp.float32)[:,
+                                                                          None,
+                                                                          None]
+        return kv_caches, hidden_states, None, None
+
+    def mock_compute_logits_fn(state, hidden_states, _):
+        return jnp.zeros((batch_size, vocab_size)).at[:, raw_top].set(10.0)
+
+    def mock_sample_fn(rng, mesh, logits, sampling_metadata, **kwargs):
+        processed_logits = jnp.zeros(
+            (batch_size, vocab_size)).at[:, processed_top].set(10.0)
+        next_tokens = jnp.zeros((batch_size, ), dtype=jnp.int32)
+        return next_tokens, processed_logits
+
+    step_rngs, _ = _split_rngs(jax.random.PRNGKey(0), 1, 1)
+    # The logprobs jits pin out_shardings=P(), so they need a mesh in context.
+    # The runner always enters one (see TPUModelRunner.execute_model); mirror
+    # that here instead of tracing the loop with an empty mesh.
+    mesh = _single_device_mesh()
+    with jax.set_mesh(mesh):
+        outputs = _decode_core_impl(
+            state={},
+            kv_caches=[jnp.zeros((2, 10))],
+            step_rngs=step_rngs,
+            sampling_metadata=TPUSupportedSamplingMetadata(logprobs=True),
+            inputs_embeds=None,
+            lora_metadata=None,
+            intermediate_tensors=None,
+            block_tables=jnp.zeros((2, 16), dtype=jnp.int32),
+            query_start_loc=jnp.array([0, 1, 2], dtype=jnp.int32),
+            request_distribution=jnp.array([0, 0], dtype=jnp.int32),
+            mamba_state_indices=None,
+            current_tokens=jnp.array([10, 20], dtype=jnp.int32),
+            active_mask=jnp.array([True, True], dtype=jnp.bool_),
+            input_positions=jnp.array([0, 0], dtype=jnp.int32),
+            seq_lens=jnp.array([1, 1], dtype=jnp.int32),
+            model_fn=mock_model_fn,
+            compute_logits_fn=mock_compute_logits_fn,
+            sample_fn=mock_sample_fn,
+            mesh=mesh,
+            max_decode_steps=1,
+            static_max_decode_steps=1,
+            eos_token_id=(99, ),
+            padding_token_id=-1,
+            dp_size=1,
+            pad_len=0,
+            collect_expert_indices=False,
+            layer_name_to_kvcache_index=(),
+            is_first_rank=True,
+            is_last_rank=True,
+            max_logprobs=1,
+            logprobs_mode=logprobs_mode,
+            continue_decode_eos_check_interval=-1,
+        )
+    # logprob_token_ids buffer is (steps, batch, max_logprobs + 1); column 0 is
+    # the sampled token, column 1 the top-1 index.
+    return np.asarray(outputs[8])[0, :, 1]
+
+
+@pytest.mark.parametrize("logprobs_mode", ["raw_logprobs", "raw_logits"])
+def test_decode_loop_raw_modes_use_compute_logits(logprobs_mode):
+    raw_top, processed_top = 7, 13
+    top1 = _run_decode_core_for_logprobs(logprobs_mode, raw_top, processed_top)
+    assert np.all(top1 == raw_top)
+
+
+@pytest.mark.parametrize("logprobs_mode",
+                         ["processed_logprobs", "processed_logits"])
+def test_decode_loop_processed_modes_use_sample_output(logprobs_mode):
+    """Every processed mode must read sample()'s logits, not the raw ones.
+
+    A literal `== "processed_logprobs"` here silently fed raw logits for
+    `processed_logits`, disagreeing with `_sample_from_logits`.
+    """
+    raw_top, processed_top = 7, 13
+    top1 = _run_decode_core_for_logprobs(logprobs_mode, raw_top, processed_top)
+    assert np.all(top1 == processed_top)
+
+
+@pytest.mark.parametrize("uses_mrope", [False, True])
+def test_continue_decode_grouped_attention_metadata_gdn(uses_mrope):
+    """Hybrid GDN + full-attention models pass GroupedAttentionMetadata with
+    per-group block_tables, mamba_state_indices, and padded_num_reqs into
+    continue_decode (with 1-D positions for Qwen3-Next and 2-D M-RoPE
+    positions for Qwen3.5).
+    """
+    batch_size = 2
+    max_decode_steps = 3
+    static_max_decode_steps = 3
+    padded_num_reqs = 8
+
+    init_tokens = jnp.array([10, 20], dtype=jnp.int32)
+    active_mask = jnp.array([True, True], dtype=jnp.bool_)
+    if uses_mrope:
+        input_positions = jnp.zeros((3, batch_size), dtype=jnp.int32)
+    else:
+        input_positions = jnp.zeros((batch_size, ), dtype=jnp.int32)
+    seq_lens = jnp.array([1, 1], dtype=jnp.int32)
+    query_start_loc = jnp.array([0, 1, 2], dtype=jnp.int32)
+    request_distribution = jnp.array([2, 2, 2], dtype=jnp.int32)
+    mamba_state_indices = jnp.array([3, 7], dtype=jnp.int32)
+
+    bt_attn = jnp.ones((2, 16), dtype=jnp.int32)
+    bt_gdn = jnp.full((2, 4), 2, dtype=jnp.int32)
+
+    grouped_attn = GroupedAttentionMetadata(
+        groups=(
+            AttentionMetadata(
+                input_positions=input_positions,
+                block_tables=bt_attn,
+                seq_lens=seq_lens,
+                query_start_loc=query_start_loc,
+                request_distribution=request_distribution,
+                mamba_state_indices=mamba_state_indices,
+                padded_num_reqs=padded_num_reqs,
+            ),
+            AttentionMetadata(
+                input_positions=input_positions,
+                block_tables=bt_gdn,
+                seq_lens=seq_lens,
+                query_start_loc=query_start_loc,
+                request_distribution=request_distribution,
+                mamba_state_indices=mamba_state_indices,
+                padded_num_reqs=padded_num_reqs,
+            ),
+        ),
+        layer_names_per_group=(("layer.0", ), ("layer.1", )),
+    )
+
+    init_state = TpuSamplingState(
+        current_tokens=init_tokens,
+        active_mask=active_mask,
+        attn_metadata=grouped_attn,
+        step_counter=jnp.array(0, dtype=jnp.int32),
+    )
+
+    kv_caches = [jnp.zeros((2, 10)), jnp.zeros((2, 4))]
+
+    def mock_model_fn(state, kv_caches, current_tokens, attn_metadata,
+                      inputs_embeds, positions, *args, **kwargs):
+        assert isinstance(attn_metadata, GroupedAttentionMetadata)
+        attn_layer0 = attn_metadata["layer.0"]
+        attn_layer1 = attn_metadata["layer.1"]
+        assert attn_layer0.padded_num_reqs == padded_num_reqs
+        assert attn_layer1.padded_num_reqs == padded_num_reqs
+        shared_am = kwargs.get("shared_attention_metadata")
+        assert shared_am is not None
+        assert shared_am.padded_num_reqs == padded_num_reqs
+        pos_1d = positions[0] if positions.ndim == 2 else positions
+        hidden_states = (pos_1d + attn_layer1.mamba_state_indices).astype(
+            jnp.float32)[:, None, None]
+        experts = jnp.ones((1, batch_size, 2), dtype=jnp.int32)
+        return kv_caches, hidden_states, None, experts
+
+    def mock_compute_logits_fn(state, hidden_states, _):
+        return jnp.zeros((batch_size, 100))
+
+    def mock_sample_fn(rng, mesh, logits, sampling_metadata, **kwargs):
+        return jnp.array([42, 43], dtype=jnp.int32), None
+
+    (
+        token_buffer,
+        final_kv_caches,
+        final_state,
+        current_rng,
+        all_expert_indices,
+        logprobs_tensors,
+    ) = continue_decode(
+        state={},
+        model_fn=mock_model_fn,
+        compute_logits_fn=mock_compute_logits_fn,
+        sample_fn=mock_sample_fn,
+        init_state=init_state,
+        kv_caches=kv_caches,
+        max_decode_steps=max_decode_steps,
+        static_max_decode_steps=static_max_decode_steps,
+        eos_token_id=(99, ),
+        padding_token_id=-1,
+        rng=jax.random.PRNGKey(0),
+        mesh=None,
+        sampling_metadata=None,
+        collect_expert_indices=True,
+    )
+
+    assert int(final_state.step_counter) == 3
+    assert isinstance(final_state.attn_metadata, GroupedAttentionMetadata)
+    assert final_state.attn_metadata[
+        "layer.0"].padded_num_reqs == padded_num_reqs
+    expected_positions = ([[3, 3], [3, 3], [3, 3]] if uses_mrope else [3, 3])
+    assert np.array_equal(
+        final_state.attn_metadata["layer.0"].input_positions,
+        expected_positions,
+    )
+    assert np.array_equal(final_state.attn_metadata["layer.1"].seq_lens,
+                          [4, 4])
+    assert all_expert_indices is not None
+    assert all_expert_indices.shape == (3, 1, 2, 2)
+
+
+def test_continue_decode_expert_shape_in_jit():
+    trace_count = 0
+
+    def mock_model_fn(state, kv_caches, current_tokens, attn_metadata, *args,
+                      **kwargs):
+        nonlocal trace_count
+        trace_count += 1
+        batch_size = current_tokens.shape[0]
+        hidden_states = current_tokens.astype(jnp.float32)[:, None, None]
+        experts = jnp.ones((2, batch_size, 4), dtype=jnp.int32)
+        return kv_caches, hidden_states, None, experts
+
+    def mock_compute_logits_fn(state, hidden_states, _):
+        batch_size = hidden_states.shape[0]
+        return jnp.zeros((batch_size, 100))
+
+    def mock_sample_fn(rng, mesh, logits, sampling_metadata, **kwargs):
+        batch_size = logits.shape[0]
+        return jnp.full((batch_size, ), 42, dtype=jnp.int32), None
+
+    def _make_init_state(batch_size: int) -> TpuSamplingState:
+        attn_metadata = AttentionMetadata(
+            input_positions=jnp.zeros((batch_size, ), dtype=jnp.int32),
+            block_tables=jnp.zeros((batch_size, 16), dtype=jnp.int32),
+            seq_lens=jnp.ones((batch_size, ), dtype=jnp.int32),
+            query_start_loc=jnp.arange(batch_size + 1, dtype=jnp.int32),
+            request_distribution=jnp.array(
+                [batch_size, batch_size, batch_size], dtype=jnp.int32),
+            mamba_state_indices=None,
+        )
+        return TpuSamplingState(
+            current_tokens=jnp.ones((batch_size, ), dtype=jnp.int32),
+            active_mask=jnp.ones((batch_size, ), dtype=jnp.bool_),
+            attn_metadata=attn_metadata,
+            step_counter=jnp.array(0, dtype=jnp.int32),
+        )
+
+    kv_caches = [jnp.zeros((2, 10))]
+    rng = jax.random.PRNGKey(0)
+
+    # First call: traces once for eval_shape inside _decode_core_impl and once
+    # for the lax.while_loop body during _get_decode_core() compilation.
+    _, kv_caches, _, rng, all_expert_indices, _ = continue_decode(
+        state={},
+        model_fn=mock_model_fn,
+        compute_logits_fn=mock_compute_logits_fn,
+        sample_fn=mock_sample_fn,
+        init_state=_make_init_state(2),
+        kv_caches=kv_caches,
+        max_decode_steps=3,
+        static_max_decode_steps=3,
+        eos_token_id=(99, ),
+        padding_token_id=-1,
+        rng=rng,
+        mesh=None,
+        sampling_metadata=None,
+        collect_expert_indices=True,
+        lora_metadata={"adapter": 1},
+    )
+    assert all_expert_indices is not None
+    assert all_expert_indices.shape == (3, 2, 2, 4)
+    first_call_traces = trace_count
+    assert first_call_traces == 2
+
+    # Second call with identical shapes: _get_decode_core() hits JAX's JIT
+    # cache directly, so neither eval_shape nor mock_model_fn runs in Python.
+    _, kv_caches, _, rng, all_expert_indices_2, _ = continue_decode(
+        state={},
+        model_fn=mock_model_fn,
+        compute_logits_fn=mock_compute_logits_fn,
+        sample_fn=mock_sample_fn,
+        init_state=_make_init_state(2),
+        kv_caches=[jnp.zeros((2, 10))],
+        max_decode_steps=3,
+        static_max_decode_steps=3,
+        eos_token_id=(99, ),
+        padding_token_id=-1,
+        rng=rng,
+        mesh=None,
+        sampling_metadata=None,
+        collect_expert_indices=True,
+        lora_metadata={"adapter": 1},
+    )
+    assert all_expert_indices_2 is not None
+    assert all_expert_indices_2.shape == (3, 2, 2, 4)
+    assert trace_count == first_call_traces
+
+    # Third call with a different current_tokens batch size (4 instead of 2):
+    # JIT cache misses and traces the new bucket shape.
+    _, _, _, _, all_expert_indices_3, _ = continue_decode(
+        state={},
+        model_fn=mock_model_fn,
+        compute_logits_fn=mock_compute_logits_fn,
+        sample_fn=mock_sample_fn,
+        init_state=_make_init_state(4),
+        kv_caches=[jnp.zeros((2, 10))],
+        max_decode_steps=3,
+        static_max_decode_steps=3,
+        eos_token_id=(99, ),
+        padding_token_id=-1,
+        rng=rng,
+        mesh=None,
+        sampling_metadata=None,
+        collect_expert_indices=True,
+        lora_metadata={"adapter": 1},
+    )
+    assert all_expert_indices_3 is not None
+    assert all_expert_indices_3.shape == (3, 2, 4, 4)
+    assert trace_count > first_call_traces

@@ -39,9 +39,7 @@ def test_lora_performance(tp):
     )[0].outputs[0].text
     base_time = time.time() - start_time
 
-    del llm_without_lora
-    # Waiting for TPUs to be released
-    time.sleep(10)
+    llm_without_lora.llm_engine.engine_core.shutdown()
 
     llm_with_lora = vllm.LLM(model="Qwen/Qwen2.5-3B-Instruct",
                              max_model_len=256,
@@ -64,4 +62,4 @@ def test_lora_performance(tp):
     assert (base_time /
             lora_time) < 8, f"Base time: {base_time}, LoRA time: {lora_time}"
 
-    del llm_with_lora
+    llm_with_lora.llm_engine.engine_core.shutdown()

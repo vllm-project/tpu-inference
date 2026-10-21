@@ -12,13 +12,16 @@ if TYPE_CHECKING:
     TPU_NAME: str | None = None
     TPU_WORKER_ID: str | None = None
     TPU_MULTIHOST_BACKEND: str = ""
+    TPU_MULTIPROCESS_DP: bool | None = None
     PREFILL_SLICES: str = ""
     DECODE_SLICES: str = ""
     SKIP_JAX_PRECOMPILE: bool = False
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     MODEL_IMPL_TYPE: str = "auto"
+    DRAFT_MODEL_IMPL_TYPE: str = "auto"
     NEW_MODEL_DESIGN: bool = False
     PHASED_PROFILING_DIR: str = ""
+    AGGREGATED_STATS_DIR: str = ""
     PYTHON_TRACER_LEVEL: int = 1
     USE_MOE_EP_KERNEL: bool = False
     USE_UNFUSED_MEGABLOCKS: bool = False
@@ -29,12 +32,74 @@ if TYPE_CHECKING:
     ENABLE_QUANTIZED_MATMUL_KERNEL: bool = False
     REQUANTIZE_BLOCK_SIZE: int | None = None
     REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
+    BF16_LINEAR_REQUANTIZE_PATTERNS: list[str] = []
+    BF16_LINEAR_REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
+    BF16_LINEAR_REQUANTIZE_BLOCK_SIZE: int | None = None
     MOE_REQUANTIZE_BLOCK_SIZE: int | None = None
-    MOE_REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
+    MOE_REQUANTIZE_WEIGHT_DTYPE: str = ""
+    MOE_REQUANTIZE_CLIP_PERCENTILE: float | None = None
+    MOE_STAGE_WEIGHTS_ON_HOST: bool = False
+    ATTN_BUCKETIZED_NUM_REQS: bool = False
+    ATTN_CUSTOM_NUM_REQS_BUCKETS: list[int] = []
     LAYOUT_Q_PROJ_AS_NDH: bool = False
     USE_JAX_PROFILER_SERVER: bool = False
     JAX_PROFILER_SERVER_PORT: int = 9999
+    CONTINUE_DECODE_EOS_CHECK_INTERVAL: int = 1
     USE_BATCHED_RPA_KERNEL: bool = False
+    USE_BATCHED_RPA_SEQ_ON_LANE: bool = False
+    # Optional operator override for the RPA v3 kernel block sizes, one per
+    # case. Each is a comma-separated 4-tuple (bq_sz, bkv_sz, bq_csz, bkv_csz).
+    # Empty (default) = use the built-in tuned/heuristic sizes.
+    RPA_V3_DECODE_BLOCK_SIZES: list[int] = []
+    RPA_V3_PREFILL_BLOCK_SIZES: list[int] = []
+    RPA_V3_MIXED_BLOCK_SIZES: list[int] = []
+    FORCE_MOE_RANDOM_ROUTING: bool = False
+    JITTED_MM_MODULE_KEYS: list[str] = []
+    REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
+    MOE_ALL_GATHER_ACTIVATION_DTYPE: str = ""
+    TPU_OFFLOAD_SKIP_JAX_PRECOMPILE: bool = False
+    TPU_OFFLOAD_DECODE_SAVE: bool = False
+    TPU_OFFLOAD_NUM_CPU_CHUNKS: int = 1024
+    TPU_OFFLOAD_NUM_STAGING_BLOCKS: int = 128
+    TPU_OFFLOAD_SAVE_THREADS: int = 1
+    TPU_OFFLOAD_BATCHED_SAVE: bool = False
+    TPU_OFFLOAD_METRICS_LOG_INTERVAL: int = 5
+    TPU_OFFLOAD_USE_UNPINNED_HOST: bool = False
+    TPU_OFFLOAD_BLOCK_SIZE_BUCKETS: list[int] = []
+    MOE_APPROX_TOPK: bool = False
+    MOE_APPROX_TOPK_RECALL_TARGET: float | None = None
+    VLLM_TPU_PATCH_MM_EMBEDDINGS: bool = False
+    ENABLE_RS_KERNEL: bool = False
+    USE_GMM_FUSED_RS_KERNEL: bool = False
+    NUM_PRECOMPILE_WORKERS: int = 1
+    DP_SCHED_BATCH_PREFILL: bool = False
+    DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS: int = 10000
+    DP_SCHED_ROUTING: str = "least_loaded"
+    VLLM_MOE_CHUNK_SIZE: int = 0
+    ONEHOT_MOE_PERMUTE_THRESHOLD: int = 0
+    PROFILE_SINGLE_DEVICE: bool = False
+    LORA_MODULE_PATH: str = ""
+    SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: str = "auto"
+    SLICE_ROPE_CACHE: bool = False
+    ROPE_CACHE_ROW_MAJOR: bool = False
+    HASH_TABLE_ROW_MAJOR: bool = False
+    MIN_TOKEN_BUCKET: int = 16
+    MOE_ROUTE_PADDING_TO_EXPERT0: bool = False
+    MOE_HIERARCHICAL_DISPATCH: bool = False
+    MOE_HIERARCHICAL_COLLECT: bool = False
+    MOE_FOLD_ROUTING_INTO_DISPATCH: bool = False
+    RAGGED_GATHER_MAX_ROW_SUBCHUNKS: int = 4
+    RAGGED_GATHER_TRIM_ROWS: bool = True
+    VLLM_TPU_BUCKET_PADDING_GAP: int = 0
+    VLLM_INCREMENTAL_FP8_LOADING: bool = False
+    TPU_MESH_SORT_BY_COORDS: bool = False
+    TPU_MESH_ATTN_DP_RING: bool = False
+    VERIFY_WEIGHTS: bool = False
+    SAMPLING_MICROBATCH_SIZE: int = 0
+    DISTRIBUTED_SAMPLING_MAX_TOP_K: int = 64
+    ENABLE_TOPK_PREFILTER: bool = False
+    RAIDEN_H2D_SETTLE: bool = True
+    SKIP_MAMBA_SCHEDULER_BLOCKS: bool = False
 
 
 def env_with_choices(
@@ -84,32 +149,83 @@ def env_with_choices(
     return _get_validated_env
 
 
-def env_bool(env_name: str, default: bool = False) -> Callable[[], bool]:
+def env_bool(env_name: str,
+             default: bool | None = False,
+             requires: list[str] | None = None) -> Callable[[], bool | None]:
     """
     Accepts both numeric strings ("0", "1") and boolean strings
     ("true", "false", "True", "False").
 
     Args:
         env_name: Name of the environment variable
-        default: Default boolean value if not set
+        default: Default value if not set. Pass None for a tri-state flag
+            (unset -> None) that callers resolve themselves.
+        requires: List of environment variables that must be set if this is True.
     """
 
-    def _get_bool_env() -> bool:
+    def _get_bool_env() -> bool | None:
         value = os.getenv(env_name)
         if value is None or value == "":
-            return default
-
-        value_lower = value.lower()
-        if value_lower in ("true", "1"):
-            return True
-        elif value_lower in ("false", "0"):
-            return False
+            parsed_value = default
         else:
-            raise ValueError(
-                f"Invalid boolean value '{value}' for {env_name}. "
-                f"Valid options: '0', '1', 'true', 'false', 'True', 'False'.")
+            value_lower = value.lower()
+            if value_lower in ("true", "1"):
+                parsed_value = True
+            elif value_lower in ("false", "0"):
+                parsed_value = False
+            else:
+                raise ValueError(
+                    f"Invalid boolean value '{value}' for {env_name}. "
+                    f"Valid options: '0', '1', 'true', 'false', 'True', 'False'."
+                )
+
+        if parsed_value and requires:
+            for req in requires:
+                if not os.getenv(req):
+                    raise ValueError(
+                        f"{env_name} can only be set if {req} is set.")
+
+        return parsed_value
 
     return _get_bool_env
+
+
+def env_str_list(env_name: str) -> Callable[[], list[str]]:
+    """
+    Accepts a comma-separated string and returns a list of strings.
+
+    Args:
+        env_name: Name of the environment variable
+        default: Default list of strings if not set
+    """
+
+    def _get_str_list_env() -> list[str]:
+        value = os.getenv(env_name)
+        if value is None or value == "":
+            return []
+
+        return [v.strip() for v in value.split(",")]
+
+    return _get_str_list_env
+
+
+def env_int_list(env_name: str) -> Callable[[], list[int]]:
+    """
+    Accepts a comma-separated string and returns a list of strings.
+
+    Args:
+        env_name: Name of the environment variable
+        default: Default list of strings if not set
+    """
+
+    def _get_int_list_env() -> list[int]:
+        value = os.getenv(env_name)
+        if value is None or value == "":
+            return []
+
+        return [int(v.strip()) for v in value.split(",")]
+
+    return _get_int_list_env
 
 
 environment_variables: dict[str, Callable[[], Any]] = {
@@ -130,6 +246,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Backend for multi-host communication on TPU
     "TPU_MULTIHOST_BACKEND":
     env_with_choices("TPU_MULTIHOST_BACKEND", "", ["ray"]),
+    # Use vLLM-native multi-process data parallelism (one engine process per
+    # DP rank, single load-balanced API endpoint) instead of tpu-inference's
+    # single-process SPMD data parallelism. Each DP rank is pinned to a
+    # disjoint set of TPU chips. Unset (None) means "auto", and
+    # TpuPlatform.check_and_update_config resolves it to a concrete value
+    # (on for online `vllm serve` with DP > 1; off for offline, attention DP,
+    # and Pathways).
+    "TPU_MULTIPROCESS_DP":
+    env_bool("TPU_MULTIPROCESS_DP", default=None),
     # Slice configuration for disaggregated prefill workers
     "PREFILL_SLICES":
     lambda: os.getenv("PREFILL_SLICES", ""),
@@ -146,6 +271,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "MODEL_IMPL_TYPE":
     env_with_choices("MODEL_IMPL_TYPE", "auto",
                      ["auto", "vllm", "flax_nnx", "jetpack"]),
+    "DRAFT_MODEL_IMPL_TYPE":
+    env_with_choices("DRAFT_MODEL_IMPL_TYPE", "auto",
+                     ["auto", "vllm", "flax_nnx"]),
     # Enable 2D tensor parallelism, shard attention heads across multiple axes
     "USE_2D_TP":
     env_bool("USE_2D_TP", default=False),
@@ -184,16 +312,66 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "REQUANTIZE_BLOCK_SIZE":
     lambda: int(block_size) if
     (block_size := os.getenv("REQUANTIZE_BLOCK_SIZE")) is not None else None,
+    # Specify requantization block size for compressed tensor NVFP4 weights
+    "REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE":
+    lambda: int(block_size)
+    if (block_size := os.getenv("REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE"
+                                )) is not None else None,
     # Specify dtype for quantized linear weights
     "REQUANTIZE_WEIGHT_DTYPE":
     lambda: os.getenv("REQUANTIZE_WEIGHT_DTYPE", "float8_e4m3fn"),
+    # Comma-separated module patterns selecting linear layers the checkpoint
+    # left unquantized, to quantize at load time. A pattern is an exact layer
+    # name, or a "re:"-prefixed regex anchored at the start of one. Layers vLLM
+    # fuses may be named as the checkpoint names them (q_proj for qkv_proj),
+    # but every shard of a fused layer must be selected or none of it is.
+    # Empty (default) leaves every unquantized linear in its checkpoint dtype.
+    "BF16_LINEAR_REQUANTIZE_PATTERNS":
+    env_str_list("BF16_LINEAR_REQUANTIZE_PATTERNS"),
+    # Weight dtype for the layers BF16_LINEAR_REQUANTIZE_PATTERNS selects.
+    "BF16_LINEAR_REQUANTIZE_WEIGHT_DTYPE":
+    lambda: os.getenv("BF16_LINEAR_REQUANTIZE_WEIGHT_DTYPE", "float8_e4m3fn"),
+    # Scale those layers once per block of this many input features, instead of
+    # once per output channel when unset (the default). Smaller blocks track
+    # outliers better for a little more scale memory. Must divide the layer's
+    # input size and leave a block count the layer's input axis can shard.
+    "BF16_LINEAR_REQUANTIZE_BLOCK_SIZE":
+    lambda: int(block_size) if
+    (block_size := os.getenv("BF16_LINEAR_REQUANTIZE_BLOCK_SIZE")) else None,
     # Specify dtype for quantized MoE weights
     "MOE_REQUANTIZE_WEIGHT_DTYPE":
-    lambda: os.getenv("MOE_REQUANTIZE_WEIGHT_DTYPE", "float8_e4m3fn"),
+    lambda: os.getenv("MOE_REQUANTIZE_WEIGHT_DTYPE", ""),
     # Specify requantization block size for MoE weights
     "MOE_REQUANTIZE_BLOCK_SIZE":
-    lambda: int(block_size) if (block_size := os.getenv(
-        "MOE_REQUANTIZE_BLOCK_SIZE")) is not None else None,
+    lambda: int(block_size)
+    if (block_size := os.getenv("MOE_REQUANTIZE_BLOCK_SIZE")) else None,
+    # Clip outlier weights before requantization at the given percentile
+    # (e.g. 99.9). Reduces quantization error for large block sizes by
+    # preventing extreme outliers from inflating the per-block scale.
+    "MOE_REQUANTIZE_CLIP_PERCENTILE":
+    lambda: float(pct)
+    if (pct := os.getenv("MOE_REQUANTIZE_CLIP_PERCENTILE")) else None,
+    # Build each FP8 MoE expert weight directly at its expert sharding from
+    # host memory, instead of staging the whole tensor on one device and
+    # slicing it back apart. Much faster the wider the mesh gets, but opt-in
+    # for now: set to 1 to take it. Only VllmFp8MoEMethod (and the
+    # deepseek_v4_fp8 method built on it) honors this today; the other
+    # quantized MoE methods (nvfp4, compressed-tensors, mxfp4, awq) still
+    # stage the full tensor on device regardless.
+    "MOE_STAGE_WEIGHTS_ON_HOST":
+    env_bool("MOE_STAGE_WEIGHTS_ON_HOST", default=False),
+    # By default, it only use max_reqs for attentions. But if set true, it
+    # will precompile max_reqs to power-of-twos between min and max reqs,
+    # and attention will have the num_reqs closer to actual num_reqs. This
+    # makes attention more efficient for num_reqs less than max_reqs but at
+    # the cost of longer model precompilation time.
+    "ATTN_BUCKETIZED_NUM_REQS":
+    env_bool("ATTN_BUCKETIZED_NUM_REQS"),
+    # ATTN_BUCKETIZED_NUM_REQS set to true but the compilation time is too
+    # long, user can set a list of custom buckets (num_reqs to precompile)
+    # separated by comma. The max_reqs will alwasy be added to the buckets
+    "ATTN_CUSTOM_NUM_REQS_BUCKETS":
+    env_int_list("ATTN_CUSTOM_NUM_REQS_BUCKETS"),
     # dictates whether to layout q-proj as NDH (q-heads, model dim, head dim)
     # or DNH (model dim, q-heads, head dim), which is the default (False)
     "LAYOUT_Q_PROJ_AS_NDH":
@@ -202,8 +380,257 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("USE_JAX_PROFILER_SERVER"),
     "JAX_PROFILER_SERVER_PORT":
     lambda: int(os.getenv("JAX_PROFILER_SERVER_PORT") or "9999"),
+    # continue_decode: check the any-sequence-hit-EOS early exit every N steps
+    # instead of every step, amortizing the per-step dispatch. Sequences still
+    # stop at their own EOS (the <=N-1 extra tokens are masked like a normal
+    # stop), so the sampled distribution is unchanged. Default 1 = stock.
+    "CONTINUE_DECODE_EOS_CHECK_INTERVAL":
+    lambda: int(os.getenv("CONTINUE_DECODE_EOS_CHECK_INTERVAL") or "1"),
     "USE_BATCHED_RPA_KERNEL":
     env_bool("USE_BATCHED_RPA_KERNEL"),
+    "USE_BATCHED_RPA_SEQ_ON_LANE":
+    env_bool("USE_BATCHED_RPA_SEQ_ON_LANE"),
+    # Optional operator override for RPA v3 kernel block sizes, per case.
+    # Comma-separated 4-tuple: bq_sz,bkv_sz,bq_csz,bkv_csz. Empty = use the
+    # built-in tuned/heuristic sizes. Lets operators retune the decode
+    # KV-fetch/compute split (e.g. deeper double-buffering) without a rebuild.
+    "RPA_V3_DECODE_BLOCK_SIZES":
+    env_int_list("RPA_V3_DECODE_BLOCK_SIZES"),
+    "RPA_V3_PREFILL_BLOCK_SIZES":
+    env_int_list("RPA_V3_PREFILL_BLOCK_SIZES"),
+    "RPA_V3_MIXED_BLOCK_SIZES":
+    env_int_list("RPA_V3_MIXED_BLOCK_SIZES"),
+    # Force random expert routing in MoE layers (for testing purposes only)
+    "FORCE_MOE_RANDOM_ROUTING":
+    env_bool("FORCE_MOE_RANDOM_ROUTING", default=False),
+    "JITTED_MM_MODULE_KEYS":
+    env_str_list("JITTED_MM_MODULE_KEYS"),
+    "REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES":
+    env_str_list("REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES"),
+    "MOE_ALL_GATHER_ACTIVATION_DTYPE":
+    lambda: os.getenv("MOE_ALL_GATHER_ACTIVATION_DTYPE", ""),
+    # kv offload to dram: skip pre-compiling swap-related jax functions
+    "TPU_OFFLOAD_SKIP_JAX_PRECOMPILE":
+    lambda: bool(int(os.getenv("TPU_OFFLOAD_SKIP_JAX_PRECOMPILE", "0"))),
+    # kv offload to dram: save kv in the decode phase
+    "TPU_OFFLOAD_DECODE_SAVE":
+    lambda: bool(int(os.getenv("TPU_OFFLOAD_DECODE_SAVE", "0"))),
+    # kv offload to dram: dram space size in # of chunks / blocks
+    "TPU_OFFLOAD_NUM_CPU_CHUNKS":
+    lambda: int(os.getenv("TPU_OFFLOAD_NUM_CPU_CHUNKS", "1024")),
+    # kv offload to dram: size of staging buffer (hbm) for swap
+    "TPU_OFFLOAD_NUM_STAGING_BLOCKS":
+    lambda: int(os.getenv("TPU_OFFLOAD_NUM_STAGING_BLOCKS", "128")),
+    # kv offload to dram: number of threads for asynchronous TPU -> CPU data transfer
+    "TPU_OFFLOAD_SAVE_THREADS":
+    lambda: int(os.getenv("TPU_OFFLOAD_SAVE_THREADS", "1")),
+    # kv offload to dram: batch multiple requests' save operations into a single swap call
+    "TPU_OFFLOAD_BATCHED_SAVE":
+    lambda: bool(int(os.getenv("TPU_OFFLOAD_BATCHED_SAVE", "0"))),
+    # kv offload to dram: prometheus metrics log interval in seconds
+    "TPU_OFFLOAD_METRICS_LOG_INTERVAL":
+    lambda: int(os.getenv("TPU_OFFLOAD_METRICS_LOG_INTERVAL", "10")),
+    # kv offload to dram: Whether to use unpinned_host for KV cache tensors on host dram.
+    "TPU_OFFLOAD_USE_UNPINNED_HOST":
+    lambda: bool(int(os.getenv("TPU_OFFLOAD_USE_UNPINNED_HOST", "0"))),
+    "AGGREGATED_STATS_DIR":
+    lambda: os.getenv("AGGREGATED_STATS_DIR", ""),
+    # kv offload to dram: buckets of sizes for pre-compilation
+    "TPU_OFFLOAD_BLOCK_SIZE_BUCKETS":
+    lambda: env_int_list("TPU_OFFLOAD_BLOCK_SIZE_BUCKETS")
+    () or [1, 2, 4, 8, 16, 32, 64],
+    # MoE: whether to use approximate top-k for expert selection.
+    # Enabling this may speedup the expert selection at the risk of accuracy loss.
+    "MOE_APPROX_TOPK":
+    env_bool("MOE_APPROX_TOPK", default=False),
+    # MoE: the target recall rate for approximate top-k expert selection.
+    # A higher rate increases accuracy at the cost of slower speed.
+    # A lower rate can speedup expert selection at the risk of higher accuracy loss.
+    "MOE_APPROX_TOPK_RECALL_TARGET":
+    lambda: float(os.getenv("MOE_APPROX_TOPK_RECALL_TARGET", "0.9")),
+    "DISABLE_WEIGHT_REQUANTIZATION":
+    env_bool("DISABLE_WEIGHT_REQUANTIZATION", default=False),
+    "VLLM_TPU_PATCH_MM_EMBEDDINGS":
+    env_bool("VLLM_TPU_PATCH_MM_EMBEDDINGS", default=False),
+    "DISABLE_MLA_Q_ACTIVATION_QUANTIZATION":
+    env_bool("DISABLE_MLA_Q_ACTIVATION_QUANTIZATION", default=False),
+    # Enable hierarchical reduce-scatter kernel for MoE
+    "ENABLE_RS_KERNEL":
+    env_bool("ENABLE_RS_KERNEL", default=False),
+    # Enable fused GMM reduce-scatter kernel for MoE
+    "USE_GMM_FUSED_RS_KERNEL":
+    env_bool("USE_GMM_FUSED_RS_KERNEL", default=False),
+    # Number of worker threads for parallel XLA precompilation.
+    "NUM_PRECOMPILE_WORKERS":
+    lambda: int(os.getenv("NUM_PRECOMPILE_WORKERS") or "1"),
+    # DP scheudler: hold and batch incoming requests (prefills) to
+    # cluster and dispatch prefills together.
+    "DP_SCHED_BATCH_PREFILL":
+    env_bool("DP_SCHED_BATCH_PREFILL", default=True),
+    # DP scheduler: timeout (ms) to force flush pending requests.
+    "DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS":
+    lambda: int(os.getenv("DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS", "30000")),
+    # DP scheduler: how new requests are assigned to DP ranks.
+    # "least_loaded" (default) routes each request to the rank with the
+    # best prefix-cache overlap and lowest projected load, querying every
+    # rank.
+    # "round_robin" cycles ranks with no per-request query: always cheaper,
+    # but it equalizes request COUNT, not load, and ignores prefix-cache
+    # locality. Count matches load only for uniform requests submitted as
+    # one batch to idle ranks -- use it for bulk homogeneous workloads
+    # (e.g. RL rollouts, where the per-request all-rank query dominates).
+    # Keep least_loaded for heterogeneous or streaming traffic, or
+    # shared-prefix (system-prompt / few-shot / multi-turn) workloads.
+    "DP_SCHED_ROUTING":
+    env_with_choices("DP_SCHED_ROUTING",
+                     "least_loaded", ["least_loaded", "round_robin"],
+                     case_sensitive=False),
+    "MLA_XPOSE_N_TILE_SIZE":
+    lambda: int(os.getenv("MLA_XPOSE_N_TILE_SIZE", "160")),
+    "VLLM_MOE_CHUNK_SIZE":
+    lambda: int(os.getenv("VLLM_MOE_CHUNK_SIZE", "0")),
+    # Use Onehot+Matmul for permute and unpermute before and after moe
+    # when the batch size <= this threshold. When set to 0, this feature
+    # is effectively disabled.
+    "ONEHOT_MOE_PERMUTE_THRESHOLD":
+    lambda: int(os.getenv("ONEHOT_MOE_PERMUTE_THRESHOLD", "0")),
+    # Profile a single device instead of all devices.
+    "PROFILE_SINGLE_DEVICE":
+    env_bool("PROFILE_SINGLE_DEVICE", default=False),
+    "LORA_MODULE_PATH":
+    lambda: os.getenv("LORA_MODULE_PATH", ""),
+    "MLA_KV_PACKING_SIZE":
+    lambda: int(os.getenv("MLA_KV_PACKING_SIZE", "32")),
+    # When set to a value, override XLA SparseCore offload minimum size (in Bytes) for all-reduce
+    # and all-gather. When set to 0, use default XLA offload threshold. When set to auto,
+    # use VMEM size as the threshold.
+    "SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES":
+    lambda: os.getenv("SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES", "auto"),
+    # Slice the rotary cos_sin_cache to max_model_len at load (saves HBM and a
+    # per-step layout copy of the full max_position_embeddings table). Applies
+    # to text / 1-D RoPE only; ignored for MRoPE models, whose (video)
+    # positions can exceed max_model_len.
+    "SLICE_ROPE_CACHE":
+    env_bool("SLICE_ROPE_CACHE", default=False),
+    # Set the rotary cos_sin_cache in the row-major TPU layout at
+    # load time. XLA picks the transposed layout {0,1} for narrow tables (the
+    # 64-wide DeepSeek rope cache) to avoid lane padding, and then has to copy
+    # the whole table back to {1,0} inside the step function on every forward
+    # pass. Trades 2x HBM for that buffer for the per-step copy.
+    "ROPE_CACHE_ROW_MAJOR":
+    env_bool("ROPE_CACHE_ROW_MAJOR", default=False),
+    # similar to ROPE_CACHE_ROW_MAJOR, but for the hash-MoE routing table
+    # (`*.routed_experts.hash_indices_table`, [vocab_size, num_experts_per_tok]).
+    "HASH_TABLE_ROW_MAJOR":
+    env_bool("HASH_TABLE_ROW_MAJOR", default=False),
+    "MLA_TRANSPOSE_KV_CACHE":
+    env_bool("MLA_TRANSPOSE_KV_CACHE", default=False),
+    # Minimum max num of batched tokens.
+    "MIN_TOKEN_BUCKET":
+    lambda: int(os.getenv("MIN_TOKEN_BUCKET") or "16"),
+    # Route padding tokens to expert 0 instead of picking other experts, to
+    # avoid activating unneeded experts and speed up the GMM kernel by not
+    # loading unnecessary weights. Only applies when DP attention size is 1
+    # (pure TP attention, e.g. TP8_EP), since under DP attention the padding
+    # is interleaved per rank and a single valid-token count cannot describe it.
+    "MOE_ROUTE_PADDING_TO_EXPERT0":
+    env_bool("MOE_ROUTE_PADDING_TO_EXPERT0", default=False),
+    # Replace the MoE dispatch all-gather over the attention-data axes with a
+    # hierarchical gather: each chip's two cores each gather half the hidden
+    # columns over the attention-data axes, then swap halves on-chip. Halves
+    # the cross-chip traffic. Applies only when the model axis pairs a chip's
+    # two cores at adjacent indices and the hidden size is a multiple of 256;
+    # otherwise the one-step gather is kept. With the fp8 all-gather
+    # (MOE_ALL_GATHER_ACTIVATION_DTYPE=fp8) both steps move fp8. Only the
+    # expert-parallel GMM path uses it: not GMM_TP or FUSED_MOE, and not with
+    # USE_GMM_FUSED_RS_KERNEL. See fused_moe_gmm.py.
+    "MOE_HIERARCHICAL_DISPATCH":
+    env_bool("MOE_HIERARCHICAL_DISPATCH", default=False),
+    # The reverse for the EP collect: each chip's two cores add column halves
+    # on-chip, then reduce-scatter half the columns over the attention-data
+    # axes. Same mesh and hidden-size conditions as MOE_HIERARCHICAL_DISPATCH.
+    # Not bitwise identical: the sum is added in a different order. Not with
+    # USE_GMM_FUSED_RS_KERNEL. See fused_moe_gmm.py.
+    "MOE_HIERARCHICAL_COLLECT":
+    env_bool("MOE_HIERARCHICAL_COLLECT", default=False),
+    # When attention-data axes beyond MLP-data are sharded, carry the MoE
+    # top-k ids and weights as extra columns of the dispatch all-gather of the
+    # tokens (one-step or hierarchical, bf16 or fp8) instead of all-gathering
+    # them separately. Bitwise identical for non-NaN weights. See
+    # fused_moe_gmm.py.
+    "MOE_FOLD_ROUTING_INTO_DISPATCH":
+    env_bool("MOE_FOLD_ROUTING_INTO_DISPATCH", default=False),
+    # EP dispatch permute gather: the ragged_gather_v2 kernel
+    # (kernels/sparse_core/ragged_gather_v2.py), called from fused_moe_gmm.py.
+    # max_row_subchunks: caps the SparseCore gather's block size; 1 gives the
+    # smallest blocks, which move fewer rows when one shard's rows are a small
+    # part of the input.
+    "RAGGED_GATHER_MAX_ROW_SUBCHUNKS":
+    lambda: int(os.getenv("RAGGED_GATHER_MAX_ROW_SUBCHUNKS") or "4"),
+    # trim_rows: copy the gather's output down to num_tokens * topk rows. When
+    # off, the block-padded output goes straight to gmm_v2, skipping the copy.
+    "RAGGED_GATHER_TRIM_ROWS":
+    env_bool("RAGGED_GATHER_TRIM_ROWS", default=True),
+    # Gap between token-bucket padding sizes for TPU precompilation. When 0,
+    # buckets grow as powers of two; otherwise buckets increase by this gap
+    # once past the power-of-two ramp. Previously provided by vllm.envs, which
+    # removed it upstream as an orphaned var, so it now lives here.
+    "VLLM_TPU_BUCKET_PADDING_GAP":
+    lambda: int(os.getenv("VLLM_TPU_BUCKET_PADDING_GAP", "0")),
+    # Sort devices by coords and core_on_chip when constructing a tpu mesh.
+    # Currently, it only supports a single host set up.
+    "TPU_MESH_SORT_BY_COORDS":
+    env_bool("TPU_MESH_SORT_BY_COORDS", default=False),
+    # Lay out an attn_dp x `model=4` mesh on a 2x2xZ v7x slice so that each
+    # attn_dp group is a physical ring of linked chips and each model group is
+    # the two cores of two linked chips. The default layout puts consecutive
+    # attn_dp ranks on unlinked chips, which doubles the load on the busiest
+    # link for attn_dp all-gathers and reduce-scatters. Single slice only;
+    # other meshes fall back to the regular layout. Takes precedence over
+    # TPU_MESH_SORT_BY_COORDS. On more than one host, each host's devices are
+    # no longer a contiguous block of the mesh, so jax's Mesh.local_mesh
+    # fails. See attn_dp_ring_device_mesh in utils.py.
+    "TPU_MESH_ATTN_DP_RING":
+    env_bool("TPU_MESH_ATTN_DP_RING", default=False),
+    # Controls whether FP8 linear and MoE layers perform incremental weight
+    # loading, sharding, and immediate host RAM cleanup. When enabled, weights
+    # are sharded and transferred to TPU device memory layer-by-layer (or per
+    # MoE expert shard), freeing PyTorch CPU storage and trimming glibc malloc
+    # arenas after each layer. This prevents host CPU memory exhaustion (OOM)
+    # when initializing large FP8 models on smaller RAM TPUs such as TPU8i.
+    "VLLM_INCREMENTAL_FP8_LOADING":
+    env_bool("VLLM_INCREMENTAL_FP8_LOADING", default=False),
+    # RL weight sync: verify tensor checksums after each Raiden H2D transfer.
+    "VERIFY_WEIGHTS":
+    env_bool("VERIFY_WEIGHTS", default=False),
+    # Microbatch size for sampling block. Set to 0 to disable microbatching (disabled by default).
+    "SAMPLING_MICROBATCH_SIZE":
+    lambda: int(os.getenv("SAMPLING_MICROBATCH_SIZE", "0")),
+    # Largest runtime top-k handled by distributed candidate sampling. This is
+    # read at trace time so candidate tensor shapes remain static.
+    "DISTRIBUTED_SAMPLING_MAX_TOP_K":
+    lambda: int(os.getenv("DISTRIBUTED_SAMPLING_MAX_TOP_K", "64")),
+    # Distributed candidate sampling: pick each vocab shard's candidates with
+    # the chunked top-k prefilter, and apply top-p to the merged candidates with
+    # one sort. Off by default. Read at trace time.
+    # Rule of thumb (default DISTRIBUTED_SAMPLING_MAX_TOP_K): enable it when
+    # each device holds more than ~8K logits per row (vocab / TP); below that,
+    # plain lax.top_k is usually as fast or faster.
+    "ENABLE_TOPK_PREFILTER":
+    env_bool("ENABLE_TOPK_PREFILTER", default=False),
+    # RL weight sync: wait for the async Raiden H2D DMA to settle before
+    # letting the rollout resume. See RaidenWorkerSync._wait_until_settled.
+    "RAIDEN_H2D_SETTLE":
+    env_bool("RAIDEN_H2D_SETTLE", default=True),
+    # With prefix caching off, stop the scheduler from charging GDN layers one
+    # block per group per request from the attention pool. The TPU runner keeps
+    # GDN state in its own arrays and never reads those blocks. Applies to GDN
+    # layers only; other mamba layers keep their blocks. Ignored with prefix
+    # caching, speculative decoding or a KV connector. Read by the model runner;
+    # TpuPlatform.additional_env_vars carries it to Ray workers on other hosts.
+    # See core/runner_slot_mamba.py.
+    "SKIP_MAMBA_SCHEDULER_BLOCKS":
+    env_bool("SKIP_MAMBA_SCHEDULER_BLOCKS", default=False),
 }
 
 

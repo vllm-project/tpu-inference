@@ -2,13 +2,13 @@
 
 import math
 import os
+import re
 import tempfile
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import jax
 import jaxlib
-import jaxtyping
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           has_kv_transfer_group)
@@ -19,7 +19,7 @@ from vllm.v1 import utils as vllm_utils
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
-from vllm.v1.worker.worker_base import WorkerBase
+from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
 from tpu_inference import envs, utils
 from tpu_inference.distributed import jax_parallel_state
@@ -30,6 +30,7 @@ from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
+from tpu_inference.offload.metrics import TPUKVCacheStatsLogger
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
@@ -88,7 +89,97 @@ class PPConfig:
                 self.default_tpu_chips_per_process_bounds = f"1,{chips_per_stage},1"
 
 
+_STANDARD_KEYS = frozenset({
+    "host_tracer_level",
+    "device_tracer_level",
+    "python_tracer_level",
+})
+
+_ALLOWED_VALUE_CHARS = re.compile(r'^[a-zA-Z0-9_./,:-]*$')
+_OPTION_PATTERN = re.compile(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.+)$')
+
+
+def _parse_option_value(key: str, val: str) -> Any:
+    """Parses and infers the type of an option value string.
+
+    Tries to parse the value as a boolean (true/false) or integer. If those fail,
+    verifies that the string contains only safe whitelisted characters and returns
+    it as-is.
+    """
+    val_lower = val.lower()
+    if val_lower == "true":
+        return True
+    if val_lower == "false":
+        return False
+    try:
+        return int(val)
+    except ValueError:
+        if not _ALLOWED_VALUE_CHARS.match(val):
+            raise ValueError(f"Invalid characters in option value '{val}' "
+                             f"for key '{key}'")
+        return val
+
+
+def _parse_profile_options(
+        profile_prefix: Optional[str]
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Parses profile options from a semicolon-separated profile_prefix string.
+
+    This function extracts profiling parameters from the provided profile_prefix
+    string and splits them into standard options (which map directly to native
+    jax.profiler.ProfileOptions attributes) and advanced/custom options
+    (which map to JAX's advanced_configuration dictionary).
+
+    Args:
+        profile_prefix: A semicolon-separated string of key-value pairs.
+          E.g., "host_tracer_level:3;tpu_num_chips_to_profile_per_task:2;my_custom_option:true"
+
+    Returns:
+        A tuple containing two dictionaries:
+          1. standard_opts: Dictionaries of parsed option keys and their typed
+             values (e.g. bool, int, or str) that match standard JAX options
+             (host_tracer_level, device_tracer_level, python_tracer_level).
+          2. advanced_opts: Dictionaries of parsed custom option keys and their
+             typed values to be passed to JAX's advanced_configuration dictionary.
+          E.g., ({"host_tracer_level": 3}, {"tpu_num_chips_to_profile_per_task": 2, "my_custom_option": True})
+    """
+    if not profile_prefix or not profile_prefix.strip():
+        return {}, {}
+
+    if not profile_prefix.isascii():
+        raise ValueError("profile_prefix contains non-ASCII characters")
+
+    standard_opts = {}
+    advanced_opts = {}
+
+    parts = profile_prefix.split(';')
+
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        match = _OPTION_PATTERN.match(part)
+        if not match:
+            raise ValueError(f"Invalid profile option format in '{part}'. "
+                             "Expected 'key:value' format.")
+        key = match.group(1)
+        val = match.group(2)
+
+        parsed_val = _parse_option_value(key, val)
+
+        if key in _STANDARD_KEYS:
+            standard_opts[key] = parsed_val
+        else:
+            advanced_opts[key] = parsed_val
+
+    return standard_opts, advanced_opts
+
+
 class TPUWorker(WorkerBase):
+
+    _weight_update_active: bool = False
+    _kv_cache_freed: bool = False
+    _raiden_rl_weight_sync: Any = None
 
     def __init__(
         self,
@@ -114,6 +205,19 @@ class TPUWorker(WorkerBase):
                                 if isinstance(device, jaxlib._jax.Device))
         self.pp_config = PPConfig(vllm_config, rank, ip, prev_worker_ip,
                                   self.parallel_config.pipeline_parallel_size)
+
+        # If model_weights is set, and we are in a distributed environment on Ray,
+        # the driver might have overwritten `model` to its local cache path.
+        # We need to restore it to the original GCS URI (stored in `model_weights`)
+        # so this remote worker can pull it.
+        if (hasattr(self.model_config, "model_weights")
+                and self.model_config.model_weights
+                and isinstance(self.model_config.model, str)
+                and not os.path.exists(self.model_config.model)):
+            logger.info("Restoring model path to GCS URI: %s",
+                        self.model_config.model_weights)
+            self.model_config.model = self.model_config.model_weights
+            self.model_config.model_weights = None
 
         # Explicitly trigger RunAI download on the worker if needed.
         # This handles downloading config.json and other non-weight files to the
@@ -143,7 +247,8 @@ class TPUWorker(WorkerBase):
                 profiler_config.torch_profiler_dir,
                 f"pprank_{self.rank}_ppworldsize_{self.pp_config.pp_world_size}"
             )
-            os.makedirs(self.profile_dir, exist_ok=True)
+            if not self.profile_dir.startswith("gs://"):
+                os.makedirs(self.profile_dir, exist_ok=True)
 
         use_jax_profiler_server = envs.USE_JAX_PROFILER_SERVER
         # Only one instance of profiler is allowed
@@ -163,10 +268,54 @@ class TPUWorker(WorkerBase):
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
+    def _setup_dp_chip_isolation(self) -> None:
+        """Sets libtpu env vars so the process initializes JAX on a subset of
+        physical chips. Must run before JAX initializes its TPU backend.
+        """
+        from tpu_inference import tpu_info
+
+        parallel_config = self.vllm_config.parallel_config
+        dp_rank = getattr(parallel_config, "data_parallel_index", 0) or 0
+
+        sharding_config = self.vllm_config.sharding_config
+        num_devices = sharding_config.total_devices
+
+        cores_per_chip = tpu_info.get_num_cores_per_chip()
+        chips_per_rank = math.ceil(num_devices / cores_per_chip)
+        total_chips = tpu_info.get_num_chips()
+
+        start_chip = dp_rank * chips_per_rank
+        end_chip = start_chip + chips_per_rank
+        if total_chips and end_chip > total_chips:
+            raise ValueError(
+                f"Multi-process DP rank {dp_rank} needs TPU chips "
+                f"[{start_chip}, {end_chip}) but the host only has "
+                f"{total_chips} chips. Reduce --data-parallel-size or "
+                f"--tensor-parallel-size.")
+
+        visible_chips = ",".join(str(c) for c in range(start_chip, end_chip))
+        # Unique libtpu port per rank so the runtimes can coexist on a host.
+        tpu_port = jax_parallel_state.BASE_TPU_PROCESS_PORT + dp_rank
+
+        os.environ["TPU_VISIBLE_CHIPS"] = visible_chips
+        os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] = f"1,{chips_per_rank},1"
+        os.environ["TPU_PROCESS_BOUNDS"] = "1,1,1"
+        os.environ["TPU_PROCESS_PORT"] = str(tpu_port)
+        os.environ["TPU_PROCESS_ADDRESSES"] = f"localhost:{tpu_port}"
+        os.environ["CLOUD_TPU_TASK_ID"] = "0"
+        logger.info(
+            "Multi-process DP | rank=%d | TPU_VISIBLE_CHIPS=%s | "
+            "TPU_CHIPS_PER_PROCESS_BOUNDS=1,%d,1 | TPU_PROCESS_PORT=%d",
+            dp_rank, visible_chips, chips_per_rank, tpu_port)
+
     def init_device(self,
                     tpu_process_bounds="",
                     tpu_chips_per_process_bounds="",
                     tpu_visible_chips=""):
+
+        if (envs.TPU_MULTIPROCESS_DP
+                and self.parallel_config.pipeline_parallel_size == 1):
+            self._setup_dp_chip_isolation()
 
         # set tpu visible devices for Jax runtime in PP.
         multihost_backend = envs.TPU_MULTIHOST_BACKEND
@@ -195,7 +344,7 @@ class TPUWorker(WorkerBase):
             else:
                 # Single host PP logic
                 tpu_ports = [
-                    jax_parallel_state.BASE_JAX_PORT + i
+                    jax_parallel_state.BASE_TPU_PROCESS_PORT + i
                     for i in range(self.pp_config.pp_world_size)
                 ]
                 os.environ["TPU_PROCESS_ADDRESSES"] = ",".join(
@@ -264,28 +413,45 @@ class TPUWorker(WorkerBase):
 
         # Initialize the vLLM distribution layer as a single chip environment,
         # we'll swap the model's parallel modules with TPU SPMD equivalents.
-        with set_current_vllm_config(self.vllm_config):
-            temp_file = tempfile.mkstemp()[1]
-            init_distributed_environment(
-                world_size=1,
-                rank=0,
-                local_rank=0,
-                distributed_init_method=f"file://{temp_file}",
-                backend="gloo",
-            )
-            ensure_model_parallel_initialized(
-                tensor_model_parallel_size=1,
-                pipeline_model_parallel_size=1,
-            )
+        #
+        # For MoE under MPMD, vllm keeps parallel_config.data_parallel_size = N
+        # inside each spawned engine (so DPEngineCoreProc can coordinate across
+        # DP ranks). Without this guard, init_distributed_environment would see
+        # data_parallel_size > 1 and override our file:// init into a cross-DP
+        # gloo PG of size DP*TP, but only DP processes exist — TP=N is internal
+        # JAX sharding — so the gloo TCPStore blocks forever waiting for the
+        # missing TP-partner ranks. Force a singleton view for this init only.
+        saved_dp_size = self.parallel_config.data_parallel_size
+        self.parallel_config.data_parallel_size = 1
+        try:
+            with set_current_vllm_config(self.vllm_config):
+                # Close the file descriptor returned by mkstemp to prevent a resource leak.
+                # In multihost environments, leaving this fd open on Host 0 (which runs both
+                # Ray GCS and the engine core) can conflict with Gloo's file locking and socket
+                # binding, resulting in a startup hang.
+                fd, temp_file = tempfile.mkstemp()
+                os.close(fd)
+                init_distributed_environment(
+                    world_size=1,
+                    rank=0,
+                    local_rank=0,
+                    distributed_init_method=f"file://{temp_file}",
+                    backend="gloo",
+                )
+                ensure_model_parallel_initialized(
+                    tensor_model_parallel_size=1,
+                    pipeline_model_parallel_size=1,
+                )
+        finally:
+            self.parallel_config.data_parallel_size = saved_dp_size
 
+        pp_rank = 0 if self.parallel_config.pipeline_parallel_size == 1 else self.rank
         jax_parallel_state.init_pp_distributed_environment(
             self.pp_config.ip,
-            self.rank,
+            pp_rank,
             self.parallel_config.pipeline_parallel_size,
             self.devices[0],
             need_pp=self.parallel_config.pipeline_parallel_size > 1)
-
-        ensure_kv_transfer_initialized(self.vllm_config)
 
         is_first_rank = True
         is_last_rank = True
@@ -315,6 +481,28 @@ class TPUWorker(WorkerBase):
                     f"local_devices={jax.local_devices()}")
         vllm_utils.report_usage_stats(self.vllm_config)
 
+        # Initialize the background metrics logger ONLY if KV offloading is enabled
+        self.stats_logger = None
+        if self.vllm_config.kv_transfer_config is not None:
+            kv_transfer_config = self.vllm_config.kv_transfer_config
+            is_offload_connector = (
+                (kv_transfer_config.kv_connector == "TPUOffloadConnector"
+                 and kv_transfer_config.kv_connector_module_path
+                 == "tpu_inference.offload.tpu_offload_connector")
+                or (kv_transfer_config.kv_connector == "RaidenOffloadConnector"
+                    and kv_transfer_config.kv_connector_module_path
+                    == "tpu_inference.offload.raiden_offload_connector"))
+            if is_offload_connector:
+
+                # Start the background thread (logging every TPU_OFFLOAD_METRICS_LOG_INTERVAL seconds)
+                self.stats_logger = TPUKVCacheStatsLogger(
+                    log_interval=envs.TPU_OFFLOAD_METRICS_LOG_INTERVAL,
+                    model_name=self.model_config.model,
+                    device_type=self.device_config.device_type)
+                logger.info(
+                    f"TPUKVCacheStatsLogger initialized on worker rank {self.rank}."
+                )
+
     def initialize_pp_transfer_connect(self):
         if self.rank == 0:
             return
@@ -335,6 +523,36 @@ class TPUWorker(WorkerBase):
         total_hbm_limit_gb = round(total_hbm_limit / utils.GBYTES, 2)
         total_hbm_limit_cap_gb = round(total_hbm_limit_cap / utils.GBYTES, 2)
         total_hbm_used_gb = round(total_hbm_used / utils.GBYTES, 2)
+
+        if self.vllm_config.kv_transfer_config is not None:
+            kv_transfer_config = self.vllm_config.kv_transfer_config
+            is_offload_connector = (
+                (kv_transfer_config.kv_connector == "TPUOffloadConnector"
+                 and kv_transfer_config.kv_connector_module_path
+                 == "tpu_inference.offload.tpu_offload_connector")
+                or (kv_transfer_config.kv_connector == "RaidenOffloadConnector"
+                    and kv_transfer_config.kv_connector_module_path
+                    == "tpu_inference.offload.raiden_offload_connector"))
+            if is_offload_connector:
+                # If kv offloading is enabled, we need to account for the memory used by the KV transfer buffer.
+                staging_buffer_pages = envs.TPU_OFFLOAD_NUM_STAGING_BLOCKS
+
+                # TODO(jcgu): verify page_size_bytes
+                kv_cache_specs = self.get_kv_cache_spec()
+                num_layers = len(kv_cache_specs)
+                assert len(kv_cache_specs) >= 1
+                # TODO(jcgu): hybrid-kv is not supported yet.
+                _layer_name, _layer_spec = next(iter(kv_cache_specs.items()))
+                vllm_page_size_bytes = _layer_spec.page_size_bytes
+                # rpa_page_size_bytes = get_rpa_page_size_bytes(self.model_runner.mesh,
+                #                                             kv_cache_specs)
+                stage_buffer_size_bytes = staging_buffer_pages * num_layers * vllm_page_size_bytes
+
+                total_hbm_avail = total_hbm_avail - stage_buffer_size_bytes
+                logger.info(
+                    f"  ALERT: KV offloading enabled. Deducting {stage_buffer_size_bytes} Bytes ({staging_buffer_pages} pages) from available HBM for staging buffer."
+                )
+
         total_hbm_avail_gb = round(total_hbm_avail / utils.GBYTES, 2)
 
         logger.info(f"Memory statistics | "
@@ -359,7 +577,6 @@ class TPUWorker(WorkerBase):
         # violates the pure abstract contract of the base class. This is a
         # deliberate, temporary compromise for the same reasons outlined in
         # the `get_kv_cache_spec` method.
-
         if self.parallel_config.pipeline_parallel_size == 1 or self.rank == 0:
             intermediate_tensors = None
         else:
@@ -401,14 +618,47 @@ class TPUWorker(WorkerBase):
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         return self.model_runner.take_draft_token_ids()
 
+    def execute_dummy_batch(self) -> None:
+        # DPEngineCoreProc (used for MoE) invokes this when this rank is idle
+        # while other DP ranks have work, to keep ranks in lockstep across any
+        # cross-DP collective inside the model step. In MPMD on TPU, JAX has
+        # data_parallelism=1 inside each process, so the model step contains
+        # no cross-DP collective and no sync work is required here.
+        return
+
     def profile(self,
                 is_start: bool = True,
                 profile_prefix: str | None = None):
         if is_start:
+            standard_opts, advanced_opts = _parse_profile_options(
+                profile_prefix)
             options = jax.profiler.ProfileOptions()
             # default: https://docs.jax.dev/en/latest/profiling.html#general-options
             options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
-            options.host_tracer_level = os.getenv("HOST_TRACER_LEVEL", 1)
+
+            # Enable strict validation of experimental options by default. If an
+            # unrecognized configuration is passed, JAX/libtpu will raise a
+            # runtime initialization error instead of silently ignoring it.
+            # Users can opt-out by passing 'check_experimental_options:false'.
+            advanced_config = {
+                "check_experimental_options": True,
+            }
+            if envs.PROFILE_SINGLE_DEVICE:
+                advanced_config.update({
+                    "tpu_num_chips_to_profile_per_task": 1,
+                    "tpu_num_sparse_cores_to_trace": 1,
+                    "tpu_num_sparse_core_tiles_to_trace": 1,
+                })
+
+            # Override with parsed options
+            for key, val in standard_opts.items():
+                if hasattr(options, key):
+                    setattr(options, key, val)
+
+            advanced_config.update(advanced_opts)
+            if advanced_config:
+                options.advanced_configuration = advanced_config
+
             jax.profiler.start_trace(self.profile_dir,
                                      profiler_options=options)
         else:
@@ -417,12 +667,15 @@ class TPUWorker(WorkerBase):
     def load_model(self) -> None:
         self.model_runner.load_model()
 
-    def compile_or_warm_up_model(self) -> float:
+    def compile_or_warm_up_model(self) -> CompilationTimes:
         self.model_runner.capture_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         self.model_runner._init_random()
-        return self.compilation_config.compilation_time
+        return CompilationTimes(
+            language_model=self.compilation_config.compilation_time,
+            encoder=0.0,
+        )
 
     def get_model(self):
         return self.model_runner.get_model()
@@ -445,6 +698,16 @@ class TPUWorker(WorkerBase):
         # and the vLLM side should be updated to handle the translation.
         return self.model_runner.get_kv_cache_spec()
 
+    def get_mamba_num_blocks(self) -> int | None:
+        """Rows in the mamba state pool this worker allocated (None without
+        mamba layers). Read by the engine core over `collective_rpc`."""
+        return self.model_runner.kv_cache_manager.actual_mamba_num_blocks
+
+    def get_kv_connector_handshake_metadata(self) -> dict | None:
+        """Get KV connector metadata from this worker if available."""
+        # NOTE: we are not using it right now.
+        return
+
     def initialize_from_config(
         self,
         kv_cache_config: KVCacheConfig,
@@ -456,6 +719,11 @@ class TPUWorker(WorkerBase):
                  and self.model_runner.model_config.enforce_eager)):
             self.model_runner.compilation_manager._precompile_sampling()
             self.model_runner.compilation_manager._precompile_gather_logprobs()
+            self.model_runner.compilation_manager._flush_compilations()
+
+        # Init kv cache connector here, because it requires `kv_cache_config`.
+        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+
         self.model_runner.initialize_kv_cache(kv_cache_config,
                                               self.topology_order_id)
 
@@ -464,19 +732,55 @@ class TPUWorker(WorkerBase):
         port = get_kv_transfer_port()
         return (int(self.topology_order_id), ip, int(port))
 
-    def sync_weights(
-        self,
-        updated_weights: jaxtyping.PyTree,
-        mappings: Dict[str, Tuple[str, Tuple[str]]],
-        transpose_keys: Dict[str, Tuple[int]],
-        reshard_fn: Callable[[jaxtyping.PyTree, jaxtyping.PyTree],
-                             jaxtyping.PyTree] = None
-    ) -> None:
-        """Sync the updated weights to the model runner."""
-        return self.model_runner._sync_weights(updated_weights=updated_weights,
-                                               mappings=mappings,
-                                               transpose_keys=transpose_keys,
-                                               reshard_fn=reshard_fn)
+    def init_weight_transfer_engine(self, init_info: Dict[str, Any]) -> None:
+        """Prepare the transport.
+
+        Binds this worker's live weights to Raiden's `WeightSynchronizer`
+        so subsequent `raiden_h2d`/`get_raiden_metadata` calls have
+        something to operate on.
+        """
+        logger.info("init_weight_transfer_engine: %s", sorted(init_info or {}))
+        self.bind_raiden_sync(
+            worker_index=init_info.get("worker_index", 0),
+            parallelism=init_info.get("parallelism", 4),
+            job_name=init_info.get("job_name", "rollout"),
+        )
+
+    def start_weight_update(self, free_kv_cache: bool = True) -> None:
+        """Open a weight update session.
+
+        Freeing the KV cache is on by default: an incoming set of weights
+        roughly doubles peak HBM, and decoding from KV computed under the old
+        weights is incorrect. `finish_weight_update` reallocates it.
+
+        The prefix cache is scheduler-side and cannot be dropped here, so
+        callers must `reset_prefix_cache()` first -- otherwise the scheduler
+        serves hits from blocks this frees.
+        """
+        if self._weight_update_active:
+            raise RuntimeError(
+                "start_weight_update called while an update is already "
+                "active. Call finish_weight_update first.")
+        if free_kv_cache:
+            self.model_runner.delete_kv_cache()
+        self._kv_cache_freed = free_kv_cache
+        self._weight_update_active = True
+
+    def update_weights(self, update_info: Dict[str, Any]) -> None:
+        """No-op. Tunix writes into the exposed vLLM model weights directly, and
+        Raiden's receiver auto-H2Ds on receipt. The phase is kept because
+        vLLM's contract has it.
+        """
+        logger.info(
+            "update_weights is a no-op on TPU; weights are applied "
+            "out-of-band (%s).", sorted(update_info or {}))
+
+    def finish_weight_update(self) -> None:
+        """Close the session and restore serving state."""
+        self._weight_update_active = False
+        if self._kv_cache_freed:
+            self.model_runner.reinitialize_kv_cache()
+            self._kv_cache_freed = False
 
     def delete_kv_cache(self) -> None:
         self.model_runner.delete_kv_cache()
@@ -484,7 +788,109 @@ class TPUWorker(WorkerBase):
     def reinitialize_kv_cache(self) -> None:
         self.model_runner.reinitialize_kv_cache()
 
-    # Ray executor do not need handshake metadata
-    # as we pass the kv_parameters through proxy server
-    def get_kv_connector_handshake_metadata(self) -> None:
-        pass
+    def get_weights_state(self) -> Any:
+        """Builds the weight PyTree (possibly `nnx.State`) from the runner.
+
+        Same-process callers only -- the result can hold live TPU arrays,
+        unserializable over collective_rpc. Used directly by same-process
+        callers, and by `bind_raiden_sync` to bind Raiden in-process.
+        Cross the collective_rpc boundary via `bind_raiden_sync` /
+        `get_raiden_metadata` instead.
+        """
+        from tpu_inference.rl import \
+            raiden_worker_sync  # pylint: disable=g-import-not-at-top
+
+        return raiden_worker_sync.extract_weight_state(
+            getattr(self.model_runner, "state", None),
+            getattr(self.model_runner, "model", None),
+        )
+
+    def _require_raiden_sync(self, op: str) -> Any:
+        sync = self._raiden_rl_weight_sync
+        if sync is None:
+            raise RuntimeError(f"bind_raiden_sync must run before {op}.")
+        return sync
+
+    def bind_raiden_sync(self,
+                         worker_index: int = 0,
+                         parallelism: int = 4,
+                         job_name: str = "rollout") -> dict:
+        """Binds this worker's live weights to Raiden and returns wire-safe
+        registration metadata (never the arrays)."""
+        from tpu_inference.rl import \
+            raiden_worker_sync  # pylint: disable=g-import-not-at-top
+
+        state = self.get_weights_state()
+        if self._raiden_rl_weight_sync is None:
+            self._raiden_rl_weight_sync = raiden_worker_sync.RaidenWorkerSync(
+                job_name=job_name,
+                worker_index=worker_index,
+                parallelism=parallelism,
+            )
+        else:
+            # Re-bind: the transport is reused, but the caller may have moved
+            # this worker to a different Raiden job (per-replica job names), and
+            # metadata_dict() would otherwise re-register under the stale one.
+            self._raiden_rl_weight_sync.job_name = job_name
+            self._raiden_rl_weight_sync.worker_index = worker_index
+        self._raiden_rl_weight_sync.bind(state)
+        return self._raiden_rl_weight_sync.metadata_dict()
+
+    def refresh_model_state_leaves(self) -> None:
+        """Re-points the runner's dispatch view at the freshly synced weights.
+
+        `model_fn` takes `state_leaves` as its first argument; it is derived
+        from `state` at load time and goes stale once the weights behind
+        `state` are replaced.
+        """
+        self.model_runner.refresh_state_leaves()
+
+    def get_raiden_metadata(self) -> dict:
+        """Re-fetches the current binding's wire-safe metadata without rebinding."""
+        return self._require_raiden_sync("get_raiden_metadata").metadata_dict()
+
+    def raiden_h2d(self, uuid: Optional[int] = None) -> dict:
+        """Blocks until the transfer that just landed is visible on-device.
+
+        Returns tensor checksums when `VERIFY_WEIGHTS=true`.
+        """
+        sync = self._require_raiden_sync("raiden_h2d")
+        sync.h2d(uuid=uuid)
+        if envs.VERIFY_WEIGHTS:
+            return sync.checksums()
+        return {}
+
+    def raiden_metrics(self) -> dict:
+        return self._require_raiden_sync("raiden_metrics").metrics()
+
+    def reset_encoder_cache(self) -> None:
+        self.model_runner.reset_encoder_cache()
+
+    def synchronize_device(self) -> None:
+        """Block until in-flight device work completes."""
+        jax.effects_barrier()
+
+    def sleep(self, level: int = 1) -> None:
+        raise NotImplementedError(
+            "Sleep mode is not supported on TPU: there is no analogue of "
+            "CUDA's virtual-memory allocator for offloading weights. Use "
+            "`pause_generation()` to stop scheduling (equivalent to sleep "
+            "level 0), and the weight-update session "
+            "(`start_weight_update`/`finish_weight_update`) to release and "
+            "restore KV cache memory.")
+
+    def wake_up(self, tags: list[str] | None = None) -> None:
+        raise NotImplementedError(
+            "Sleep mode is not supported on TPU; see TPUWorker.sleep.")
+
+    def add_lora(self, lora_request: Any) -> bool:
+        return self.model_runner.add_lora(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        return self.model_runner.remove_lora(lora_id)
+
+    def list_loras(self) -> set[int]:
+        return self.model_runner.list_loras()
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.model_runner.pin_lora(lora_id)

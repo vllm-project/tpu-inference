@@ -23,22 +23,58 @@
 # 3. top_p (nucleus sampling) correctly constrains token selection
 # 4. top_k correctly limits the number of candidate tokens
 # 5. logprobs returns probability information for generated tokens
+#
+# Note on ties: top-k masking keeps *every* value tied with the k-th largest
+# logit, so top_k=1 is not equivalent to greedy decoding. When several tokens
+# share the top logit they all stay in the candidate set and sampling picks
+# among them. Tests must assert on probabilities, not on a single expected
+# token or on textual equality across runs.
 
 from __future__ import annotations
 
 import pytest
 from vllm import LLM, SamplingParams
 
+# Two tokens are tied when their logits are bitwise equal, so their logprobs
+# are equal too. This tolerance only absorbs float reassociation in
+# log_softmax, it is not a "close enough" allowance.
+TIE_TOLERANCE = 1e-5
+
+
+def iter_step_logprobs(completion):
+    """Yield (sampled_logprob, best_logprob) for each generated token.
+
+    `completion.logprobs[i]` holds the top-k entries for step `i` plus the
+    sampled token, so the maximum over that mapping is the step's highest
+    logprob.
+    """
+    assert completion.logprobs is not None, (
+        "request logprobs to inspect per-step probabilities")
+    for token_id, step_logprobs in zip(completion.token_ids,
+                                       completion.logprobs):
+        assert token_id in step_logprobs, (
+            "the sampled token must always be reported in its step's logprobs")
+        yield (step_logprobs[token_id].logprob,
+               max(entry.logprob for entry in step_logprobs.values()))
+
 
 @pytest.fixture(scope="module")
 def llm():
     """Create a shared LLM instance for all tests in this module."""
-    return LLM(
+    instance = LLM(
         model='meta-llama/Llama-3.2-1B-Instruct',
         max_model_len=1024,
         max_num_seqs=4,
         enable_prefix_caching=False,
     )
+    try:
+        yield instance
+    finally:
+        # vLLM's synchronous LLM client stops EngineCore from a weakref
+        # finalizer, so a reference cycle can defer it indefinitely and leave
+        # the worker subprocess holding the container open until the CI job
+        # times out. Shut the engine down explicitly instead.
+        instance.llm_engine.engine_core.shutdown()
 
 
 class TestTemperature:
@@ -142,34 +178,60 @@ class TestTopP:
 class TestTopK:
     """Tests for top_k sampling parameter."""
 
-    def test_top_k_restricts_sampling(self, llm: LLM):
-        """top_k should limit the candidate tokens for sampling."""
-        prompt = "Pick a number between 1 and 10:"
+    def test_top_k_one_samples_only_from_the_top_tie_group(self, llm: LLM):
+        """top_k=1 should only ever sample a highest-probability token.
 
-        # top_k=1 is equivalent to greedy (always pick the most likely)
+        Top-k masking retains every token tied with the k-th largest logit, so
+        top_k=1 keeps the whole argmax tie group rather than a single token.
+        That makes the generated text non-deterministic when the top logit is
+        tied (e.g. "Pick a number" can yield " 5" or " 7"), which is the
+        intended behaviour. The invariant that does hold is that no token
+        below the maximum probability can ever be sampled.
+        """
+        prompt = "Pick a number between 1 and 10:"
+        # n draws independent samples from one batched request, which is much
+        # cheaper than repeating generate().
         sampling_params_k1 = SamplingParams(temperature=1.0,
                                             top_k=1,
-                                            max_tokens=5)
+                                            max_tokens=5,
+                                            logprobs=5,
+                                            n=10)
 
-        # top_k=-1 considers all tokens
+        outputs = llm.generate([prompt], sampling_params_k1)
+        for completion in outputs[0].outputs:
+            for sampled_logprob, best_logprob in iter_step_logprobs(
+                    completion):
+                assert sampled_logprob == pytest.approx(
+                    best_logprob, abs=TIE_TOLERANCE), (
+                        "top_k=1 sampled a token that is not tied for the "
+                        f"highest probability: {sampled_logprob} vs "
+                        f"{best_logprob}")
+
+    def test_top_k_restricts_sampling(self, llm: LLM):
+        """top_k should limit the candidate tokens for sampling.
+
+        Compared against top_k=-1, which may sample below the maximum.
+        """
+        prompt = "Capital of France is:"
+        # n draws independent samples from one batched request, which is much
+        # cheaper than repeating generate().
         sampling_params_all = SamplingParams(temperature=1.0,
                                              top_k=-1,
-                                             max_tokens=5)
+                                             max_tokens=5,
+                                             logprobs=5,
+                                             n=10)
 
-        # With top_k=1, outputs should be deterministic
-        outputs_k1_run1 = llm.generate([prompt], sampling_params_k1)
-        outputs_k1_run2 = llm.generate([prompt], sampling_params_k1)
-        assert outputs_k1_run1[0].outputs[0].text == outputs_k1_run2[
-            0].outputs[0].text
+        # With top_k=-1 the whole vocabulary stays in play, so across enough
+        # samples at least one token must come from below the tie group.
+        outputs = llm.generate([prompt], sampling_params_all)
+        sampled_below_max = any(sampled_logprob < best_logprob - TIE_TOLERANCE
+                                for completion in outputs[0].outputs
+                                for sampled_logprob, best_logprob in
+                                iter_step_logprobs(completion))
 
-        # With top_k=-1 and temperature=1.0, we may see variation
-        all_outputs = set()
-        for _ in range(10):
-            outputs = llm.generate([prompt], sampling_params_all)
-            all_outputs.add(outputs[0].outputs[0].text)
-
-        # Should produce at least one valid output
-        assert len(all_outputs) >= 1
+        assert sampled_below_max, (
+            "top_k=-1 should consider tokens outside the top-probability tie "
+            "group, but every sampled token was a maximum-probability one")
 
     def test_top_k_with_temperature_zero(self, llm: LLM):
         """top_k should have no effect when temperature=0 (greedy)."""
@@ -293,6 +355,65 @@ class TestLogprobs:
                 # Log probabilities should be <= 0
                 assert logprob_obj.logprob <= 0, (
                     f"Log probability should be <= 0, got {logprob_obj.logprob}"
+                )
+
+
+class TestPromptLogprobs:
+    """Tests for prompt_logprobs parameter."""
+
+    def test_prompt_logprobs_returns_probabilities(self, llm: LLM):
+        """prompt_logprobs parameter should return log probabilities for prompt tokens."""
+        prompt = "Hello, my name is"
+        sampling_params = SamplingParams(temperature=0,
+                                         max_tokens=5,
+                                         prompt_logprobs=5)
+
+        outputs = llm.generate([prompt], sampling_params)
+        output = outputs[0]
+
+        # Check that prompt_logprobs are returned
+        assert output.prompt_logprobs is not None, "prompt_logprobs should be returned"
+        assert len(output.prompt_logprobs
+                   ) > 0, "prompt_logprobs should contain entries"
+
+        # The first token does not have prompt logprobs (by definition)
+        assert output.prompt_logprobs[0] is None
+
+        # Each subsequent prompt token should have logprob information
+        for token_logprobs in output.prompt_logprobs[1:]:
+            assert token_logprobs is not None
+            # Should have up to 5 top logprobs + 1 ground-truth logprob if not in top k
+            assert len(token_logprobs) <= 6
+
+    def test_prompt_logprobs_none_returns_no_probabilities(self, llm: LLM):
+        """When prompt_logprobs=None, no prompt log probabilities should be returned."""
+        prompt = "Hello, my name is"
+        sampling_params = SamplingParams(temperature=0,
+                                         max_tokens=5,
+                                         prompt_logprobs=None)
+
+        outputs = llm.generate([prompt], sampling_params)
+        output = outputs[0]
+
+        # prompt_logprobs should be None when not requested
+        assert output.prompt_logprobs is None, "prompt_logprobs should be None when not requested"
+
+    def test_prompt_logprobs_values_are_valid(self, llm: LLM):
+        """Prompt log probabilities should be valid (negative or zero)."""
+        prompt = "Hello, my name is"
+        sampling_params = SamplingParams(temperature=0,
+                                         max_tokens=3,
+                                         prompt_logprobs=3)
+
+        outputs = llm.generate([prompt], sampling_params)
+        output = outputs[0]
+
+        assert output.prompt_logprobs is not None
+        for token_logprobs in output.prompt_logprobs[1:]:
+            for token_id, logprob_obj in token_logprobs.items():
+                # Log probabilities should be <= 0
+                assert logprob_obj.logprob <= 0, (
+                    f"Prompt log probability should be <= 0, got {logprob_obj.logprob}"
                 )
 
 

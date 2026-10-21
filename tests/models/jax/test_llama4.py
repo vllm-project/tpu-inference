@@ -24,7 +24,7 @@ import pytest
 from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
-from vllm.config import ModelConfig
+from vllm.config import AuxOutputConfig, ModelConfig
 
 from tpu_inference.layers.jax.quantization.unquantized import UnquantizedConfig
 from tpu_inference.models.jax.llama4 import (Llama4ForCausalLM,
@@ -38,12 +38,14 @@ class MockParamLlama4:
     sharding: Tuple[str | None, ...] | None = None
     value: Any = field(init=False)
     sharding: Any = field(init=False)
+    out_sharding: Any = field(init=False)
 
     def __init__(self, shape=(32, 128)):
         self.shape = shape
         self.value = jnp.zeros(self.shape, dtype=self.dtype)
         # The sharding spec is accessed during weight loading
         self.sharding = SimpleNamespace(spec=self.sharding)
+        self.out_sharding = self.sharding
 
     # Allow the mock parameter's value to be updated
     def __setattr__(self, name, value):
@@ -61,6 +63,7 @@ class MockVllmConfig:
                  random_weights: bool = False,
                  tensor_parallelism: int = 1):
         self.model_config = MagicMock(spec=ModelConfig)
+        self.aux_output_config = AuxOutputConfig()
         self.load_config = MagicMock()
         self.load_config.download_dir = None
 
@@ -189,6 +192,31 @@ class TestLlama4ForCausalLM:
                                                 num_key_value_heads=8,
                                                 attn_head_dim=128)
         mock_loader_instance.load_weights.assert_called_once_with(model)
+
+    def test_rope_scaling_handling(self, mock_vllm_config_llama4, rng, mesh):
+        """Tests that rope_scaling is parsed correctly with or without factor."""
+        with jax.set_mesh(mesh):
+            # Case 1: rope_scaling has 'factor'
+            mock_vllm_config_llama4.model_config.hf_config.text_config.rope_scaling = {
+                "factor": 16.0,
+                "rope_type": "llama3",
+            }
+            model = Llama4ForCausalLM(mock_vllm_config_llama4, rng, mesh)
+            assert model.rope_scaling is not None
+            assert model.rope_scaling["scale_factor"] == 16.0
+            assert "factor" not in model.rope_scaling
+
+            # Case 2: rope_scaling does not have 'factor' (standard RoPE / default)
+            mock_vllm_config_llama4.model_config.hf_config.text_config.rope_scaling = {
+                "rope_type": "default",
+            }
+            model2 = Llama4ForCausalLM(mock_vllm_config_llama4, rng, mesh)
+            assert model2.rope_scaling is None
+
+            # Case 3: rope_scaling is None
+            mock_vllm_config_llama4.model_config.hf_config.text_config.rope_scaling = None
+            model3 = Llama4ForCausalLM(mock_vllm_config_llama4, rng, mesh)
+            assert model3.rope_scaling is None
 
 
 class TestLlama4WeightLoader:

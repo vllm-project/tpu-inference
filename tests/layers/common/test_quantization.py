@@ -71,6 +71,24 @@ class QuantizationTest(jtu.JaxTestCase):
         self.assertAllClose(dequantized, original, rtol=0.1, atol=0.1)
 
     @parameterized.product(dtype=[jnp.float8_e4m3fn, jnp.int8],
+                           axis=[(0, 1)],
+                           block_size=[(32, 64)])
+    def test_2d_block_quantization(self, dtype, axis, block_size):
+        """Test 2D blockwise quantization."""
+        key = jax.random.key(0)
+
+        shape = (128, 128)
+        original = jax.random.normal(key, shape, jnp.bfloat16)
+
+        tensor_q, scale = quantize_tensor(dtype, original, axis, block_size)
+        dequantized = dequantize_tensor(tensor_q,
+                                        scale,
+                                        axis,
+                                        block_size=block_size)
+
+        self.assertAllClose(dequantized, original, rtol=0.1, atol=0.1)
+
+    @parameterized.product(dtype=[jnp.float8_e4m3fn, jnp.int8],
                            axis=[-1, 0, (0, 1)],
                            block_size=[32])
     def test_unaligned_dequantization(self, dtype, axis, block_size):

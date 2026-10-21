@@ -1,0 +1,52 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Buildkite pipeline for the XLA OFAT autotune sweep.
+#
+# The autotuner slices the candidate-flag list into contiguous chunks, one
+# per shard, and every shard additionally runs AUTOTUNE_BASELINE_RUNS
+# baselines so per-VM noise can be characterised.  To parallelise across N
+# shards, list N entries in `matrix` and set AUTOTUNE_TOTAL_SHARDS to the same
+# N (e.g. matrix ["1","2","3","4"] with AUTOTUNE_TOTAL_SHARDS "4").
+#
+# See .buildkite/xla_autotune/README.md for trigger instructions.
+
+steps:
+  - label: ":docker: Build and Push Base Image (tpu7x)"
+    key: tpu7x_build_docker
+    agents:
+      queue: cpu_64_core
+    env:
+      TPU_VERSION: "tpu7x"
+    commands:
+      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
+
+  - label: "tpu7x [xla-autotune] shard {{matrix}}"
+    key: tpu7x_xla_autotune
+    depends_on: tpu7x_build_docker
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+      AUTOTUNE_MODEL: "Qwen/Qwen3.5-397B-A17B-FP8"
+      AUTOTUNE_TARGET_METRIC: "total_token_throughput"
+      AUTOTUNE_BASELINE_RUNS: "2"
+      AUTOTUNE_FLAGS: ".buildkite/xla_autotune/flags.txt"
+      # Shard count: keep this in sync with the length of `matrix` below.
+      # The shard script reads it, so it is the only number to change.
+      AUTOTUNE_TOTAL_SHARDS: "1"
+    matrix: ["1"]
+    agents:
+      queue: tpu_v7x_8_queue
+    commands:
+      - .buildkite/scripts/run_xla_autotune_shard.sh {{matrix}}

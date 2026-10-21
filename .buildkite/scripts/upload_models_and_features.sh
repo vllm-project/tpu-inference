@@ -20,26 +20,70 @@ BUILDKITE_DIR=".buildkite"
 MODEL_LIST_KEY="model-list"
 FEATURE_LIST_KEY="feature-list"
 
-declare -a TARGET_FOLDERS=(
-    "quantization"
-    "parallelism"
-    "models"
-    "features"
-    "RL"
-)
+MODEL_IMPL_TYPE="${MODEL_IMPL_TYPE:-auto}"
 
+# Validate inputs that will later be interpolated into uploaded pipeline YAML.
+# Reject anything that isn't on the allowlist / numeric to prevent injection of
+# extra YAML keys (e.g. via embedded newlines or quotes) through env vars.
+case "${MODEL_IMPL_TYPE}" in
+  auto|flax_nnx|vllm) ;;
+  *)
+    echo "ERROR: MODEL_IMPL_TYPE must be one of auto|flax_nnx|vllm, got: '${MODEL_IMPL_TYPE}'"
+    exit 1
+    ;;
+esac
 
-# Use find to append the kernel_microbenchmarks subdirectories
-KERNEL_PARENT_DIR=".buildkite/kernel_microbenchmarks"
-
-if [[ -d "$KERNEL_PARENT_DIR" ]]; then
-    while IFS= read -r dir; do
-        folder_path_to_add="${dir#"${BUILDKITE_DIR}"/}"
-        TARGET_FOLDERS+=("$folder_path_to_add")
-    done < <(find "$KERNEL_PARENT_DIR" -maxdepth 1 -mindepth 1 -type d)
-else
-    echo "Warning: Kernel microbenchmarks directory '$KERNEL_PARENT_DIR' not found. Skipping dynamic folder discovery."
+if [[ ! "${JOB_PRIORITY:-1}" =~ ^-?[0-9]+$ ]]; then
+  echo "ERROR: JOB_PRIORITY must be an integer, got: '${JOB_PRIORITY:-}'"
+  exit 1
 fi
+
+failure_handler() {
+  local exit_code=$?
+  local line_no=$1
+  echo "--- ❌ Script failed at line $line_no with exit status: $exit_code"
+  echo "Hint: Check for duplicate step keys, YAML syntax errors, or failed buildkite-agent commands."
+  buildkite-agent meta-data set "stop_support_matrix" "true"
+  exit $exit_code
+}
+
+# Catch ERR signals
+trap 'failure_handler $LINENO' ERR
+
+# A kube build sends up the kube versions of the same suites.
+if [[ "${CI_FLEET:-bare}" == "kube" ]]; then
+  # shellcheck source=/dev/null
+  source "$(dirname "${BASH_SOURCE[0]}")/configs/pipeline_config.sh"
+  # shellcheck source=/dev/null
+  source "$(dirname "${BASH_SOURCE[0]}")/kube_suites.sh"
+  export JOB_PRIORITY="${JOB_PRIORITY:-1}"
+  upload_kube_nightly_suites
+  exit 0
+fi
+declare -a TARGET_FOLDERS=()
+
+# Append the kernel_microbenchmarks subdirectories
+add_kernel_microbenchmarks() {
+  local kernel_parent_dir=".buildkite/kernel_microbenchmarks"
+  if [[ -d "$kernel_parent_dir" ]]; then
+    while IFS= read -r dir; do
+      local folder_path_to_add="${dir#"${BUILDKITE_DIR}"/}"
+      TARGET_FOLDERS+=("$folder_path_to_add")
+    done < <(find "$kernel_parent_dir" -maxdepth 1 -mindepth 1 -type d)
+  else
+    echo "Warning: Kernel microbenchmarks directory '$kernel_parent_dir' not found. Skipping dynamic folder discovery."
+  fi
+}
+
+# shellcheck source=/dev/null
+source "$(dirname "${BASH_SOURCE[0]}")/nightly_suites.sh"
+for suite in $(nightly_suites); do
+  if [[ "${suite}" == "kernel_microbenchmarks" ]]; then
+    add_kernel_microbenchmarks
+  else
+    TARGET_FOLDERS+=("${suite}")
+  fi
+done
 
 # Arrays to store YAML content fragments (without 'steps:' header)
 pipeline_v6e_fragments=()
@@ -65,12 +109,12 @@ for folder_path in "${TARGET_FOLDERS[@]}"; do
   while IFS= read -r -d '' yml_file; do
     echo "--- handling yml file: ${yml_file}"
 
-    # Targeted Extraction: Find the line starting with '# pipeline-name:'
-    subject_name_line=$(awk '/^# ?pipeline-name:/ {print $0; exit}' "${yml_file}")
+    # Use the first occurrence of CI_TARGET as the subject name
+    subject_name_line=$(grep -m 1 "^[[:space:]]*CI_TARGET:" "${yml_file}" || true)
 
     if [[ -n "$subject_name_line" ]]; then
-      # Extract value: Remove everything up to and including the colon and optional space
-      subject_name="${subject_name_line#*:[[:space:]]}"
+      # Extract value after colon and remove quotes/whitespace
+      subject_name=$(echo "$subject_name_line" | sed 's/^[^:]*:[[:space:]]*//' | tr -d '"'\' | xargs)
       # Trim trailing whitespace/carriage returns
       subject_name="${subject_name%"${subject_name##*[![:space:]]}"}"
 
@@ -78,11 +122,8 @@ for folder_path in "${TARGET_FOLDERS[@]}"; do
         "models")
           model_list+=("$subject_name")
           ;;
-        "features" | "parallelism" | "quantization" | "kernel_microbenchmarks"/* | "RL")
-          # When MODEL_IMPL_TYPE is 'auto', do not add quantization tests to the list for reporting.
-          if ! [[ "$folder_path" == "quantization" && "${MODEL_IMPL_TYPE:-auto}" == "auto" ]]; then
-            feature_list+=("${subject_name}")
-          fi
+        "features" | "parallelism" | "quantization" | "kernel_microbenchmarks"/* | "rl")
+          feature_list+=("${subject_name}")
           ;;
       esac
     fi
@@ -91,16 +132,11 @@ for folder_path in "${TARGET_FOLDERS[@]}"; do
     # This is required because we wrap them inside a 'group' later
     yml_content=$(grep -v "^steps:" "${yml_file}")
 
-    # When MODEL_IMPL_TYPE is 'auto', quantization tests are not uploaded or reported.
-    if [[ "$folder_path" == "quantization" && "${MODEL_IMPL_TYPE:-auto}" == "auto" ]]; then
-      echo "Skipping upload and reporting of quantization test '${yml_file}' because MODEL_IMPL_TYPE is 'auto'."
-    else
-      # Store the content for both hardware types
-      if [[ "$subject_name" != "multi-host" ]]; then
-        pipeline_v6e_fragments+=("${yml_content}")
-      fi
-      pipeline_v7x_fragments+=("${yml_content}")
+    # Store the content for both hardware types
+    if [[ "$subject_name" != "multi-host" ]]; then
+      pipeline_v6e_fragments+=("${yml_content}")
     fi
+    pipeline_v7x_fragments+=("${yml_content}")
 
   done < <(find "$folder" -maxdepth 1 -type f \( -name "*.yml" -o -name "*.yaml" \) -print0)
 done
@@ -123,12 +159,19 @@ fi
 # Final Uploads (Two separate calls to handle variables) ---
 if [[ "${#pipeline_v6e_fragments[@]}" -gt 0 ]]; then
   echo "--- Uploading TPU v6e Pipeline Group"
+  # Export v6e specific variables
+  export TPU_QUEUE_SINGLE="tpu_v6e_queue"
+  export TPU_QUEUE_MULTI="tpu_v6e_8_queue"
+  export TPU_VERSION="tpu6e"
+  export TENSOR_PARALLEL_SIZE_SINGLE=1
+  export TENSOR_PARALLEL_SIZE_MULTI=8
   buildkite-agent meta-data set "run_v6_matrix" "true"
   {
     echo "priority: ${JOB_PRIORITY:-1}"
     echo "steps:"
     echo "  - group: \"TPU v6e nightly Tests (${MODEL_IMPL_TYPE:-auto})\""
     echo "    key: \"v6e-group\""
+    echo "    depends_on: \"build_docker\""
     echo "    steps:"
     printf "%s\n" "${pipeline_v6e_fragments[@]}" | sed 's/^/      /'
   } | buildkite-agent pipeline upload
@@ -139,16 +182,19 @@ fi
 
 if [[ "${#pipeline_v7x_fragments[@]}" -gt 0 ]]; then
   echo "--- Uploading TPU v7x Pipeline Group"
-  # Export v7x specific variables (overwrites previous exports)
+  # Export v7x specific variables
   export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
   export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
   export TPU_VERSION="tpu7x"
+  export TENSOR_PARALLEL_SIZE_SINGLE=2
+  export TENSOR_PARALLEL_SIZE_MULTI=8
   buildkite-agent meta-data set "run_v7_matrix" "true"
   {
     echo "priority: ${JOB_PRIORITY:-1}"
     echo "steps:"
     echo "  - group: \"TPU v7x nightly Tests (${MODEL_IMPL_TYPE:-auto})\""
     echo "    key: \"v7x-group\""
+    echo "    depends_on: \"build_docker\""
     echo "    steps:"
     printf "%s\n" "${pipeline_v7x_fragments[@]}" | sed 's/^/      /'
   } | buildkite-agent pipeline upload

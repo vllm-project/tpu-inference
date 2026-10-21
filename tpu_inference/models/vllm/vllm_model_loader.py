@@ -24,9 +24,20 @@ from vllm.model_executor.model_loader.runai_streamer_loader import \
     RunaiModelStreamerLoader
 from vllm.model_executor.model_loader.utils import (
     initialize_model, process_weights_after_loading)
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 from tpu_inference.layers.vllm.quantization.base import VllmQuantizationMethod
+from tpu_inference.models.common.layer_filter import (
+    filter_safetensors_by_layer, num_hidden_layers_override,
+    should_skip_layer_weight)
+
+
+def _patch_tied_embedding_mapper(model: torch.nn.Module) -> None:
+    """Ensure checkpoint weights targeting lm_head are skipped when word embeddings are tied but self.lm_head is not defined."""
+    if hasattr(model, "hf_to_vllm_mapper") and not hasattr(model, "lm_head"):
+        model.hf_to_vllm_mapper = model.hf_to_vllm_mapper | WeightsMapper(
+            orig_to_new_prefix={"lm_head.": None})
 
 
 def attach_incremental_weight_loader(model: torch.nn.Module) -> None:
@@ -44,8 +55,9 @@ def attach_incremental_weight_loader(model: torch.nn.Module) -> None:
             res = original_loader(param, loaded_weight, *args, **kwargs)
 
             # Processing and sharding
-            # For now, only handle unquantized linear and moe layers.
-            quant_method = layer.quant_method
+            # Incremental processing and sharding for supported layers.
+            # Currently only unquantized and fp8 linear and moe layers supported.
+            quant_method = getattr(layer, "quant_method", None)
             if isinstance(quant_method, VllmQuantizationMethod):
                 quant_method.maybe_process_weights(layer, param_name, args,
                                                    kwargs)
@@ -84,6 +96,41 @@ class IncrementalModelLoader(DefaultModelLoader):
     def __init__(self, load_config: LoadConfig):
         load_config.load_format = "auto"
         super().__init__(load_config)
+        # Set in get_all_weights when hf_overrides truncates
+        # num_hidden_layers; None means no layer filtering.
+        self._num_hidden_layers: int | None = None
+
+    def _prepare_weights(
+        self,
+        model_name_or_path: str,
+        subfolder: str | None,
+        revision: str | None,
+        fall_back_to_pt: bool,
+        allow_patterns_overrides: list[str] | None,
+    ) -> tuple:
+        hf_folder, hf_weights_files, use_safetensors, *rest = (
+            super()._prepare_weights(model_name_or_path, subfolder, revision,
+                                     fall_back_to_pt,
+                                     allow_patterns_overrides))
+        # Keep only shards holding at least one needed tensor; shards made
+        # up entirely of layers >= the cap are never opened.
+        if self._num_hidden_layers is not None and use_safetensors:
+            hf_weights_files = filter_safetensors_by_layer(
+                hf_folder, hf_weights_files, self._num_hidden_layers)
+        return hf_folder, hf_weights_files, use_safetensors, *rest
+
+    def get_all_weights(
+        self,
+        model_config: ModelConfig,
+        model: torch.nn.Module,
+    ):
+        # Shards can mix kept and pruned layers, so also filter per tensor;
+        # otherwise AutoWeightsLoader fails on `layers.N` with N >= the cap.
+        self._num_hidden_layers = num_hidden_layers_override(model_config)
+        for name, param in super().get_all_weights(model_config, model):
+            if should_skip_layer_weight(name, self._num_hidden_layers):
+                continue
+            yield name, param
 
     def load_model(self,
                    vllm_config: VllmConfig,
@@ -101,6 +148,7 @@ class IncrementalModelLoader(DefaultModelLoader):
                                          model_config=model_config)
             # Override weight loader logic of each parameter to support incremental loading.
             attach_incremental_weight_loader(model)
+            _patch_tied_embedding_mapper(model)
             # Quantization does not happen in `load_weights` but after it
             self.load_weights(model, model_config)
             process_weights_after_loading(model, model_config, target_device)
@@ -141,6 +189,7 @@ class RunaiIncrementalModelLoader(RunaiModelStreamerLoader):
                                          model_config=model_config)
             # Override weight loader logic of each parameter to support incremental loading.
             attach_incremental_weight_loader(model)
+            _patch_tied_embedding_mapper(model)
             # Quantization does not happen in `load_weights` but after it
             self.load_weights(model, model_config)
             process_weights_after_loading(model, model_config, target_device)

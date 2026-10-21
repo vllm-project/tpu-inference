@@ -209,7 +209,7 @@ def _all_gather_kernel(
             send_sem=send_sems.at[0, outer_step],
             recv_sem=recv_sems.at[0, outer_step],
             device_id=(left_neighbor, ),
-            device_id_type=pltpu.DeviceIdType.MESH,
+            device_id_type=pl.DeviceIdType.MESH,
         )
         _start_or_wait_copy(left_remote_copy_op, wait)
 
@@ -228,7 +228,7 @@ def _all_gather_kernel(
             send_sem=send_sems.at[1, outer_step],
             recv_sem=recv_sems.at[1, outer_step],
             device_id=(right_neighbor, ),
-            device_id_type=pltpu.DeviceIdType.MESH,
+            device_id_type=pl.DeviceIdType.MESH,
         )
         _start_or_wait_copy(right_remote_copy_op, wait)
 
@@ -248,7 +248,7 @@ def _all_gather_kernel(
             send_sem=send_sems.at[0, outer_step],
             recv_sem=recv_sems.at[0, outer_step],
             device_id=(left_neighbor, ),
-            device_id_type=pltpu.DeviceIdType.MESH,
+            device_id_type=pl.DeviceIdType.MESH,
         )
         _start_or_wait_copy(left_remote_copy_op, wait)
 
@@ -268,7 +268,7 @@ def _all_gather_kernel(
             send_sem=send_sems.at[1, outer_step],
             recv_sem=recv_sems.at[1, outer_step],
             device_id=(right_neighbor, ),
-            device_id_type=pltpu.DeviceIdType.MESH,
+            device_id_type=pl.DeviceIdType.MESH,
         )
         _start_or_wait_copy(right_remote_copy_op, wait)
 

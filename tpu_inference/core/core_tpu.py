@@ -623,6 +623,8 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[Union[tuple[int, EngineCoreOutputs],
                                               bytes]]()
+        self.aborts_queue = queue.Queue()
+        self.tensor_ipc_receiver = None
 
         self.engine_index = engine_index
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
@@ -688,6 +690,20 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
             logger.info(
                 f"{len(self._decode_engines)} Disaggregated decode engines created."
             )
+
+            try:
+                from tpu_inference.runner.continuous_block_pool import \
+                    ContinuousFreeQueue
+                for core in self._prefill_engines + self._decode_engines:
+                    pool = core.scheduler.kv_cache_manager.block_pool
+                    pool.free_block_queue = ContinuousFreeQueue(pool.blocks)
+                    pool.null_block = pool.free_block_queue.popleft()
+                    pool.null_block.is_null = True
+                logger.warning(
+                    "Successfully injected ContinuousFreeQueue into DisaggEngineCoreProcs."
+                )
+            except Exception as e:
+                logger.warning(f"Failed to inject ContinuousFreeQueue: {e}")
 
             ready_event = threading.Event()
             input_thread = threading.Thread(target=self.process_input_sockets,

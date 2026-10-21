@@ -19,14 +19,19 @@ import jax
 from jax import numpy as jnp
 from jax.sharding import Mesh
 
+import tpu_inference.envs as envs
 from tpu_inference.layers.common.linear import sharded_quantized_matmul
 from tpu_inference.layers.common.process_weights.linear_weights import (
-    LinearWeights, process_linear_weights)
+    LinearWeights, format_linear_scale, process_linear_weights)
 from tpu_inference.layers.common.quantization import (dequantize_tensor,
                                                       quantize_tensor)
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
-from tpu_inference.layers.common.utils import \
-    slice_sharded_tensor_for_concatenation
+from tpu_inference.layers.common.utils import (
+    reorder_concatenated_tensor_for_sharding,
+    slice_sharded_tensor_for_concatenation)
+from tpu_inference.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class Fp8LinearMethod:
@@ -41,11 +46,14 @@ class Fp8LinearMethod:
     def _apply_fused(self, x: jax.Array, weight_jax: jax.Array,
                      weight_scale_jax: jax.Array,
                      bias: Optional[jax.Array]) -> jax.Array:
-        outs = sharded_quantized_matmul(x,
-                                        weight_jax,
-                                        weight_scale_jax,
-                                        self.linear_config.weight_sharding,
-                                        mesh=self.linear_config.mesh)
+
+        outs = sharded_quantized_matmul(
+            x,
+            weight_jax,
+            weight_scale_jax,
+            self.linear_config.weight_sharding,
+            mesh=self.linear_config.mesh,
+            defer_all_reduce=self.linear_config.defer_all_reduce)
 
         if bias is not None:
             outs += bias
@@ -62,11 +70,13 @@ class Fp8LinearMethod:
         outs = []
         for i, (weight, weight_scale) in enumerate(weight_and_scale):
 
-            out = sharded_quantized_matmul(x,
-                                           weight,
-                                           weight_scale,
-                                           self.linear_config.weight_sharding,
-                                           mesh=mesh)
+            out = sharded_quantized_matmul(
+                x,
+                weight,
+                weight_scale,
+                self.linear_config.weight_sharding,
+                mesh=mesh,
+                defer_all_reduce=self.linear_config.defer_all_reduce)
 
             if bias is not None:
                 out += bias[i]
@@ -81,6 +91,7 @@ class Fp8LinearMethod:
     'requant_weight_dtype',
     'fuse_matmuls',
     'n_shards',
+    'enable_kernel',
 ))
 def process_blockwise_fp8_linear_weights(
     weight: jax.Array,
@@ -93,7 +104,46 @@ def process_blockwise_fp8_linear_weights(
     requant_weight_dtype,
     fuse_matmuls,
     n_shards,
+    enable_kernel: bool = False,
 ) -> LinearWeights:
+    if envs.DISABLE_WEIGHT_REQUANTIZATION:
+        logger.info_once(
+            "Using the disabled weight requantization path in process_blockwise_fp8_linear_weights."
+        )
+        original_block_size = weight_block_size[0]
+        output_sizes_blocks = [s // original_block_size for s in output_sizes]
+
+        linear_weights = process_linear_weights(
+            LinearWeights(
+                weight=weight,
+                weight_scale=None,
+                zero_point=None,
+                bias=bias,
+            ),
+            fused=fuse_matmuls,
+            output_sizes=output_sizes,
+            reorder_size=n_shards,
+        )
+
+        if fuse_matmuls:
+            weight_scale_processed = reorder_concatenated_tensor_for_sharding(
+                weight_scale, output_sizes_blocks, n_shards, dim=1)
+        else:
+            weight_scale_processed = []
+            start = 0
+            for size in output_sizes_blocks:
+                end = start + size
+                tensor_split = jax.lax.slice_in_dim(weight_scale,
+                                                    start,
+                                                    end,
+                                                    axis=1)
+                weight_scale_processed.append(tensor_split)
+                start = end
+
+        linear_weights.weight_scale = format_linear_scale(
+            weight_scale_processed, enable_kernel)
+        return linear_weights
+
     weights = []
     weight_scales = []
     original_block_size = weight_block_size[0]
@@ -101,18 +151,19 @@ def process_blockwise_fp8_linear_weights(
     for output_size in output_sizes:
         end = start + output_size
 
-        weight_slice = weight[start:end]
-        weight_scale_slice = weight_scale[start // original_block_size:math.
+        weight_slice = weight[:, start:end]
+        weight_scale_slice = weight_scale[:, start // original_block_size:math.
                                           ceil(end / original_block_size)]
         dequantized_weight = dequantize_tensor(
             weight_slice,
             weight_scale_slice,
             (0, 1),
-            block_size=weight_block_size,
+            block_size=weight_block_size[::-1],
         )
         weight_slice, weight_scale_slice = quantize_tensor(
             requant_weight_dtype,
             dequantized_weight,
+            axis=0,
             block_size=requant_block_size)
 
         weights.append(weight_slice)
@@ -120,8 +171,10 @@ def process_blockwise_fp8_linear_weights(
 
         start = end
 
-    weight = jnp.concat(weights, axis=0)
-    weight_scale = jnp.concat(weight_scales, axis=0)
+    weight = jnp.concat(weights, axis=1)
+    weight_scale = jnp.concat(
+        weight_scales,
+        axis=0 if (weight_scales and weight_scales[0].ndim == 1) else 1)
 
     return process_linear_weights(
         LinearWeights(
@@ -133,4 +186,5 @@ def process_blockwise_fp8_linear_weights(
         fused=fuse_matmuls,
         output_sizes=output_sizes,
         reorder_size=n_shards,
+        enable_kernel=enable_kernel,
     )

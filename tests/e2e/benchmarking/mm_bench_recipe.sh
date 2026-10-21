@@ -15,17 +15,33 @@
 
 
 # Spin up the vLLM server
-model_name="Qwen/Qwen2.5-VL-7B-Instruct"
-max_model_len=16384
-dataset_name="random-mm"
+model_name="${TEST_MODEL:-Qwen/Qwen2.5-VL-7B-Instruct}"
+tp_size="${TENSOR_PARALLEL_SIZE:-1}"
+# MAX_MODEL_LEN / MAX_NUM_SEQS are env-overridable so smaller models can fit
+# on memory-tight v6e. Defaults match the previous tpu7x_2 sizing.
+max_model_len="${MAX_MODEL_LEN:-16384}"
+max_num_seqs="${MAX_NUM_SEQS:-}"
+gpu_mem_util="${GPU_MEMORY_UTILIZATION:-0.98}"
+block_size="${BLOCK_SIZE:-}"
+# BENCH_DATASET=text routes through the plain-text "random" dataset and skips
+# the vision tower entirely. Use for text-only mm-capable models like
+# gemma-4-E2B-it where we want kernel/attention perf without vision overhead.
+# Default "mm" preserves the existing Qwen-VL etc. multimodal recipe.
+bench_dataset="${BENCH_DATASET:-mm}"
+compilation_config="${COMPILATION_CONFIG:-}"
+if [ "$bench_dataset" = "text" ]; then
+  dataset_name="random"
+else
+  dataset_name="random-mm"
+fi
 backend="openai-chat"
 num_prompts=128
 
-TIMEOUT_SECONDS=600
+TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-600}"
 READY_MESSAGE="Application startup complete."
 LOG_FILE="server.log"
 BENCHMARK_LOG_FILE="benchmark.log"
-TARGET_THROUGHPUT="0.76"
+TARGET_THROUGHPUT="${MINIMUM_THROUGHPUT_THRESHOLD:-0.76}"
 exit_code=0
 
 
@@ -78,21 +94,93 @@ checkThroughput() {
     fi
     echo
 
+    # Throughput alone does not prove the run worked. If the EngineCore dies
+    # mid-benchmark, `vllm bench serve` still counts every request whose HTTP
+    # response headers arrived before the death as "successful", so it reports a
+    # short duration and a high req/s with no tokens produced at all. Require
+    # actual decoded output, and no failed request, so that neither a dead engine
+    # nor one that died part-way through the run can score a pass.
+    # Both use the last occurrence in the log, so a re-run appended to the same
+    # file is judged on its own summary.
+    generated_tokens=$(awk '/Total generated tokens:/ {v=$NF} END {print v}' "$BENCHMARK_LOG_FILE")
+    failed_requests=$(awk '/Failed requests:/ {v=$NF} END {print v}' "$BENCHMARK_LOG_FILE")
+
+    case "$generated_tokens" in
+        '' )
+            echo "Total generated tokens: NOT FOUND"
+            tokens_pass=0
+            ;;
+        *[!0-9]* )
+            echo "Total generated tokens: '$generated_tokens' (not a number)"
+            tokens_pass=0
+            ;;
+        0 )
+            echo "Total generated tokens: 0"
+            tokens_pass=0
+            ;;
+        * )
+            echo "Total generated tokens: $generated_tokens"
+            tokens_pass=1
+            ;;
+    esac
+
+    case "$failed_requests" in
+        '' )
+            echo "Failed requests: NOT FOUND"
+            requests_pass=0
+            ;;
+        *[!0-9]* )
+            echo "Failed requests: '$failed_requests' (not a number)"
+            requests_pass=0
+            ;;
+        0 )
+            echo "Failed requests: 0"
+            requests_pass=1
+            ;;
+        * )
+            echo "Failed requests: $failed_requests"
+            requests_pass=0
+            ;;
+    esac
+    echo
+
     echo "--- Summary ---"
     # Ensure pass flags are initialized if extraction fails
     : "${throughput_pass:=0}"
+    : "${tokens_pass:=0}"
+    : "${requests_pass:=0}"
 
-    if [ "$throughput_pass" -eq 1 ]; then
+    if [ "$throughput_pass" -eq 1 ] && [ "$tokens_pass" -eq 1 ] && [ "$requests_pass" -eq 1 ]; then
         echo "Overall: PASSED"
     else
         echo "Overall: FAILED"
         [ "$throughput_pass" -eq 0 ] && echo "Reason: Throughput check failed or value not found."
+        [ "$tokens_pass" -eq 0 ] && echo "Reason: Benchmark produced no decoded tokens -- the server likely died mid-run (grep the server log for EngineDeadError / RESOURCE_EXHAUSTED)."
+        [ "$requests_pass" -eq 0 ] && echo "Reason: Benchmark had failed requests -- the server did not serve the whole workload (grep the server log for EngineDeadError / RESOURCE_EXHAUSTED)."
         exit_code=1
     fi
 }
 
 echo "Spinning up the vLLM server..."
-(vllm serve "$model_name" --tensor-parallel-size 1 --pipeline-parallel-size 1 --dtype bfloat16 --gpu-memory-utilization 0.98 --max-model-len "$max_model_len" --limit-mm-per-prompt '{"image": 10, "video": 0}' --mm-processor-kwargs '{"size": {"longest_edge": 1003520, "shortest_edge": 3136}}' --disable-chunked-mm-input  2>&1 | tee -a "$LOG_FILE") &
+vllm_cmd=(vllm serve "$model_name" --tensor-parallel-size "$tp_size" --pipeline-parallel-size 1 --dtype bfloat16 --gpu-memory-utilization "$gpu_mem_util" --max-model-len "$max_model_len")
+if [ "$bench_dataset" = "text" ]; then
+    # MM-capable models still compute the MM encoder budget at startup;
+    # on TPU --disable-chunked-mm-input is force-applied, so we must keep
+    # max_num_batched_tokens >= max_tokens_per_mm_item (2496 for gemma-4-E2B).
+    vllm_cmd+=(--max-num-batched-tokens 4096)
+else
+    vllm_cmd+=(--limit-mm-per-prompt '{"image": 10, "video": 0}' --mm-processor-kwargs '{"size": {"longest_edge": 1003520, "shortest_edge": 3136}}' --disable-chunked-mm-input)
+fi
+if [ -n "$max_num_seqs" ]; then
+    vllm_cmd+=(--max-num-seqs "$max_num_seqs")
+fi
+if [ -n "$block_size" ]; then
+    vllm_cmd+=(--block-size "$block_size")
+fi
+if [ -n "$compilation_config" ]; then
+    vllm_cmd+=(--compilation-config "$compilation_config")
+fi
+"${vllm_cmd[@]}" 2>&1 | tee -a "$LOG_FILE" &
 
 
 # Run a busy loop to block until the server is ready to receive requests
@@ -120,16 +208,13 @@ done
 if $did_find_ready_message; then
     echo "Starting the benchmark for $model_name..."
     echo "Current working directory: $(pwd)"
-    vllm bench serve \
-    --model "$model_name" \
-    --dataset-name "$dataset_name" \
-    --num-prompts "$num_prompts" \
-    --backend "$backend" \
-    --endpoint "/v1/chat/completions" \
-    --random-mm-bucket-config '{(736, 736, 1): 1.0}' \
-    --random-mm-base-items-per-request 6 \
-    --random-mm-num-mm-items-range-ratio 0.67 \
-    --random-mm-limit-mm-per-prompt '{"image": 10, "video": 0}' 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
+    bench_cmd=(vllm bench serve --model "$model_name" --dataset-name "$dataset_name" --num-prompts "$num_prompts" --backend "$backend" --endpoint "/v1/chat/completions")
+    if [ "$bench_dataset" = "text" ]; then
+        bench_cmd+=(--random-input-len "${INPUT_LEN:-1024}" --random-output-len "${OUTPUT_LEN:-128}" --random-range-ratio 0.0)
+    else
+        bench_cmd+=(--random-mm-bucket-config '{(736, 736, 1): 1.0}' --random-mm-base-items-per-request 6 --random-mm-num-mm-items-range-ratio 0.67 --random-mm-limit-mm-per-prompt '{"image": 10, "video": 0}')
+    fi
+    "${bench_cmd[@]}" 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
 
 
     checkThroughput

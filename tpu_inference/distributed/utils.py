@@ -58,6 +58,17 @@ def get_host_ip() -> str:
     return get_ip()
 
 
+def format_host_port(host: str, port: int | str) -> str:
+    """Format host and port into a valid endpoint address string.
+
+    Encloses IPv6 addresses in square brackets if not already bracketed.
+    """
+    host_str = str(host)
+    if ":" in host_str and not host_str.startswith("["):
+        return f"[{host_str}]:{port}"
+    return f"{host_str}:{port}"
+
+
 def get_kv_transfer_port() -> str:
     port = os.getenv("TPU_KV_TRANSFER_PORT", "9100")
     return port
@@ -66,6 +77,35 @@ def get_kv_transfer_port() -> str:
 def get_side_channel_port() -> str:
     port = os.getenv("TPU_SIDE_CHANNEL_PORT", "9600")
     return port
+
+
+def get_transfer_channel_number() -> str:
+    n = os.getenv("TPU_KV_TRANSFER_CHANNEL_NUMBER", "8")
+    return int(n)
+
+
+def get_enable_d2h_transfer() -> bool:
+    """Check if device-to-host transfer is enabled via environment variable."""
+    enable_str = os.getenv("TPU_ENABLE_D2H_TRANSFER", "0").lower()
+    return enable_str in ("true", "1", "yes")
+
+
+def get_enable_block_kv_transfer() -> bool:
+    """Check if we block the KV-cache transfer until it is ready via environment variable."""
+    enable_str = os.getenv("TPU_ENABLE_BLOCK_KV_TRANSFER", "true").lower()
+    return enable_str in ("true", "1", "yes")
+
+
+def get_p2p_wait_pull_timeout() -> int:
+    """KV-cache transfer timeout in seconds."""
+    timeout_str = os.getenv("TPU_P2P_WAIT_PULL_TIMEOUT", "180")
+    return int(timeout_str)
+
+
+def get_max_host_kv_buffer_size() -> int:
+    """Maximum size of KV requests that can be handled by the host KV pool."""
+    size_str = os.getenv("TPU_MAX_HOST_KV_BUFFER_SIZE", "64")
+    return int(size_str)
 
 
 def get_device_topology_order_id(local_devices, global_devices) -> int:

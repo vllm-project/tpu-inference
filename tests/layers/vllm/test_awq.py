@@ -28,7 +28,6 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
                                                MergedColumnParallelLinear,
@@ -41,6 +40,7 @@ from vllm.scalar_type import scalar_types
 
 from tests.layers.common import utils as test_utils
 from tpu_inference.layers.common.moe import MoEBackend
+from tpu_inference.layers.vllm.interface.moe import FusedMoEFactory
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.awq import (VllmAWQConfig,
                                                         VllmAWQLinearMethod,
@@ -300,7 +300,7 @@ def test_row_parallel_linear(model, bias, mesh, enable_sp):
         dtype='bfloat16',
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
+    vllm_config.additional_config["enable_sp"] = enable_sp
 
     vllm_config.model_config.dtype = dtype
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
@@ -339,7 +339,7 @@ def test_column_parallel_linear(model, bias, mesh, enable_sp):
         dtype='bfloat16',
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
+    vllm_config.additional_config["enable_sp"] = enable_sp
 
     # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16
@@ -380,7 +380,7 @@ def test_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
         dtype='bfloat16',
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
+    vllm_config.additional_config["enable_sp"] = enable_sp
 
     # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16
@@ -425,7 +425,7 @@ def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
         dtype='bfloat16',
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
+    vllm_config.additional_config["enable_sp"] = enable_sp
 
     # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16
@@ -492,51 +492,51 @@ def test_fused_moe(num_devices, num_tokens, intermediate_size, hidden_size,
 
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):
-        vllm_fused_moe = FusedMoE(
+        vllm_fused_moe = FusedMoEFactory(
             num_experts=num_experts,
             top_k=topk,
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
-            reduce_results=False,
             renormalize=False,
             tp_size=1,
             dp_size=1,
             quant_config=quant_config,
             has_bias=True,
         )
-        vllm_fused_moe.moe_parallel_config.use_ep = use_ep
+        vllm_fused_moe.moe_config.moe_parallel_config.use_ep = use_ep
 
     w13_q, w13_z, w13_s = quantize_to_awq(
         w1.permute(0, 2, 1).float(), quant_config.group_size)
     w2_q, w2_z, w2_s = quantize_to_awq(
         w2.permute(0, 2, 1).float(), quant_config.group_size)
 
-    vllm_fused_moe.w13_qweight.data = w13_q
-    vllm_fused_moe.w2_qweight.data = w2_q
-    vllm_fused_moe.w13_scales.data = w13_s.to(dtype)
-    vllm_fused_moe.w2_scales.data = w2_s.to(dtype)
-    vllm_fused_moe.w13_qzeros.data = w13_z
-    vllm_fused_moe.w2_qzeros.data = w2_z
-    vllm_fused_moe.w13_bias.data = w1_bias
-    vllm_fused_moe.w2_bias.data = w2_bias
+    vllm_fused_moe.routed_experts.w13_qweight.data = w13_q
+    vllm_fused_moe.routed_experts.w2_qweight.data = w2_q
+    vllm_fused_moe.routed_experts.w13_scales.data = w13_s.to(dtype)
+    vllm_fused_moe.routed_experts.w2_scales.data = w2_s.to(dtype)
+    vllm_fused_moe.routed_experts.w13_qzeros.data = w13_z
+    vllm_fused_moe.routed_experts.w2_qzeros.data = w2_z
+    vllm_fused_moe.routed_experts.w13_bias.data = w1_bias
+    vllm_fused_moe.routed_experts.w2_bias.data = w2_bias
 
     expected = test_utils.ref_moe(a, score, w1, w2, w1_bias, w2_bias,
-                                  vllm_fused_moe.top_k,
-                                  vllm_fused_moe.renormalize,
+                                  vllm_fused_moe.routed_experts.top_k,
+                                  vllm_fused_moe.routed_experts.renormalize,
                                   vllm_fused_moe.activation.value)
 
     with torchax.default_env(), set_forward_context(None, vllm_config):
-        assert isinstance(vllm_fused_moe.quant_method, VllmAWQMoEMethod)
+        assert isinstance(vllm_fused_moe.routed_experts.quant_method,
+                          VllmAWQMoEMethod)
         if use_ep:
-            assert vllm_fused_moe.quant_method.moe_backend == MoEBackend.GMM_EP
+            assert vllm_fused_moe.routed_experts.quant_method.moe_backend == MoEBackend.GMM_EP
         else:
-            assert vllm_fused_moe.quant_method.moe_backend == MoEBackend.GMM_TP
+            assert vllm_fused_moe.routed_experts.quant_method.moe_backend == MoEBackend.GMM_TP
 
         jax_a = a.to('jax')
         score = score.to('jax')
 
-        vllm_fused_moe.quant_method.process_weights_after_loading(
-            vllm_fused_moe)
+        vllm_fused_moe.routed_experts.quant_method.process_weights_after_loading(
+            vllm_fused_moe.routed_experts)
         actual = vllm_fused_moe(jax_a, score)
 
         torch.testing.assert_close(expected,

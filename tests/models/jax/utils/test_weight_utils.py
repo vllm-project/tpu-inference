@@ -17,6 +17,7 @@ import tempfile
 from unittest.mock import MagicMock
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import torch
 from flax import nnx
@@ -28,7 +29,8 @@ from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxLinear
-from tpu_inference.models.jax.utils.weight_utils import LoadableWithIterator
+from tpu_inference.models.jax.utils.weight_utils import (
+    LoadableWithIterator, convert_torch_to_jax_with_view)
 
 
 class TorchMLP(nn.Module):
@@ -113,3 +115,219 @@ class TestJaxAutoWeightsLoader:
                                    jax_output,
                                    rtol=1e-3,
                                    atol=1e-2)
+
+    def test_skip_lists_survive_init(self):
+        """skip_prefixes/skip_substrs must survive construction regardless of
+        whether the vLLM AutoWeightsLoader base class still owns (and resets)
+        those attributes in its own __init__."""
+        from tpu_inference.models.jax.utils.weight_utils import \
+            JaxAutoWeightsLoader
+
+        jax_model = JaxMLP(rngs=nnx.Rngs(0))
+        loader = JaxAutoWeightsLoader(jax_model,
+                                      skip_prefixes=["lm_head"],
+                                      skip_substrs=["vision", "audio"])
+        assert "lm_head" in loader.skip_prefixes
+        assert "vision" in loader.skip_substrs
+        assert "audio" in loader.skip_substrs
+
+    def test_weight_prefix_mapping(self):
+        """Test that 'model.' is prepended correctly based on module structure."""
+        from unittest.mock import MagicMock, patch
+
+        from tpu_inference.models.jax.utils.weight_utils import \
+            JaxAutoWeightsLoader
+
+        class MockModel(JaxModule):
+
+            def __init__(self):
+                super().__init__()
+                self.model = MagicMock()  # Simulate having 'model' attribute
+
+        model = MockModel()
+
+        def mock_named_children():
+            yield "model", model.model
+            yield "lm_head", MagicMock()
+            yield "visual", MagicMock()
+
+        model.named_children = mock_named_children
+
+        loader = JaxAutoWeightsLoader(model)
+
+        weights = [
+            ("embed_tokens.weight", torch.zeros((2, 2))),
+            ("lm_head.weight", torch.zeros((2, 2))),
+            ("visual.weight", torch.zeros((2, 2))),
+            ("model.layers.0.weight", torch.zeros((2, 2))),
+        ]
+
+        with patch(
+                'tpu_inference.models.jax.utils.weight_utils.AutoWeightsLoader._load_module'
+        ) as mock_super_load:
+            mock_super_load.return_value = iter([])  # Yield nothing
+            list(loader._load_module("", model, weights))
+
+            assert mock_super_load.called
+            args, kwargs = mock_super_load.call_args
+            modified_weights = list(args[2])
+
+            expected_keys = [
+                "model.embed_tokens.weight",
+                "lm_head.weight",
+                "visual.weight",
+                "model.layers.0.weight",
+            ]
+
+            received_keys = [name for name, _ in modified_weights]
+            assert received_keys == expected_keys
+
+        # Test with model WITHOUT 'model' attribute
+        class MockModelNoModel(JaxModule):
+
+            def __init__(self):
+                super().__init__()
+                self.w1 = MagicMock()
+
+        model_no = MockModelNoModel()
+        loader_no = JaxAutoWeightsLoader(model_no)
+
+        with patch(
+                'tpu_inference.models.jax.utils.weight_utils.AutoWeightsLoader._load_module'
+        ) as mock_super_load_no:
+            mock_super_load_no.return_value = iter([])
+            list(loader_no._load_module("", model_no, weights))
+
+            args, kwargs = mock_super_load_no.call_args
+            modified_weights_no = list(args[2])
+            received_keys_no = [name for name, _ in modified_weights_no]
+
+            expected_keys_no = [
+                "embed_tokens.weight",
+                "lm_head.weight",
+                "visual.weight",
+                "model.layers.0.weight",
+            ]
+            assert received_keys_no == expected_keys_no
+
+    def test_weight_interception_for_pooler(self):
+        """Test that pooler weights are intercepted and loaded into PyTorch pooler."""
+        from unittest.mock import MagicMock
+
+        from tpu_inference.models.jax.utils.weight_utils import \
+            JaxAutoWeightsLoader
+
+        class MockModel(JaxModule):
+
+            def __init__(self):
+                super().__init__()
+
+        model = MockModel()
+        mock_pytorch_pooler = MagicMock()
+
+        loader = JaxAutoWeightsLoader(model,
+                                      pytorch_pooler=mock_pytorch_pooler)
+
+        weights = [
+            ("embed_tokens.weight", torch.zeros((2, 2))),
+            ("pooler.weight", torch.zeros((2, 2))),
+            ("model.pooler.bias", torch.zeros((2, ))),
+        ]
+
+        from unittest.mock import patch
+        with patch(
+                'tpu_inference.models.jax.utils.weight_utils.AutoWeightsLoader._load_module'
+        ) as mock_super_load:
+            seen_weights = []
+
+            def side_effect(bp, mod, w_iter):
+                for item in w_iter:
+                    seen_weights.append(item)
+                return iter(seen_weights)
+
+            mock_super_load.side_effect = side_effect
+
+            list(loader._load_module("", model, weights))
+
+            assert mock_pytorch_pooler.load_state_dict.called
+            args, kwargs = mock_pytorch_pooler.load_state_dict.call_args
+            loaded_state_dict = args[0]
+
+            assert "weight" in loaded_state_dict
+            assert "bias" in loaded_state_dict
+
+            received_keys = [name for name, _ in seen_weights]
+            assert "pooler.weight" not in received_keys
+            assert "model.pooler.bias" not in received_keys
+            assert "embed_tokens.weight" in received_keys
+
+    def test_dynamic_weight_mapping(self):
+        """Test that weights are mapped dynamically based on root children."""
+        from unittest.mock import MagicMock, patch
+
+        from tpu_inference.models.jax.utils.weight_utils import \
+            JaxAutoWeightsLoader
+
+        class MockModel(JaxModule):
+
+            def __init__(self):
+                super().__init__()
+                self.model = MagicMock()
+                self.custom_head = MagicMock()
+
+        model = MockModel()
+        loader = JaxAutoWeightsLoader(model)
+
+        weights = [
+            ("custom_head.weight", torch.zeros((2, 2))),
+            ("layers.0.weight", torch.zeros((2, 2))),
+            ("model.layers.1.weight", torch.zeros((2, 2))),
+        ]
+
+        with patch(
+                'tpu_inference.models.jax.utils.weight_utils.AutoWeightsLoader._load_module'
+        ) as mock_super_load:
+            mock_super_load.return_value = iter([])
+
+            # We need to mock named_children to return the expected names
+            def mock_named_children():
+                yield "model", model.model
+                yield "custom_head", model.custom_head
+
+            model.named_children = mock_named_children
+
+            list(loader._load_module("", model, weights))
+
+            assert mock_super_load.called
+            args, kwargs = mock_super_load.call_args
+            modified_weights = list(args[2])
+
+            expected_keys = [
+                "custom_head.weight",  # Path A: root child, as-is
+                "model.layers.0.weight",  # Path B: not root child, root has 'model', prepended
+                "model.layers.1.weight",  # Path A: root child ('model'), as-is
+            ]
+
+            received_keys = [name for name, _ in modified_weights]
+            assert received_keys == expected_keys
+
+
+def test_convert_torch_to_jax_with_view():
+    tensor = torch.randn(4, 4, dtype=torch.bfloat16)
+    cast_type = jnp.bfloat16
+
+    # Test conversion under normal conditions
+    jax_arr = convert_torch_to_jax_with_view(tensor, cast_type)
+    assert jax_arr.dtype == jnp.bfloat16
+    assert jax_arr.shape == (4, 4)
+    assert jax_arr.device.platform == "cpu"
+
+    # Test conversion under an active JAX Mesh context
+    # This directly verifies that our set_mesh(None) suspension workaround works as expected
+    devices = jax.devices()
+    mesh = Mesh(devices, ('data', ))
+    with jax.set_mesh(mesh):
+        jax_arr_mesh = convert_torch_to_jax_with_view(tensor, cast_type)
+        assert jax_arr_mesh.dtype == jnp.bfloat16
+        assert jax_arr_mesh.shape == (4, 4)
+        assert jax_arr_mesh.device.platform == "cpu"

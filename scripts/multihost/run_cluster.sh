@@ -78,6 +78,16 @@ if [ "${NODE_TYPE}" != "--head" ] && [ "${NODE_TYPE}" != "--worker" ]; then
     exit 1
 fi
 
+# Validate HEAD_NODE_ADDRESS as a hostname / IP-like token before splicing it
+# into the Ray --address string. A typo or stray character would otherwise
+# either silently produce a broken --address=...:6379 or be interpreted by the
+# shell inside the container's `bash -c "${RAY_START_CMD}"`.
+if [[ ! "${HEAD_NODE_ADDRESS}" =~ ^[A-Za-z0-9.:-]+$ ]]; then
+    echo "Error: HEAD_NODE_ADDRESS contains unexpected characters: '${HEAD_NODE_ADDRESS}'" >&2
+    echo "Expected a hostname or IP (alphanumerics, '.', ':', '-')." >&2
+    exit 1
+fi
+
 # Set up Docker authentication for Google Container Registry.
 # Modify the hostname to accomodate your specific docker region.
 gcloud auth configure-docker us-east5-docker.pkg.dev
@@ -110,9 +120,14 @@ fi
 # -v HF_HOME: Mounts HuggingFace cache to avoid re-downloading models
 
 # Force cleanup of the image to ensure we pull the absolute latest
-echo "Ensuring we have the latest image for ${DOCKER_IMAGE}..."
-docker rmi "${DOCKER_IMAGE}" > /dev/null 2>&1 || true
-docker pull "${DOCKER_IMAGE}"
+if [[ "${IS_MULTI_HOST_BENCH:-false}" != "true" ]]; then
+    echo "Ensuring we have the latest image for ${DOCKER_IMAGE}..."
+    docker rmi "${DOCKER_IMAGE}" > /dev/null 2>&1 || true
+    # -q: the layer-by-layer pull progress is ~600 lines per multihost job.
+    docker pull -q "${DOCKER_IMAGE}"
+else
+    echo "IS_MULTI_HOST_BENCH is true, skipping image pull to use prebuilt image ${DOCKER_IMAGE}."
+fi
  
 
 # Default to no gcloud mount
@@ -123,13 +138,27 @@ if [ -d "$HOME/.config/gcloud" ]; then
     GCLOUD_MOUNT_ARGS+=(-v "$HOME/.config/gcloud:/root/.config/gcloud")
 fi
 
+# Mount checkpoint directory if it exists
+CHECKPOINT_MOUNT_ARGS=()
+if [ -d "/mnt/disks/checkpoint" ]; then
+    CHECKPOINT_MOUNT_ARGS+=(-v "/mnt/disks/checkpoint:/mnt/disks/checkpoint")
+fi
+
+# -----------------------------------------------------------------------------
+# Docker Options Explanation:
+# - log-opt: Limits log file size and count to prevent excessive logging 
+#   from Ray/vLLM from exhausting VM disk space and causing node failures.
+# -----------------------------------------------------------------------------
 docker run \
     --privileged \
     --entrypoint /bin/bash \
     --network host \
     --shm-size=16G \
+    --log-opt max-size=50m \
+    --log-opt max-file=2 \
     --name "${CONTAINER_NAME}" \
     -v "${PATH_TO_HF_HOME}:/root/.cache/huggingface" \
     "${GCLOUD_MOUNT_ARGS[@]}" \
+    "${CHECKPOINT_MOUNT_ARGS[@]}" \
     "${ADDITIONAL_ARGS[@]}" \
-    "${DOCKER_IMAGE}" -c "${RAY_START_CMD}"
+    "${DOCKER_IMAGE}" -c "echo always > /sys/kernel/mm/transparent_hugepage/enabled && ${RAY_START_CMD}"

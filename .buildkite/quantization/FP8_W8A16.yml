@@ -12,14 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: FP8 W8A16
-# pipeline-type: quantization support matrix
 steps:
   - label: "${TPU_VERSION:-tpu6e} Correctness tests for FP8 W8A16"
     key: "${TPU_VERSION:-tpu6e}_FP8_W8A16_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+      queue: cpu  # TODO: replace with execution environment (e.g. "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}")
     commands:
       - |
         buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_FP8_W8A16_CorrectnessTest" "unverified"
@@ -42,7 +40,7 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_record_FP8_W8A16_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+      queue: cpu  # TODO: replace with execution environment (e.g. "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}")
     commands:
       - |
         buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_FP8_W8A16_PerformanceTest" "unverified"

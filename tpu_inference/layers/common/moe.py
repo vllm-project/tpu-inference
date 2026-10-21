@@ -18,20 +18,23 @@ from typing import TYPE_CHECKING, Tuple, Union
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 
+from tpu_inference import envs
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
 from tpu_inference.layers.common.fused_moe_gmm import fused_moe_func
 from tpu_inference.logger import init_logger
+from tpu_inference.utils import to_jax_dtype
 
 if TYPE_CHECKING:
     from tpu_inference.layers.common.process_weights.moe_weights import (
         FusedMoEWeights, UnfusedMoEWeights)
-    from tpu_inference.layers.jax.moe.moe import JaxMoE
+    from tpu_inference.layers.jax.moe.moe import JaxMoE, JaxRoutedExperts
 else:
     FusedMoEWeights = None
     UnfusedMoEWeights = None
     JaxMoE = None
+    JaxRoutedExperts = None
 
 logger = init_logger(__name__)
 
@@ -69,7 +72,7 @@ class MoEBackend(Enum):
 
 
 def moe_apply(
-    layer: Union[FusedMoE, JaxMoE],
+    layer: Union[RoutedExperts, JaxRoutedExperts, JaxMoE],
     x: jax.Array,
     gating_output: Union[jax.Array, Tuple[jax.Array, jax.Array]],
     weights: Union[FusedMoEWeights, UnfusedMoEWeights],
@@ -77,10 +80,28 @@ def moe_apply(
     mesh: Mesh,
     extra_backend_kwargs: dict,
 ) -> jax.Array:
+    extra_backend_kwargs = dict(
+        extra_backend_kwargs) if extra_backend_kwargs else {}
+    scatter_results = extra_backend_kwargs.pop("scatter_results", False)
+    moe_chunk_size = extra_backend_kwargs.pop("moe_chunk_size", 0)
+    # When set, the GMM backends skip their tensor-/expert-parallel all-reduce
+    # and return per-shard partial sums, so the reduction can be deferred and
+    # fused with a later collective (e.g. a shared-expert all-reduce).
+    defer_all_reduce = extra_backend_kwargs.pop("defer_all_reduce", False)
+
+    if defer_all_reduce and moe_backend not in {
+            MoEBackend.GMM_EP, MoEBackend.GMM_TP
+    }:
+        raise ValueError(
+            "defer_all_reduce can only be True for GMM_EP and GMM_TP backends")
 
     with jax.named_scope(layer._get_name()):
         activation = layer.activation if isinstance(
             layer.activation, str) else layer.activation.value
+        if activation == "silu":
+            swiglu_limit = getattr(layer, "swiglu_limit", None)
+            if swiglu_limit is not None and swiglu_limit > 0:
+                activation = "silu_and_mul_with_clamp"
         match moe_backend:
             case MoEBackend.FUSED_MOE:
                 subc_quant_w1_sz = None
@@ -121,6 +142,13 @@ def moe_apply(
                     **extra_backend_kwargs,
                 )[:, :actual_hidden_size]
             case MoEBackend.GMM_EP | MoEBackend.GMM_TP:
+                # Check if activation_dtype was passed via kwargs or as an environment variable
+                activation_dtype = extra_backend_kwargs.get(
+                    "activation_dtype", envs.MOE_ALL_GATHER_ACTIVATION_DTYPE)
+                all_gather_fp8 = (bool(activation_dtype)
+                                  and to_jax_dtype(activation_dtype)
+                                  == jnp.float8_e4m3fn)
+
                 output = fused_moe_func(
                     hidden_states=x,
                     w1=weights.w13_weight,
@@ -136,6 +164,20 @@ def moe_apply(
                     use_ep=layer.use_ep,
                     activation=activation,
                     scoring_fn=layer.scoring_func,
+                    all_gather_fp8=all_gather_fp8,
+                    enable_rs_kernel=envs.ENABLE_RS_KERNEL,
+                    use_gmm_fused_rs_kernel=envs.USE_GMM_FUSED_RS_KERNEL,
+                    onehot_moe_permute_threshold=envs.
+                    ONEHOT_MOE_PERMUTE_THRESHOLD,
+                    scatter_results=scatter_results,
+                    defer_all_reduce=defer_all_reduce,
+                    hash_based_topk_indices=extra_backend_kwargs.get(
+                        "hash_based_topk_indices", None),
+                    expert_score_correction_bias=extra_backend_kwargs.get(
+                        "e_score_correction_bias", None),
+                    moe_chunk_size=moe_chunk_size,
+                    num_valid_tokens=extra_backend_kwargs.get(
+                        "num_valid_tokens", None),
                 )
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance
@@ -172,3 +214,16 @@ def moe_apply(
                                        mesh=mesh)
 
         return output
+
+
+# TODO(#3041): Inherit from vLLM's FusedMoEMethodBase, so it can take FusedMoeConfig
+# as init arg, and unify more logic.
+class FusedMoEMethodBase:
+    """Base class that prepare TPU specific configs"""
+
+    def __init__(self, moe_backend: MoEBackend, ep_axis_name: str):
+        self.extra_backend_kwargs: dict = {
+            "moe_chunk_size": envs.VLLM_MOE_CHUNK_SIZE
+        }
+        if moe_backend == MoEBackend.FUSED_MOE:
+            self.extra_backend_kwargs["ep_axis_name"] = ep_axis_name

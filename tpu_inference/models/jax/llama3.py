@@ -21,6 +21,7 @@ from flax import nnx
 from jax.sharding import Mesh
 from transformers import LlamaConfig
 from vllm.config import VllmConfig
+from vllm.transformers_utils.config import set_default_rope_theta
 
 from tpu_inference import utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
@@ -30,7 +31,9 @@ from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
-from tpu_inference.layers.jax.rope_interface import apply_rope
+from tpu_inference.layers.jax.rope_interface import (apply_rope,
+                                                     get_rope_scaling,
+                                                     get_rope_theta)
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
@@ -91,11 +94,12 @@ class LlamaAttention(nnx.Module):
 
     def __init__(self, config: LlamaConfig, dtype: jnp.dtype, rng: nnx.Rngs,
                  mesh: Mesh, kv_cache_dtype: str):
+        set_default_rope_theta(config, default_theta=500000)
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
-        self.rope_theta = config.rope_theta
-        self.rope_scaling = getattr(config, "rope_scaling", None)
+        self.rope_theta = get_rope_theta(config, default=500000.0)
+        self.rope_scaling = get_rope_scaling(config)
 
         self.head_dim_original = getattr(config, "head_dim",
                                          self.hidden_size // self.num_heads)
@@ -306,9 +310,30 @@ class LlamaModel(nnx.Module):
             self.lm_head = PPMissingLayer()
 
         self.aux_hidden_state_layers = []
-        if vllm_config.speculative_config and vllm_config.speculative_config.method == "eagle3":
-            self.aux_hidden_state_layers = self.get_eagle3_aux_hidden_state_layers(
-            )
+        self.spec_method = None
+        if vllm_config.speculative_config:
+            self.spec_method = vllm_config.speculative_config.method
+            if self.spec_method == "eagle3":
+                self.aux_hidden_state_layers = self.get_eagle3_aux_hidden_state_layers(
+                )
+            elif self.spec_method == "dflash":
+                self.aux_hidden_state_layers = self.get_dflash_aux_hidden_state_layers(
+                    vllm_config)
+
+    def get_dflash_aux_hidden_state_layers(self, vllm_config):
+        spec_config = vllm_config.speculative_config
+        if spec_config is None or spec_config.draft_model_config is None:
+            return []
+        draft_hf_config = spec_config.draft_model_config.hf_config
+        dflash_config = getattr(draft_hf_config, "dflash_config", {})
+        target_layer_ids = dflash_config.get("target_layer_ids", None)
+        if target_layer_ids is not None:
+            return [i for i in target_layer_ids]
+        hf_config = vllm_config.model_config.hf_config
+        num_target_layers = getattr(draft_hf_config, "num_target_layers",
+                                    hf_config.num_hidden_layers)
+        num_layers = hf_config.num_hidden_layers
+        return list(range(num_layers - num_target_layers, num_layers))
 
     def get_eagle3_aux_hidden_state_layers(self):
         num_layers = len(self.layers)
@@ -320,8 +345,8 @@ class LlamaModel(nnx.Module):
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
         intermediate_tensors: JaxIntermediateTensors | None,
-    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]] | Tuple[
-            List[jax.Array], JaxIntermediateTensors]:
+    ) -> Tuple[List[jax.Array], jax.Array | JaxIntermediateTensors,
+               List[jax.Array]]:
         if self.is_first_rank:
             x = self.embed(input_ids)
         else:
@@ -331,7 +356,7 @@ class LlamaModel(nnx.Module):
         aux_hidden_states = []
         for i, layer in enumerate(
                 islice(self.layers, self.start_layer, self.end_layer)):
-            if i in self.aux_hidden_state_layers:
+            if i in self.aux_hidden_state_layers and self.spec_method == "eagle3":
                 aux_hidden_states.append(x)
             kv_cache = kv_caches[i]
             kv_cache, x = layer(
@@ -340,6 +365,8 @@ class LlamaModel(nnx.Module):
                 attention_metadata,
             )
             kv_caches[i] = kv_cache
+            if i in self.aux_hidden_state_layers and self.spec_method == "dflash":
+                aux_hidden_states.append(x)
         if not self.is_last_rank:
             # Note: add aux_hidden_states to make the output spec consistent.
             return kv_caches, JaxIntermediateTensors({"hidden_states":
@@ -382,14 +409,15 @@ class LlamaForCausalLM(nnx.Module):
         _is_first_rank: bool | None = None,
         _is_last_rank: bool | None = None,
         *args,
-    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]] | Tuple[
-            List[jax.Array], JaxIntermediateTensors]:
-        return self.model(
+    ) -> Tuple[List[jax.Array], jax.Array | JaxIntermediateTensors,
+               List[jax.Array], Optional[jax.Array]]:
+        outputs = self.model(
             kv_caches,
             input_ids,
             attention_metadata,
             intermediate_tensors,
         )
+        return outputs[0], outputs[1], outputs[2], None
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         if self.vllm_config.model_config.hf_config.tie_word_embeddings:

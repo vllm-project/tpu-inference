@@ -31,6 +31,9 @@ RUN apt-get update && apt-get install -y \
     rclone \
     wget \
     ca-certificates \
+    build-essential \
+    cmake \
+    g++ \
     && rm -rf /var/lib/apt/lists/*
 
 # Install tpu_inference

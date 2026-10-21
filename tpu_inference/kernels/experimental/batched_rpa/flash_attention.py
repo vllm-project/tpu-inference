@@ -12,53 +12,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import jax
 import jax.numpy as jnp
 from jax import lax
 
-from tpu_inference.kernels.experimental.batched_rpa import \
-    schedule as rpa_schedule
-
-_NUM_LANES = 128
+from tpu_inference.kernels.experimental.batched_rpa import configs, utils
 
 
-def cdiv(a, b):
-    return (a + b - 1) // b
-
-
-def align_to(a, b):
-    return cdiv(a, b) * b
-
-
-def broadcast_minor(src, shape):
-    if src.shape == shape:
-        return src
-    assert src.shape[:-1] == shape[:-1]
-    assert src.shape[-1] % 128 == 0
-    target_minor = align_to(shape[-1], src.shape[-1])
-    # no-op concatenation.
-    return jnp.concatenate([src for _ in range(target_minor // src.shape[-1])],
-                           axis=-1)[..., :shape[-1]]
-
-
-def flash_attention(
-    q,  # [B, KV, TQ, H]
-    k,  # [B, KV, S, H]
-    v,  # [B, KV, S, H]
-    o_prev,  # [B, KV, TQ, H]
-    m_prev,  # [B, KV, TQ, 128]
-    l_prev,  # [B, KV, TQ, 128]
+def flash_attention_qk_softmax(
+    q: jax.Array,  # [B, KV, TQ, H]
+    k: jax.Array,  # [B, KV, S, H] or [B, KV, H, S]
+    m_prev: jax.Array,  # [B, KV, TQ, 128]
+    l_prev: jax.Array,  # [B, KV, TQ, 128]
     *,
-    processed_q_len,  # [B]
-    processed_kv_len,  # [B]
-    effective_kv_len,  # [B]
-    config: rpa_schedule.RPAConfig,
+    processed_q_len: list[jax.Array],  # [B]
+    processed_kv_len: list[jax.Array],  # [B]
+    effective_kv_len: list[jax.Array],  # [B]
+    cfgs: configs.RpaConfigs,
+    bq_start: int,
 ):
     """Flash attention kernel."""
-    b, k_heads, tq, h = q.shape
-    s = k.shape[2]
+    b, k_heads, tq, h_size = q.shape
 
-    if config.q_scale is not None:
-        q = q / config.q_scale
+    if cfgs.serve.scale_q is not None:
+        q = q / cfgs.serve.scale_q
         if jnp.issubdtype(k.dtype, jnp.floating):
             dtype_info = jnp.finfo(k.dtype)
             minval = float(dtype_info.min)
@@ -66,59 +43,97 @@ def flash_attention(
             q = jnp.clip(q, min=minval, max=maxval)
         q = q.astype(k.dtype)
 
-    qk = lax.dot_general(
-        q.reshape((b * k_heads, tq, h)),
-        k.reshape((b * k_heads, s, h)),
-        dimension_numbers=(([2], [2]), ([0], [0])),
-        preferred_element_type=jnp.float32,
-    )
-    qk = qk.reshape((b, k_heads, tq, s))
+    if cfgs.serve.kv_layout == configs.KVLayout.SEQ_ALONG_LANE:
+        s = k.shape[-1]
+        qk = lax.dot(
+            q.reshape(-1, tq, h_size),
+            k.reshape(-1, h_size, s),
+            dimension_numbers=(([2], [1]), ([0], [0])),
+            preferred_element_type=jnp.float32,
+        )
+    else:
+        s = k.shape[-2]
+        qk = lax.dot(
+            q.reshape(-1, tq, h_size),
+            k.reshape(-1, s, h_size),
+            dimension_numbers=(([2], [2]), ([0], [0])),
+            preferred_element_type=jnp.float32,
+        )
+    qk = qk.astype(cfgs.serve.dtype_out).reshape(b, k_heads, tq, s)
 
-    qk *= config.sm_scale
-    if config.k_scale is not None:
-        qk *= config.k_scale
-    if config.q_scale is not None:
-        qk *= config.q_scale
+    qk *= cfgs.model.sm_scale
+    if cfgs.serve.scale_k is not None:
+        qk *= cfgs.serve.scale_k
+    if cfgs.serve.scale_q is not None:
+        qk *= cfgs.serve.scale_q
 
-    if config.soft_cap is not None:
-        qk = config.soft_cap * jnp.tanh(qk / config.soft_cap)
+    if cfgs.model.soft_cap is not None:
+        qk = cfgs.model.soft_cap * jnp.tanh(qk / cfgs.model.soft_cap)
 
-    qk_seq_masks: list[jnp.ndarray] = []
-    for i in range(b):
-        kv_idx_i = processed_kv_len[i] + lax.broadcasted_iota(
-            jnp.int32, (k_heads, tq, s), 2)
-        q_idx_i = (processed_q_len[i] +
-                   lax.broadcasted_iota(jnp.int32, (k_heads, tq, s), 1) //
-                   config.num_q_heads_per_kv_head)
-        mask_i = kv_idx_i < effective_kv_len[i]
-        mask_i &= q_idx_i < effective_kv_len[i]
-        mask_i &= q_idx_i >= kv_idx_i
-        if config.sliding_window is not None:
-            mask_i &= q_idx_i < kv_idx_i + config.sliding_window
-        qk_seq_masks.append(mask_i)
-    mask = jnp.stack(qk_seq_masks, axis=0)
+    qk_masked = []
 
-    qk = jnp.where(mask, qk, config.mask_value)
+    int_ty = cfgs.serve.int_ty
+
+    for b_idx in range(cfgs.block.batch_size):
+        kv_idx_b = (lax.broadcasted_iota(int_ty, (k_heads, tq, s), 2) +
+                    processed_kv_len[b_idx])
+        q_idx_b = (lax.broadcasted_iota(jnp.int32, (k_heads, tq, s), 1) //
+                   cfgs.aligned_num_q_heads_per_kv_head +
+                   bq_start).astype(int_ty) + processed_q_len[b_idx]
+
+        eff_kv_len_b = effective_kv_len[b_idx]
+        mask_b = q_idx_b < eff_kv_len_b
+        mask_b = jnp.logical_and(mask_b, q_idx_b >= kv_idx_b)
+
+        if (sliding_window := cfgs.model.sliding_window) is not None:
+            mask_b = jnp.logical_and(mask_b, q_idx_b
+                                     < kv_idx_b + sliding_window)
+
+        qk_masked.append(jnp.where(mask_b, qk[b_idx], cfgs.model.mask_value))
+    qk = jnp.stack(qk_masked, axis=0)
 
     m_curr = jnp.max(qk, axis=-1, keepdims=True)
     m_next = jnp.maximum(m_prev, m_curr)
-    p = jnp.exp(qk - broadcast_minor(m_next, qk.shape))
+    p = jnp.exp(qk - utils.broadcast_minor(m_next, qk.shape))
+    p_rowsum = jnp.sum(p, axis=-1, keepdims=True, dtype=cfgs.serve.dtype_out)
 
-    pv = lax.dot_general(
-        p.reshape((b * k_heads, tq, s)),
-        v.reshape((b * k_heads, s, h)),
-        dimension_numbers=(([2], [1]), ([0], [0])),
-        preferred_element_type=jnp.float32,
-    )
-    pv = pv.reshape((b, k_heads, tq, h))
-
-    if config.v_scale is not None:
-        pv *= config.v_scale
-
-    p_rowsum = jnp.sum(p, axis=-1, keepdims=True)
     alpha = jnp.exp(m_prev - m_next)
     l_next = alpha * l_prev + p_rowsum
 
-    o_next = broadcast_minor(alpha, o_prev.shape) * o_prev + pv
+    return p, alpha, m_next, l_next
 
-    return m_next, l_next, o_next.astype(o_prev.dtype)
+
+def flash_attention_pv(
+    p: jax.Array,  # [B, KV, TQ, S]
+    v: jax.Array,  # [B, KV, S, H] or [B, KV, H, S]
+    alpha: jax.Array,  # [B, KV, TQ, 128]
+    o_prev: jax.Array,  # [B, KV, TQ, H]
+    cfgs: configs.RpaConfigs,
+):
+    """Flash attention kernel."""
+    b, k_heads, tq, s = p.shape
+
+    if cfgs.serve.kv_layout == configs.KVLayout.SEQ_ALONG_LANE:
+        h_size = v.shape[-2]
+        pv = lax.dot(
+            p.reshape(-1, tq, s),
+            v.reshape(-1, h_size, s),
+            dimension_numbers=(([2], [2]), ([0], [0])),
+            preferred_element_type=jnp.float32,
+        )
+    else:
+        h_size = v.shape[-1]
+        pv = lax.dot(
+            p.reshape(-1, tq, s),
+            v.reshape(-1, s, h_size),
+            dimension_numbers=(([2], [1]), ([0], [0])),
+            preferred_element_type=jnp.float32,
+        )
+    pv = pv.astype(cfgs.serve.dtype_out).reshape(b, k_heads, tq, h_size)
+
+    if cfgs.serve.scale_v is not None:
+        pv *= cfgs.serve.scale_v
+
+    o_next = utils.broadcast_minor(alpha, o_prev.shape) * o_prev + pv
+
+    return o_next

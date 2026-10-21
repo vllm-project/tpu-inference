@@ -84,13 +84,19 @@ class BlockTable:
 class MultiGroupBlockTable:
     """The BlockTables for each KV cache group."""
 
-    def __init__(self, max_num_reqs: int, max_model_len: int,
-                 max_num_batched_tokens: int, pin_memory: bool,
-                 block_sizes: list[int]) -> None:
+    def __init__(self,
+                 max_num_reqs: int,
+                 max_model_len: int,
+                 max_num_batched_tokens: int,
+                 pin_memory: bool,
+                 block_sizes: list[int],
+                 num_speculative_tokens: int = 0) -> None:
         self.block_tables = [
-            BlockTable(max_num_reqs, cdiv(max_model_len, block_size),
-                       max_num_batched_tokens, pin_memory)
-            for block_size in block_sizes
+            BlockTable(
+                max_num_reqs,
+                max(cdiv(max_model_len, block_size),
+                    1 + num_speculative_tokens), max_num_batched_tokens,
+                pin_memory) for block_size in block_sizes
         ]
 
     def append_row(self, block_ids: list[list[int]], row_idx: int) -> None:

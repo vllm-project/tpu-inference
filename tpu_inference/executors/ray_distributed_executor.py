@@ -29,13 +29,16 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.network_utils import (get_distributed_init_method, get_ip,
                                       get_open_port)
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.executor.ray_distributed_executor import \
+from vllm.v1.executor.ray_executor import \
     RayDistributedExecutor as RayDistributedExecutorV1
 from vllm.v1.executor.ray_executor import RayWorkerMetaData
+from vllm.v1.executor.ray_utils import WORKER_SPECIFIC_ENV_VARS
 from vllm.v1.executor.ray_utils import RayWorkerWrapper as RayWorkerWrapperV1
 from vllm.v1.executor.ray_utils import _wait_until_pg_ready
 from vllm.v1.outputs import ModelRunnerOutput
 
+from tpu_inference.core.hybrid_coordinator import (
+    MambaPoolSyncExecutorMixin, maybe_install_hybrid_coordinator_hooks)
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.distributed.utils import set_node_kv_ip_port
 from tpu_inference.logger import init_logger
@@ -48,10 +51,11 @@ logger = init_logger(__name__)
 
 class AsyncResultFuture(Future):
 
-    def __init__(self, result_ids_ref, workers):
+    def __init__(self, result_ids_ref, workers, aggregator=None):
         super().__init__()
         self.result_ids_ref = result_ids_ref
         self.workers = workers
+        self.aggregator = aggregator
 
     def result(self, timeout=None):
         result_ids = ray.get(self.result_ids_ref, timeout=timeout)
@@ -60,10 +64,15 @@ class AsyncResultFuture(Future):
             ret_refs.append(
                 worker.execute_method.remote("get_execute_model_output",
                                              result_id))
-        return ray.get(ret_refs[0], timeout=timeout)
+        if self.aggregator is not None:
+            outputs = ray.get(ret_refs, timeout=timeout)
+            return self.aggregator.aggregate(outputs, output_rank=0)
+        else:
+            return ray.get(ret_refs[0], timeout=timeout)
 
 
-class RayDistributedExecutor(RayDistributedExecutorV1):
+class RayDistributedExecutor(MambaPoolSyncExecutorMixin,
+                             RayDistributedExecutorV1):
     """Ray-based distributed executor for TPU.
 
     The implementation is similar to vllm/executor/ray_distributed_executor.py
@@ -88,6 +97,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         return True
 
     def _init_executor(self) -> None:
+        maybe_install_hybrid_coordinator_hooks(self.vllm_config)
         self.forward_dag: Optional[ray.dag.CompiledDAG] = None
 
         os.environ["VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE"] = "shm"
@@ -326,7 +336,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         worker_node_and_tpu_ids = []
         for worker in self.workers:
             worker_node_and_tpu_ids.append(
-                ray.get(worker.get_node_and_gpu_ids.remote()) \
+                ray.get(worker.get_node_and_physical_gpu_ids.remote()) \
             ) # type: ignore
 
         node_workers = defaultdict(list)  # node id -> list of worker ranks
@@ -363,7 +373,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
 
         # Environment variables to copy from driver to workers
         env_vars_to_copy = get_env_vars_to_copy(
-            exclude_vars=self.WORKER_SPECIFIC_ENV_VARS,
+            exclude_vars=WORKER_SPECIFIC_ENV_VARS,
             additional_vars=set(current_platform.additional_env_vars),
             destination="workers")
 
@@ -435,6 +445,12 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         if self.parallel_config.pipeline_parallel_size > 1:
             self.collective_rpc("initialize_pp_transfer_connect")
         self.collective_rpc("load_model")
+
+        def _update_block_size(worker):
+            current_platform.update_block_size_for_backend(worker.vllm_config)
+
+        self.collective_rpc(_update_block_size)
+
         if self.use_ray_spmd_worker:
             for pp_rank in range(self.parallel_config.pipeline_parallel_size):
                 self.pp_tp_workers.append([])
@@ -474,8 +490,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
 
         refs = self.forward_dag.execute(
             (scheduler_output, grammar_output))  # type: ignore
-        assert not self.has_connector, "async scheduling with connector not yet supported"
-        return AsyncResultFuture(refs, self.workers)
+        return AsyncResultFuture(refs, self.workers, self.kv_output_aggregator)
 
 
 class RayWorkerWrapper(RayWorkerWrapperV1):
@@ -483,7 +498,7 @@ class RayWorkerWrapper(RayWorkerWrapperV1):
     Ray worker wrapper for TPU.
 
     The implementation is similar to vllm/v1/executor/ray_utils.py
-    
+
     _is_intermediate_tensors: check whether the output is JaxIntermediateTensors.
     _is_last_rank: check whether this Ray worker is the last PP stage.
     """

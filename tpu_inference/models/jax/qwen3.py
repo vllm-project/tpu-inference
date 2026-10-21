@@ -20,6 +20,7 @@ from flax import nnx
 from jax.sharding import Mesh
 from transformers import Qwen3Config
 from vllm.config import VllmConfig
+from vllm.transformers_utils.config import set_default_rope_theta
 
 from tpu_inference import envs, utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
@@ -28,10 +29,12 @@ from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.embed import JaxEmbed
-from tpu_inference.layers.jax.linear import JaxEinsum
+from tpu_inference.layers.jax.linear import JaxEinsum, JaxLmHead
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
-from tpu_inference.layers.jax.rope_interface import apply_rope
+from tpu_inference.layers.jax.rope_interface import (apply_rope,
+                                                     get_rope_scaling,
+                                                     get_rope_theta)
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
@@ -56,11 +59,12 @@ class Qwen3Attention(JaxModule):
                  kv_cache_dtype: str,
                  quant_config: VllmQuantConfig,
                  prefix: str = ""):
+        set_default_rope_theta(config, default_theta=1000000)
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
-        self.rope_theta = config.rope_theta
-        self.rope_scaling = getattr(config, "rope_scaling", None)
+        self.rope_theta = get_rope_theta(config, default=1000000.0)
+        self.rope_scaling = get_rope_scaling(config)
         self.rms_norm_eps = config.rms_norm_eps
 
         self.head_dim_original = getattr(config, "head_dim",
@@ -271,10 +275,13 @@ class Qwen3Model(Qwen2Model):
         self.is_first_rank = get_pp_group().is_first_rank
         self.is_last_rank = get_pp_group().is_last_rank
 
+        tp_size = vllm_config.parallel_config.tensor_parallel_size if vllm_config.parallel_config is not None else 1
+        padded_vocab_size = utils.align_to(vocab_size, tp_size)
+
         if self.is_first_rank or (hf_config.tie_word_embeddings
                                   and self.is_last_rank):
             self.embed_tokens = JaxEmbed(
-                num_embeddings=vocab_size,
+                num_embeddings=padded_vocab_size,
                 features=hidden_size,
                 dtype=dtype,
                 param_dtype=dtype,
@@ -312,22 +319,60 @@ class Qwen3Model(Qwen2Model):
         else:
             self.norm = PPMissingLayer()
 
+        self.aux_hidden_state_layers = []
+        spec_config = getattr(vllm_config, "speculative_config", None)
+        if spec_config and spec_config.method == "dflash":
+            self.aux_hidden_state_layers = self.get_dflash_aux_hidden_state_layers(
+                vllm_config)
+
+    def get_dflash_aux_hidden_state_layers(self, vllm_config):
+        spec_config = getattr(vllm_config, "speculative_config", None)
+        if spec_config is None or spec_config.draft_model_config is None:
+            return []
+        draft_hf_config = spec_config.draft_model_config.hf_config
+        dflash_config = getattr(draft_hf_config, "dflash_config", {})
+        target_layer_ids = dflash_config.get("target_layer_ids", None)
+        if target_layer_ids is not None:
+            return [i for i in target_layer_ids]
+        hf_config = vllm_config.model_config.hf_config
+        num_target_layers = getattr(draft_hf_config, "num_target_layers",
+                                    hf_config.num_hidden_layers)
+        num_layers = hf_config.num_hidden_layers
+        return list(range(num_layers - num_target_layers, num_layers))
+
+    def __call__(
+        self,
+        kv_caches: List[jax.Array],
+        input_ids: Optional[jax.Array],
+        attention_metadata: AttentionMetadata,
+        inputs_embeds: Optional[jax.Array] = None,
+    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
+        from itertools import islice
+        if inputs_embeds is not None:
+            x = inputs_embeds
+        else:
+            x = self.embed_tokens(input_ids)
+
+        aux_hidden_states = []
+        for i, layer in enumerate(
+                islice(self.layers, self.start_layer, self.end_layer)):
+            kv_cache = kv_caches[i]
+            kv_cache, x = layer(
+                kv_cache,
+                x,
+                attention_metadata,
+            )
+            kv_caches[i] = kv_cache
+            if i in self.aux_hidden_state_layers:
+                aux_hidden_states.append(x)
+        x = self.norm(x)
+        return kv_caches, x, aux_hidden_states
+
 
 class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
                  mesh: Mesh) -> None:
-        if getattr(vllm_config.model_config, "quantization", None) == "fp8":
-            # `get_tpu_quantization_config` returns None for "fp8" because
-            # the work in #1623 is not fully merged. So this block overrides
-            # the logic to return Fp8Config when model_config indicates fp8.
-            # TODO(#1623): Remove this block when `get_tpu_quantization_config`
-            # is updated.
-            from tpu_inference.layers.jax.quantization.fp8 import Fp8Config
-            hg_quant_config = getattr(vllm_config.model_config.hf_config,
-                                      "quantization_config", {})
-            vllm_config.quant_config = Fp8Config(hg_quant_config)
-
         self.vllm_config = vllm_config
         rng = nnx.Rngs(rng_key)
         self.mesh = mesh
@@ -339,21 +384,25 @@ class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
             prefix="model",
         )
         model_config = vllm_config.model_config
-        if not model_config.hf_config.tie_word_embeddings:
+        is_pooling = vllm_config.model_config.runner_type == "pooling"
+        if not model_config.hf_config.tie_word_embeddings and not is_pooling:
             if self.model.is_last_rank:
                 vocab_size = model_config.get_vocab_size()
+                tp_size = vllm_config.parallel_config.tensor_parallel_size if vllm_config.parallel_config is not None else 1
+                padded_vocab_size = utils.align_to(vocab_size, tp_size)
                 hidden_size = model_config.hf_config.hidden_size
-                self.lm_head = JaxEinsum(
-                    einsum_str="TD,DV->TV",
-                    kernel_shape=(hidden_size, vocab_size),
+                self.lm_head = JaxLmHead(
+                    hidden_size=hidden_size,
+                    vocab_size=padded_vocab_size,
                     dtype=model_config.dtype,
                     param_dtype=model_config.dtype,
                     rngs=rng,
-                    quant_config=vllm_config.quant_config,
                     prefix="lm_head",
                 )
             else:
                 self.lm_head = PPMissingLayer()
+        else:
+            self.lm_head = PPMissingLayer()
 
     def __call__(
         self,
@@ -369,11 +418,11 @@ class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
         is_last_rank: bool = True,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array | JaxIntermediateTensors,
-               List[jax.Array]]:
+               List[jax.Array], Optional[jax.Array]]:
         if not is_first_rank:
             assert intermediate_tensors is not None
             inputs_embeds = intermediate_tensors["hidden_states"]
-        kv_caches, x = self.model(
+        kv_caches, x, aux_hidden_states = self.model(
             kv_caches,
             input_ids,
             attention_metadata,
@@ -381,10 +430,12 @@ class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
         )
         if not is_last_rank:
             x = JaxIntermediateTensors(tensors={"hidden_states": x}, )
-        return kv_caches, x, []
+        return kv_caches, x, aux_hidden_states, None
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        if hasattr(self, 'lm_head'):
+        # Only use lm_head if it's a real projection layer (not a PPMissingLayer placeholder)
+        if hasattr(self,
+                   'lm_head') and not isinstance(self.lm_head, PPMissingLayer):
             return self.lm_head(hidden_states)
 
         assert isinstance(self.model.embed_tokens, JaxEmbed)

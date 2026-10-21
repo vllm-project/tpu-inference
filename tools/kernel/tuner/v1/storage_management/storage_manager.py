@@ -1,0 +1,325 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Base class for kernel tuner storage backends.
+
+This module defines the StorageManager abstract base class, which provides the
+interface for persisting and retrieving kernel tuning data. Concrete subclasses
+implement this interface against a specific backend — either Google Cloud Spanner
+for production use, or a local JSON file for lightweight / offline use.
+
+Typical usage:
+    Instantiate a concrete subclass (e.g. SpannerStorageManager or
+    JsonStorageManager) and pass it to the tuning pipeline. The pipeline interacts
+    only with the StorageManager interface, making the backend swappable.
+"""
+
+import atexit
+
+from tools.kernel.tuner.v1.common.tuner_datatypes import (BucketStatus,
+                                                          CaseResult,
+                                                          ProcessedCaseStatus)
+
+
+class StorageManager:
+    """Abstract base class for kernel tuner storage backends.
+
+    Subclasses must implement all methods to provide a concrete storage backend.
+    Two backends are currently supported:
+      - Spanner: a fully managed, scalable backend for production tuning runs.
+      - Local JSON file: a lightweight backend for offline or development use.
+    """
+
+    def __init__(self, results_batch_size=10):
+        self.results_buffer = []
+        self.results_batch_size = results_batch_size
+        self._closed = False
+        atexit.register(self.close)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def init_case_set(self, case_set_id, scan_space, desc):
+        """Creates a new CaseSet entry in storage.
+
+        Called at the start of a tuning run to register the case set before any
+        cases are written.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+            scan_space: Total number of configurations in the scan space.
+            desc: Human-readable description of the case set.
+        """
+        raise NotImplementedError("Subclasses must implement init_case_set")
+
+    def case_set_id_exists(self, case_set_id) -> bool:
+        """Checks whether the given case_set_id already exists in the CaseSet table."""
+        raise NotImplementedError(
+            "Subclasses must implement case_set_id_exists")
+
+    def get_case_set_desc(self, case_set_id) -> str:
+        """Gets the description for the given case_set_id from the CaseSet table."""
+        raise NotImplementedError(
+            "Subclasses must implement get_case_set_desc")
+
+    def finish_case_set(self, case_set_id, valid, invalid, duration):
+        """Marks a CaseSet as completed and records summary statistics.
+
+        Called at the end of a tuning run after all cases have been written.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+            valid: Number of valid cases that were written.
+            invalid: Number of invalid cases that were skipped.
+            duration: Total wall-clock time in seconds for the tuning run.
+        """
+        raise NotImplementedError("Subclasses must implement finish_case_set")
+
+    def get_case_set_metadata(self, case_set_id):
+        """Retrieves metadata associated with a case set.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+
+        Returns:
+            A dict with keys:
+                'tpu_inference_hash': git hash of the tpu-inference repo.
+                'bm_infra_hash': git hash of the bm-infra repo.
+                'kernel_runner': name of the KernelTunerRunner class used.
+        """
+        raise NotImplementedError(
+            "Subclasses must implement get_case_set_metadata")
+
+    def save_result(self, result: CaseResult):
+        """Buffers a single CaseResult for storage and flushes when batch threshold is met.
+
+        Args:
+            result: A CaseResult instance.
+        """
+        assert isinstance(
+            result,
+            CaseResult), f'result is not a CaseResult instance: {result}'
+        self.results_buffer.append(result)
+        if len(self.results_buffer) >= self.results_batch_size:
+            self.flush_results()
+
+    def flush_results(self):
+        """Flushes any buffered result tuples to the backend storage."""
+        if self.results_buffer:
+            self.save_results_batch()
+            self.results_buffer.clear()
+
+    def flush(self):
+        """Flushes any buffered tuning cases and results to the backend storage.
+
+        Implementations that buffer writes (e.g. for batching) must commit all
+        pending data when this is called.
+        """
+        self.flush_results()
+
+    def add_tuner_case(self,
+                       caseset_id: str,
+                       case_id: int,
+                       case: str,
+                       tpu: str = None):
+        """Buffers a single tuning case for storage.
+
+        Implementations may batch writes internally and flush automatically when
+        a buffer threshold is reached.
+
+        Args:
+            caseset_id: Unique string identifier for the case set.
+            case_id: Integer index of this case within the case set.
+            case: String encoding of the case in 'key:value' format.
+            tpu: TPU queue identifier where this case is generated (e.g. tpu_v6e_8_queue).
+        """
+        raise NotImplementedError("Subclasses must implement add_tuner_case")
+
+    def create_bucket_for_run(self,
+                              cs_id: str,
+                              r_id: int,
+                              bucket_id: int,
+                              start_case_id: int,
+                              end_case_id: int,
+                              tpu: str = None):
+        """Creates a new work bucket for a tuning run.
+
+        Used by tuner agents to define discrete units of work (buckets) that can
+        be claimed and processed independently.
+
+        Args:
+            cs_id: Case set ID the bucket belongs to.
+            r_id: Run ID the bucket belongs to.
+            bucket_id: Unique integer identifier for the bucket within the run.
+            start_case_id: Starting case ID (inclusive) for this bucket.
+            end_case_id: Ending case ID (inclusive) for this bucket.
+            tpu: TPU queue identifier where this bucket will be executed.
+        """
+        raise NotImplementedError(
+            "Subclasses must implement create_buckets_for_run")
+
+    def update_bucket_status(self, cs_id, r_id, b_id, status: BucketStatus):
+        """Marks a work bucket as IN_PROGRESS, claiming it for the current worker.
+
+        Used by tuner agents to coordinate work distribution and avoid duplicate
+        processing across workers.
+
+        Args:
+            cs_id: Case set ID the bucket belongs to.
+            r_id: Run ID the bucket belongs to.
+            b_id: Bucket ID to update.
+            status: Status to update the bucket to.
+        """
+        raise NotImplementedError(
+            "Subclasses must implement update_bucket_status")
+
+    def add_bucket_processed_time_us(self, cs_id, r_id, b_id,
+                                     processed_time_us):
+        """Add the processed_time_us to the total processed time for the bucket.
+
+        Used by tuner agents to update the total processing time for a bucket as a whole bucket can be broken down into multiple smaller sub-buckets for enabling the TPU Machines to work on other jobs like CICD. Tuning jobs has the lowest priority it should be able to yield the resources when there is a high priority job.
+
+        Args:
+            cs_id: Case set ID the bucket belongs to.
+            r_id: Run ID the bucket belongs to.
+            b_id: Bucket ID to update the processed time for.
+            processed_time_us: Time in microseconds to add to the bucket's total processed time.
+        """
+        raise NotImplementedError(
+            "Subclasses must implement add_bucket_processed_time_us")
+
+    def get_already_processed_ids(self, cs_id: str, r_id: str, start: int,
+                                  end: int) -> list[ProcessedCaseStatus]:
+        """Returns case IDs that have already been processed within a range.
+
+        Used by tuner agents to resume interrupted runs without reprocessing
+        completed cases.
+
+        Args:
+            cs_id: Case set ID to query.
+            r_id: Run ID to query.
+            start: Start of the case ID range (inclusive).
+            end: End of the case ID range (inclusive).
+
+        Returns:
+            A list of ProcessedCaseStatus namedtuples, each containing:
+                'case_id': the case ID (int)
+                'status': the processing status (str) of the case
+        """
+        raise NotImplementedError(
+            "Subclasses must implement get_already_processed_ids")
+
+    def save_results_batch(self):
+        """Immediately persists a batch of tuning results to the backend.
+
+        Called by tuner agents after completing a batch of cases.
+        """
+        raise NotImplementedError(
+            "Subclasses must implement save_results_batch")
+
+    def get_bucket_configs(self, cs_id, start, end):
+        """Retrieves the tuning case configurations for a range of case IDs.
+
+        Called by tuner agents to fetch the cases they need to run.
+
+        Args:
+            cs_id: Case set ID to query.
+            start: Start of the case ID range (inclusive).
+            end: End of the case ID range (inclusive).
+
+        Returns:
+            A dict mapping case_id (int) to the corresponding storage row for
+            that case.
+        """
+        raise NotImplementedError(
+            "Subclasses must implement get_bucket_configs")
+
+    def get_total_cases_in_case_set(self, case_set_id):
+        """Returns the total number of cases in the given case set.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+
+        Returns:
+            The total number of cases in the case set.
+        """
+        raise NotImplementedError(
+            "Subclasses must implement get_total_cases_in_case_set")
+
+    def get_timestamp_sec(self):
+        """Returns the current timestamp in seconds since the epoch.
+
+        Used for logging the time of events.
+
+        Returns:
+            Current timestamp in seconds.
+        """
+        raise NotImplementedError(
+            "Subclasses must implement get_timestamp_sec")
+
+    def close(self):
+        """Closes any open connections or resources held by the storage manager."""
+        raise NotImplementedError("Subclasses must implement close")
+
+    def add_autotune_case(self,
+                          case_set_id: str,
+                          case_str: str,
+                          kernel_tuner_name: str,
+                          tpu: str = None):
+        """Adds a tuning case to the AutoTuneCase table for logging purposes.
+
+        Called by the autotuning pipeline to log the tuning key and tuned params
+        for each case.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+            case_str: String encoding of the tuning case (e.g. in 'key:value' format).
+            kernel_tuner_name: Name of the kernel tuner.
+            tpu: Optional TPU identifier.
+        """
+        raise NotImplementedError(
+            "Subclasses must implement add_autotune_case")
+
+    def read_autotune_cases(self,
+                            case_set_id: str,
+                            kernel_tuner_name: str = None,
+                            tpu: str = None) -> list[dict]:
+        """Reads tuning cases from the AutoTuneCase table for a given case set.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+            kernel_tuner_name: Optional name of the kernel tuner.
+            tpu: Optional TPU identifier.
+
+        Returns:
+            List of tuning cases. For example, each case is represented as a dict with keys:
+                'CaseKeyValue': tuning case string,
+                'KernelTunerName': name of the kernel tuner,
+                'TPU': TPU identifier.
+        """
+        raise NotImplementedError(
+            "Subclasses must implement read_autotune_cases")
+
+    def get_all_cases(self, case_set_id) -> list[tuple[int, str]]:
+        """Returns all cases in the given case set.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+
+        Returns:
+            A list of all cases in the case set in the formate of [CaseId, CaseKeyValue].
+        """
+        raise NotImplementedError("Subclasses must implement get_all_cases")

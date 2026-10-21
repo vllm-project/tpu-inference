@@ -38,7 +38,7 @@ get_tpu_generation() {
         "FP8 W8A8") echo "v7" ;;
         "FP8 W8A16") echo "v7" ;;
         "FP4 W4A16") echo "v7" ;;
-        "AWQ INT4") echo "\"v5, v6\"" ;;
+        "NVFP4 W4A16") echo "v7" ;;
         *) echo "N/A" ;;
     esac
 }
@@ -51,7 +51,7 @@ get_quantization_method() {
         "FP8 W8A8") echo "compressed-tensor" ;;
         "FP8 W8A16") echo "compressed-tensor" ;;
         "FP4 W4A16") echo "mxfp4" ;;
-        "AWQ INT4") echo "" ;;
+        "NVFP4 W4A16") echo "modelopt_fp4" ;;
         *) echo "N/A" ;;
     esac
 }
@@ -117,7 +117,11 @@ process_models() {
             if [ "$stage" == "Type" ]; then
                 if [ "$category" == "multimodal" ]; then
                     result="Multimodal"
-                else
+                elif [ "$category" == "embedding" ]; then
+                    result="Embedding"
+                elif [ "$category" == "diffusion" ]; then
+                    result="Diffusion"
+                else 
                     result="Text"
                 fi
             else
@@ -289,6 +293,37 @@ process_kernel_matrix_to_pivot() {
     buildkite-agent artifact upload "$output_file"
 }
 
+# Package all CSVs into a tar archive with internal structure: {tpu-type}/{impl_type}/*.csv
+package_support_matrices_tar() {
+    local impl_type="default"
+    if [[ "${MODEL_IMPL_TYPE:-auto}" == "vllm" || "${MODEL_IMPL_TYPE:-auto}" == "flax_nnx" ]]; then
+        impl_type="${MODEL_IMPL_TYPE}"
+    fi
+
+    local archive_file="${TPU_DIR}_${impl_type}.tar.gz"
+    local staging_dir="staging_${TPU_DIR}"
+    local target_dir="${staging_dir}/${TPU_DIR}/${impl_type}"
+
+    # Removed any legacy files from previous runs
+    rm -f "${archive_file}"
+    rm -rf "${staging_dir}"
+    mkdir -p "${target_dir}"
+
+    # Only copy support matrix CSV files
+    cp "${TPU_DIR}"/*_support_matrix.csv "${target_dir}/" 2>/dev/null || true
+    if [[ -f "${TPU_DIR}/kernel_support_matrix-microbenchmarks.csv" ]]; then
+        cp "${TPU_DIR}/kernel_support_matrix-microbenchmarks.csv" "${target_dir}/"
+    fi
+
+    echo "--- Creating Tar Archive: ${archive_file} (${TPU_DIR}/${impl_type}/) ---"
+    (cd "${staging_dir}" && tar -czf "../${archive_file}" "${TPU_DIR}")
+
+    echo "--- Uploading Tar Artifact: ${archive_file} ---"
+    buildkite-agent artifact upload "${archive_file}"
+    rm -f "${archive_file}"
+    rm -rf "${staging_dir}"
+}
+
 if [ ${#model_list[@]} -gt 0 ]; then
     process_models
 fi
@@ -301,7 +336,7 @@ if [ ${#metadata_feature_list[@]} -gt 0 ]; then
     process_features "METADATA" "${metadata_feature_list[@]}"
 fi
 
-buildkite-agent meta-data set "CI_TESTS_FAILED" "${ANY_FAILED}"
+buildkite-agent meta-data set "${TPU_METADATA_PREFIX}_CI_TESTS_FAILED" "${ANY_FAILED}"
 
 # Model support matrices
 for csv_file in "${model_csv_files[@]:-}"; do
@@ -341,6 +376,9 @@ done
 
 # Process the Kernel Matrix into the pivoted format
 process_kernel_matrix_to_pivot
+
+# Package all CSV matrices into a tar archive with {tpu-type}/{impl_type} structure
+package_support_matrices_tar
 
 echo "Reports uploaded successfully."
 

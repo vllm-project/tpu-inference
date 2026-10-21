@@ -1,0 +1,394 @@
+#!/bin/bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -Eeuo pipefail
+
+# ==============================================================================
+# 0. Global Panic Handler (Crash Interceptor)
+# ==============================================================================
+# shellcheck disable=SC2317
+on_crash() {
+    local exit_code=$?
+    local line_no=$1
+    local command="$2"
+    
+    # Ignore normal exits
+    if [ "$exit_code" -eq 0 ]; then
+        return
+    fi
+
+
+    # Ignore explicit 'exit' commands as these are controlled intentional exits
+    if [[ "$command" == exit* ]]; then
+        return
+    fi
+
+    echo ""
+    echo "================================================================"
+    echo "🚨 [FATAL ERROR] Bash Script Crashed Unexpectedly!"
+    echo "================================================================"
+    echo "File:     $(basename "$0")"
+    echo "Line:     $line_no"
+    echo "Command:  $command"
+    echo "ExitCode: $exit_code"
+    echo "================================================================"
+    echo ""
+}
+
+# Bind the ERR signal: Triggers on_crash immediately if any command fails 
+# and is not explicitly caught by an 'if' statement or '||' operator.
+trap 'on_crash ${LINENO} "$BASH_COMMAND"' ERR
+
+# ==============================================================================
+# Strict allowlist for metric column names read from RESULT_FILE.
+# ==============================================================================
+ALLOWED_METRIC_KEYS=(
+    "Throughput"
+    "MedianITL"
+    "MedianTPOT"
+    "MedianTTFT"
+    "MedianETEL"
+    "P99ITL"
+    "P99TPOT"
+    "P99TTFT"
+    "P99ETEL"
+    "OutputTokenThroughput"
+    "TotalTokenThroughput"
+    "AccuracyMetrics"
+)
+
+is_allowed_metric_key() {
+    local key="$1"
+    local allowed
+    for allowed in "${ALLOWED_METRIC_KEYS[@]}"; do
+        if [[ "$key" == "$allowed" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# ==============================================================================
+# Validate that a value is a safe numeric literal before embedding it directly (without quoting) into SQL.
+# Rejects anything that is not a plain integer or decimal float.
+# ==============================================================================
+is_safe_numeric() {
+    local val="$1"
+    [[ "$val" =~ ^[0-9]+(\.[0-9]+)?$ ]]
+}
+
+prepare_sql_val() {
+  local val="$1"
+  local default="$2"
+  if [ -z "$val" ]; then
+    echo "$default"
+    return
+  fi
+
+  # Strip surrounding whitespace
+  val="${val#"${val%%[![:space:]]*}"}"
+  val="${val%"${val##*[![:space:]]}"}"
+
+  val="${val#\'}"
+  val="${val%\'}"
+  
+  local escaped_val="${val//\'/\'\'}"
+  echo "'$escaped_val'"
+}
+
+# ==============================================================================
+# Validate numeric-only environment variables before they are
+# interpolated bare (unquoted) into the SQL string.
+# ==============================================================================
+safe_numeric_or_null() {
+    local val="${1:-}"
+    if [[ -z "$val" ]]; then
+        echo "NULL"
+    elif is_safe_numeric "$val"; then
+        echo "$val"
+    else
+        echo "Error: Expected a numeric value but got: '$val'" >&2
+        exit 1
+    fi
+}
+
+if [ $# -lt 1 ]; then
+  echo "Usage: $0 <RECORD_ID> [EXIT_CODE]"
+  exit 1
+fi
+
+RECORD_ID=$1
+EXIT_CODE=${2:-0} # Default to 0 if not provided
+RUN_TYPE="${RUN_TYPE:-DAILY}"
+
+# Define Result_file name
+RESULT_FILE="${ARTIFACT_FOLDER}/${RECORD_ID}.result"
+
+# Upload logs to GCS if bucket is provided
+if [[ -n "${GCS_BUCKET:-}" ]]; then
+  # TODO: When switching to Production after validation is complete, 
+  # please change to use `$GCS_BUCKET` as the log storage bucket. 
+  # For now, it is hardcoded to use the `vllm-bm-bk-storage` bucket.
+  # REMOTE_LOG_ROOT="gs://$GCS_BUCKET/job_logs/$RECORD_ID/"
+  REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
+  if command -v gsutil &> /dev/null; then
+    echo "--- Uploading $LOG_FOLDER to unified GCS: $REMOTE_LOG_ROOT"
+    gsutil cp -r "$LOG_FOLDER"/* "$REMOTE_LOG_ROOT" || echo "Warning: Failed to upload log folder to GCS."
+  else
+    echo "Warning: gsutil not found. Skipping log upload to GCS."
+  fi
+else
+  echo "Warning: GCS_BUCKET is not set. Skipping log upload to GCS."
+fi
+
+(
+  if [ "${BUILDKITE:-false}" == "true" ]; then
+    ENV_CONTEXT="Buildkite environment"
+  else
+    ENV_CONTEXT="Local environment"
+  fi
+  printf "[DEBUG] Start scan artifacts folder (Environment: %s)...\n" "$ENV_CONTEXT"
+  printf "[INFO] ARTIFACT_FOLDER=\n%s\n" "$ARTIFACT_FOLDER"
+  if [ -d "$ARTIFACT_FOLDER" ]; then
+    printf "[DEBUG] ls $ARTIFACT_FOLDER=\n%s\n" "$(ls "$ARTIFACT_FOLDER")"
+  fi
+  printf "[INFO] LOG_FOLDER=\n%s\n" "$LOG_FOLDER"
+
+  # Handle log file
+
+  # Metric data extraction from log file
+  BM_LOG="$LOG_FOLDER/bm_log.txt"
+
+  # Use unified Python script to parse all metrics from the log
+  python3 "$(dirname "$0")/parse_benchmark_log.py" "$BM_LOG" "$RESULT_FILE" || true
+
+  if [ "$EXIT_CODE" -eq 0 ]; then
+    if [[ "$RUN_TYPE" == *"ACCURACY"* ]]; then
+      # Accuracy run logic validation
+      if ! grep -q "AccuracyMetrics" "$RESULT_FILE"; then
+        echo "Error: Accuracy run ($RUN_TYPE) but no AccuracyMetrics found."
+        exit 1
+      fi
+    else
+      # Performance run logic validation
+      # Extract Throughput from RESULT_FILE to check against EXPECTED_THROUGHPUT
+      throughput=$(grep "^Throughput=" "$RESULT_FILE" | cut -d "=" -f 2 || true)
+      
+      if [[ -z "$throughput" || ! "$throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        echo "Failed to get the throughput and this is not an accuracy run."
+        exit 1
+      fi
+
+      output_token_throughput=$(grep "^OutputTokenThroughput=" "$RESULT_FILE" | cut -d "=" -f 2 || true)
+      if [[ -z "$output_token_throughput" || ! "$output_token_throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        echo "Failed to get output_token_throughput."
+        exit 1
+      fi
+
+      total_token_throughput=$(grep "^TotalTokenThroughput=" "$RESULT_FILE" | cut -d "=" -f 2 || true)
+      if [[ -z "$total_token_throughput" || ! "$total_token_throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        echo "Failed to get total_token_throughput."
+        exit 1
+      fi
+
+      # Compare throughput using awk for float support
+      EXPECTED_THROUGHPUT_VAL="${EXPECTED_THROUGHPUT:-0}"
+      IS_LOW_THROUGHPUT=$(echo "$throughput $EXPECTED_THROUGHPUT_VAL" | awk '{if ($1 < $2 || $1 == 0) print 1; else print 0}')
+      if [ "$IS_LOW_THROUGHPUT" -eq 1 ]; then
+        echo "Error: throughput($throughput) is less than expected($EXPECTED_THROUGHPUT_VAL) or is 0"
+      fi
+    fi
+  else
+    echo "--- Skipping metric validation because EXIT_CODE ($EXIT_CODE) indicates failure."
+  fi
+)
+
+# Database Reporting Logic (ON CONFLICT (RecordId) DO UPDATE SET)
+if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_PROJECT_ID:-}" && -n "${GCP_INSTANCE_ID:-}" ]]; then
+  if [ "$EXIT_CODE" -ne 0 ]; then
+    echo "--- run_bm.sh failed with exit code $EXIT_CODE. Skipping DB reporting."
+    exit 0
+  fi
+
+  MANDATORY_VARS=(
+    "RECORD_ID"
+    "DEVICE"
+    "MODEL"
+    "CODE_HASH"
+    "TARGET_CASE_NAME"
+    "DATASET"
+    "TENSOR_PARALLEL_SIZE"
+    "INPUT_LEN"
+    "OUTPUT_LEN"
+    "MAX_NUM_SEQS"
+    "MAX_NUM_BATCHED_TOKENS"
+    "MAX_MODEL_LEN"
+  )
+
+  for var_name in "${MANDATORY_VARS[@]}"; do
+    if [[ -z "${!var_name:-}" ]]; then
+      echo "Error: Environment variable $var_name is not set or empty. This is mandatory for database reporting." >&2
+      exit 1
+    fi
+  done
+
+  BUILDKITE_AGENT_NAME="${BUILDKITE_AGENT_NAME:-local-test}"
+
+  # Parse metric assignments for dynamic columns
+  FINAL_STATUS="FAILED"
+  insert_cols=""
+  insert_vals=""
+  update_metrics=""
+
+  if [ -f "$RESULT_FILE" ]; then
+      while IFS='=' read -r key value; do
+          # ------------------------------------------------------------------
+          # Validate key against strict allowlist.
+          # Keys that are not in the allowlist are silently skipped.
+          # ------------------------------------------------------------------
+          if [[ -z "$key" || -z "$value" ]]; then
+              continue
+          fi
+
+          if ! is_allowed_metric_key "$key"; then
+              echo "Warning: Skipping unrecognized metric key '$key' (not in allowlist)." >&2
+              continue
+          fi
+
+          # ------------------------------------------------------------------
+          # Validate value types before SQL embedding.
+          # AccuracyMetrics is kept as a JSON literal; all other metric values
+          # must be strictly numeric — any non-numeric value aborts the script.
+          # ------------------------------------------------------------------
+          if [[ "$key" == "AccuracyMetrics" ]]; then
+              val_str="JSON '${value}'"
+          elif is_safe_numeric "$value"; then
+              val_str="${value}"
+          else
+              echo "Error: Non-numeric value for metric key '$key': '$value'" >&2
+              exit 1
+          fi
+
+          insert_cols+=", $key"
+          insert_vals+=", $val_str"
+          # Use excluded keyword to refer to the proposed insert value
+          update_metrics+=", ${key}=excluded.${key}"
+          FINAL_STATUS="COMPLETED"
+      done < "$RESULT_FILE"
+  fi
+
+  # ------------------------------------------------------------------
+  # All string variables passed into SQL go through the hardened prepare_sql_val (backslash + single-quote
+  # escaping, length cap).
+  # Numeric variables go through safe_numeric_or_null which rejects anything that is not a plain integer or decimal float.
+  # ------------------------------------------------------------------
+  SQL_ADDITIONAL_CONFIG=$(prepare_sql_val "${ADDITIONAL_CONFIG:-}" "'{}'")
+  SQL_EXTRA_ARGS=$(prepare_sql_val "${EXTRA_ARGS:-}" "''")
+  SQL_EXTRA_ENVS=$(prepare_sql_val "${EXTRA_ENVS:-}" "''")
+  SQL_RECORD_ID=$(prepare_sql_val "$RECORD_ID" "''")
+  SQL_STATUS=$(prepare_sql_val "$FINAL_STATUS" "FAILED")
+  SQL_USER=$(prepare_sql_val "${USER:-buildkite-agent}" "buildkite-agent")
+  SQL_JOB_REFERENCE=$(prepare_sql_val "${JOB_REFERENCE:-}" "''")
+  SQL_AGENT_NAME=$(prepare_sql_val "${BUILDKITE_AGENT_NAME:-}" "''")
+  SQL_DEVICE=$(prepare_sql_val "${DEVICE:-}" "''")
+  SQL_MODEL=$(prepare_sql_val "${MODEL_NAME:-${MODEL:-}}" "''")
+  SQL_RUN_TYPE=$(prepare_sql_val "${RUN_TYPE:-DAILY}" "DAILY")
+  SQL_CODE_HASH=$(prepare_sql_val "${CODE_HASH:-}" "''")
+  SQL_CASE_NAME=$(prepare_sql_val "${TARGET_CASE_NAME:-}" "''")
+  SQL_DATASET=$(prepare_sql_val "${DATASET:-}" "''")
+  SQL_MODELTAG=$(prepare_sql_val "${MODELTAG:-PROD}" "PROD")
+  SQL_CONFIG=$(prepare_sql_val "${CASE_CONFIG_JSON:-}" "{}")
+
+  # Validate all bare numeric placeholders.
+  SQL_MAX_NUM_SEQS=$(safe_numeric_or_null "${MAX_NUM_SEQS:-}")
+  SQL_MAX_NUM_BATCHED_TOKENS=$(safe_numeric_or_null "${MAX_NUM_BATCHED_TOKENS:-}")
+  SQL_TENSOR_PARALLEL_SIZE=$(safe_numeric_or_null "${TENSOR_PARALLEL_SIZE:-}")
+  SQL_MAX_MODEL_LEN=$(safe_numeric_or_null "${MAX_MODEL_LEN:-}")
+  SQL_INPUT_LEN=$(safe_numeric_or_null "${INPUT_LEN:-}")
+  SQL_OUTPUT_LEN=$(safe_numeric_or_null "${OUTPUT_LEN:-}")
+  SQL_EXPECTED_ETEL=$(safe_numeric_or_null "${EXPECTED_ETEL:-3600000}")
+  SQL_NUM_PROMPTS=$(safe_numeric_or_null "${NUM_PROMPTS:-1000}")
+  SQL_PREFIX_LEN=$(safe_numeric_or_null "${PREFIX_LEN:-0}")
+
+  SQL="INSERT INTO RunRecord (
+      RecordId, Status, CreatedTime, LastUpdate, CreatedBy, JobReference, RunBy,
+      Device, Model, RunType, CodeHash,
+      CaseName,
+      MaxNumSeqs, MaxNumBatchedTokens, TensorParallelSize, MaxModelLen,
+      Dataset, InputLen, OutputLen,
+      ExpectedETEL, NumPrompts, ModelTag, PrefixLen,
+      ExtraEnvs, AdditionalConfig, ExtraArgs, TryCount, Config $insert_cols
+    ) VALUES (
+      $SQL_RECORD_ID, $SQL_STATUS, PENDING_COMMIT_TIMESTAMP(), PENDING_COMMIT_TIMESTAMP(), $SQL_USER, $SQL_JOB_REFERENCE, $SQL_AGENT_NAME,
+      $SQL_DEVICE, $SQL_MODEL, $SQL_RUN_TYPE, $SQL_CODE_HASH,
+      $SQL_CASE_NAME,
+      $SQL_MAX_NUM_SEQS, $SQL_MAX_NUM_BATCHED_TOKENS, $SQL_TENSOR_PARALLEL_SIZE, $SQL_MAX_MODEL_LEN,
+      $SQL_DATASET, $SQL_INPUT_LEN, $SQL_OUTPUT_LEN,
+      $SQL_EXPECTED_ETEL, $SQL_NUM_PROMPTS, $SQL_MODELTAG, $SQL_PREFIX_LEN,
+      $SQL_EXTRA_ENVS, $SQL_ADDITIONAL_CONFIG, $SQL_EXTRA_ARGS, 1, JSON r$SQL_CONFIG $insert_vals
+    ) ON CONFLICT (RecordId) DO UPDATE SET
+      Status = excluded.Status,
+      LastUpdate = excluded.LastUpdate,
+      RunBy = excluded.RunBy,
+      TryCount = RunRecord.TryCount + 1,
+      Config = excluded.Config
+      $update_metrics;"
+
+  # Off unless SPANNER_UPLOAD_ENABLED=true. Spanner bills each call to the
+  # caller's own project, so on a host whose project doesn't have the Spanner
+  # API enabled (the inferact tpu7x-8 hosts) the write fails the whole job.
+  if [[ "${SPANNER_UPLOAD_ENABLED:-false}" == "true" ]]; then
+    echo "Executing Atomic Upsert SQL:"
+    echo "$SQL"
+
+    gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
+      --project="$GCP_PROJECT_ID" \
+      --instance="$GCP_INSTANCE_ID" \
+      --sql="$SQL"
+    echo "--- Reporting finished (DB written)"
+  else
+    echo "--- Reporting to Spanner (skipped)"
+  fi
+
+  # Keyed by RECORD_ID, the same key as RunRecord, so rows in the two sinks
+  # can be joined. Non-fatal: a BigQuery outage or a missing grant must not
+  # fail an otherwise good benchmark run.
+  if [[ "${BQ_UPLOAD_ENABLED:-true}" == "true" ]]; then
+    echo "--- Reporting to BigQuery"
+    python3 "$(dirname "${BASH_SOURCE[0]}")/report_bigquery.py" \
+      --record-id="$RECORD_ID" \
+      --result-file="$RESULT_FILE" \
+      --status="$FINAL_STATUS" \
+      || echo "Warning: BigQuery dual write failed for $RECORD_ID."
+  else
+    echo "--- Reporting to BigQuery (skipped)"
+  fi
+else
+  echo "--- Reporting finished (Local test scenario: GCP variables not set, skipping DB reporting)"
+  if [ -f "$RESULT_FILE" ]; then
+    echo "--- Final Benchmark Results ($RESULT_FILE) ---"
+    cat "$RESULT_FILE"
+    echo "------------------------------------------------"
+  else
+    echo "Warning: $RESULT_FILE not found. No results to display."
+  fi
+fi
+
+if [[ "${MLCOMPASS_EXPORT_ENABLED:-false}" == "true" ]]; then
+  echo "--- Reporting to MLCompass"
+  python3 "$(dirname "${BASH_SOURCE[0]}")/mlcompass_export.py" --result_file="$RESULT_FILE"
+else
+  echo "--- Reporting to MLCompass (skipped)"
+fi

@@ -527,7 +527,7 @@ def _verify_lora_linear_layer(linear, lora_linear):
         # if len(devices) != 1, `reorder_concatenated_tensor_for_sharding` function may reorder the out_features dimension of the weight matrix.
         # So the below check will fail.
         if len(_get_devices()) == 1:
-            assert torch.equal(linear.weight.data,
+            assert torch.equal(linear.weight.data.t(),
                                lora_linear.weight.to('cpu'))
 
 
@@ -659,3 +659,136 @@ def _create_lora_wrapper(linear,
         lora_linear.lora_b_stacked) == n_slices)
 
     return lora_linear
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("num_loras", [1, 4, 9])
+def test_punica_wrapper_add_lora_embedding(dist_init, num_loras) -> None:
+    set_random_seed(6)
+    max_loras = 9
+    max_lora_rank = 8
+
+    max_num_batched_tokens = 8192
+    max_batches = 256
+    with torchax.default_env():
+        punica_wrapper = get_punica_wrapper(max_num_batched_tokens,
+                                            max_batches,
+                                            'jax',
+                                            max_loras=max_loras)
+
+    index_to_id = get_random_index_to_id(num_loras, max_loras)
+
+    num_tokens = 32
+    x = torch.rand((num_tokens, max_lora_rank), dtype=torch.bfloat16)
+    y = torch.rand((num_tokens, 64), dtype=torch.bfloat16)
+
+    lora_b_stacked = torch.rand((max_loras, 1, 64, max_lora_rank),
+                                dtype=torch.bfloat16)
+
+    valid_lora_ids = [i for i in index_to_id if i is not None]
+    if not valid_lora_ids:
+        valid_lora_ids = [1]
+        index_to_id[0] = 1
+
+    prompt_mapping = [random.choice(valid_lora_ids) for _ in range(num_tokens)]
+    index_mapping = prompt_mapping
+
+    lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=True)
+    with torchax.default_env():
+        # Convert inputs to torchax tensors
+        x_torchax = torch_view(t2j(x))
+        y_torchax = torch_view(t2j(y))
+        lora_b_stacked_torchax = torch_view(t2j(lora_b_stacked))
+
+        punica_wrapper.update_metadata(lora_mapping,
+                                       index_to_id,
+                                       max_loras,
+                                       vocab_size=512)
+        actual_result = punica_wrapper.add_lora_embedding(
+            y_torchax.clone(), x_torchax, lora_b_stacked_torchax)
+
+    expected_result = y.clone()
+    for i in range(num_tokens):
+        lora_id = prompt_mapping[i]
+        if lora_id is not None:
+            lora_idx = index_to_id.index(lora_id)
+            lora_b = lora_b_stacked[lora_idx, 0, :, :]
+            expected_result[i] += x[i] @ lora_b.T
+
+    rtol, atol = TOLERANCES[actual_result.dtype]
+    with torchax.default_env():
+        actual_result_cpu = actual_result.to('cpu')
+        torch.testing.assert_close(actual_result_cpu,
+                                   expected_result,
+                                   rtol=rtol,
+                                   atol=atol)
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("num_loras", [1, 4, 9])
+def test_punica_wrapper_add_lora_logits(dist_init, num_loras) -> None:
+    set_random_seed(6)
+    max_loras = 9
+    max_lora_rank = 8
+
+    max_num_batched_tokens = 8192
+    max_batches = 256
+    with torchax.default_env():
+        punica_wrapper = get_punica_wrapper(max_num_batched_tokens,
+                                            max_batches,
+                                            'jax',
+                                            max_loras=max_loras)
+
+    index_to_id = get_random_index_to_id(num_loras, max_loras)
+
+    num_tokens = 32
+    x = torch.rand((num_tokens, 64), dtype=torch.bfloat16)
+    y = torch.rand((num_tokens, 512), dtype=torch.bfloat16)
+
+    lora_a_stacked = torch.rand((max_loras, 1, max_lora_rank, 64),
+                                dtype=torch.bfloat16)
+    lora_b_stacked = torch.rand((max_loras, 1, 512, max_lora_rank),
+                                dtype=torch.bfloat16)
+
+    valid_lora_ids = [i for i in index_to_id if i is not None]
+    if not valid_lora_ids:
+        valid_lora_ids = [1]
+        index_to_id[0] = 1
+
+    prompt_mapping = [random.choice(valid_lora_ids) for _ in range(num_tokens)]
+    index_mapping = prompt_mapping
+
+    lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=True)
+    with torchax.default_env():
+        # Convert inputs to torchax tensors
+        x_torchax = torch_view(t2j(x))
+        y_torchax = torch_view(t2j(y))
+        lora_a_stacked_torchax = torch_view(t2j(lora_a_stacked))
+        lora_b_stacked_torchax = torch_view(t2j(lora_b_stacked))
+
+        punica_wrapper.update_metadata(lora_mapping,
+                                       index_to_id,
+                                       max_loras,
+                                       vocab_size=512)
+        actual_result = punica_wrapper.add_lora_logits(y_torchax.clone(),
+                                                       x_torchax,
+                                                       lora_a_stacked_torchax,
+                                                       lora_b_stacked_torchax,
+                                                       scale=1.0)
+
+    expected_result = y.clone()
+    for i in range(num_tokens):
+        lora_id = prompt_mapping[i]
+        if lora_id is not None:
+            lora_idx = index_to_id.index(lora_id)
+            lora_a = lora_a_stacked[lora_idx, 0, :, :]
+            lora_b = lora_b_stacked[lora_idx, 0, :, :]
+            expected_result[i] += (x[i] @ lora_a.T) @ lora_b.T
+
+    rtol, atol = TOLERANCES[actual_result.dtype]
+    with torchax.default_env():
+        actual_result_cpu = actual_result.to('cpu')
+        torch.testing.assert_close(actual_result_cpu,
+                                   expected_result,
+                                   rtol=rtol,
+                                   atol=atol)

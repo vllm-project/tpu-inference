@@ -8,6 +8,13 @@ from tpu_inference.envs import enable_envs_cache, environment_variables
 
 
 def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
+    # A default is only observable if the variable is unset, and the TPU device
+    # plugin injects TPU_ACCELERATOR_TYPE and TPU_NAME into any container
+    # holding a chip.
+    for name in ("JAX_PLATFORMS", "PHASED_PROFILING_DIR", "TPU_NAME",
+                 "TPU_ACCELERATOR_TYPE"):
+        monkeypatch.delenv(name, raising=False)
+
     assert envs.JAX_PLATFORMS == ""
     assert envs.PHASED_PROFILING_DIR == ""
     monkeypatch.setenv("JAX_PLATFORMS", "tpu")
@@ -64,6 +71,7 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("USE_MOE_EP_KERNEL", "0")
     monkeypatch.setenv("LAYOUT_Q_PROJ_AS_NDH", "0")
     monkeypatch.setenv("USE_BATCHED_RPA_KERNEL", "0")
+    monkeypatch.setenv("DISABLE_WEIGHT_REQUANTIZATION", "0")
 
     # Test SKIP_JAX_PRECOMPILE (default False)
     assert envs.SKIP_JAX_PRECOMPILE is False
@@ -71,6 +79,13 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     assert envs.SKIP_JAX_PRECOMPILE is True
     monkeypatch.setenv("SKIP_JAX_PRECOMPILE", "0")
     assert envs.SKIP_JAX_PRECOMPILE is False
+
+    # Test DISABLE_WEIGHT_REQUANTIZATION (default False)
+    assert envs.DISABLE_WEIGHT_REQUANTIZATION is False
+    monkeypatch.setenv("DISABLE_WEIGHT_REQUANTIZATION", "1")
+    assert envs.DISABLE_WEIGHT_REQUANTIZATION is True
+    monkeypatch.setenv("DISABLE_WEIGHT_REQUANTIZATION", "0")
+    assert envs.DISABLE_WEIGHT_REQUANTIZATION is False
 
     # Test VLLM_XLA_CHECK_RECOMPILATION (default False)
     assert envs.VLLM_XLA_CHECK_RECOMPILATION is False
@@ -103,6 +118,89 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     assert envs.USE_BATCHED_RPA_KERNEL is False
     monkeypatch.setenv("USE_BATCHED_RPA_KERNEL", "1")
     assert envs.USE_BATCHED_RPA_KERNEL is True
+
+
+def test_distributed_sampling_max_top_k(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("DISTRIBUTED_SAMPLING_MAX_TOP_K", raising=False)
+    assert envs.DISTRIBUTED_SAMPLING_MAX_TOP_K == 64
+    monkeypatch.setenv("DISTRIBUTED_SAMPLING_MAX_TOP_K", "32")
+    assert envs.DISTRIBUTED_SAMPLING_MAX_TOP_K == 32
+
+
+def test_moe_stage_weights_on_host(monkeypatch: pytest.MonkeyPatch):
+    """MOE_STAGE_WEIGHTS_ON_HOST is opt-in: off unless it is asked for."""
+    monkeypatch.delenv("MOE_STAGE_WEIGHTS_ON_HOST", raising=False)
+    assert envs.MOE_STAGE_WEIGHTS_ON_HOST is False
+
+    monkeypatch.setenv("MOE_STAGE_WEIGHTS_ON_HOST", "1")
+    assert envs.MOE_STAGE_WEIGHTS_ON_HOST is True
+
+    monkeypatch.setenv("MOE_STAGE_WEIGHTS_ON_HOST", "true")
+    assert envs.MOE_STAGE_WEIGHTS_ON_HOST is True
+
+    monkeypatch.setenv("MOE_STAGE_WEIGHTS_ON_HOST", "0")
+    assert envs.MOE_STAGE_WEIGHTS_ON_HOST is False
+
+
+def test_moe_hierarchical_dispatch(monkeypatch: pytest.MonkeyPatch):
+    """MOE_HIERARCHICAL_DISPATCH is opt-in: off unless it is asked for."""
+    monkeypatch.delenv("MOE_HIERARCHICAL_DISPATCH", raising=False)
+    assert envs.MOE_HIERARCHICAL_DISPATCH is False
+
+    monkeypatch.setenv("MOE_HIERARCHICAL_DISPATCH", "1")
+    assert envs.MOE_HIERARCHICAL_DISPATCH is True
+
+    monkeypatch.setenv("MOE_HIERARCHICAL_DISPATCH", "true")
+    assert envs.MOE_HIERARCHICAL_DISPATCH is True
+
+    monkeypatch.setenv("MOE_HIERARCHICAL_DISPATCH", "0")
+    assert envs.MOE_HIERARCHICAL_DISPATCH is False
+
+
+def test_moe_hierarchical_collect(monkeypatch: pytest.MonkeyPatch):
+    """MOE_HIERARCHICAL_COLLECT is opt-in: off unless it is asked for."""
+    monkeypatch.delenv("MOE_HIERARCHICAL_COLLECT", raising=False)
+    assert envs.MOE_HIERARCHICAL_COLLECT is False
+
+    monkeypatch.setenv("MOE_HIERARCHICAL_COLLECT", "1")
+    assert envs.MOE_HIERARCHICAL_COLLECT is True
+
+    monkeypatch.setenv("MOE_HIERARCHICAL_COLLECT", "true")
+    assert envs.MOE_HIERARCHICAL_COLLECT is True
+
+    monkeypatch.setenv("MOE_HIERARCHICAL_COLLECT", "0")
+    assert envs.MOE_HIERARCHICAL_COLLECT is False
+
+
+def test_moe_fold_routing_into_dispatch(monkeypatch: pytest.MonkeyPatch):
+    """MOE_FOLD_ROUTING_INTO_DISPATCH is opt-in: off unless it is asked for."""
+    monkeypatch.delenv("MOE_FOLD_ROUTING_INTO_DISPATCH", raising=False)
+    assert envs.MOE_FOLD_ROUTING_INTO_DISPATCH is False
+
+    monkeypatch.setenv("MOE_FOLD_ROUTING_INTO_DISPATCH", "1")
+    assert envs.MOE_FOLD_ROUTING_INTO_DISPATCH is True
+
+    monkeypatch.setenv("MOE_FOLD_ROUTING_INTO_DISPATCH", "true")
+    assert envs.MOE_FOLD_ROUTING_INTO_DISPATCH is True
+
+    monkeypatch.setenv("MOE_FOLD_ROUTING_INTO_DISPATCH", "0")
+    assert envs.MOE_FOLD_ROUTING_INTO_DISPATCH is False
+
+
+def test_dp_sched_routing(monkeypatch: pytest.MonkeyPatch):
+    """DP_SCHED_ROUTING defaults to least_loaded and only accepts known policies."""
+    monkeypatch.delenv("DP_SCHED_ROUTING", raising=False)
+    assert envs.DP_SCHED_ROUTING == "least_loaded"
+
+    monkeypatch.setenv("DP_SCHED_ROUTING", "round_robin")
+    assert envs.DP_SCHED_ROUTING == "round_robin"
+
+    monkeypatch.setenv("DP_SCHED_ROUTING", "Round_Robin")
+    assert envs.DP_SCHED_ROUTING.lower() == "round_robin"
+
+    monkeypatch.setenv("DP_SCHED_ROUTING", "random")
+    with pytest.raises(ValueError, match="DP_SCHED_ROUTING"):
+        _ = envs.DP_SCHED_ROUTING
 
 
 def test_boolean_env_vars_string_values(monkeypatch: pytest.MonkeyPatch):
@@ -182,6 +280,7 @@ def test_integer_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("NUM_SLICES", "1")
     monkeypatch.delenv("REQUANTIZE_BLOCK_SIZE", raising=False)
     monkeypatch.delenv("MOE_REQUANTIZE_BLOCK_SIZE", raising=False)
+    monkeypatch.delenv("CONTINUE_DECODE_EOS_CHECK_INTERVAL", raising=False)
 
     assert envs.PYTHON_TRACER_LEVEL == 1
     monkeypatch.setenv("PYTHON_TRACER_LEVEL", "3")
@@ -206,6 +305,11 @@ def test_integer_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("MOE_REQUANTIZE_BLOCK_SIZE", "512")
     assert envs.MOE_REQUANTIZE_BLOCK_SIZE == 512
 
+    # Test CONTINUE_DECODE_EOS_CHECK_INTERVAL (default 1 = stock every-step check)
+    assert envs.CONTINUE_DECODE_EOS_CHECK_INTERVAL == 1
+    monkeypatch.setenv("CONTINUE_DECODE_EOS_CHECK_INTERVAL", "8")
+    assert envs.CONTINUE_DECODE_EOS_CHECK_INTERVAL == 8
+
 
 def test_model_impl_type_choices(monkeypatch: pytest.MonkeyPatch):
     # Test case sensitive choices
@@ -215,20 +319,28 @@ def test_model_impl_type_choices(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("MODEL_IMPL_TYPE", "vllm")
     assert envs.MODEL_IMPL_TYPE == "vllm"
 
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", "flax_nnx")
+    assert envs.DRAFT_MODEL_IMPL_TYPE == "flax_nnx"
+
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", "vllm")
+    assert envs.DRAFT_MODEL_IMPL_TYPE == "vllm"
+
 
 def test_string_env_vars_defaults(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("JAX_PLATFORMS", raising=False)
     monkeypatch.delenv("PREFILL_SLICES", raising=False)
     monkeypatch.delenv("DECODE_SLICES", raising=False)
     monkeypatch.delenv("REQUANTIZE_WEIGHT_DTYPE", raising=False)
+    monkeypatch.delenv("AGGREGATED_STATS_DIR", raising=False)
     monkeypatch.delenv("MOE_REQUANTIZE_WEIGHT_DTYPE", raising=False)
 
     assert envs.JAX_PLATFORMS == ""
     assert envs.PREFILL_SLICES == ""
     assert envs.DECODE_SLICES == ""
     assert envs.PHASED_PROFILING_DIR == ""
+    assert envs.AGGREGATED_STATS_DIR == ""
     assert envs.REQUANTIZE_WEIGHT_DTYPE == "float8_e4m3fn"
-    assert envs.MOE_REQUANTIZE_WEIGHT_DTYPE == "float8_e4m3fn"
+    assert envs.MOE_REQUANTIZE_WEIGHT_DTYPE == ""
 
 
 def test_none_default_env_vars(monkeypatch: pytest.MonkeyPatch):

@@ -27,7 +27,8 @@ from tests.layers.common import utils as test_utils
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   ShardingAxisNameBase)
-from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
+from tpu_inference.layers.jax.linear import (JaxEinsum, JaxLinear,
+                                             JaxMergedColumnParallelLinear)
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.quantization.configs import QuantLinearConfig
 # yapf: disable
@@ -133,6 +134,20 @@ class TestQuantLinearConfig:
         assert config.in_features == (128, )  # D is contracting
         assert config.out_features == (8, 16)  # N, H are free
         assert config.batch_features == ()  # no batch dims
+        # N and H are two axes of one projection (e.g. k_proj's
+        # num_kv_heads, head_dim) and must be multiplied, not summed, to
+        # get the true output size — regression test for a bug where
+        # output_sizes was derived by summing per-axis sizes instead.
+        assert config.output_sizes == [8 * 16]
+
+    def test_merged_column_parallel_linear_output_sizes(self, rngs):
+        """Merged linear (e.g. gate_up_proj): output_sizes must preserve
+        the per-projection split (for fusing/splitting checkpoint shards),
+        not collapse to the product of the fused kernel's output axis."""
+        layer = JaxMergedColumnParallelLinear(32, [16, 16], rngs)
+        config = QuantLinearConfig(layer, enable_sp=False)
+        assert config.out_features == (32, )  # fused kernel's single axis
+        assert config.output_sizes == [16, 16]  # per-projection split
 
     def test_batched_einsum_tnh_anh_tna(self, rngs):
         """TNH,ANH->TNA: N is batch dim, H is contracting."""
@@ -194,8 +209,8 @@ class TestFp8BlockwiseJaxLinear:
             output = layer(x)
 
         assert output.shape == (batch_size, out_features)
-        assert layer.weight.shape == (out_features, in_features)
-        expected_weight_sharding = weight_sharding[::-1]
+        assert layer.weight.shape == (in_features, out_features)
+        expected_weight_sharding = weight_sharding
         assert sharding_to_tuple(layer.weight.sharding) == expected_weight_sharding
         if use_bias:
             assert layer.bias.shape == (out_features, )
@@ -242,10 +257,10 @@ class TestFp8BlockwiseJaxLinear:
         # Output shape should be (B, N, H)
         expected_shape = (batch_size, ) + kernel_shape[1:]
         assert output.shape == expected_shape
-        assert layer.weight.shape == (math.prod(kernel_shape[1:]), kernel_shape[0])
+        assert layer.weight.shape == (kernel_shape[0], math.prod(kernel_shape[1:]))
 
-        expected_weight_sharding = ('out',) if 'out' in weight_sharding else (None,)
-        expected_weight_sharding += ('in',) if 'in' in weight_sharding else (None,)
+        expected_weight_sharding = ('in',) if 'in' in weight_sharding else (None,)
+        expected_weight_sharding += ('out',) if 'out' in weight_sharding else (None,)
         assert sharding_to_tuple(layer.weight.sharding) == expected_weight_sharding
         if use_bias:
             assert layer.bias.shape == (math.prod(kernel_shape[1:]),)
@@ -273,7 +288,7 @@ class TestFp8BlockwiseJaxLinear:
         )
 
         devices = jax.devices()
-        mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
+        mesh = jax.sharding.Mesh(np.array(devices).reshape(1, -1), ('data', 'model'))
         with jax.set_mesh(mesh):
             assert layer.quant_method.process_weights_after_loading(layer)
 
@@ -303,7 +318,7 @@ class TestFp8BlockwiseJaxLinear:
         )
 
         devices = jax.devices()
-        mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
+        mesh = jax.sharding.Mesh(np.array(devices).reshape(1, -1), ('data', 'model'))
         with jax.set_mesh(mesh):
             assert layer.quant_method.process_weights_after_loading(layer)
 
@@ -327,7 +342,7 @@ class TestFp8TensorwiseJaxLinear:
             assert hasattr(layer, 'weight_scale')
             assert layer.weight.value.dtype == jnp.float8_e4m3fn
             assert layer.weight_scale.value.dtype == jnp.float32
-            assert layer.weight.value.shape == (16, 32)
+            assert layer.weight.value.shape == (32, 16)
             assert layer.weight_scale.value.shape == (16, )
             assert hasattr(layer.weight, 'weight_loader')
 
@@ -387,7 +402,7 @@ class TestFp8TensorwiseJaxLinear:
         )
 
         devices = jax.devices()
-        mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
+        mesh = jax.sharding.Mesh(np.array(devices).reshape(1, -1), ('data', 'model'))
         with jax.set_mesh(mesh):
             x = jax.random.normal(rngs.params(), (batch_size, N, H))
             output = layer(x)
@@ -423,7 +438,7 @@ class TestFp8TensorwiseJaxLinear:
         input_shape = tuple(dim_sizes[d] for d in input_dims)
 
         devices = jax.devices()
-        mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
+        mesh = jax.sharding.Mesh(np.array(devices).reshape(1, -1), ('data', 'model'))
         with jax.set_mesh(mesh):
             x = jax.random.normal(rngs.params(), input_shape,
                                   dtype=jnp.bfloat16)
@@ -633,7 +648,7 @@ class TestFp8FusedMoE:
         with patch.object(layer, 'router', return_value=score):
             # Run the actual forward pass and up-cast
             # to avoid promote error
-            actual = layer(a).astype(expected.dtype)
+            actual = layer(a)[0].astype(expected.dtype)
 
         assert jnp.allclose(expected, actual, atol=5e-2, rtol=1e-1)
 

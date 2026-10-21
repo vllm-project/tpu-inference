@@ -102,8 +102,7 @@ def _run_inference(
     outputs = llm.generate(test_prompts, sampling_params)
     elapsed_time = time.time() - start_time
 
-    del llm
-    time.sleep(10)  # Wait for TPUs to be released
+    llm.llm_engine.engine_core.shutdown()
     return outputs, elapsed_time
 
 
@@ -214,7 +213,7 @@ def _test_sequence_parallelism(
         max_model_len=cfg.max_model_len,
         max_num_batched_tokens=cfg.max_num_batched_tokens,
         max_num_seqs=cfg.max_num_seqs,
-        compilation_config=CompilationConfig(pass_config={"enable_sp": True}),
+        additional_config={"enable_sp": True},
     )
     sp_outputs, sp_time = _run_inference(sp_config, test_prompts,
                                          sampling_params)

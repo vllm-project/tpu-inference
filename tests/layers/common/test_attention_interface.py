@@ -21,8 +21,10 @@ import pytest
 from jax.sharding import Mesh
 
 from tpu_inference.layers.common.attention_interface import (
-    attention, mla_attention, sharded_ragged_paged_attention)
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+    attention, mla_attention, segment_ids_from_cu_seqlens,
+    sharded_ragged_paged_attention)
+from tpu_inference.layers.common.attention_metadata import (
+    AttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.runner.kv_cache import get_kv_cache_shape_with_mesh
 
@@ -61,7 +63,12 @@ def mesh():
 # ---- Test for `attention` ----
 
 
-def _test_attention(monkeypatch, mesh, head_dim, use_sinks=False):
+def _test_attention(monkeypatch,
+                    mesh,
+                    head_dim,
+                    use_sinks=False,
+                    metadata_use_causal_mask=True,
+                    attention_use_causal_mask=None):
     """
     Tests the main `attention` function.
 
@@ -112,6 +119,13 @@ def _test_attention(monkeypatch, mesh, head_dim, use_sinks=False):
         seq_lens=jnp.array([5, 5, 0, 0], dtype=jnp.int32),
         query_start_loc=jnp.array([0, 5, 10, 10, 10], dtype=jnp.int32),
         request_distribution=jnp.array([0, 0, NUM_SEQS], dtype=jnp.int32),
+        use_causal_mask=metadata_use_causal_mask,
+    )
+    shared_attention_metadata = SharedAttentionMetadata(
+        input_positions=jnp.arange(TOTAL_TOKENS, dtype=jnp.int32),
+        seq_lens=jnp.array([5, 5, 0, 0], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 5, 10, 10, 10], dtype=jnp.int32),
+        request_distribution=jnp.array([0, 0, NUM_SEQS], dtype=jnp.int32),
     )
 
     # 2. Act
@@ -124,11 +138,18 @@ def _test_attention(monkeypatch, mesh, head_dim, use_sinks=False):
         mesh=mesh,
         head_dim_original=head_dim,
         sinks=sinks,
+        use_causal_mask=attention_use_causal_mask,
+        shared_attention_metadata=shared_attention_metadata,
     )
 
     # 3. Assert
     # Check that both mocked kernels were called
     mock_paged_attn_kernel.assert_called_once()
+    expected_causal = (metadata_use_causal_mask if attention_use_causal_mask
+                       is None else attention_use_causal_mask)
+    if head_dim != 64:
+        assert mock_paged_attn_kernel.call_args.kwargs[
+            "use_causal_mask"] is expected_causal
 
     # Check output shapes
     assert final_kv_cache.shape == kv_cache.shape
@@ -148,6 +169,30 @@ def test_attention_hd64(monkeypatch, mesh):
 
 def test_attention_sink(monkeypatch, mesh):
     _test_attention(monkeypatch, mesh, 64, True)
+
+
+def test_attention_bidirectional_from_metadata(monkeypatch, mesh):
+    _test_attention(monkeypatch, mesh, 128, metadata_use_causal_mask=False)
+
+
+def test_attention_explicit_override_takes_precedence(monkeypatch, mesh):
+    _test_attention(
+        monkeypatch,
+        mesh,
+        128,
+        metadata_use_causal_mask=False,
+        attention_use_causal_mask=True,
+    )
+
+
+def test_attention_bidirectional_hd64_fails_loudly(monkeypatch, mesh):
+    with pytest.raises(NotImplementedError, match="head_dim==64"):
+        _test_attention(
+            monkeypatch,
+            mesh,
+            64,
+            metadata_use_causal_mask=False,
+        )
 
 
 def test_attention_sink_no_64_raises_error(monkeypatch, mesh):
@@ -306,6 +351,126 @@ def test_sharded_ragged_paged_attention_gqa_incompatible_raises_error(
         )
 
 
+def _run_sharded_rpa_capturing_kwargs(monkeypatch, gqa_mesh, update_kv_cache):
+    """Helper: run `sharded_ragged_paged_attention` with a stubbed
+    `ragged_paged_attention` (the module-level binding) and a passthrough
+    `jax.shard_map`. Returns the kwargs forwarded by the closure to the
+    underlying kernel.
+    """
+    head_dim = 128  # non-hd64
+    num_kv_heads = 4
+    q = jnp.ones((TOTAL_TOKENS, NUM_HEADS, head_dim))
+    k = jnp.ones((TOTAL_TOKENS, num_kv_heads, head_dim))
+    v = jnp.ones((TOTAL_TOKENS, num_kv_heads, head_dim))
+    kv_cache = jnp.zeros((num_kv_heads, NUM_BLOCKS, BLOCK_SIZE, head_dim))
+    kv_lens = jnp.zeros((MAX_NUM_SEQS, ), dtype=jnp.int32)
+    page_indices = jnp.zeros((MAX_NUM_SEQS, MAX_BLOCKS_PER_SEQ),
+                             dtype=jnp.int32)
+    cu_q_lens = jnp.zeros((MAX_NUM_SEQS + 1, ), dtype=jnp.int32)
+    distribution = jnp.zeros((3, ), dtype=jnp.int32)
+
+    captured = {}
+
+    def fake_kernel(*_args, **kwargs):
+        captured.update(kwargs)
+        return jnp.ones_like(q), kv_cache
+
+    monkeypatch.setattr(
+        "tpu_inference.layers.common.attention_interface.ragged_paged_attention",
+        fake_kernel,
+    )
+
+    # Passthrough shard_map so the closure actually executes.
+    def passthrough_shard_map(inner_fn, **_):
+        return inner_fn
+
+    monkeypatch.setattr("jax.shard_map", passthrough_shard_map)
+
+    sharded_ragged_paged_attention(
+        mesh=gqa_mesh,
+        q=q,
+        k=k,
+        v=v,
+        kv_cache=kv_cache,
+        kv_lens=kv_lens,
+        page_indices=page_indices,
+        cu_q_lens=cu_q_lens,
+        distribution=distribution,
+        attention_sink=None,
+        sm_scale=1.0,
+        update_kv_cache=update_kv_cache,
+    )
+    return captured
+
+
+def test_sharded_rpa_forwards_update_kv_cache_when_not_hd64(
+        monkeypatch, gqa_mesh):
+    """`sharded_ragged_paged_attention` must forward `update_kv_cache`
+    to the underlying kernel on the non-hd64 path. Both kernels (v3 and
+    batched) accept the kwarg after this fix; the wrapper forwards it
+    unconditionally for non-hd64 head sizes."""
+    captured = _run_sharded_rpa_capturing_kwargs(monkeypatch,
+                                                 gqa_mesh,
+                                                 update_kv_cache=False)
+
+    assert captured.get("update_kv_cache") is False, (
+        f"non-hd64 path must forward update_kv_cache=False; got {captured!r}")
+
+
+def test_batched_rpa_wrapper_accepts_update_kv_cache():
+    """Direct signature check that catches the original #2601 crash:
+    the batched RPA wrapper's `ragged_paged_attention` must declare an
+    `update_kv_cache` keyword parameter. `sharded_ragged_paged_attention`
+    always forwards the kwarg on the non-hd64 path; without this
+    signature, that forwarding crashed at trace time with
+    `TypeError: ragged_paged_attention() got an unexpected keyword
+    argument 'update_kv_cache'`."""
+    import inspect
+
+    from tpu_inference.kernels.experimental.batched_rpa import wrapper
+    params = inspect.signature(wrapper.ragged_paged_attention).parameters
+    assert "update_kv_cache" in params, (
+        f"batched RPA wrapper must accept update_kv_cache as a kwarg; "
+        f"got params: {list(params.keys())}")
+    assert params["update_kv_cache"].default is True, (
+        f"update_kv_cache should default to True (no-op for non-KV-share "
+        f"callers); got default={params['update_kv_cache'].default!r}")
+
+
+def test_sharded_rpa_rejects_update_kv_cache_false_on_hd64(gqa_mesh):
+    """The hd64 RPA kernel doesn't support KV-share; passing
+    update_kv_cache=False must raise rather than silently writing to
+    cache. (Currently no model uses head_dim=64 + KV-share, but the
+    guard is cheap insurance.)"""
+    head_dim = 64
+    num_kv_heads = 4
+    q = jnp.ones((TOTAL_TOKENS, NUM_HEADS, head_dim))
+    k = jnp.ones((TOTAL_TOKENS, num_kv_heads, head_dim))
+    v = jnp.ones((TOTAL_TOKENS, num_kv_heads, head_dim))
+    kv_cache = jnp.zeros((num_kv_heads, NUM_BLOCKS, BLOCK_SIZE, head_dim))
+    kv_lens = jnp.zeros((MAX_NUM_SEQS, ), dtype=jnp.int32)
+    page_indices = jnp.zeros((MAX_NUM_SEQS, MAX_BLOCKS_PER_SEQ),
+                             dtype=jnp.int32)
+    cu_q_lens = jnp.zeros((MAX_NUM_SEQS + 1, ), dtype=jnp.int32)
+    distribution = jnp.zeros((3, ), dtype=jnp.int32)
+
+    with pytest.raises(NotImplementedError, match="head_dim==64"):
+        sharded_ragged_paged_attention(
+            mesh=gqa_mesh,
+            q=q,
+            k=k,
+            v=v,
+            kv_cache=kv_cache,
+            kv_lens=kv_lens,
+            page_indices=page_indices,
+            cu_q_lens=cu_q_lens,
+            distribution=distribution,
+            attention_sink=None,
+            sm_scale=1.0,
+            update_kv_cache=False,
+        )
+
+
 def test_mla_attention(monkeypatch, mesh):
     """
     Tests the `mla_attention` function.
@@ -320,7 +485,7 @@ def test_mla_attention(monkeypatch, mesh):
     q_lora_rank = 64
     kv_lora_rank = 64
 
-    q_TNA = jnp.ones((TOTAL_TOKENS, NUM_HEADS, q_lora_rank))
+    q_NTA = jnp.ones((NUM_HEADS, TOTAL_TOKENS, q_lora_rank))
     q_rope_TNH = jnp.ones((TOTAL_TOKENS, NUM_HEADS, qk_rope_dim))
     k_SA = jnp.ones((TOTAL_TOKENS, kv_lora_rank))
     k_rope_SH = jnp.ones((TOTAL_TOKENS, qk_rope_dim))
@@ -338,12 +503,7 @@ def test_mla_attention(monkeypatch, mesh):
         request_distribution=jnp.array([0, 0, NUM_SEQS], dtype=jnp.int32),
     )
 
-    mock_tuned_block_sizes = MagicMock(return_value=(8, 8))
-    monkeypatch.setattr(
-        "tpu_inference.layers.common.attention_interface.get_tuned_block_sizes",
-        mock_tuned_block_sizes)
-
-    expected_output = jnp.full(q_TNA.shape, 0.5)
+    expected_output = jnp.full(q_NTA.shape, 0.5)
     expected_new_cache = jnp.full(kv_cache_shape, 0.1)
 
     mock_mla_kernel = MagicMock(return_value=(expected_output,
@@ -353,7 +513,7 @@ def test_mla_attention(monkeypatch, mesh):
         mock_mla_kernel)
 
     final_kv_cache, output = mla_attention(
-        q_TNA=q_TNA,
+        q_NTA=q_NTA,
         q_rope_TNH=q_rope_TNH,
         k_SA=k_SA,
         k_rope_SH=k_rope_SH,
@@ -365,8 +525,6 @@ def test_mla_attention(monkeypatch, mesh):
         sm_scale=0.1,
     )
 
-    # Verify mocked functions were called
-    mock_tuned_block_sizes.assert_called_once()
     mock_mla_kernel.assert_called_once()
 
     # Verify output correctness
@@ -374,6 +532,161 @@ def test_mla_attention(monkeypatch, mesh):
     assert jnp.array_equal(final_kv_cache, expected_new_cache)
 
     _, kernel_kwargs = mock_mla_kernel.call_args
-    assert kernel_kwargs["num_kv_pages_per_block"] == 4
-    assert kernel_kwargs["num_queries_per_block"] == 4
+    assert kernel_kwargs["num_kv_pages_per_block"] == (3, 1, 1)
+    assert kernel_kwargs["num_queries_per_block"] == (1, 16, 16)
+    assert kernel_kwargs["mixed_q_split"] == 1
     assert kernel_kwargs["sm_scale"] == 0.1
+
+
+class TestSegmentIdsFromCuSeqlens:
+    """`segment_ids_from_cu_seqlens` must give padding positions their own
+    segment id.
+
+    Wherever q/k/v are padded past `cu_seqlens[-1]` — e.g. the mm-encoder
+    budget path, where `pixel_values` is padded up to the token budget — a
+    `jnp.repeat(..., total_repeat_length=...)` construction would fill those
+    rows with the LAST real segment id, letting pad tokens attend together
+    with the last real sequence whenever `cu_seqlens` has no trailing empty
+    segment.
+    """
+
+    def test_trailing_positions_get_pad_segment(self):
+        """Positions >= cu_seqlens[-1] get id num_segs, not the last real id."""
+        cu = jnp.array([0, 4, 10], dtype=jnp.int32)
+        seg = segment_ids_from_cu_seqlens(cu, 16)
+        expected = [0] * 4 + [1] * 6 + [2] * 6
+        np.testing.assert_array_equal(np.asarray(seg), np.array(expected))
+
+    def test_exact_fit_has_no_pad_segment(self):
+        """total_len == cu_seqlens[-1]: every position belongs to a real seg."""
+        cu = jnp.array([0, 4, 10], dtype=jnp.int32)
+        seg = segment_ids_from_cu_seqlens(cu, 10)
+        np.testing.assert_array_equal(np.asarray(seg),
+                                      np.array([0] * 4 + [1] * 6))
+
+    def test_padded_cu_seqlens_with_empty_trailing_segments(self):
+        """cu_seqlens padded by repeating the last offset (empty sequences):
+        real positions keep their ids and pad positions still get num_segs."""
+        # 2 real sequences (0..3, 4..9) padded out to 4 sequence slots.
+        cu = jnp.array([0, 4, 10, 10, 10], dtype=jnp.int32)
+        seg = segment_ids_from_cu_seqlens(cu, 14)
+        expected = [0] * 4 + [1] * 6 + [4] * 4
+        np.testing.assert_array_equal(np.asarray(seg), np.array(expected))
+
+    def test_leading_empty_segment(self):
+        """An empty leading segment must not swallow position 0."""
+        cu = jnp.array([0, 0, 6], dtype=jnp.int32)
+        seg = segment_ids_from_cu_seqlens(cu, 8)
+        np.testing.assert_array_equal(np.asarray(seg),
+                                      np.array([1] * 6 + [2] * 2))
+
+    def test_jit_traced_matches_eager(self):
+        """cu_seqlens is a traced array under jax.jit (torchax tensor -> jax
+        array); only total_len is static, so ids must match the eager result."""
+        cu = jnp.array([0, 4, 10, 10], dtype=jnp.int32)
+        eager = segment_ids_from_cu_seqlens(cu, 16)
+        jitted = jax.jit(segment_ids_from_cu_seqlens, static_argnums=1)(cu, 16)
+        np.testing.assert_array_equal(np.asarray(jitted), np.asarray(eager))
+
+
+# ---- Tests for the RPA v3 block-size env overrides ----
+
+
+def _capture_rpa_kwargs(monkeypatch, mesh, head_dim=128):
+    """Call `attention` with a stubbed RPA kernel and return its kwargs.
+
+    Deliberately does not reuse `_test_attention`: that helper installs its own
+    kernel mock, which would replace the stub whose call we need to inspect.
+
+    The env vars are set with monkeypatch.setenv rather than patched onto the
+    `envs` module: `envs` resolves these lazily through a module-level
+    __getattr__, so setattr would install a real attribute that shadows the
+    lazy lookup for the rest of the session. setenv also exercises the real
+    env -> env_int_list parsing.
+    """
+    q_dtype = kv_dtype = jnp.float32
+    q = jnp.ones((TOTAL_TOKENS, NUM_HEADS, head_dim), dtype=q_dtype)
+    k = jnp.ones((TOTAL_TOKENS, NUM_KV_HEADS, head_dim), dtype=kv_dtype)
+    v = jnp.ones((TOTAL_TOKENS, NUM_KV_HEADS, head_dim), dtype=kv_dtype)
+    kv_cache_shape = get_kv_cache_shape_with_mesh(mesh, NUM_BLOCKS, BLOCK_SIZE,
+                                                  NUM_KV_HEADS, head_dim,
+                                                  kv_dtype)
+    kv_cache = jnp.zeros(kv_cache_shape, dtype=kv_dtype)
+
+    mock_kernel = MagicMock(return_value=(jnp.ones((TOTAL_TOKENS, NUM_HEADS,
+                                                    head_dim)), kv_cache))
+    monkeypatch.setattr(
+        "tpu_inference.layers.common.attention_interface.ragged_paged_attention",
+        mock_kernel,
+    )
+
+    attention_metadata = AttentionMetadata(
+        input_positions=jnp.arange(TOTAL_TOKENS, dtype=jnp.int32),
+        block_tables=jnp.zeros((MAX_NUM_SEQS * MAX_BLOCKS_PER_SEQ, ),
+                               dtype=jnp.int32),
+        seq_lens=jnp.array([5, 5, 0, 0], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 5, 10, 10, 10], dtype=jnp.int32),
+        request_distribution=jnp.array([0, 0, NUM_SEQS], dtype=jnp.int32),
+    )
+    shared_attention_metadata = SharedAttentionMetadata(
+        input_positions=jnp.arange(TOTAL_TOKENS, dtype=jnp.int32),
+        seq_lens=jnp.array([5, 5, 0, 0], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 5, 10, 10, 10], dtype=jnp.int32),
+        request_distribution=jnp.array([0, 0, NUM_SEQS], dtype=jnp.int32),
+    )
+
+    attention(
+        kv_cache=kv_cache,
+        q=q,
+        k=k,
+        v=v,
+        attention_metadata=attention_metadata,
+        mesh=mesh,
+        head_dim_original=head_dim,
+        sinks=None,
+        shared_attention_metadata=shared_attention_metadata,
+    )
+    mock_kernel.assert_called_once()
+    return mock_kernel.call_args.kwargs
+
+
+def test_rpa_block_sizes_absent_when_env_unset(monkeypatch, mesh):
+    """Unset env leaves the stock call untouched -- no v3-only kwargs."""
+    monkeypatch.delenv("RPA_V3_DECODE_BLOCK_SIZES", raising=False)
+    monkeypatch.delenv("RPA_V3_PREFILL_BLOCK_SIZES", raising=False)
+    monkeypatch.delenv("RPA_V3_MIXED_BLOCK_SIZES", raising=False)
+    kwargs = _capture_rpa_kwargs(monkeypatch, mesh)
+    assert "d_block_sizes" not in kwargs
+    assert "p_block_sizes" not in kwargs
+    assert "m_block_sizes" not in kwargs
+
+
+def test_rpa_block_sizes_forwarded_from_env(monkeypatch, mesh):
+    """RPA_V3_*_BLOCK_SIZES reach the kernel through this entry point too.
+
+    Regression test: the override was wired into
+    layers/jax/attention/attention.py only, so callers arriving through
+    sharded_ragged_paged_attention silently got get_default_block_sizes().
+    Only non-empty vars are forwarded.
+    """
+    monkeypatch.setenv("RPA_V3_DECODE_BLOCK_SIZES", "1,16384,1,4096")
+    monkeypatch.delenv("RPA_V3_PREFILL_BLOCK_SIZES", raising=False)
+    monkeypatch.setenv("RPA_V3_MIXED_BLOCK_SIZES", "8,512,4,256")
+    kwargs = _capture_rpa_kwargs(monkeypatch, mesh)
+    assert kwargs["d_block_sizes"] == (1, 16384, 1, 4096)
+    assert kwargs["m_block_sizes"] == (8, 512, 4, 256)
+    assert "p_block_sizes" not in kwargs
+
+
+def test_rpa_block_sizes_not_forwarded_to_batched_kernel(monkeypatch, mesh):
+    """The v3 block-size env must not reach the experimental batched kernel.
+
+    Its `ragged_paged_attention` takes `decode_block_sizes` /
+    `prefill_block_sizes` configs, not the v3 4-tuples, so forwarding them
+    would raise TypeError whenever USE_BATCHED_RPA_KERNEL=1 and the env is set.
+    """
+    monkeypatch.setenv("USE_BATCHED_RPA_KERNEL", "1")
+    monkeypatch.setenv("RPA_V3_DECODE_BLOCK_SIZES", "1,16384,1,4096")
+    kwargs = _capture_rpa_kwargs(monkeypatch, mesh)
+    assert "d_block_sizes" not in kwargs
+    assert "decode_query_size" in kwargs

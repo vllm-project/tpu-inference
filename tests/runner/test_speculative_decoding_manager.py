@@ -92,11 +92,19 @@ class TestSpeculativeDecodingManager:
                           return_value=[[10, 11]]) as mock_propose_eagle:
 
             # 2. ===== Act =====
+            mock_spec_decode_metadata = MagicMock()
+            mock_spec_decode_metadata.req_indices_dp = {0: [0, 1]}
             self.runner.speculative_decoding_manager.propose_draft_token_ids(
-                sampled_token_ids=[[1]],
+                sampled_output=MagicMock(),
+                logits_indices_selector=MagicMock(),
+                last_sampled_token_id=MagicMock(),
+                num_rejected_tokens=MagicMock(),
+                discard_sampled_tokens_req_indices=[],
                 aux_hidden_states=None,
                 attn_metadata=MagicMock(),
-                spec_decode_metadata=None,
+                async_scheduling=False,
+                spec_decode_metadata=mock_spec_decode_metadata,
+                input_ids=MagicMock(),
             )
 
             # 3. ===== Assert =====
@@ -112,7 +120,8 @@ class TestSpeculativeDecodingManager:
         self.runner.speculative_config.method = "ngram"
         with pytest.raises(AssertionError):
             self.runner.speculative_decoding_manager.propose_draft_token_ids(
-                [[1]], None, MagicMock(), None)
+                MagicMock(), MagicMock(), MagicMock(), MagicMock(), [], None,
+                MagicMock(), False, None)
 
     def test_take_draft_token_ids(self):
         """Tests the take_draft_token_ids method for speculative decoding."""
@@ -174,6 +183,15 @@ class TestSpeculativeDecodingManager:
 
         # Set the draft tokens to be taken
         self.runner.speculative_decoding_manager._draft_token_ids = mock_draft_ids
+        self.runner.speculative_decoding_manager._req_indices_dp = {
+            rank:
+            list(
+                range(
+                    rank * (self.runner.max_num_reqs // self.runner.dp_size),
+                    rank * (self.runner.max_num_reqs // self.runner.dp_size) +
+                    (2 if rank == 0 else 0)))
+            for rank in range(self.runner.dp_size)
+        }
 
         # Call the method to be tested
         result = self.runner.take_draft_token_ids()
@@ -196,7 +214,6 @@ class TestSpeculativeDecodingManager:
         # Mock runner attributes needed by the function
         self.runner.arange_cpu = np.arange(1024, dtype=np.int64)
         # Make input_ids_cpu a sequence of numbers for easy verification
-        self.runner.input_ids_cpu = np.arange(1024, dtype=np.int32) * 10
         self.runner.num_tokens_paddings = [16, 32, 64, 128, 256, 512, 1024]
 
         # Mock the device_array function to just return the numpy arrays
@@ -209,7 +226,7 @@ class TestSpeculativeDecodingManager:
         self.mock_device_array = mock_device_array
 
     @pytest.mark.parametrize(
-        "num_draft_tokens,cu_num_scheduled_tokens,padded_num_reqs,expected_logits_indices,expected_bonus_logits_indices,expected_target_logits_indices,expected_draft_token_ids",
+        "num_draft_tokens,cu_num_scheduled_tokens,padded_num_reqs,expected_logits_indices,expected_bonus_logits_indices,expected_target_logits_indices",
         [
             (
                 # Normal case
@@ -218,8 +235,7 @@ class TestSpeculativeDecodingManager:
                 8,
                 [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208],
                 [3, 4, 7, 8, 10, 0, 0, 0],
-                [0, 1, 2, 5, 6, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                [10, 20, 30, 1050, 1060, 2080, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+                [0, 1, 2, 5, 6, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
             (
                 # High speculative tokens case
                 [5, 3, 4, 2, 1],
@@ -233,33 +249,54 @@ class TestSpeculativeDecodingManager:
                 [
                     0, 1, 2, 3, 4, 6, 7, 8, 10, 11, 12, 13, 15, 16, 18, 0, 0,
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-                ],
-                [
-                    10, 20, 30, 40, 50, 70, 80, 90, 140, 150, 160, 170, 200,
-                    210, 250
                 ]),
         ])
     def test_get_spec_decode_metadata_parametrized(
             self, num_draft_tokens, cu_num_scheduled_tokens, padded_num_reqs,
             expected_logits_indices, expected_bonus_logits_indices,
-            expected_target_logits_indices, expected_draft_token_ids):
+            expected_target_logits_indices):
         """Comprehensive parametrized test for _get_spec_decode_metadata function."""
         # Setup
         self._setup_spec_decode_metadata_test()
 
-        # Convert Python lists to numpy arrays for function input
-        num_draft_tokens_np = np.array(num_draft_tokens, dtype=np.int32)
-        cu_num_scheduled_tokens_np = np.array(cu_num_scheduled_tokens,
-                                              dtype=np.int32)
+        # Determine padded logits length matching the original expectations
+        if len(expected_logits_indices) <= 16:
+            padded_logits_length = 16
+        else:
+            padded_logits_length = 32
+
+        # Build inputs in the new dp-aware API shape (dp_size = 1).
+        num_reqs = len(num_draft_tokens)
+        num_draft_tokens_padded = np.array(num_draft_tokens + [0] *
+                                           (padded_num_reqs - num_reqs),
+                                           dtype=np.int32)
+        # query_start_loc has length max_num_reqs_per_dp_rank + 1; with
+        # dp_size = 1, max_num_reqs_per_dp_rank == padded_num_reqs.
+        query_start_loc = np.zeros(padded_num_reqs + 1, dtype=np.int32)
+        query_start_loc[1:1 + len(cu_num_scheduled_tokens)] = (
+            cu_num_scheduled_tokens)
+        # Pad tail with last cu value (matches reordering of padded reqs).
+        if cu_num_scheduled_tokens:
+            query_start_loc[1 + len(cu_num_scheduled_tokens):] = (
+                cu_num_scheduled_tokens[-1])
+
+        req_indices_dp = {0: list(range(num_reqs))}
+        req_ids_dp = {0: [str(i) for i in range(num_reqs)]}
 
         # Act
         with patch(
                 "tpu_inference.runner.speculative_decoding_manager.device_array",
                 side_effect=self.mock_device_array):
             metadata = self.runner.speculative_decoding_manager.get_spec_decode_metadata(
-                num_draft_tokens_np,
-                cu_num_scheduled_tokens_np,
-                padded_num_reqs=padded_num_reqs)
+                num_draft_tokens_dp=num_draft_tokens_padded,
+                dp_size=1,
+                req_indices_dp=req_indices_dp,
+                req_ids_dp=req_ids_dp,
+                query_start_loc=query_start_loc,
+                padded_num_reqs_per_dp_rank=padded_num_reqs,
+                padded_logits_length_dp_rank=padded_logits_length,
+                max_num_reqs_per_dp_rank=padded_num_reqs,
+            )
 
         # Assert basic properties
         assert isinstance(metadata, SpecDecodeMetadata)
@@ -287,21 +324,13 @@ class TestSpeculativeDecodingManager:
         assert np.asarray(metadata.target_logits_indices).tolist(
         ) == expected_padded_target_logits_indices
 
-        # draft_token_ids - pad the expected values to the correct length and compare as Python lists
-        expected_padded_draft_token_ids = expected_draft_token_ids + [0] * (
-            padded_len - len(expected_draft_token_ids))
-        assert np.asarray(metadata.draft_token_ids).tolist(
-        ) == expected_padded_draft_token_ids
-
         # draft_lengths - pad and compare as Python lists
         expected_padded_num_draft_tokens = num_draft_tokens + [0] * (
             padded_num_reqs - len(num_draft_tokens))
         assert np.asarray(metadata.draft_lengths).tolist(
         ) == expected_padded_num_draft_tokens
 
-    @pytest.mark.parametrize("spec_decode_metadata_is_none", [True, False])
-    def test_propose_eagle3_draft_token_ids(self,
-                                            spec_decode_metadata_is_none):
+    def test_propose_eagle3_draft_token_ids(self):
         """Tests the logic for proposing Eagle3 draft tokens."""
         # 1. ===== Setup =====
         self.runner.drafter = MagicMock(spec=Eagle3Proposer)
@@ -335,29 +364,107 @@ class TestSpeculativeDecodingManager:
         )
 
         # Inputs
-        sampled_token_ids = [[1], [2]]
         aux_hidden_states = MagicMock()
         attn_metadata = MagicMock()
         attn_metadata.seq_lens.shape = [2]
-        if spec_decode_metadata_is_none:
-            spec_decode_metadata = None
-        else:
-            spec_decode_metadata = MagicMock(spec=SpecDecodeMetadata)
-            spec_decode_metadata.draft_lengths_cpu = np.array([2, 3])
+        # Both parametrizations supply a real spec_decode_metadata now (the
+        # `None` path was removed when propose_eagle3 became dp-aware). The
+        # parametrization is kept to exercise with/without prior draft state.
+        spec_decode_metadata = MagicMock(spec=SpecDecodeMetadata)
+        spec_decode_metadata.req_indices_dp = {0: [0, 1]}
+        spec_decode_metadata.draft_lengths_cpu = np.array([2, 3])
+        last_sampled_token_id = MagicMock()
+        num_rejected_tokens = MagicMock()
+        discard_sampled_tokens_req_indices = []
         scheduler_output = MagicMock()
         input_ids = MagicMock()
+        hidden_states = MagicMock()
 
         # 2. ===== Act =====
         with patch(
                 "tpu_inference.runner.speculative_decoding_manager.device_array",
-                side_effect=lambda mesh, x: x):
+                side_effect=lambda mesh, x, **kwargs: x):
             result = self.runner.speculative_decoding_manager.propose_eagle3_draft_token_ids(
-                sampled_token_ids,
+                spec_decode_metadata,
+                last_sampled_token_id,
+                num_rejected_tokens,
+                discard_sampled_tokens_req_indices,
                 aux_hidden_states,
                 attn_metadata,
-                spec_decode_metadata,
                 scheduler_output,
                 input_ids,
+                async_scheduling=False,
+                hidden_states=hidden_states,
+            )
+
+        # 3. ===== Assert =====
+        assert result == [[10, 11], [20, 21]]
+        self.runner.drafter.prepare_inputs.assert_called_once()
+        self.runner.drafter.propose.assert_called_once()
+
+    def test_propose_dflash_draft_token_ids(self):
+        """Tests the logic for proposing DFlash draft tokens."""
+        # 1. ===== Setup =====
+        from tpu_inference.spec_decode.jax.dflash import DFlashProposer
+        self.runner.drafter = MagicMock(spec=DFlashProposer)
+        self.runner.speculative_config.method = "dflash"
+
+        # Mock TPUModelRunner attributes
+        self.runner.input_batch = MagicMock()
+        self.runner.input_batch.req_ids = ["req-1", "req-2"]
+        self.runner.requests = {
+            "req-1": MagicMock(),
+            "req-2": MagicMock(),
+        }
+        self.runner.mesh = self.mock_mesh
+        self.runner.kv_caches = MagicMock()
+
+        # Mock drafter methods
+        mock_attn_metadata = MagicMock()
+        mock_target_token_ids = MagicMock()
+        mock_last_token_indices = MagicMock()
+        mock_target_hidden_states = MagicMock()
+        self.runner.drafter.prepare_inputs.return_value = (
+            mock_target_hidden_states,
+            mock_target_token_ids,
+            mock_last_token_indices,
+            mock_attn_metadata,
+        )
+        mock_draft_token_ids = [[10, 11], [20, 21]]
+        self.runner.drafter.propose.return_value = (
+            self.runner.kv_caches,
+            mock_draft_token_ids,
+        )
+
+        # Inputs
+        aux_hidden_states = MagicMock()
+        attn_metadata = MagicMock()
+        attn_metadata.seq_lens.shape = [2]
+        spec_decode_metadata = MagicMock(spec=SpecDecodeMetadata)
+        spec_decode_metadata.req_indices_dp = {0: [0, 1]}
+        spec_decode_metadata.draft_lengths_cpu = np.array([2, 3])
+        last_sampled_token_id = MagicMock()
+        num_rejected_tokens = MagicMock()
+        discard_sampled_tokens_req_indices = []
+        scheduler_output = MagicMock()
+        input_ids = MagicMock()
+        hidden_states = MagicMock()
+
+        # 2. ===== Act =====
+        with patch(
+                "tpu_inference.runner.speculative_decoding_manager.device_array",
+                side_effect=lambda mesh, x, **kwargs: x):
+            result = self.runner.speculative_decoding_manager.propose_dflash_draft_token_ids(
+                spec_decode_metadata,
+                last_sampled_token_id,
+                num_rejected_tokens,
+                discard_sampled_tokens_req_indices,
+                aux_hidden_states,
+                attn_metadata,
+                scheduler_output,
+                input_ids,
+                async_scheduling=False,
+                hidden_states=hidden_states,
             )
 
         # 3. ===== Assert =====

@@ -1,0 +1,188 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Register function to overwrite torch functions used by vllm via torchax."""
+
+import jax
+import jax.numpy as jnp
+import torch
+from torchax.ops.jtorch import register_function
+
+from tpu_inference.layers.common.attention_interface import (
+    segment_ids_from_cu_seqlens, sharded_flash_attention)
+
+# ViT flash-attention on large flattened image sequences needs more scoped
+# vmem than the 32MiB pallas default (~37MiB at bf16[1,16,25344,80]); 64MiB
+# covers such shapes with headroom. The RPA kernels already run with up to
+# 100MiB on both v6e and v7x.
+_VIT_FLASH_ATTENTION_VMEM_LIMIT_BYTES = 64 * 1024 * 1024
+
+
+@register_function(torch.nn.functional.scaled_dot_product_attention)
+def scaled_dot_product_attention(
+    query,
+    key,
+    value,
+    attn_mask=None,
+    dropout_p=0.0,
+    is_causal=False,
+    scale=None,
+    enable_gqa=False,
+):
+    """The same args as torch.nn.functional.scaled_dot_product_attention to use flash attention."""
+    if dropout_p != 0.0:
+        raise NotImplementedError("patched_sdpa does not support dropout_p")
+    if enable_gqa is not False:
+        raise NotImplementedError("patched_sdpa does not support enable_gqa")
+
+    if scale is None:
+        scale = 1.0
+
+    mesh = jax.sharding.get_abstract_mesh()
+
+    # Q, K, V shapes: (batch, num_heads, seq_len, head_dim)
+    batch = query.shape[0]
+    num_heads = query.shape[1]
+    q_seq_len = query.shape[2]
+    kv_seq_len = key.shape[2]
+
+    # padding due to the requirement of sharded_flash_attention
+    q_pad = (128 - (q_seq_len % 128)) % 128
+    kv_pad = (128 - (kv_seq_len % 128)) % 128
+
+    if q_pad > 0:
+        query = jnp.pad(query, ((0, 0), (0, 0), (0, q_pad), (0, 0)))
+    if kv_pad > 0:
+        key = jnp.pad(key, ((0, 0), (0, 0), (0, kv_pad), (0, 0)))
+        value = jnp.pad(value, ((0, 0), (0, 0), (0, kv_pad), (0, 0)))
+
+    # Prevent nan while using -inf
+    mask_value = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
+    attention_bias = jnp.zeros((batch, num_heads, q_seq_len, kv_seq_len),
+                               dtype=jnp.float32)
+    if attn_mask is not None:
+        # attn_mask shape: (batch, num_heads, q_len, kv_len)
+        if attn_mask.dtype == jnp.bool_:
+            attention_bias = jnp.where(attn_mask, attention_bias, mask_value)
+        else:
+            attention_bias += attn_mask
+
+    if q_pad > 0 or kv_pad > 0:
+        attention_bias = jnp.pad(
+            attention_bias,
+            ((0, 0), (0, 0), (0, q_pad), (0, kv_pad)),
+            mode="constant",
+            constant_values=mask_value,
+        )
+
+    # batch is always 1 here (vLLM's ViT flattens all images in a request
+    # into one sequence via cu_seqlens/segment_ids, no real batch axis), so
+    # it must stay replicated rather than sharded by the DP ('data') axis --
+    # sharding a size-1 axis by DP>1 fails divisibility under enable_dp_attention.
+    attn_fn = sharded_flash_attention(
+        mesh,
+        causal=is_causal,
+        sm_scale=scale,
+        vmem_limit_bytes=_VIT_FLASH_ATTENTION_VMEM_LIMIT_BYTES,
+        use_attention_bias=True,
+        batch_axis=None)
+    out = attn_fn(query, key, value, attention_bias, None)
+
+    if q_pad > 0:
+        out = out[:, :, :q_seq_len, :]
+
+    return out
+
+
+@register_function(torch.ops.vllm.torch_sdpa_wrapper)
+def vllm_vit_sdpa(
+    query,
+    key,
+    value,
+    scale=None,
+    cu_seqlens=None,
+    enable_gqa=False,
+):
+    """Custom JAX implementation of ViT SDPA as an alternative of [upstream vLLM SDPA](https://github.com/vllm-project/vllm/blob/bcc2306cefa4179c548d3e638e7a22a88d281733/vllm/v1/attention/ops/vit_attn_wrappers.py#L211-L239) implementation."""
+
+    # The custom vLLM operator `torch.ops.vllm.torch_sdpa_wrapper` used in ViT, passes tensors in
+    # shape (batch, seq_len, num_heads, head_dim)
+    # while `sharded_flash_attention` expects shape (batch, num_heads, seq_len, head_dim)
+    query = jnp.swapaxes(query, 1, 2)
+    key = jnp.swapaxes(key, 1, 2)
+    value = jnp.swapaxes(value, 1, 2)
+
+    if scale is None:
+        scale = 1.0
+
+    mesh = jax.sharding.get_abstract_mesh()
+
+    batch = query.shape[0]
+    q_seq_len = query.shape[2]
+    kv_seq_len = key.shape[2]
+
+    # The `sharded_flash_attention` kernel requires sequence lengths to be multiples of 128. So, padding accordingly.
+    q_pad = (128 - (q_seq_len % 128)) % 128
+    kv_pad = (128 - (kv_seq_len % 128)) % 128
+
+    # Pad the sequence dimension (axis 2) with zeros at the end.
+    if q_pad > 0:
+        query = jnp.pad(query, ((0, 0), (0, 0), (0, q_pad), (0, 0)))
+    if kv_pad > 0:
+        key = jnp.pad(key, ((0, 0), (0, 0), (0, kv_pad), (0, 0)))
+        value = jnp.pad(value, ((0, 0), (0, 0), (0, kv_pad), (0, 0)))
+
+    if cu_seqlens is not None:
+        # Build the segment ids straight over the PADDED length. Every position
+        # >= cu_seqlens[-1] -- both the kernel's 128-alignment padding and the
+        # mm-encoder budget padding baked into pixel_values -- lands in the
+        # dedicated trailing segment `num_segs`, so pad tokens never attend
+        # together with the last real image.
+        cu_seqlens_arr = jnp.asarray(cu_seqlens)
+        q_seg = segment_ids_from_cu_seqlens(cu_seqlens_arr, q_seq_len + q_pad)
+        kv_seg = segment_ids_from_cu_seqlens(cu_seqlens_arr,
+                                             kv_seq_len + kv_pad)
+
+        # Broadcast from 1D (seq_len,) to 2D (batch, seq_len) to match kernel expectations.
+        q_seg = jnp.broadcast_to(q_seg, (batch, q_seg.shape[0]))
+        kv_seg = jnp.broadcast_to(kv_seg, (batch, kv_seg.shape[0]))
+
+        from tpu_inference.kernels.flash_attention.kernel import SegmentIds
+        seg_ids = SegmentIds(q=q_seg, kv=kv_seg)
+    else:
+        seg_ids = None
+
+    # Note:
+    # 1. causal=False as ViT attention is bidirectional (non-causal)
+    # 2. use_attention_bias=False as sequence boundaries are handled by seg_ids instead of an explicit attention bias matrix.
+    # 3. batch_axis=None: batch is always 1 here (all images in a request are
+    #    flattened into one sequence via cu_seqlens/segment_ids), so it must
+    #    stay replicated -- sharding a size-1 axis by DP>1 fails divisibility
+    #    under enable_dp_attention.
+    attn_fn = sharded_flash_attention(
+        mesh,
+        causal=False,
+        sm_scale=scale,
+        vmem_limit_bytes=_VIT_FLASH_ATTENTION_VMEM_LIMIT_BYTES,
+        use_attention_bias=False,
+        batch_axis=None)
+
+    out = attn_fn(query, key, value, seg_ids)
+
+    if q_pad > 0:
+        out = out[:, :, :q_seq_len, :]
+
+    # Reshape back to (batch, seq_len, num_heads, head_dim) to match the original input shape.
+    out = jnp.swapaxes(out, 1, 2)
+
+    return out

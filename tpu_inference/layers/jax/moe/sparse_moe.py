@@ -19,7 +19,7 @@ import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh, PartitionSpec
 from qwix._src.providers import ptq
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 
 from tpu_inference.layers.common.process_weights.moe_weights import \
     UnfusedMoEWeights
@@ -233,7 +233,8 @@ def sparse_moe_distributed_fwd(
 
 def sparse_moe_func(weights: UnfusedMoEWeights, x_TD: jax.Array,
                     gating_output: Tuple[jax.Array, jax.Array],
-                    layer: Union[FusedMoE, JaxMoE], mesh: Mesh) -> jax.Array:
+                    layer: Union[RoutedExperts,
+                                 JaxMoE], mesh: Mesh) -> jax.Array:
     assert isinstance(
         weights, UnfusedMoEWeights), "Expected unfused weights for sparse MoE!"
     weights_TX, indices_TX = gating_output

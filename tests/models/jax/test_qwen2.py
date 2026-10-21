@@ -141,7 +141,7 @@ class TestQwen2ForCausalLM:
         hidden_size = hf_config.hidden_size
         num_heads = hf_config.num_attention_heads
         num_kv_heads = hf_config.num_key_value_heads
-        rope_theta = hf_config.rope_theta
+        rope_theta = hf_config.rope_parameters["rope_theta"]
         original_head_dim = hidden_size // num_heads
         head_dim = 128
         intermediate_size = hf_config.intermediate_size
@@ -182,7 +182,7 @@ class TestQwen2ForCausalLM:
             jnp.bfloat16)
         # 1 seq with 16 tokens
         input_ids, attention_metadata, indices_do_sample = mock_model_inputs
-        kv_caches, hidden_states, aux_hidden_states = model(
+        kv_caches, hidden_states, aux_hidden_states, _ = model(
             kv_caches, input_ids, attention_metadata)
         assert hidden_states.shape == (8, hidden_size)
         assert len(aux_hidden_states) == 0

@@ -1,0 +1,125 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# E4B is ~2x the params of E2B. v6e (TP=1, single chip) is the default
+# topology; v7x_2 (TP=2) is also verified and runs faster. The
+# TENSOR_PARALLEL_SIZE / TPU_QUEUE_SINGLE / TPU_VERSION placeholders are
+# filled by upload_models_and_features.sh at upload time
+# (TENSOR_PARALLEL_SIZE_SINGLE=1 for v6e, =2 for v7x).
+# Uses --use-chat-template because gemma-4-it is BOS-sensitive — raw
+# prompts produce token-repetition garbage on both GPU vllm-pytorch and JAX.
+
+steps:
+  - label: "${TPU_VERSION:-tpu6e} Unit tests for google/gemma-4-E4B-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-E4B-it_UnitTest"
+    agents:
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    soft_fail: true
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          bash -c 'JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 python /workspace/tpu_inference/examples/offline_inference.py --model google/gemma-4-E4B-it --tensor-parallel-size ${TENSOR_PARALLEL_SIZE_SINGLE:-1} --max-num-batched-tokens 4096 --max-model-len 4096 --use-chat-template'
+
+  - label: "${TPU_VERSION:-tpu6e} Record unit test result for google/gemma-4-E4B-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E4B-it_UnitTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_google_gemma-4-E4B-it_UnitTest"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-4-E4B-it"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "multimodal"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-E4B-it_UnitTest
+
+  - label: "${TPU_VERSION:-tpu6e} Accuracy for google/gemma-4-E4B-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-E4B-it_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E4B-it_UnitTest"
+    agents:
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    soft_fail: true
+    env:
+      TEST_MODEL: google/gemma-4-E4B-it
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
+      # USE_CHAT_TEMPLATE=1 routes lm_eval through apply_chat_template +
+      # fewshot_as_multiturn. Required for gemma-4-it because the model is
+      # BOS/chat-template-sensitive — raw prompts produce token-repetition
+      # garbage. Floor below is set from the minimum chat-templated
+      # measurement × ~0.92 across topologies in BK dev #473
+      # (min strict-match = 0.7074 on v6e TP=1; v6e_8 TP=8 and v7x_2 TP=2
+      # both scored 0.7119-0.7127).
+      USE_CHAT_TEMPLATE: "1"
+      MINIMUM_ACCURACY_THRESHOLD: 0.65
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh bash -c 'bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh'
+
+  - label: "${TPU_VERSION:-tpu6e} Record integration test result for google/gemma-4-E4B-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E4B-it_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_google_gemma-4-E4B-it_Accuracy"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-4-E4B-it"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "multimodal"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-E4B-it_Accuracy
+
+  - label: "${TPU_VERSION:-tpu6e} Performance benchmarks for google/gemma-4-E4B-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-E4B-it_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E4B-it_Accuracy"
+    agents:
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    soft_fail: true
+    env:
+      TEST_MODEL: google/gemma-4-E4B-it
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
+      # BENCH_DATASET unset -> mm_bench_recipe.sh defaults to the random-mm
+      # dataset (6 images @ 736x736 per prompt, 128 prompts), exercising
+      # the vision tower end-to-end. Validated on both v6e (TP=1) and v7x_2
+      # (TP=2) in tpu-inference-dev #475.
+      MAX_MODEL_LEN: "4096"
+      MAX_NUM_SEQS: "64"
+      # 0.85 was the most permissive value at which both v6e TP=1 and
+      # v7x_2 TP=2 cleanly completed `vllm serve` + `vllm bench serve`
+      # without OOM in BK dev #473. v6e TP=1 is the tighter constraint
+      # (one chip, ~10GB weights + KV + JIT precompile); 0.85 leaves
+      # enough headroom for `jit_structured_decode_fn` there. Bump if a
+      # measured workload needs longer context.
+      GPU_MEMORY_UTILIZATION: "0.85"
+      # No perf bar to start. Set after first measured run.
+      # Dev #475 measurements: req/s = 2.40 (v6e), 2.88 (v7x_2).
+      MINIMUM_THROUGHPUT_THRESHOLD: 0.0
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh bash -c 'TIMEOUT_SECONDS=960 JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh'
+
+  - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for google/gemma-4-E4B-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E4B-it_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_google_gemma-4-E4B-it_Benchmark"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-4-E4B-it"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "multimodal"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-E4B-it_Benchmark

@@ -16,7 +16,6 @@
 set -e
 
 # --- Configuration ---
-REPO_URL="https://github.com/vllm-project/tpu-inference.git"
 TARGET_BRANCH="${BUILDKITE_BRANCH:-main}"
 
 # Conditional Configuration for Release vs. Nightly
@@ -40,18 +39,11 @@ else
   ARTIFACT_DOWNLOAD_PATH="support_matrices"
   COMMIT_MESSAGE="[skip ci] Update support matrices for ${COMMIT_TAG} (v6e/v7x)"
 fi
-# Construct the repository URL with the access token for authentication.
-AUTHENTICATED_REPO_URL="https://x-access-token:${GITHUB_PAT}@${REPO_URL#https://}"
 
-# Ensure the GITHUB_PAT is available before proceeding.
-if [ -z "${GITHUB_PAT:-}" ]; then
-  echo "--- ERROR: GITHUB_PAT secret not found. Cannot proceed."
-  exit 1
-fi
 
 echo "--- Configuring Git user details"
-git config user.name "Buildkite Bot"
-git config user.email "buildkite-bot@users.noreply.github.com"
+git config user.name "vllm-ci-bot[bot]"
+git config user.email "vllm-ci-bot[bot]@users.noreply.github.com"
 
 echo "--- Fetching and checking out the target branch"
 git fetch origin "${TARGET_BRANCH}"
@@ -63,6 +55,7 @@ echo "--- Downloading CSV artifacts"
 buildkite-agent artifact download "v*/*.csv" "."
 
 # Iterate through v6 and v7 folders if they exist
+TARGET_DIRS=""
 for ver in v6e v7x; do
   if [ -d "$ver" ]; then
     if [ "${NIGHTLY}" = "1" ]; then
@@ -81,10 +74,27 @@ for ver in v6e v7x; do
 
     # Clean up the temporary download directory
     rmdir "${ver}"
+
+    # Collect target directories for later compression
+    TARGET_DIRS="$TARGET_DIRS $TARGET_DIR"
   else
     echo "No artifacts found for version: ${ver}. Skipping."
   fi
 done
+
+echo "--- Compressing support matrices"
+if [ -n "$TARGET_DIRS" ]; then
+  # shellcheck disable=SC2086
+  tar -czf support_matrices.tar.gz $TARGET_DIRS
+
+  echo "--- Uploading compressed support matrices to Buildkite"
+  buildkite-agent artifact upload "support_matrices.tar.gz"
+
+  echo "--- Cleaning up compressed file"
+  rm -f support_matrices.tar.gz
+else
+  echo "No target directories to compress."
+fi
 
 echo "--- Staging changes"
 git add support_matrices/
@@ -98,5 +108,5 @@ else
   git commit -s -m "${COMMIT_MESSAGE}"
 
   echo "--- Pushing changes to '${TARGET_BRANCH}'"
-  git push "${AUTHENTICATED_REPO_URL}" "HEAD:${TARGET_BRANCH}"
+  git push origin "HEAD:${TARGET_BRANCH}"
 fi

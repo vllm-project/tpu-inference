@@ -11,8 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-from typing import List
+from dataclasses import dataclass
+from functools import cache, partial
+from typing import Callable, List
 
 import jax
 import jax.numpy as jnp
@@ -20,10 +21,11 @@ import numpy as np
 from jax._src import dtypes
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
-import tpu_inference.kernels.mla.v1.kernel as mla
-import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
-import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
+import tpu_inference.envs as envs
+import tpu_inference.kernels.mla.v2.kernel as mla
 from tpu_inference import utils
+from tpu_inference.layers.common.attention_backend import (AttentionBackend,
+                                                           RPAAttentionBackend)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import to_jax_dtype
@@ -33,41 +35,96 @@ logger = init_logger(__name__)
 DEFAULT_KV_CACHE_DTYPE = jnp.bfloat16
 
 
+@dataclass
+class KVCacheMetadata:
+    """
+    Used to store metadata about the KV cache for logging in the KV cache manager.
+    Specifcally, with Hybrid KV cache, we can have multiple KV cache types
+    so we need to store the metadata for each KV cache type separately
+    """
+    count: int = 0
+    shape: tuple = None
+    dtype: jnp.dtype = None
+    sharding: NamedSharding = None
+
+
 def get_kv_cache_shape_with_mesh(mesh: Mesh,
                                  total_num_pages: int,
-                                 page_size: int,
+                                 block_size: int,
                                  actual_num_kv_heads: int,
                                  actual_head_dim: int,
                                  kv_dtype: any,
-                                 use_mla: bool = False):
-    """Gets the KV cache shape based on the mesh configuration."""
+                                 use_mla: bool = False,
+                                 attention_backend: AttentionBackend
+                                 | None = None):
+    """Gets the KV cache shape based on the mesh configuration.
 
-    axis_name = ShardingAxisName.ATTN_HEAD
-    model_cnt = utils.get_mesh_shape_product(mesh, axis_name)
+    This function scales block_size by the CONTEXT (DCP, PCP) axis and num_heads by duplicate kv heads.
+    attention_backend is the runner's TPU attention backend; None runs RPA.
 
-    # NOTE(chengjiyao): Currently, the attention kernel is tailored to the
-    # specific model, rather than being determined by the head_dim. If new
-    # models are introduced with a head_dim of 64, this will require additional
-    # model-specific adjustments.
+    """
+
+    model_cnt = utils.get_mesh_shape_product(mesh, ShardingAxisName.KV_HEAD)
+    context_cnt = utils.get_mesh_shape_product(mesh,
+                                               ShardingAxisName.KV_CONTEXT)
+    physical_block_size = block_size * context_cnt
+
     if use_mla:
         # No assertion needed: MLA compresses all KV into a single latent vector,
         # so actual_num_kv_heads is never used in mla.get_kv_cache_shape().
         get_kv_cache_shape_fn = mla.get_kv_cache_shape
         shape = list(
-            get_kv_cache_shape_fn(total_num_pages, page_size, actual_head_dim,
-                                  kv_dtype))
+            get_kv_cache_shape_fn(
+                total_num_pages,
+                physical_block_size,
+                actual_head_dim,
+                kv_dtype,
+                envs.MLA_KV_PACKING_SIZE,
+                transpose_kv_cache=envs.MLA_TRANSPOSE_KV_CACHE))
     else:
         assert actual_num_kv_heads % model_cnt == 0
-        get_kv_cache_shape_fn = (
-            rpa_hd64.get_kv_cache_shape if actual_head_dim == 64 \
-                else rpa.get_kv_cache_shape
-        )
         shape = list(
-            get_kv_cache_shape_fn(total_num_pages, page_size,
-                                  actual_num_kv_heads // model_cnt,
-                                  actual_head_dim, kv_dtype))
+            (attention_backend or RPAAttentionBackend()).get_kv_cache_shape(
+                total_num_pages, physical_block_size,
+                actual_num_kv_heads // model_cnt, actual_head_dim, kv_dtype))
         shape[2] *= model_cnt
     return tuple(shape)
+
+
+@cache
+def _get_kv_cache_allocator(
+        cache_shape: tuple, cache_dtype: jnp.dtype,
+        sharding: NamedSharding) -> Callable[[], jax.Array]:
+
+    @partial(jax.jit, out_shardings=sharding)
+    def _allocate() -> jax.Array:
+        return jnp.zeros(
+            shape=cache_shape,
+            dtype=cache_dtype,
+        )
+
+    return _allocate
+
+
+@cache
+def _get_mamba_cache_allocator(
+        cache_shape: tuple, cache_dtype: jnp.dtype,
+        sharding: NamedSharding) -> Callable[[], jax.Array]:
+
+    @partial(jax.jit, out_shardings=sharding)
+    def _allocate() -> jax.Array:
+        return jnp.zeros(
+            shape=cache_shape,
+            dtype=cache_dtype,
+        )
+
+    return _allocate
+
+
+def create_mamba_cache(cache_shape: tuple, cache_dtype: jnp.dtype,
+                       sharding: NamedSharding) -> jax.Array:
+    """Creates a fresh Mamba state array with a cached allocator."""
+    return _get_mamba_cache_allocator(cache_shape, cache_dtype, sharding)()
 
 
 def create_kv_caches(
@@ -79,6 +136,7 @@ def create_kv_caches(
     layer_names: List[str],
     cache_dtype: jnp.dtype = DEFAULT_KV_CACHE_DTYPE,
     use_mla: bool = False,
+    attention_backend: AttentionBackend | None = None,
 ) -> List[jax.Array]:
     """
     Creates a list of KV cache where each array mapps to single attention layer.
@@ -105,41 +163,58 @@ def create_kv_caches(
 
     cache_shape = get_kv_cache_shape_with_mesh(mesh, num_blocks, block_size,
                                                num_kv_heads, head_size,
-                                               cache_dtype, use_mla)
+                                               cache_dtype, use_mla,
+                                               attention_backend)
 
+    # num_blocks --> shard by data batch
+    # block_size --> shard by context
+    # head       --> shard by heads
     if use_mla:
-        sharding = NamedSharding(mesh,
-                                 PartitionSpec(ShardingAxisName.MLP_TENSOR))
+        sharding = NamedSharding(
+            mesh,
+            PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT))
     else:
         sharding = NamedSharding(
             mesh,
-            PartitionSpec(ShardingAxisName.ATTN_DATA, None,
-                          ShardingAxisName.ATTN_HEAD))
+            PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
+                          ShardingAxisName.KV_HEAD))
 
-    def _allocate() -> jax.Array:
-        return jnp.empty(
-            shape=cache_shape,
-            dtype=cache_dtype,
-        )
-
-    sharded_allocate = jax.jit(_allocate, out_shardings=sharding)
-    kv_caches = []
-    for _ in layer_names:
-        kv_caches.append(sharded_allocate())
-    return kv_caches
+    sharded_allocate = _get_kv_cache_allocator(cache_shape, cache_dtype,
+                                               sharding)
+    return [sharded_allocate() for _ in layer_names]
 
 
-def get_attention_page_size_bytes(mesh, block_size, num_kv_heads, head_size,
-                                  dtype, use_mla) -> int:
+def create_kv_cache_of_shape(
+    cache_shape: tuple,
+    mesh: Mesh,
+    cache_dtype: jnp.dtype = DEFAULT_KV_CACHE_DTYPE,
+) -> jax.Array:
+    """Creates a single zero-filled KV cache array with an explicit shape.
+    """
+    sharding = NamedSharding(
+        mesh, PartitionSpec(ShardingAxisName.BATCH,
+                            ShardingAxisName.KV_CONTEXT))
+    return _get_kv_cache_allocator(tuple(cache_shape), cache_dtype, sharding)()
+
+
+def get_attention_page_size_bytes(
+        mesh,
+        block_size,
+        num_kv_heads,
+        head_size,
+        dtype,
+        use_mla,
+        attention_backend: AttentionBackend | None = None) -> int:
     jax_dtype = to_jax_dtype(dtype)
     bits = dtypes.itemsize_bits(jax_dtype)
     kv_cache_shape = get_kv_cache_shape_with_mesh(
         mesh=mesh,
         total_num_pages=1,
-        page_size=block_size,
+        block_size=block_size,
         actual_num_kv_heads=num_kv_heads,
         actual_head_dim=head_size,
         kv_dtype=jax_dtype,
         use_mla=use_mla,
+        attention_backend=attention_backend,
     )
-    return (bits * np.prod(kv_cache_shape)) // 8
+    return int(bits * np.prod(kv_cache_shape)) // 8

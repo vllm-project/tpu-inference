@@ -132,7 +132,7 @@ def quantized_matmul_kernel(
     # allowing the compiler to overlap output fusion and packing overhead with MXU computation
     # TODO(amandaliang): use pltpu.get_tpu_info().mxu_column_size when JAX version is newer
     compute_tile_n = MXU_SIZE * n_lane_multiplier
-    steps_n = out_block_size // compute_tile_n
+    steps_n = max(1, out_block_size // compute_tile_n)
 
     def kernel(lhs_ref, rhs_ref, w_scales_ref, out_ref, acc_scratch):
         pid_k = pl.program_id(2)

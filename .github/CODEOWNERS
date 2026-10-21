@@ -7,53 +7,104 @@
 # Analysis includes full history from tpu_commons and tpu_inference paths.
 
 # Default owners for everything in the repo (fallback)
-* @vipannalla
+* @vipannalla @kyuyeunk @QiliangCui
 
 # CI/CD and Build Configuration
-/.buildkite/ @jcyang43 @QiliangCui
-/.github/ @jcyang43 @QiliangCui
+/.buildkite/ @QiliangCui @yiw-wang @CienetStingLin @yunyao-gg @theminghuang
+/.github/ @QiliangCui @yiw-wang @CienetStingLin @theminghuang
 
 # Documentation
-/docs/ @bvrockwell
-/README.md @bvrockwell
-/CONTRIBUTING.md @jrplatin @bvrockwell
+/docs/ @bvrockwell @RobMulla @vipannalla @QiliangCui
+/README.md @bvrockwell @RobMulla @vipannalla @QiliangCui
+/CONTRIBUTING.md @jrplatin @bvrockwell @RobMulla @QiliangCui
 
 # Distributed Computing
-/tpu_inference/distributed/ @mrjunwan-lang @sixiang-google
+/tpu_inference/distributed/ @mrjunwan-lang @sixiang-google @wenxindongwork @QiliangCui
 
 # Kernel Implementations (Performance-critical)
-/tpu_inference/kernels/ @kyuyeunk @bythew3i
+/tpu_inference/kernels/ @kyuyeunk @bythew3i @a1yssan13 @jrplatin
+/tpu_inference/kernels/mla/ @m-liu @gxd3 @gpolovets1 @kyuyeunk
+/tpu_inference/kernels/experimental/deepseek_v4/ @gxd3 @a1yssan13 @inucool12
+/tpu_inference/kernels/experimental/rpa_v3_cp/ @kyuyeunk @wenxindongwork @weiyu0824
 
-# JAX Model Layers - Attention
-/tpu_inference/layers/jax/ @bzgoogle @jrplatin @gpolovets1
-/tpu_inference/layers/vllm/ @kyuyeunk @vanbasten23
+# Model layers
+/tpu_inference/layers/ @kyuyeunk @lk-chen @jrplatin @gxd3
+/tpu_inference/layers/jax/ @jrplatin @gpolovets1 @lk-chen
+/tpu_inference/layers/vllm/ @kyuyeunk @vanbasten23 @gxd3 @jrplatin
+/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v4/ @gxd3 @a1yssan13 @inucool12
+# FlyWheel attention backend (--attention-backend flywheel)
+/tpu_inference/layers/common/flywheel_*.py @kyuyeunk @lk-chen @jrplatin @gxd3
+/tpu_inference/layers/vllm/backends/flywheel.py @kyuyeunk @vanbasten23 @gxd3 @jrplatin @lk-chen
 
-# JAX Model Implementations
-/tpu_inference/models/jax/qwen2_5_vl.py @kwang3939
-/tpu_inference/models/jax/gpt_oss.py @bzgoogle
-/tpu_inference/models/jax/deepseek_v3.py @bzgoogle @gpolovets1 @jrplatin
-/tpu_inference/models/vllm/ @kyuyeunk @vanbasten23
+# Model Implementations and wrappers
+/tpu_inference/models/ @kyuyeunk @lk-chen @jrplatin
+/tpu_inference/models/jax/ @kyuyeunk @lk-chen @jrplatin @kwang3939
+/tpu_inference/models/jax/qwen2_5_vl.py @kyuyeunk @lk-chen @jrplatin @kwang3939 @JiriesKaileh
+/tpu_inference/models/jax/deepseek_v3.py @gpolovets1 @jrplatin @gxd3
+/tpu_inference/models/vllm/ @kyuyeunk @vanbasten23 @gxd3 @jrplatin
 
 # Runner and Execution
-/tpu_inference/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google  @mrjunwan-lang
+/tpu_inference/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google  @mrjunwan-lang @gxd3 @a1yssan13
+/tpu_inference/runner/mm_encoder_jit_manager.py @lk-chen @kwang3939 @jrplatin
+/tpu_inference/runner/multimodal_manager.py @lk-chen @kwang3939 @jrplatin
 /tpu_inference/runner/tpu_runner.py @jrplatin @kyuyeunk @wenxindongwork @sixiang-google
 /tpu_inference/runner/persistent_batch_manager.py @jrplatin @wenxindongwork
-/tpu_inference/runner/speculative_decoding_manager.py @Lumosis
-/tpu_inference/executors/ @sixiang-google @mrjunwan-lang
+/tpu_inference/executors/ @sixiang-google @mrjunwan-lang @Lumosis
 /tpu_inference/core/ @sixiang-google @mrjunwan-lang @wenxindongwork
+/tpu_inference/layers/common/sharding.py @kyuyeunk @jrplatin @wenxindongwork @sixiang-google  @mrjunwan-lang
 
 # Worker Management
-/tpu_inference/worker/ @sixiang-google @mrjunwan-lang @jrplatin @vanbasten23 @wenxindongwork
+/tpu_inference/worker/ @sixiang-google @mrjunwan-lang @jrplatin @vanbasten23 @wenxindongwork @Lumosis
+
+# RL Rollout / Weight Sync
+/tpu_inference/rl/ @wenxindongwork @pv97
 
 # Speculative Decoding
-/tpu_inference/spec_decode/ @Lumosis
+/tpu_inference/spec_decode/ @Lumosis @gxd3
+/tpu_inference/layers/jax/sample/rejection_sampler.py @Lumosis @gxd3
+/tpu_inference/runner/speculative_decoding_manager.py @Lumosis @gxd3
 
 # Platform Support
-/tpu_inference/platforms/ @sixiang-google @mrjunwan-lang
+/tpu_inference/platforms/ @sixiang-google @mrjunwan-lang @Lumosis
 
 # LoRA and Adapters
-/tpu_inference/lora/ @vanbasten23
-/tpu_inference/runner/lora_utils.py @vanbasten23
+/tpu_inference/lora/ @vanbasten23 @kyuyeunk
+/tpu_inference/runner/lora_utils.py @vanbasten23 @kyuyeunk
 
 # Docker Configuration
-/docker/ @jrplatin @QiliangCui
+/docker/ @jrplatin @QiliangCui @yiw-wang QiliangCui
+
+# Tools (kernel tuner, etc.)
+/tools/ @vipannalla @kyuyeunk @patrickji2014 @yiw-wang @qiliangcui @yunyao-gg
+
+# Unowned: scripts, examples, and bot-updated support_matrices —
+# anyone can approve, no required CODEOWNER review. Bot pushes to
+# support_matrices bypass branch protection at the push level.
+/scripts/
+/examples/
+/support_matrices/
+
+# Tests mirror production-code ownership (CODEOWNERS rules per subtree)
+/tests/core/ @sixiang-google @mrjunwan-lang @wenxindongwork
+/tests/distributed/ @mrjunwan-lang @sixiang-google @wenxindongwork @QiliangCui
+/tests/executors/ @sixiang-google @mrjunwan-lang @wenxindongwork @QiliangCui
+/tests/kernels/ @kyuyeunk @bythew3i @a1yssan13
+/tests/kernels/deepseek_v4 @gxd3 @a1yssan13 @inucool12
+/tests/kernels/rpa_v3_cp/ @kyuyeunk @wenxindongwork @weiyu0824 
+/tests/layers/ @kyuyeunk @lk-chen @jrplatin
+/tests/layers/jax/ @kyuyeunk @lk-chen @jrplatin
+/tests/lora/ @vanbasten23 @kyuyeunk
+/tests/models/ @kyuyeunk @lk-chen @jrplatin
+/tests/models/jax/ @kyuyeunk @lk-chen @jrplatin
+/tests/layers/jax/sample/test_rejection_sampler.py @Lumosis @gxd3
+/tests/platforms/ @sixiang-google @mrjunwan-lang @wenxindongwork @QiliangCui
+/tests/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google @mrjunwan-lang @gxd3 @a1yssan13
+/tests/spec_decode/ @Lumosis @gxd3
+/tests/worker/ @sixiang-google @mrjunwan-lang @jrplatin @vanbasten23 @wenxindongwork
+/tests/rl/ @wenxindongwork @pv97
+/tests/e2e/ @pv97 @wenxindongwork @jrplatin @Lumosis @gxd3
+/tests/offload/ @juncgu-google @richardsliu
+/tests/scripts/ @jrplatin @QiliangCui
+/tests/kernels/flywheel_*_test.py @kyuyeunk @bythew3i @a1yssan13 @lk-chen
+/tests/layers/common/test_flywheel_*.py @kyuyeunk @lk-chen @jrplatin
+/tests/layers/vllm/backends/test_flywheel.py @kyuyeunk @lk-chen @jrplatin

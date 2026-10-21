@@ -12,14 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: all-gather-matmul-w8a16
-# pipeline-type: kernel support matrix microbenchmarks
 steps:
   - label: "${TPU_VERSION:-tpu6e} Correctness tests for all-gather-matmul-w8a16"
     key: "${TPU_VERSION:-tpu6e}_all-gather-matmul-w8a16_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+      queue: cpu  # TODO: replace with execution environment (e.g. "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}")
     commands:
       - |
         buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_all-gather-matmul-w8a16_CorrectnessTest" "unverified"
@@ -42,7 +40,7 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_record_all-gather-matmul-w8a16_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+      queue: cpu  # TODO: replace with execution environment (e.g. "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}")
     commands:
       - |
         buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_all-gather-matmul-w8a16_PerformanceTest" "unverified"

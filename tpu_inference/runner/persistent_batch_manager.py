@@ -49,16 +49,43 @@ class PersistentBatchManager:
         swap_cnt = 0
         if num_reqs <= 0:
             return swap_cnt
+        max_decode_tokens = self.input_batch.max_decode_tokens
+
+        if (max_decode_tokens == 1
+                and scheduler_output.total_num_scheduled_tokens == num_reqs):
+            num_decode = num_reqs
+            self.input_batch.request_distribution = [
+                num_decode, num_decode, num_reqs
+            ]
+            return swap_cnt
+
+        # Check if all scheduled requests match the decode threshold
+        all_decode = True
+        for req_id in self.input_batch.req_ids[:num_reqs]:
+            if scheduler_output.num_scheduled_tokens[
+                    req_id] > max_decode_tokens:
+                all_decode = False
+                break
+
+        if all_decode:
+            num_decode = num_reqs
+            self.input_batch.request_distribution = [
+                num_decode, num_decode, num_reqs
+            ]
+            return swap_cnt
+
         # Use two-pointer approach to reorder the decode requests to front.
         i, j = 0, num_reqs - 1
         while i < j:
             i_req_id = self.input_batch.req_ids[i]
             j_req_id = self.input_batch.req_ids[j]
 
-            if scheduler_output.num_scheduled_tokens[i_req_id] == 1:
+            if scheduler_output.num_scheduled_tokens[
+                    i_req_id] <= max_decode_tokens:
                 # i is a decode request, move to the next one.
                 i += 1
-            elif scheduler_output.num_scheduled_tokens[j_req_id] > 1:
+            elif scheduler_output.num_scheduled_tokens[
+                    j_req_id] > max_decode_tokens:
                 # j is a prefill request, move to the previous one.
                 j -= 1
             else:
@@ -69,7 +96,7 @@ class PersistentBatchManager:
                 swap_cnt += 1
 
         num_decode = i + int(scheduler_output.num_scheduled_tokens[
-            self.input_batch.req_ids[i]] == 1)
+            self.input_batch.req_ids[i]] <= max_decode_tokens)
 
         self.input_batch.request_distribution = [
             num_decode, num_decode, num_reqs
@@ -90,8 +117,9 @@ class PersistentBatchManager:
             If False, we can skip copying SamplingMetadata to the TPU.
         """
         # Remove finished requests from the cached states.
+        finished_req_states = {}
         for req_id in scheduler_output.finished_req_ids:
-            self.requests.pop(req_id, None)
+            finished_req_states[req_id] = self.requests.pop(req_id, None)
 
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
@@ -103,7 +131,16 @@ class PersistentBatchManager:
         for req_id in scheduler_output.finished_req_ids:
             req_index = self.input_batch.remove_request(req_id)
             if req_index is not None:
+                req_state = finished_req_states.get(req_id)
+                if req_state is not None:
+                    req_state.mamba_state_slot = None
                 removed_req_indices.append(req_index)
+            else:
+                req_state = finished_req_states.get(req_id)
+                if req_state is not None:
+                    self.input_batch.release_mamba_slot(
+                        req_state.mamba_state_slot)
+                    req_state.mamba_state_slot = None
 
         # Free the cached encoder outputs.
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
@@ -116,13 +153,50 @@ class PersistentBatchManager:
         # they will be scheduled again sometime in the future.
         scheduled_req_ids = scheduler_output.num_scheduled_tokens.keys()
         cached_req_ids = self.input_batch.req_id_to_index.keys()
-        unscheduled_req_ids = cached_req_ids - scheduled_req_ids
+        resumed_req_ids = set(
+            getattr(scheduler_output.scheduled_cached_reqs, "resumed_req_ids",
+                    ()) or ())
+        preempted_req_ids = set(
+            getattr(scheduler_output, "preempted_req_ids", ()) or ())
+        reset_mamba_req_ids = preempted_req_ids | resumed_req_ids
+
+        # A request can be temporarily removed from the persistent batch while
+        # keeping its physical mamba slot. If it is then preempted or resumed
+        # before being re-added, the active-batch removal loop below cannot see
+        # it. Reset the preserved slot here so a recomputed request cannot read
+        # stale recurrent state from its old slot.
+        for req_id in reset_mamba_req_ids:
+            if req_id in self.input_batch.req_id_to_index:
+                continue
+            req_state = self.requests.get(req_id)
+            if req_state is None:
+                continue
+            self.input_batch.release_mamba_slot(req_state.mamba_state_slot)
+            req_state.mamba_state_slot = None
+
+        # Usually resumed requests are not present in the persistent batch.
+        # Forced preemption can make a resumed request still appear there; clear
+        # it first so it is re-added through the normal resumed-request path.
+        unscheduled_req_ids = cached_req_ids - (scheduled_req_ids -
+                                                resumed_req_ids)
         # NOTE(woosuk): The persistent batch optimization assumes that
         # consecutive batches contain mostly the same requests. If batches
         # have low request overlap (e.g., alternating between two distinct
         # sets of requests), this optimization becomes very inefficient.
         for req_id in unscheduled_req_ids:
-            req_index = self.input_batch.remove_request(req_id)
+            req_index = self.input_batch.req_id_to_index.get(req_id)
+            reset_mamba_slot = (req_id in preempted_req_ids
+                                or req_id in resumed_req_ids)
+            if req_index is not None:
+                req_state = self.requests.get(req_id)
+                if reset_mamba_slot:
+                    if req_state is not None:
+                        req_state.mamba_state_slot = None
+                else:
+                    self.requests[req_id].mamba_state_slot = int(
+                        self.input_batch.mamba_state_indices_cpu[req_index])
+            req_index = self.input_batch.remove_request(
+                req_id, free_mamba_slot=reset_mamba_slot)
             assert req_index is not None
             removed_req_indices.append(req_index)
 
@@ -149,42 +223,10 @@ class PersistentBatchManager:
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
-                image_grid_thw = []
-                video_grid_thw = []
-                second_per_grid_ts = []
-                audio_feature_lengths = []
-                use_audio_in_video = False
-                for mm_feature in self.requests[req_id].mm_features:
-                    item = mm_feature.data
-                    if item is None:
-                        continue
-                    mm_input = item.get_data()
-                    if mm_input.get("image_grid_thw") is not None:
-                        image_grid_thw.append(
-                            mm_input["image_grid_thw"].tolist())
-                    if mm_input.get("video_grid_thw") is not None:
-                        video_grid_thw.append(
-                            mm_input["video_grid_thw"].tolist())
-                    if mm_input.get("second_per_grid_ts") is not None:
-                        second_per_grid_ts.append(
-                            mm_input["second_per_grid_ts"])
-                    if mm_input.get("audio_feature_lengths") is not None:
-                        audio_feature_lengths.append(
-                            mm_input["audio_feature_lengths"])
-                    if mm_input.get("use_audio_in_video") is True:
-                        use_audio_in_video = True
-
-                hf_config = self.model_config.hf_config
-
                 self.requests[req_id].mrope_positions, self.requests[
                     req_id].mrope_position_delta = get_mrope_input_positions_fn(
                         self.requests[req_id].prompt_token_ids,
-                        hf_config=hf_config,
-                        image_grid_thw=image_grid_thw,
-                        video_grid_thw=video_grid_thw,
-                        second_per_grid_ts=second_per_grid_ts,
-                        audio_feature_lengths=audio_feature_lengths,
-                        use_audio_in_video=use_audio_in_video,
+                        self.requests[req_id].mm_features,
                     )
 
         # Update the states of the running/resumed requests.
@@ -276,6 +318,9 @@ class PersistentBatchManager:
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
         removed_req_indices = sorted(removed_req_indices, reverse=True)
+        dp_rank_map = getattr(scheduler_output, 'assigned_dp_rank', None)
+        if not isinstance(dp_rank_map, dict):
+            dp_rank_map = None
         for req_id in req_ids_to_add:
             req_state = self.requests[req_id]
             if removed_req_indices:
@@ -284,7 +329,8 @@ class PersistentBatchManager:
             else:
                 # Append to the end.
                 req_index = None
-            self.input_batch.add_request(req_state, req_index)
+            dp_rank = dp_rank_map.get(req_id, 0) if dp_rank_map else 0
+            self.input_batch.add_request(req_state, req_index, dp_rank=dp_rank)
 
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
@@ -292,5 +338,10 @@ class PersistentBatchManager:
 
         batch_changed = len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
         # TODO(jevinjiang): I assume we do not need to set batch_changed to true if just swapping requests.
-        self._reorder_batch(scheduler_output)
+        swap_cnt = self._reorder_batch(scheduler_output)
+        if (isinstance(self.input_batch, InputBatch)
+                and self.input_batch.has_mamba_layers
+                and (batch_changed or swap_cnt > 0)):
+            self.input_batch.assert_mamba_state_invariants(
+                self.requests, dp_rank_map)
         return batch_changed

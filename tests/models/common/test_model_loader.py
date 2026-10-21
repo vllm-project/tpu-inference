@@ -133,6 +133,39 @@ def test_get_model_architecture_unsupported():
         model_loader._get_model_architecture(config)
 
 
+@pytest.mark.parametrize("env_value,is_draft", [
+    ("flax_nnx", False),
+    ("vllm", False),
+    ("flax_nnx", True),
+    ("vllm", True),
+])
+def test_resolve_model_impl_type_explicit(env_value, is_draft):
+    """An explicit (non-auto) impl type is returned as-is, from
+    MODEL_IMPL_TYPE for the target model and DRAFT_MODEL_IMPL_TYPE for the
+    draft model, without consulting the architecture."""
+    env_attr = "DRAFT_MODEL_IMPL_TYPE" if is_draft else "MODEL_IMPL_TYPE"
+    with patch.object(model_loader.envs, env_attr, env_value), \
+         patch.object(model_loader, "resolve_model_architecture") as mock_res:
+        impl = model_loader.resolve_model_impl_type(MagicMock(),
+                                                    is_draft_model=is_draft)
+    assert impl == env_value
+    mock_res.assert_not_called()
+
+
+@pytest.mark.parametrize("is_draft", [False, True])
+def test_resolve_model_impl_type_auto(is_draft):
+    """'auto' delegates to resolve_model_architecture with the draft flag."""
+    env_attr = "DRAFT_MODEL_IMPL_TYPE" if is_draft else "MODEL_IMPL_TYPE"
+    cfg = MagicMock()
+    with patch.object(model_loader.envs, env_attr, "auto"), \
+         patch.object(model_loader, "resolve_model_architecture",
+                      return_value="flax_nnx") as mock_res:
+        impl = model_loader.resolve_model_impl_type(cfg,
+                                                    is_draft_model=is_draft)
+    assert impl == "flax_nnx"
+    mock_res.assert_called_once_with(cfg, is_draft)
+
+
 @pytest.fixture(autouse=True)
 def clear_model_registry_after_test():
     """Clear the model registry after each test to prevent side effects."""
@@ -273,11 +306,135 @@ def test_get_flax_model(vllm_config, mesh, tie_word_embeddings):
                                     device=jax.devices()[0],
                                     need_pp=False)
     with jax.set_mesh(mesh), set_current_vllm_config(vllm_config):
-        model_fn, compute_logits_fn, *_ = model_loader.get_flax_model(
-            vllm_config, rng, mesh)
+        model = model_loader.get_flax_model(vllm_config, rng, mesh)
 
-    assert callable(model_fn)
-    assert callable(compute_logits_fn)
+    assert callable(model.model_fn)
+    assert callable(model.compute_logits_fn)
+
+    # Verify that JAX model instance possesses the named_modules attribute
+    assert hasattr(model.model, "named_modules")
+
+
+def test_step_fn_kv_cache_sharding_is_a_fixed_point(vllm_config, mesh, rng):
+    """The step fn must return kv-caches sharded exactly as it received them.
+
+    The runner feeds each step's kv-cache output straight back in as the next
+    step's input, so any divergence between the allocated sharding and the
+    sharding the step fn returns changes the jit cache key and forces a
+    recompile mid-run -- which `ForbidCompile` turns into a hard error. This
+    pins the fixed point across the token buckets a draining batch walks
+    through, and asserts the replay compiles nothing.
+    """
+    from tpu_inference.layers.common.attention_metadata import \
+        AttentionMetadata
+    from tpu_inference.runner.kv_cache import create_kv_caches
+    from tpu_inference.runner.utils import ForbidCompile
+
+    init_pp_distributed_environment(ip="",
+                                    rank=0,
+                                    world_size=1,
+                                    device=jax.devices()[0],
+                                    need_pp=False)
+    with jax.set_mesh(mesh), set_current_vllm_config(vllm_config):
+        model = model_loader.get_flax_model(vllm_config, rng, mesh)
+
+        hf_config = vllm_config.model_config.hf_config
+        num_layers = hf_config.num_hidden_layers
+        kv_caches = create_kv_caches(
+            num_blocks=64,
+            block_size=32,
+            num_kv_heads=hf_config.num_key_value_heads,
+            head_size=hf_config.head_dim,
+            mesh=mesh,
+            layer_names=[f"layer.{i}" for i in range(num_layers)],
+            cache_dtype=jnp.bfloat16,
+        )
+        allocated = jax.tree.map(lambda c: c.sharding, kv_caches)
+        cache_index = tuple((f"layer.{i}", i) for i in range(num_layers))
+
+        def step(caches, num_tokens, with_options=True, state_leaves=None):
+            if state_leaves is None:
+                state_leaves = model.state_leaves
+            step_fn = (model.model_fn
+                       if with_options else model.model.step_fn_no_options)
+            num_reqs = min(num_tokens, 8)
+            attention_metadata = AttentionMetadata(
+                input_positions=jnp.zeros((num_tokens, ), dtype=jnp.int32),
+                block_tables=jnp.zeros((num_reqs, 4),
+                                       dtype=jnp.int32).reshape(-1),
+                seq_lens=jnp.ones((num_reqs, ), dtype=jnp.int32),
+                query_start_loc=jnp.arange(num_reqs + 1, dtype=jnp.int32),
+                request_distribution=jnp.array([0, 0, num_reqs],
+                                               dtype=jnp.int32),
+            )
+            return step_fn(
+                state_leaves,
+                caches,
+                jnp.ones((num_tokens, ), dtype=jnp.int32),
+                attention_metadata,
+                None,
+                jnp.zeros((num_tokens, ), dtype=jnp.int32),
+                cache_index,
+                None,
+                None,
+                True,
+                True,
+            )[0]
+
+        # A batch drains through decreasing token buckets; every one of them
+        # must hand back caches sharded the way they were allocated.
+        buckets = (64, 32, 16, 8)
+        for num_tokens in buckets:
+            kv_caches = step(kv_caches, num_tokens)
+            got = jax.tree.map(lambda c: c.sharding, kv_caches)
+            drifted = [(want, have) for want, have in zip(
+                jax.tree.leaves(allocated), jax.tree.leaves(got))
+                       if want != have]
+            assert not drifted, (
+                f"kv-cache sharding drifted at num_tokens={num_tokens}: "
+                f"{len(drifted)} leaf(s) changed, e.g. allocated "
+                f"{drifted[0][0]} came back as {drifted[0][1]}")
+
+        # Replaying the same buckets with the returned caches must reuse the
+        # compiled executables rather than trigger a fresh lowering.
+        with ForbidCompile():
+            for num_tokens in buckets:
+                kv_caches = step(kv_caches, num_tokens)
+
+        # The eagle3 drafter and the `continue_decode` loop both call the step
+        # fn from inside an outer jit, where `kv_caches` arrives as tracers
+        # with no queryable sharding. Pass `state_leaves` as an argument rather
+        # than capturing it by closure so the model weights are not inlined into
+        # the serialized XLA executable (>2 GiB).
+        traced_step = jax.jit(lambda state_leaves, caches: step(
+            caches, buckets[0], with_options=False, state_leaves=state_leaves))
+        traced_step(model.state_leaves, kv_caches)
+
+
+def test_get_flax_model_with_pooling(vllm_config, mesh, rng):
+    """Tests that get_flax_model correctly instantiates a pooler when runner_type is 'pooling'."""
+    vllm_config.model_config.runner_type = "pooling"
+    from vllm.config import PoolerConfig
+    vllm_config.model_config.pooler_config = PoolerConfig(
+        task="embed", tok_pooling_type="STEP", seq_pooling_type="CLS")
+
+    with patch("tpu_inference.models.common.model_loader._get_nnx_model"
+               ) as mock_get_nnx:
+        mock_model = MagicMock()
+        mock_get_nnx.return_value = mock_model
+
+        init_pp_distributed_environment(ip="",
+                                        rank=0,
+                                        world_size=1,
+                                        device=jax.devices()[0],
+                                        need_pp=False)
+
+        with jax.set_mesh(mesh), set_current_vllm_config(vllm_config):
+            model_interface = model_loader.get_flax_model(
+                vllm_config, rng, mesh)
+
+        assert model_interface.pooler_fn != model_loader._not_support
+        assert model_interface.pooler_fn.__name__ == "compute_pooler_output"
 
 
 def test_get_vllm_model(mock_get_pp_group, mesh):
@@ -306,11 +463,10 @@ def test_get_vllm_model(mock_get_pp_group, mesh):
             pipeline_model_parallel_size=1,
         )
 
-    model_fn, compute_logits_fn, *_ = model_loader.get_vllm_model(
-        vllm_config, rng, mesh)
+    model = model_loader.get_vllm_model(vllm_config, rng, mesh)
 
-    assert callable(model_fn)
-    assert callable(compute_logits_fn)
+    assert callable(model.model_fn)
+    assert callable(model.compute_logits_fn)
 
 
 def test_get_vllm_model_random_weights(mock_get_pp_group, mesh):
@@ -338,11 +494,10 @@ def test_get_vllm_model_random_weights(mock_get_pp_group, mesh):
     with patch(
             "vllm.model_executor.model_loader.dummy_loader.DummyModelLoader.load_weights"
     ) as mock_load:
-        model_fn, compute_logits_fn, *_ = model_loader.get_vllm_model(
-            vllm_config, rng, mesh)
+        model = model_loader.get_vllm_model(vllm_config, rng, mesh)
 
-    assert callable(model_fn)
-    assert callable(compute_logits_fn)
+    assert callable(model.model_fn)
+    assert callable(model.compute_logits_fn)
     mock_load.assert_called()
 
 
@@ -385,7 +540,8 @@ class TestGetModel:
         result = model_loader.get_model(vllm_config, rng, mesh)
 
         mock_get_flax.assert_not_called()
-        mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh)
+        mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh, False,
+                                              None)
         assert result == "vllm_model_sentinel"
 
     @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "flax_nnx"}, clear=True)
@@ -415,7 +571,8 @@ class TestGetModel:
         result = model_loader.get_model(vllm_config, rng, mesh)
 
         mock_get_flax.assert_not_called()
-        mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh)
+        mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh, False,
+                                              None)
         assert result == "vllm_model_sentinel"
 
     @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "flax_nnx"}, clear=True)
@@ -436,7 +593,8 @@ class TestGetModel:
 
         # Check that both were called
         mock_get_flax.assert_called_once_with(vllm_config, rng, mesh, False)
-        mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh)
+        mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh, False,
+                                              None)
         assert result == "vllm_fallback_sentinel"
 
     @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "flax_nnx"}, clear=True)
@@ -508,5 +666,6 @@ class TestGetModel:
         result = model_loader.get_model(vllm_config, rng, mesh)
 
         mock_get_flax.assert_not_called()
-        mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh)
+        mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh, False,
+                                              None)
         assert result == "vllm_model_sentinel"

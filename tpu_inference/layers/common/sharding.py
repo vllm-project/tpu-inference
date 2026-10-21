@@ -22,11 +22,15 @@ import numpy as np
 from jax.sharding import Mesh
 
 from tpu_inference import envs, utils
+from tpu_inference.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-MESH_AXIS_NAMES = ("data", "attn_dp", "attn_dp_expert", "expert", "model")
+logger = init_logger(__name__)
+
+MESH_AXIS_NAMES = ("data", "attn_dp", "attn_dp_expert", "expert", "model",
+                   "dcp", "pcp")
 MESH_AXIS_NAMES_2D = ('data', 'model')
 
 
@@ -37,18 +41,34 @@ class ShardingAxisNameBase:
         'attn_dp',
         'attn_dp_expert',
     )
-    ATTN_DATA = ('data', 'attn_dp', 'attn_dp_expert')
+    ATTN_DATA = ('data', 'pcp', 'attn_dp', 'attn_dp_expert')
     ATTN_DATA_EXPERT = ('attn_dp_expert', 'expert')
     MLP_DATA = 'data'
-    ATTN_HEAD = ('model', 'expert')
+    ATTN_HEAD = ('model', 'expert', 'dcp')  # Q heads
+    KV_HEAD = ('model', 'expert')
     ATTN_TENSOR = None
-    MLP_TENSOR = ('attn_dp', 'attn_dp_expert', 'model', 'expert')
-    MOE_TENSOR = ('attn_dp', 'model')
-    EXPERT = ('attn_dp', 'attn_dp_expert', 'expert', 'model')
-    EXPERT_DATA = ('data', 'attn_dp', 'attn_dp_expert', 'expert', 'model')
-    VOCAB = ('model', 'attn_dp', 'attn_dp_expert', 'expert')
+    MLP_TENSOR = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp', 'pcp')
+    MOE_TENSOR = ('attn_dp', 'model', 'dcp', 'pcp')
+    EXPERT = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp', 'pcp')
+    EXPERT_DATA = ('data', 'attn_dp', 'attn_dp_expert', 'expert', 'model',
+                   'dcp', 'pcp')
+    VOCAB = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp', 'pcp')
     MODEL_1 = 'model'
     MODEL_2 = 'expert'
+
+    # Standard name for the model sharding axis.
+    MODEL = 'model'
+
+    # These axes are used in KV caches management.
+    BATCH = ('data', 'attn_dp', 'attn_dp_expert')
+    KV_CONTEXT = ('pcp', 'dcp')
+
+    # PCP input sharding
+    PREFILL_CONTEXT = 'pcp'
+
+    # Vision encoder sharding axes
+    VIT_BATCH = ('data', 'attn_dp', 'attn_dp_expert')
+    VIT_MODEL = 'model'
 
 
 class ShardingAxisName2D:
@@ -61,12 +81,22 @@ class ShardingAxisName2D:
     ATTN_DATA = 'data'
     MLP_DATA = 'data'
     ATTN_HEAD = 'model'
+    KV_HEAD = 'model'
     ATTN_TENSOR = None
     MLP_TENSOR = 'model'
     MOE_TENSOR = 'model'
     EXPERT = 'model'
     EXPERT_DATA = ('data', 'model')
     VOCAB = ('data', 'model')
+    BATCH = 'data'
+    KV_CONTEXT = None
+    PREFILL_CONTEXT = None
+
+    MODEL = 'model'
+
+    # Vision encoder sharding axes
+    VIT_BATCH = 'data'
+    VIT_MODEL = 'model'
 
 
 # Lazily initialize the ShardingAxisName so that we can decide which one to use based on the
@@ -76,6 +106,7 @@ class LazyShardingAxisName:
 
     def __init__(self):
         self._cls = None
+        self._overrides: dict = {}
 
     def _initialize(self):
         if self._cls is None:
@@ -89,12 +120,35 @@ class LazyShardingAxisName:
             except Exception:
                 self._cls = ShardingAxisName2D
 
+    def override(self, **kwargs):
+        """Set runtime axis overrides."""
+        self._overrides.update(kwargs)
+
+    def reset(self):
+        """Clear all overrides, restoring base-class values."""
+        self._overrides.clear()
+
     def __getattr__(self, name):
+        if name in self._overrides:
+            return self._overrides[name]
         self._initialize()
         return getattr(self._cls, name)
 
 
 ShardingAxisName = LazyShardingAxisName()
+
+
+def is_attn_dp(mesh: Mesh) -> bool:
+    """Whether attention data-parallelism is active on ``mesh``.
+
+    True when the attention-data axes carry a factor beyond plain data
+    parallelism (i.e. ``attn_dp`` * ``attn_dp_expert`` > 1), meaning attention
+    is replicated over more data-parallel shards than the MLP/data axis alone.
+    """
+    attn_dp_size = utils.get_mesh_shape_product(mesh,
+                                                ShardingAxisName.ATTN_DATA)
+    dp_size = utils.get_mesh_shape_product(mesh, ShardingAxisName.MLP_DATA)
+    return (attn_dp_size // dp_size) > 1
 
 
 @dataclass
@@ -119,6 +173,8 @@ class ShardingStrategy:
     data_parallelism: int = 1
     attention_data_parallelism: int = 1
     attention_data_expert_parallelism: int = 1
+    decode_context_parallelism: int = 1
+    prefill_context_parallelism: int = 1
 
 
 class ShardingConfigManager:
@@ -135,7 +191,8 @@ class ShardingConfigManager:
 
     def __init__(self,
                  sharding_strategy: ShardingStrategy,
-                 device_indexes: Optional[List] = None):
+                 device_indexes: Optional[List] = None,
+                 mm_encoder_tp_mode: str = "weights"):
 
         self.sharding_strategy: ShardingStrategy = sharding_strategy
         self.device_indexes: Optional[List[int]] = device_indexes
@@ -143,6 +200,7 @@ class ShardingConfigManager:
             math.prod(asdict(sharding_strategy).values()))
         if device_indexes:
             assert self._total_devices == len(device_indexes)
+        self.mm_encoder_tp_mode = mm_encoder_tp_mode
 
     @classmethod
     def from_vllm_config(cls,
@@ -156,17 +214,29 @@ class ShardingConfigManager:
         ss_tensor_parallelsim = sharding_strategy.get("tensor_parallelism",
                                                       None)
         data_parallelism = parallel_config.data_parallel_size
+        enable_dp_attention = sharding_strategy.get("enable_dp_attention",
+                                                    False)
+        if envs.TPU_MULTIPROCESS_DP:
+            data_parallelism = 1
         expert_parallelism = sharding_strategy.get("expert_parallelism", 1)
         sequence_parallelism = sharding_strategy.get("sequence_parallelism", 1)
         device_indexes = sharding_strategy.get("device_indexes", None)
 
-        enable_dp_attention = sharding_strategy.get("enable_dp_attention",
-                                                    False)
+        decode_context_parallelism = parallel_config.decode_context_parallel_size
+        prefill_context_parallelism = parallel_config.prefill_context_parallel_size
+
         if pc_tensor_parallelism != ss_tensor_parallelsim and ss_tensor_parallelsim:
             # The user has explicitly set the tensor parallelism in the sharding config.
             tensor_parallelism = ss_tensor_parallelsim
         else:
             tensor_parallelism = pc_tensor_parallelism
+
+        if tensor_parallelism % decode_context_parallelism != 0:
+            raise ValueError(
+                f"tensor_parallelism ({tensor_parallelism}) must be divisible by "
+                f"decode_context_parallelism ({decode_context_parallelism})")
+        # DCP reused TP axis
+        tensor_parallelism = tensor_parallelism // decode_context_parallelism
 
         if enable_dp_attention:
             # Replicate attention layer when num_kv_heads < TP
@@ -188,14 +258,38 @@ class ShardingConfigManager:
             # Use attention DP instead to reduce per-device num_kv_heads and
             # eliminate this waste.
 
-            num_kv_heads_per_device_in_kv_cache = max(1, (num_kv_heads * 2) /
-                                                      packing)
-            attn_dp = max(
-                int(tensor_parallelism // num_kv_heads_per_device_in_kv_cache),
-                1)
-            tensor_parallelism = tensor_parallelism // attn_dp
-            attn_dp_expert = expert_parallelism
-            expert_parallelism = 1
+            if envs.USE_BATCHED_RPA_KERNEL and envs.USE_BATCHED_RPA_SEQ_ON_LANE:
+                num_kv_heads_per_device_in_kv_cache = max(1, num_kv_heads * 2)
+            else:
+                num_kv_heads_per_device_in_kv_cache = max(
+                    1, (num_kv_heads * 2) / packing)
+            attn_dp_size = sharding_strategy.get("attn_dp_size", None)
+            if attn_dp_size is None:
+                attn_dp = max(
+                    int(tensor_parallelism //
+                        num_kv_heads_per_device_in_kv_cache), 1)
+                tensor_parallelism = tensor_parallelism // attn_dp
+            else:
+                attn_dp = attn_dp_size
+                assert tensor_parallelism % attn_dp_size == 0
+                tensor_parallelism = tensor_parallelism // attn_dp
+
+            # If Attention DP is active or TP perfectly saturates the KV heads limit,
+            # prioritize TP for KV heads and shift all expert parallelism to attn_dp_expert.
+            is_kv_fully_sharded_by_tp = (attn_dp > 1) or (
+                tensor_parallelism == num_kv_heads_per_device_in_kv_cache)
+
+            if is_kv_fully_sharded_by_tp:
+                attn_dp_expert = expert_parallelism
+                expert_parallelism = 1
+            else:
+                # Otherwise, shard KV heads over the expert axis.
+                # Use the remaining KV heads per device as the divisor.
+                shard_divisor = num_kv_heads_per_device_in_kv_cache // tensor_parallelism
+                attn_dp_expert = max(1,
+                                     int(expert_parallelism // shard_divisor))
+                expert_parallelism //= attn_dp_expert
+
         else:
             attn_dp = 1
             attn_dp_expert = 1
@@ -206,26 +300,28 @@ class ShardingConfigManager:
             expert_parallelism=expert_parallelism,
             sequence_parallelism=sequence_parallelism,
             attention_data_parallelism=attn_dp,
-            attention_data_expert_parallelism=attn_dp_expert)
+            attention_data_expert_parallelism=attn_dp_expert,
+            decode_context_parallelism=decode_context_parallelism,
+            prefill_context_parallelism=prefill_context_parallelism)
 
         # Must override here to avoid vLLM spinning up multiple DP engines.
-        if vllm_config.parallel_config.data_parallel_size > 1:
+        if (not envs.TPU_MULTIPROCESS_DP
+                and vllm_config.parallel_config.data_parallel_size > 1):
             vllm_config.parallel_config.data_parallel_size = 1
             vllm_config.parallel_config.data_parallel_rank = 0
             vllm_config.parallel_config.data_parallel_size_local = 1
 
+        # To enable data-parallel vision encoding, pass:
+        # --additional_config='{"mm-encoder-tp-mode": "data"}'
+        mm_encoder_tp_mode = vllm_config.additional_config.get(
+            'mm-encoder-tp-mode', 'weights')
         cls.validate(vllm_config, sharding_strategy)
-        return cls(sharding_strategy, device_indexes)
+        return cls(sharding_strategy, device_indexes, mm_encoder_tp_mode)
 
     @classmethod
     def validate(cls, vllm_config, sharding_strategy):
         total_dp_size = sharding_strategy.data_parallelism * sharding_strategy.attention_data_parallelism * sharding_strategy.attention_data_expert_parallelism
         if total_dp_size > 1:
-            if vllm_config.speculative_config is not None:
-                raise ValueError(
-                    f"Speculative decoding is not supported with data parallelism "
-                    f"(DP size: {total_dp_size}). Please disable speculative decoding or "
-                    f"set data parallelism to 1.")
             if vllm_config.lora_config is not None:
                 raise ValueError(
                     f"LoRA is not supported with data parallelism "
@@ -236,6 +332,29 @@ class ShardingConfigManager:
                 raise ValueError(
                     "Must run Attention DP with NEW_MODEL_DESIGN enabled. Please set "
                     "NEW_MODEL_DESIGN=True")
+        if sharding_strategy.decode_context_parallelism > 1:
+            if not envs.NEW_MODEL_DESIGN:
+                raise ValueError(
+                    "Must run Context Parallelism with NEW_MODEL_DESIGN enabled. Please set "
+                    "NEW_MODEL_DESIGN=True")
+        if sharding_strategy.prefill_context_parallelism > 1:
+            if not envs.NEW_MODEL_DESIGN:
+                raise ValueError(
+                    "Must run Prefill Context Parallelism with NEW_MODEL_DESIGN "
+                    "enabled. Please set NEW_MODEL_DESIGN=True")
+            if sharding_strategy.prefill_context_parallelism % 2 != 0:
+                raise ValueError(
+                    "Prefill context parallelism size must be even: the ring "
+                    "cache phase rotates KV shards between rank pairs, got "
+                    f"{sharding_strategy.prefill_context_parallelism}.")
+            if sharding_strategy.decode_context_parallelism > 1:
+                raise ValueError(
+                    "Only one of prefill/decode context parallelism may be "
+                    "enabled at a time.")
+            if sharding_strategy.data_parallelism > 1:
+                raise ValueError(
+                    "Prefill context parallelism is not compatible with data parallelism yet."
+                )
 
     @property
     def total_dp_size(self) -> int:
@@ -266,12 +385,30 @@ class ShardingConfigManager:
         return self.sharding_strategy.sequence_parallelism
 
     @property
+    def decode_cp_size(self) -> int:
+        return self.sharding_strategy.decode_context_parallelism
+
+    @property
+    def prefill_cp_size(self) -> int:
+        return self.sharding_strategy.prefill_context_parallelism
+
+    @property
     def total_devices(self) -> int:
         return self._total_devices
+
+    def apply_vision_sharding(self):
+        ShardingAxisName.reset()
+        if self.mm_encoder_tp_mode == "data" and self.tp_size > 1:
+            base = ShardingAxisName.VIT_BATCH
+            model_axis = ShardingAxisName.MODEL
+            vit_batch = (base, model_axis) if isinstance(
+                base, str) else tuple(base) + (model_axis, )
+            ShardingAxisName.override(VIT_BATCH=vit_batch, VIT_MODEL=None)
 
     def __str__(self):
         return (f"ShardingConfigManager(total_devices={self.total_devices}, "
                 f"sharding_strategy={self.sharding_strategy}, "
+                f"mm_encoder_tp_mode={self.mm_encoder_tp_mode}, "
                 f"device_indexes={self.device_indexes})")
 
 
@@ -419,6 +556,8 @@ def build_mesh(devices, strategy: dict[str, int]) -> Mesh:
         "expert": strategy.get("expert_parallelism", 1),
         "seq": strategy.get("sequence_parallelism", 1),
         "model": strategy.get("tensor_parallelism", 1),
+        "dcp": strategy.get("decode_context_parallelism", 1),
+        "pcp": strategy.get("prefill_context_parallelism", 1),
     }
     # TODO: add logic to infer axis when the degree is -1
     mesh_axis_names = []

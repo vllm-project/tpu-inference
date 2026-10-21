@@ -1,0 +1,274 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import os
+import shutil
+import tempfile
+import time
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+from absl.testing import absltest, parameterized
+from jax._src import test_util as jtu
+
+from tests.kernels.mla_v2_test import generate_mla_inputs
+from tpu_inference.kernels.mla.v2.kernel import mla_ragged_paged_attention
+from tpu_inference.kernels.mla.v2.tuned_params import (TunableParams,
+                                                       tuned_params_mapping)
+
+
+def _load_xplane_pb2():
+    """Locate XSpace proto bindings across available profiler packages."""
+    try:
+        from tensorflow.tsl.profiler.protobuf import xplane_pb2
+        return xplane_pb2
+    except ImportError:
+        pass
+    try:
+        from tensorflow.core.profiler.protobuf import xplane_pb2
+        return xplane_pb2
+    except ImportError:
+        pass
+    try:
+        from xprof.protobuf import xplane_pb2
+        return xplane_pb2
+    except ImportError:
+        pass
+    try:
+        from tensorboard_plugin_profile.protobuf import xplane_pb2
+        return xplane_pb2
+    except ImportError:
+        pass
+    try:
+        from tensorboard.plugins.profile.protobuf import xplane_pb2
+        return xplane_pb2
+    except ImportError:
+        pass
+    return None
+
+
+def _measure_device_latency_ns(run_fn,
+                               params,
+                               num_iters: int = 50,
+                               warmup_iters: int = 5) -> tuple[float, str]:
+    """Measures kernel execution duration using on-device XPlane hardware counters (`duration_ps`).
+
+    Bypasses host CPU wall-clock noise, Python loop overhead, and XLA dispatch queues.
+    Falls back to a noise-resistant batched timing loop (`min(block_latencies)`) if profiler
+    traces cannot be loaded (e.g., when `tensorflow` bindings are not installed in the container).
+
+    Returns:
+        tuple[float, str]: Average execution duration in nanoseconds (`latency_ns`) and the
+        measurement source (`'xprof_device'` or `'timer_fallback'`).
+    """
+    for _ in range(warmup_iters):
+        out = run_fn(params)
+        jax.block_until_ready(out)
+
+    xplane_pb2 = _load_xplane_pb2()
+    if xplane_pb2 is None:
+        batch_size = 5
+        num_batches = num_iters // batch_size
+        block_latencies = []
+        for _ in range(5):
+            start_ns = time.perf_counter_ns()
+            for _ in range(num_batches):
+                results = [run_fn(params) for _ in range(batch_size)]
+                jax.block_until_ready(results[-1])
+            block_latencies.append(
+                (time.perf_counter_ns() - start_ns) / num_iters)
+        return min(block_latencies), "timer_fallback"
+
+    temp_dir = tempfile.mkdtemp(prefix="xprof_mla_test_")
+    try:
+        with jax.profiler.trace(temp_dir, create_perfetto_link=False):
+            for _ in range(num_iters):
+                out = run_fn(params)
+                jax.block_until_ready(out)
+
+        pb_files = []
+        for root, _, files in os.walk(temp_dir):
+            for file in files:
+                if file.endswith(".xplane.pb"):
+                    pb_files.append(os.path.join(root, file))
+
+        if not pb_files:
+            batch_size = 5
+            num_batches = num_iters // batch_size
+            block_latencies = []
+            for _ in range(5):
+                start_ns = time.perf_counter_ns()
+                for _ in range(num_batches):
+                    results = [run_fn(params) for _ in range(batch_size)]
+                    jax.block_until_ready(results[-1])
+                block_latencies.append(
+                    (time.perf_counter_ns() - start_ns) / num_iters)
+            return min(block_latencies), "timer_fallback"
+
+        xspace = xplane_pb2.XSpace()
+        with open(pb_files[0], "rb") as f:
+            xspace.ParseFromString(f.read())
+
+        kernel_keywords = (
+            "mla_ragged_paged_attention",
+            "paged_attention",
+            "fusion",
+            "custom_call",
+        )
+        durations_ps = []
+
+        for plane in xspace.planes:
+            if not plane.name.startswith("/device:TPU:"):
+                continue
+            event_names = {
+                meta_id: meta.name
+                for meta_id, meta in plane.event_metadata.items()
+            }
+            for line in plane.lines:
+                for event in line.events:
+                    name = event_names.get(event.metadata_id, "").lower()
+                    if any(k in name for k in kernel_keywords):
+                        durations_ps.append(event.duration_ps)
+
+        if not durations_ps:
+            batch_size = 5
+            num_batches = num_iters // batch_size
+            block_latencies = []
+            for _ in range(5):
+                start_ns = time.perf_counter_ns()
+                for _ in range(num_batches):
+                    results = [run_fn(params) for _ in range(batch_size)]
+                    jax.block_until_ready(results[-1])
+                block_latencies.append(
+                    (time.perf_counter_ns() - start_ns) / num_iters)
+            return min(block_latencies), "timer_fallback"
+
+        # Convert picoseconds to nanoseconds (1 ns = 1000 ps)
+        return (sum(durations_ps) / len(durations_ps)) / 1000.0, "xprof_device"
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _get_tuned_test_cases():
+    test_cases = []
+    for key in tuned_params_mapping.keys():
+        # Current performance test only for batch_decode.
+        if key.case != "batched_decode":
+            continue
+        name = (f"tokens_{key.max_num_tokens}_"
+                f"seqs_{key.max_num_seqs}_"
+                f"pagesperseq_{key.pages_per_seq}")
+        test_cases.append(dict(testcase_name=name, key=key))
+    return test_cases
+
+
+@jtu.with_config(jax_numpy_dtype_promotion="standard")
+class MlaTunedVsBaselinePerformanceTest(jtu.JaxTestCase):
+
+    @parameterized.named_parameters(*_get_tuned_test_cases())
+    def test_tuned_vs_baseline_performance(self, key):
+        if not jtu.is_device_tpu_at_least(version=7):
+            self.skipTest("Performance comparison requires TPUv4+")
+
+        tuned_params = tuned_params_mapping[key]
+
+        baseline_params = TunableParams(
+            decode_batch_size=4,
+            num_kv_pages_per_block=3,
+            num_queries_per_block=1,
+            vmem_limit_bytes=tuned_params.vmem_limit_bytes,
+        )
+
+        kv_len = key.pages_per_seq * key.page_size_per_kv_packing * key.kv_packing
+        rng = np.random.default_rng(1234)
+        inputs = generate_mla_inputs(
+            seq_lens=[[1, kv_len] for _ in range(key.max_num_seqs)],
+            num_heads=key.actual_num_q_heads,
+            lkv_dim=key.actual_lkv_dim,
+            r_dim=key.actual_r_dim,
+            page_size=key.page_size_per_kv_packing * key.kv_packing,
+            q_dtype=jnp.dtype(key.q_dtype),
+            kv_dtype=jnp.dtype(key.kv_dtype),
+            num_pages=key.pages_per_seq * key.max_num_seqs,
+            rng=rng,
+        )
+
+        (ql_nope, q_pe, new_kv_c, new_k_pe, cache_kv, kv_lens, page_indices,
+         cu_q_lens, distribution) = inputs
+        ql_nope_transposed = jnp.transpose(ql_nope, (1, 0, 2))
+
+        def run_kernel(params):
+            out, _ = mla_ragged_paged_attention(
+                ql_nope=ql_nope_transposed,
+                q_pe=q_pe,
+                new_kv_c=new_kv_c,
+                new_k_pe=new_k_pe,
+                cache_kv=cache_kv.copy(),
+                kv_lens=kv_lens,
+                page_indices=page_indices,
+                cu_q_lens=cu_q_lens,
+                distribution=distribution,
+                sliding_window=key.sliding_window,
+                soft_cap=key.soft_cap,
+                q_scale=None,
+                k_scale=None,
+                v_scale=None,
+                chunk_prefill_size=key.chunk_prefill_size,
+                s_dtype=key.s_dtype,
+                p_same_dtype_as_v=key.p_same_dtype_as_v,
+                decode_batch_size=params.decode_batch_size,
+                num_kv_pages_per_block=params.num_kv_pages_per_block,
+                num_queries_per_block=params.num_queries_per_block,
+                vmem_limit_bytes=params.vmem_limit_bytes,
+            )
+            return out
+
+        print(f"\nCompiling baseline kernel for: {key}...")
+        jax.block_until_ready(run_kernel(baseline_params))
+        print(f"Compiling tuned kernel for: {key}...")
+        jax.block_until_ready(run_kernel(tuned_params))
+
+        baseline_latency, baseline_src = _measure_device_latency_ns(
+            run_kernel, baseline_params, num_iters=50, warmup_iters=5)
+        tuned_latency, tuned_src = _measure_device_latency_ns(run_kernel,
+                                                              tuned_params,
+                                                              num_iters=50,
+                                                              warmup_iters=5)
+
+        speedup = (baseline_latency - tuned_latency) / baseline_latency * 100
+
+        print("\n" + "=" * 80)
+        print("PERFORMANCE COMPARISON FOR KEY:")
+        print(f"{key}")
+        print("-" * 80)
+        print(
+            f"Baseline (BS={baseline_params.decode_batch_size}, Pages={baseline_params.num_kv_pages_per_block}): {baseline_latency / 1e3:.2f} us [{baseline_src}]"
+        )
+        print(
+            f"Tuned    (BS={tuned_params.decode_batch_size}, Pages={tuned_params.num_kv_pages_per_block}): {tuned_latency / 1e3:.2f} us [{tuned_src}]"
+        )
+        print(f"Speedup: {speedup:+.2f}%")
+        print("=" * 80 + "\n")
+
+        margin = 1.05 if tuned_src == "xprof_device" else 1.15
+        self.assertLessEqual(
+            tuned_latency, baseline_latency * margin,
+            f"Regression detected! Tuned latency ({tuned_latency / 1e3:.2f} us [{tuned_src}]) "
+            f"is significantly slower than baseline ({baseline_latency / 1e3:.2f} us [{baseline_src}])"
+        )
+
+
+if __name__ == "__main__":
+    absltest.main()

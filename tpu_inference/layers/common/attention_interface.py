@@ -29,14 +29,19 @@ from jax.sharding import Sharding
 
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
 from tpu_inference import envs
-from tpu_inference.kernels.flash_attention.kernel import flash_attention
-from tpu_inference.kernels.mla.v1.kernel import mla_ragged_paged_attention
-from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import \
-    get_tuned_block_sizes
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.kernels.flash_attention.kernel import (
+    encoder_only_flash_attention, flash_attention)
+from tpu_inference.kernels.mla.v2.kernel import mla_ragged_paged_attention
+from tpu_inference.kernels.mla.v2.tuned_params import (TuningKey,
+                                                       get_tuned_params)
+from tpu_inference.layers.common.attention_backend import (AttentionBackend,
+                                                           RPAAttentionBackend)
+from tpu_inference.layers.common.attention_metadata import (
+    AttentionMetadata, SharedAttentionMetadata)
+from tpu_inference.layers.common.cp_attention import dcp_forward, pcp_forward
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_megacore
+from tpu_inference.utils import get_megacore, get_mesh_shape_product
 
 logger = init_logger(__name__)
 
@@ -61,22 +66,59 @@ ragged_paged_attention_hd64 = rpa_hd64.ragged_paged_attention_hd64
 get_kv_cache_shape_hd64 = rpa_hd64.get_kv_cache_shape
 
 
+def segment_ids_from_cu_seqlens(cu_seqlens: jax.Array,
+                                total_len: int) -> jax.Array:
+    """Build a per-position segment id vector from cumulative sequence lengths.
+
+    Position ``p`` belongs to segment ``i`` when
+    ``cu_seqlens[i] <= p < cu_seqlens[i + 1]``; every position at or beyond
+    ``cu_seqlens[-1]`` is padding and gets the dedicated id ``num_segs``
+    (``= len(cu_seqlens) - 1``), which no real sequence uses. That keeps
+    padding tokens out of the last real sequence's attention block.
+
+    The alternative ``jnp.repeat(arange(num_segs), lens,
+    total_repeat_length=total_len)`` fills the trailing positions with the LAST
+    segment id instead, which silently merges padding into the last real
+    sequence unless ``cu_seqlens`` happens to end with an empty (padded)
+    segment. That matters wherever q/k/v are padded past ``cu_seqlens[-1]`` --
+    e.g. the mm-encoder budget path, where ``pixel_values`` is padded up to the
+    token budget.
+
+    Args:
+      cu_seqlens: 1-D cumulative offsets, ``[0, l0, l0+l1, ...]``. May be a
+        traced array (repeated trailing offsets = empty segments are fine).
+      total_len: Static length of the id vector to produce.
+
+    Returns:
+      int32 array of shape ``(total_len,)``. The shape depends only on the
+      static ``total_len`` / ``len(cu_seqlens)``, so this is jit-safe.
+    """
+    cu = jnp.asarray(cu_seqlens)
+    positions = jnp.arange(total_len, dtype=cu.dtype)
+    # searchsorted(side="right") over the segment *end* offsets gives exactly
+    # sum(p >= cu_seqlens[1:]): the count of segments that end at or before p.
+    return jnp.searchsorted(cu[1:], positions, side="right").astype(jnp.int32)
+
+
 def sharded_flash_attention(
     mesh: Mesh,
     causal: bool = True,
     sm_scale: Optional[float] = None,
     vmem_limit_bytes: int | None = None,
     use_attention_bias: bool = False,
+    batch_axis="data",
+    head_axis="model",
 ) -> Callable[..., Any]:
     if use_attention_bias:
         in_specs = (
-            P("data", "model", None, None),  # q
-            P("data", "model", None, None),  # k
-            P("data", "model", None, None),  # v
-            P("data", "model", None, None),  # attention_bias
-            P(),  # segment_ids
+            P(batch_axis, head_axis, None, None),  # q
+            P(batch_axis, head_axis, None, None),  # k
+            P(batch_axis, head_axis, None, None),  # v
+            P(batch_axis, head_axis, None, None),  # attention_bias
+            P(batch_axis,
+              None),  # segment_ids (B matches q's B, so shard 'data')
         )
-        out_specs = P("data", "model", None, None)
+        out_specs = P(batch_axis, head_axis, None, None)
 
         def _flash_attention_use_ab(q, k, v, attention_bias, segment_ids):
             return flash_attention(q,
@@ -91,12 +133,13 @@ def sharded_flash_attention(
         attn_fn = _flash_attention_use_ab
     else:
         in_specs = (
-            P("data", "model", None, None),  # q
-            P("data", "model", None, None),  # k
-            P("data", "model", None, None),  # v
-            P(),  # segment_ids
+            P(batch_axis, head_axis, None, None),  # q
+            P(batch_axis, head_axis, None, None),  # k
+            P(batch_axis, head_axis, None, None),  # v
+            P(batch_axis,
+              None),  # segment_ids (B matches q's B, so shard 'data')
         )
-        out_specs = P("data", "model", None, None)
+        out_specs = P(batch_axis, head_axis, None, None)
 
         def _flash_attention(q, k, v, segment_ids):
             return flash_attention(q,
@@ -115,6 +158,43 @@ def sharded_flash_attention(
                       in_specs=in_specs,
                       out_specs=out_specs,
                       check_vma=False))
+
+
+def sharded_encoder_only_attention(
+    mesh: Mesh,
+    causal: bool = True,
+    sm_scale: Optional[float] = None,
+    sliding_window: Optional[int] = None,
+    vmem_limit_bytes: int | None = None,
+) -> Callable[..., Any]:
+    in_specs = (
+        P(None, "model", None),  # q: [q_len, num_heads, head_size]
+        P(None, "model", None),  # k: [k_len, num_kv_heads, head_size]
+        P(None, "model", None),  # v: [k_len, num_kv_heads, head_size]
+        P(),  # seq_lens: [batch_size]
+    )
+    out_specs = P(None, "model", None)
+
+    def _flash_attention(q, k, v, seq_lens):
+        return encoder_only_flash_attention(
+            q,
+            k,
+            v,
+            seq_lens,
+            causal=causal,
+            sm_scale=sm_scale,
+            sliding_window=sliding_window,
+            vmem_limit_bytes=vmem_limit_bytes,
+        )
+
+    return jax.jit(
+        jax.shard_map(
+            _flash_attention,
+            mesh=mesh,
+            in_specs=in_specs,
+            out_specs=out_specs,
+            check_vma=False,
+        ))
 
 
 def sharded_paged_attention(
@@ -325,6 +405,26 @@ def sharded_splash_attention(
         ))
 
 
+def rpa_block_size_kwargs() -> dict[str, tuple[int, int, int, int]]:
+    """Optional RPA v3 block-size overrides from env, for the call site to
+    forward with ``**``.
+
+    The kernel is self-contained and never reads env, so every call site must
+    supply these (the vLLM-model path in layers/jax/attention/attention.py and
+    the MaxText path below). Without it the RPA_V3_*_BLOCK_SIZES vars are
+    silently ignored and the kernel falls back to get_default_block_sizes().
+    Each var is a comma-separated 4-tuple ``(bq_sz, bkv_sz, bq_csz, bkv_csz)``;
+    a key is included only when its var is non-empty, so the default call is
+    unchanged.
+    """
+    env_to_kwarg = {
+        "d_block_sizes": envs.RPA_V3_DECODE_BLOCK_SIZES,
+        "p_block_sizes": envs.RPA_V3_PREFILL_BLOCK_SIZES,
+        "m_block_sizes": envs.RPA_V3_MIXED_BLOCK_SIZES,
+    }
+    return {k: tuple(v) for k, v in env_to_kwarg.items() if v}
+
+
 def sharded_ragged_paged_attention(
     mesh: Mesh,
     q: jax.Array,
@@ -341,13 +441,17 @@ def sharded_ragged_paged_attention(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    update_kv_cache: bool = True,
+    use_causal_mask: bool = True,
+    attn_logits_soft_cap: float | None = None,
+    decode_query_size: int = 1,
 ):
     """Shards along KV heads."""
     # Handle GQA/MQA where num_kv_heads < tp_size
     # We replicate KV heads to match tp_size so that we can shard them evenly.
     # TODO (ranlihao): This is not performant and introduces extra overhead during inference. We need to handle this during weight loading
-    if ShardingAxisName.ATTN_HEAD in mesh.shape:
-        tp_size = mesh.shape[ShardingAxisName.ATTN_HEAD]
+    tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
+    if tp_size > 1:
         num_kv_heads = k.shape[1]
         if num_kv_heads < tp_size:
             if tp_size % num_kv_heads != 0:
@@ -386,15 +490,41 @@ def sharded_ragged_paged_attention(
         in_specs += (P(ShardingAxisName.ATTN_HEAD), )
         args += (attention_sink, )
 
+    # update_kv_cache=False (KV-share) is supported by the v3 default RPA
+    # kernel and by the experimental batched RPA kernel. The hd64 path
+    # doesn't accept it; fail loud rather than silently ignoring.
+    if use_hd64 and not update_kv_cache:
+        raise NotImplementedError(
+            "update_kv_cache=False (KV-share) is not supported on the "
+            "head_dim==64 RPA kernel.")
+
+    if use_hd64 and not use_causal_mask:
+        raise NotImplementedError(
+            "Bidirectional attention is not supported on the head_dim==64 "
+            "RPA kernel")
+
     def _ragged_paged_attention(*args):
-        return func(
-            *args,
+        kwargs = dict(
             sm_scale=sm_scale,
             sliding_window=attention_chunk_size,
+            soft_cap=attn_logits_soft_cap,
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,
         )
+        # update_kv_cache is supported by both the v3 default and batched
+        # RPA kernels; only the hd64 path doesn't accept it. Default True
+        # is a no-op so we don't forward it to the hd64 signature.
+        if not use_hd64:
+            kwargs["update_kv_cache"] = update_kv_cache
+            kwargs["use_causal_mask"] = use_causal_mask
+            if envs.USE_BATCHED_RPA_KERNEL:
+                kwargs["decode_query_size"] = decode_query_size
+            else:
+                # RPA_V3_*_BLOCK_SIZES are v3-kernel knobs; the experimental
+                # batched kernel takes its own BlockSizes configs instead.
+                kwargs.update(rpa_block_size_kwargs())
+        return func(*args, **kwargs)
 
     return jax.shard_map(
         _ragged_paged_attention,
@@ -419,7 +549,14 @@ def attention(
     k_scale: float | None = None,
     v_scale: float | None = None,
     sinks: jax.Array | None = None,
+    update_kv_cache: bool = True,
+    use_causal_mask: bool | None = None,
+    shared_attention_metadata: SharedAttentionMetadata | None = None,
+    attn_logits_soft_cap: float | None = None,
+    decode_query_size: int = 1,
+    attention_backend: AttentionBackend | None = None,
 ) -> Tuple[jax.Array, jax.Array]:
+    # attention_backend: the TPU attention backend to run; None runs RPA.
     # T: seq_len
     # N: num_heads
     # K: num_kv_heads
@@ -439,7 +576,89 @@ def attention(
         sm_scale = head_dim_original**-0.5
 
     md = attention_metadata
+    if use_causal_mask is None:
+        use_causal_mask = md.use_causal_mask
+    # shared_attention_metadata is None for flax models, and is used for vllm models to share the metadata across layers.
+    shared_md = shared_attention_metadata if shared_attention_metadata is not None else md
 
+    return (attention_backend or RPAAttentionBackend()).attention(
+        kv_cache,
+        q,
+        k,
+        v,
+        md,
+        shared_md,
+        mesh,
+        head_dim_original=head_dim_original,
+        sm_scale=sm_scale,
+        attention_chunk_size=attention_chunk_size,
+        q_scale=q_scale,
+        k_scale=k_scale,
+        v_scale=v_scale,
+        sinks=sinks,
+        update_kv_cache=update_kv_cache,
+        use_causal_mask=use_causal_mask,
+        attn_logits_soft_cap=attn_logits_soft_cap,
+        decode_query_size=decode_query_size)
+
+
+def rpa_attention(
+    kv_cache: jax.Array,
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    md: AttentionMetadata,
+    shared_md: AttentionMetadata | SharedAttentionMetadata,
+    mesh: Mesh,
+    *,
+    head_dim_original: int,
+    sm_scale: float,
+    attention_chunk_size: int | None,
+    q_scale: float | None,
+    k_scale: float | None,
+    v_scale: float | None,
+    sinks: jax.Array | None,
+    update_kv_cache: bool,
+    use_causal_mask: bool,
+    attn_logits_soft_cap: float | None,
+    decode_query_size: int,
+) -> Tuple[jax.Array, jax.Array]:
+    """The body of RPAAttentionBackend.attention, its only caller: ragged
+    paged attention, or dcp_forward / pcp_forward under decode / prefill
+    context parallelism."""
+    if 'dcp' in mesh.shape and mesh.shape['dcp'] > 1:
+        if not use_causal_mask:
+            raise NotImplementedError(
+                "Bidirectional attention is not supported with DCP")
+        return dcp_forward(
+            mesh,
+            q,
+            k,
+            v,
+            kv_cache,
+            md,
+            head_dim_original=head_dim_original,
+            sm_scale=sm_scale,
+            attention_chunk_size=attention_chunk_size,
+            q_scale=q_scale,
+            k_scale=k_scale,
+            v_scale=v_scale,
+        )
+    if 'pcp' in mesh.shape and mesh.shape['pcp'] > 1:
+        return pcp_forward(
+            mesh,
+            q,
+            k,
+            v,
+            kv_cache,
+            md,
+            sm_scale=sm_scale,
+            q_scale=q_scale,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            update_kv_cache=update_kv_cache,
+            use_causal_mask=use_causal_mask,
+        )
     # (T, N, H)
     output, kv_cache = sharded_ragged_paged_attention(
         mesh,
@@ -447,23 +666,27 @@ def attention(
         k,
         v,
         kv_cache,
-        md.seq_lens,
+        shared_md.seq_lens,
         md.block_tables,
-        md.query_start_loc,
-        md.request_distribution,
+        shared_md.query_start_loc,
+        shared_md.request_distribution,
         sinks,
         sm_scale=sm_scale,
         attention_chunk_size=attention_chunk_size,
         q_scale=q_scale,
         k_scale=k_scale,
         v_scale=v_scale,
+        update_kv_cache=update_kv_cache,
+        use_causal_mask=use_causal_mask,
+        attn_logits_soft_cap=attn_logits_soft_cap,
+        decode_query_size=decode_query_size,
     )
 
     return kv_cache, output
 
 
 def mla_attention(
-        q_TNA: jax.Array,
+        q_NTA: jax.Array,
         q_rope_TNH: jax.Array,
         k_SA: jax.Array,
         k_rope_SH: jax.Array,
@@ -472,9 +695,10 @@ def mla_attention(
         mesh: Mesh,
         num_attention_heads: int,
         qk_nope_head_dim: int,
+        query_nth_sharding: Sharding | None = None,
         query_tnh_sharding: Sharding | None = None,
         keyvalue_skh_sharding: Sharding | None = None,
-        attn_o_tnh_sharding: Sharding | None = None,
+        attn_o_nth_sharding: Sharding | None = None,
         q_scale: float | None = None,
         k_scale: float | None = None,
         v_scale: float | None = None,
@@ -484,7 +708,7 @@ def mla_attention(
     output and kv cache update.
 
     Args:
-        q_TNA: (tokens_query, num_query_heads, q_lora_rank)
+        q_NTA: (num_query_heads, tokens_query, q_lora_rank) # head-major output from q_nope einsum projection.
         q_rope_TNH: (tokens_query, num_query_heads, head_dim)
         k_SA: (tokens_kv, q_lora_rank)
         k_rope_SH: (tokens_kv, head_dim)
@@ -493,44 +717,83 @@ def mla_attention(
         mesh: Mesh
         num_attention_heads: number of attention heads
         qk_nope_head_dim: head dim for QK without rope
-        query_tnh_sharding: sharding to use for q/q_rope for the shard map (MLA kernel)
+        query_nth_sharding: sharding to use for q_nope for the shard map (MLA kernel)
+        query_tnh_sharding: sharding to use for q_rope for the shard map (MLA kernel)
         keyvalue_skh_sharding: sharding to use for k/k_rope for the shard map (MLA kernel)
-        attn_o_tnh_sharding: sharding to use for the attention output for the shard map (MLA kernel)
+        attn_o_nth_sharding: sharding to use for the attention output for the shard map (MLA kernel)
         q_scale: scale to apply to q (if quantized)
         k_scale: scale to apply to k (if quantized)
         v_scale: scale to apply to v (if quantized)
         sm_scale: softmax scale
     """
     in_specs = (
-        query_tnh_sharding or P(ShardingAxisName.MLP_TENSOR, None, None),  # q
+        query_nth_sharding
+        or P(None, ShardingAxisName.MLP_TENSOR, None),  # q (head-major)
         query_tnh_sharding
-        or P(ShardingAxisName.MLP_TENSOR, None, None),  # q_rope
+        or P(ShardingAxisName.MLP_TENSOR, None, None),  # q_rope (token-major)
         keyvalue_skh_sharding or P(ShardingAxisName.MLP_TENSOR, None),  # k
         keyvalue_skh_sharding
         or P(ShardingAxisName.MLP_TENSOR, None),  # k_rope
-        P(ShardingAxisName.MLP_TENSOR),  # kv_cache
+        P(ShardingAxisName.BATCH),  # kv_cache
         P(ShardingAxisName.ATTN_DATA),  # md.seq_lens
         P(ShardingAxisName.ATTN_DATA),  # md.page_indices_flat
         P(ShardingAxisName.ATTN_DATA),  # md.query_start_loc
         P(ShardingAxisName.ATTN_DATA),  # md.distribution
     )
     out_specs = (
-        attn_o_tnh_sharding
-        or P(ShardingAxisName.MLP_TENSOR, None, None),  # attn output
-        P(ShardingAxisName.MLP_TENSOR)  # kv cache
+        P(ShardingAxisName.BATCH),  # kv cache
+        attn_o_nth_sharding
+        or P(None, ShardingAxisName.MLP_TENSOR, None)  # attn output
     )
 
     def _mla_ragged_paged_attention(q, q_rope, k, k_rope, cache, *args):
-        max_num_tokens = q.shape[0]
-        max_num_seqs = md.seq_lens.shape[0]
-        pages_per_seq = md.block_tables.shape[0] // max_num_seqs
+        dp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA)
+        batched_decode_tuning_key = TuningKey(
+            case="batched_decode",
+            max_num_tokens=q.shape[1],
+            actual_num_q_heads=q.shape[0],
+            actual_lkv_dim=q.shape[2],
+            actual_r_dim=q_rope.shape[2],
+            kv_dtype=cache.dtype.name,
+            q_dtype=q.dtype.name,
+            page_size_per_kv_packing=cache.shape[1],
+            kv_packing=cache.shape[2],
+            max_num_seqs=md.padded_num_reqs // dp_size,
+            pages_per_seq=args[1].shape[0] // args[0].shape[0],
+        )
+        batched_decode_tuned_params = get_tuned_params(
+            batched_decode_tuning_key)
+        mixed_tuning_key = TuningKey(
+            case="mixed",
+            max_num_tokens=q.shape[1],
+            actual_num_q_heads=q.shape[0],
+            actual_lkv_dim=q.shape[2],
+            actual_r_dim=q_rope.shape[2],
+            kv_dtype=cache.dtype.name,
+            q_dtype=q.dtype.name,
+            page_size_per_kv_packing=cache.shape[1],
+            kv_packing=cache.shape[2],
+            max_num_seqs=md.padded_num_reqs // dp_size,
+            pages_per_seq=args[1].shape[0] // args[0].shape[0],
+        )
+        mixed_tuned_params = get_tuned_params(mixed_tuning_key)
 
-        bkv_p, bq_sz = get_tuned_block_sizes(q.dtype, cache.dtype,
-                                             num_attention_heads, 1,
-                                             qk_nope_head_dim, cache.shape[1],
-                                             max_num_tokens, pages_per_seq)
-        num_kv_pages_per_block = min(min(pages_per_seq, bkv_p), 4)
-        num_queries_per_block = min(min(max_num_tokens, bq_sz), 4)
+        # Temporally prefill use same params as mixed.
+        prefill_tuned_params = mixed_tuned_params
+
+        num_kv_pages_per_block = (
+            batched_decode_tuned_params.num_kv_pages_per_block,
+            prefill_tuned_params.num_kv_pages_per_block,
+            mixed_tuned_params.num_kv_pages_per_block)
+        num_queries_per_block = (
+            batched_decode_tuned_params.num_queries_per_block,
+            prefill_tuned_params.num_queries_per_block,
+            mixed_tuned_params.num_queries_per_block)
+        mixed_q_split = mixed_tuned_params.q_split
+        decode_batch_size = batched_decode_tuned_params.decode_batch_size
+        logger.info(
+            f"Using MLA tuned block sizes for batched decode: {batched_decode_tuned_params} for input shapes: {batched_decode_tuning_key}"
+        )
 
         out, new_cache = mla_ragged_paged_attention(
             q,
@@ -542,9 +805,12 @@ def mla_attention(
             sm_scale=sm_scale,
             num_kv_pages_per_block=num_kv_pages_per_block,
             num_queries_per_block=num_queries_per_block,
+            decode_batch_size=decode_batch_size,
+            mixed_q_split=mixed_q_split,
             q_scale=q_scale,
             k_scale=k_scale,
-            v_scale=v_scale)
+            v_scale=v_scale,
+            transpose_kv_cache=envs.MLA_TRANSPOSE_KV_CACHE)
 
         return new_cache, out
 
@@ -553,8 +819,34 @@ def mla_attention(
                       mesh=mesh,
                       in_specs=in_specs,
                       out_specs=out_specs,
-                      check_vma=False))(q_TNA, q_rope_TNH, k_SA, k_rope_SH,
+                      check_vma=False))(q_NTA, q_rope_TNH, k_SA, k_rope_SH,
                                         kv_cache, md.seq_lens, md.block_tables,
                                         md.query_start_loc,
                                         md.request_distribution)
     return kv_cache, output_TNA
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=(
+        "mesh",
+        "sm_scale",
+        "sliding_window",
+    ),
+)
+def encoder_only_attention(
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    attention_metadata: AttentionMetadata,
+    mesh: Mesh,
+    sm_scale: float | None = None,
+    sliding_window: int | None = None,
+) -> jax.Array:
+    kernel = sharded_encoder_only_attention(
+        mesh=mesh,
+        causal=False,
+        sm_scale=sm_scale,
+        sliding_window=sliding_window,
+    )
+    return kernel(q, k, v, attention_metadata.seq_lens)

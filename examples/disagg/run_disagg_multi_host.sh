@@ -18,9 +18,22 @@
 
 set -e
 
+# EX_TEMPFAIL from sysexits.h. The Buildkite steps that run this harness declare
+# `retry: automatic: - exit_status: 75` so that ONLY the known-transient infra
+# failures below (a TPU runtime session that fails to start) get re-run once.
+# Every real failure still exits 1 and is never retried.
+EXIT_TEMPFAIL=75
+
 # Function to print logs on exit
 print_logs_on_exit() {
-  echo "--- Script exiting, displaying logs ---"
+  # Capture the status the script is exiting with before running anything else.
+  # This trap body runs under `set -e`, so any failing command below would both
+  # abort the trap and overwrite the exit status -- which would silently turn
+  # EXIT_TEMPFAIL into some other code and defeat the exit-code-keyed retry.
+  local exit_code=$?
+  set +e
+
+  echo "--- Script exiting with status ${exit_code}, displaying logs ---"
 
   # The logs are written inside containers to /root/logs, which is mapped from $LOG_DIR on the host.
   LOG_DIR=$HOME/logs
@@ -40,6 +53,13 @@ print_logs_on_exit() {
       echo "File not found."
     fi
 
+    echo "--- Contents of $LOG_DIR/correctness.txt ---"
+    if [ -f "$LOG_DIR/correctness.txt" ]; then
+      cat "$LOG_DIR/correctness.txt"
+    else
+      echo "File not found."
+    fi
+
     echo "--- Contents of $LOG_DIR/benchmark.txt ---"
     if [ -f "$LOG_DIR/benchmark.txt" ]; then
       cat "$LOG_DIR/benchmark.txt"
@@ -50,6 +70,9 @@ print_logs_on_exit() {
     echo "Log directory '$LOG_DIR' not found."
   fi
   echo "--- End of logs ---"
+
+  # Restore the original status so it propagates to the caller.
+  exit "$exit_code"
 }
 
 # Register the cleanup function to be called on script exit (normal or error)
@@ -60,7 +83,7 @@ trap print_logs_on_exit EXIT
 # docker related
 CONTAINER_PREFIX=${CONTAINER_PREFIX:="disagg-node"}
 RUN_IN_BUILDKITE=${RUN_IN_BUILDKITE:=false}
-TPU_VERSION=${TPU_VERSION:=tpu6e}
+TPU_VERSION=${TPU_VERSION:=tpu7x}
 MODEL=${MODEL:="Qwen/Qwen3-0.6B"}
 DOCKER_IMAGE=${DOCKER_IMAGE:="vllm-tpu:000"}
 
@@ -74,6 +97,38 @@ TEST_MODE=${TEST_MODE:=1} # if 1, run benchmark; if 2, run correctness; if 3, ru
 ############################
 
 echo "--- The HOME variable is : $HOME ---"
+
+# If the server log carries the known TPU runtime session-init signature, end the
+# whole harness with EXIT_TEMPFAIL so Buildkite retries the step. Returns normally
+# for anything else, leaving the caller to fail the usual way.
+#
+# The signature, raised from tpu_inference/worker/tpu_worker.py init_device ->
+# jax.devices() inside a RayWorkerProc, looks like:
+#   RuntimeError: Unable to initialize backend 'tpu': INTERNAL: TPU initialization
+#   failed: GRPC_ERROR error message: START_SESSION failed. ... Max # of tries(=3) exhausted.
+#
+# The match is deliberately restricted to two fixed strings (grep -F) so generic
+# words like "Error" can never trigger a retry. It is still a heuristic, not proof
+# of a flake: START_SESSION also fails deterministically for misconfiguration --
+# a wrong TPU_PROCESS_BOUNDS / TPU_PROCESS_ADDRESSES, or chips still held by a
+# leaked container from an earlier run. Retrying cannot fix those, so the cost is
+# one extra harness run (~10 min) before the step fails for real. `limit: 1` on
+# the Buildkite steps is what bounds that cost to a single wasted run; do not
+# widen this pattern or raise the limit without redoing that arithmetic.
+exit_if_transient_tpu_init_failure() {
+  local container_name=$1
+  local log_path=$2
+  local service_name=$3
+  local port=$4
+
+  if docker exec "$container_name" grep -qF \
+      -e 'TPU initialization failed: GRPC_ERROR' \
+      -e 'START_SESSION failed' \
+      "$log_path" 2>/dev/null; then
+    echo "[disagg-harness] Transient TPU runtime session failure (START_SESSION / TPU initialization failed: GRPC_ERROR) in ${container_name}:${log_path} while waiting for ${service_name} on port ${port}; this is an infra flake, not a test failure. Exiting with EX_TEMPFAIL=${EXIT_TEMPFAIL} so Buildkite retry.automatic re-runs this step once."
+    exit "$EXIT_TEMPFAIL"
+  fi
+}
 
 wait_for_server() {
   local port=$1
@@ -110,6 +165,7 @@ wait_for_server() {
       echo "Error: $service_name on $port (PID $pid) died inside container while waiting for health check."
       echo "Displaying logs from $container_name:$log_path"
       docker exec "$container_name" cat "$log_path"
+      exit_if_transient_tpu_init_failure "$container_name" "$log_path" "$service_name" "$port"
       return 1
     fi
 
@@ -119,7 +175,27 @@ wait_for_server() {
   echo "Error: $service_name on $port failed to become healthy within the timeout."
   echo "Displaying logs from $container_name:$log_path"
   docker exec "$container_name" cat "$log_path"
+  exit_if_transient_tpu_init_failure "$container_name" "$log_path" "$service_name" "$port"
   return 1
+}
+
+check_failed_requests() {
+  local log_file="$1"
+  local failed_requests
+  failed_requests=$(grep "Failed requests:" "$log_file" | awk '{print $3}' || true)
+
+  if [ -z "$failed_requests" ]; then
+    echo "Error: Could not find 'Failed requests:' in the benchmark output." >&2
+    return 1
+  fi
+
+  if [ "$failed_requests" -gt 0 ]; then
+    echo "Error: Benchmark reported $failed_requests failed requests." >&2
+    return 1
+  fi
+
+  echo "Success: Benchmark reported $failed_requests failed requests." >&2
+  return 0
 }
 
 # clear existing container if there is
@@ -140,6 +216,9 @@ fi
 LOG_DIR=$HOME/logs
 if [ ! -d $LOG_DIR ]; then
   mkdir -p $LOG_DIR
+else
+  # Delete old log files to avoid printing stale logs at the end
+  rm -f $LOG_DIR/prefill.txt $LOG_DIR/decode.txt $LOG_DIR/benchmark.txt $LOG_DIR/proxy.txt $LOG_DIR/correctness.txt
 fi
 
 # Define local mounts for non-Buildkite environments
@@ -232,10 +311,11 @@ set -x
 docker exec -d ${CONTAINER_PREFIX}-0 /bin/bash -c \
     "vllm serve $MODEL \
     --port ${PREFILL_VLLM_PORT} \
-    --gpu-memory-utilization 0.3 \
+    --gpu-memory-utilization 0.8 \
+    --no-enable-prefix-caching \
+    --max-num-batched-tokens 1024 \
     --tensor-parallel-size 4 \
     --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}' \
-    --no-async-scheduling \
     > /root/logs/prefill.txt 2>&1"
 set +x
 
@@ -304,10 +384,11 @@ set -x
 docker exec -d ${CONTAINER_PREFIX}-2-0 /bin/bash -c \
     "vllm serve $MODEL \
     --port ${DECODE_VLLM_PORT} \
-    --gpu-memory-utilization 0.3 \
+    --gpu-memory-utilization 0.8 \
+    --no-enable-prefix-caching \
+    --max-num-batched-tokens 1024 \
     --tensor-parallel-size 4 \
     --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\"}' \
-    --no-async-scheduling \
     > /root/logs/decode.txt 2>&1"
 set +x
 
@@ -345,7 +426,7 @@ set +x
 if [ "$TEST_MODE" = "1" ] || [ "$TEST_MODE" = "3" ]; then
     echo "Running benchmark test in container."
     set -x
-    docker exec ${CONTAINER_PREFIX}-proxy-benchmark /bin/bash -c "python3 /workspace/tpu_inference/scripts/vllm/benchmarking/benchmark_serving.py \
+    docker exec ${CONTAINER_PREFIX}-proxy-benchmark /bin/bash -c "vllm bench serve \
         --backend vllm \
         --host localhost \
         --port 8000 \
@@ -359,6 +440,8 @@ if [ "$TEST_MODE" = "1" ] || [ "$TEST_MODE" = "3" ]; then
         --trust-remote-code \
         --seed ${RANDOM_SEED} > /root/logs/benchmark.txt 2>&1"
     set +x
+
+    check_failed_requests "$LOG_DIR/benchmark.txt"
 fi
 
 # Run correctness test inside the proxy-benchmark-node container

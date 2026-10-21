@@ -6,4 +6,5 @@ datasets
 rouge-score
 scikit-learn
 pandas
-gdown
+gdown<6.0.0
+google-cloud-bigquery

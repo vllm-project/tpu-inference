@@ -59,6 +59,11 @@ class LoraUtils:
         params_and_buffers = update_lora(
             self.runner.model.model, initial_params_buffers=self.runner.state)
         self.runner.state = jax_view(params_and_buffers)
+        # Keep the dispatch-side view in sync: `model_fn` etc. take
+        # `state_leaves` as their first arg, which for vllm-impl aliases
+        # `state`. The LoRA load above reassigned `state` to a new dict, so
+        # the prior `state_leaves` reference is stale.
+        self.runner.refresh_state_leaves()
 
     def extract_lora_metadata(self):
         if self.runner.lora_config is None:

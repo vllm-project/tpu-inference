@@ -154,11 +154,11 @@ def _kv_cache_update(
                                  page_size, num_slices)
 
     in_specs = [
-        pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
-        pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY),
+        pl.BlockSpec(memory_space=pl.MemorySpace.ANY),
+        pl.BlockSpec(memory_space=pl.MemorySpace.ANY),
     ]
 
-    out_specs = [pl.BlockSpec(memory_space=pltpu.TPUMemorySpace.ANY)]
+    out_specs = [pl.BlockSpec(memory_space=pl.MemorySpace.ANY)]
     out_shape = [jax.ShapeDtypeStruct(kv_cache.shape, dtype=kv_cache.dtype)]
 
     scalar_prefetches = [slices, num_slices]

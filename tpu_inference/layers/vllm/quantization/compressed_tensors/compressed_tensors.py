@@ -15,9 +15,10 @@
 from typing import Optional
 
 import torch
+from compressed_tensors.quantization import QuantizationType
 from jax.sharding import PartitionSpec
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
@@ -32,6 +33,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
 from tpu_inference.layers.common.quant_methods import COMPRESSED_TENSORS
 from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors_moe import \
     VllmCompressedTensorsMoEMethod
+from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w4a4_nvfp4 import (
+    VllmCompressedTensorsW4A4Fp4, W4A4ActivationType)
+from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w4a8_fp8 import \
+    VllmCompressedTensorsW4A8Fp8
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import \
     VllmCompressedTensorsW8A8Fp8
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_int8 import \
@@ -92,6 +97,41 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, VllmQuantConfig):
         # TODO(kyuyeunk): Add support for different act_quant_format
 
         linear_config = self.get_linear_config(layer)
+
+        if self._is_fp8_w4a8(weight_quant, input_quant):
+            # TODO(dmolitor): Handle unpacked weights or propagate a guard here based on the quantization config format.
+            return VllmCompressedTensorsW4A8Fp8(
+                weight_quant=weight_quant,
+                is_static_input_scheme=input_quant and not input_quant.dynamic,
+                linear_config=linear_config,
+            )
+
+        if self._is_nvfp4_format(weight_quant):
+            if input_quant is None:
+                return VllmCompressedTensorsW4A4Fp4(
+                    activation_type=W4A4ActivationType.BF16,
+                    is_static_input_scheme=False,
+                    linear_config=linear_config,
+                )
+            if self._is_nvfp4_format(input_quant):
+                return VllmCompressedTensorsW4A4Fp4(
+                    activation_type=W4A4ActivationType.NVFP4,
+                    is_static_input_scheme=input_quant
+                    and not input_quant.dynamic,
+                    linear_config=linear_config,
+                )
+            if input_quant.type == QuantizationType.FLOAT and input_quant.num_bits == 8 and input_quant.dynamic:
+                return VllmCompressedTensorsW4A4Fp4(
+                    activation_type=W4A4ActivationType.FP8,
+                    is_static_input_scheme=input_quant
+                    and not input_quant.dynamic,
+                    linear_config=linear_config,
+                )
+            raise ValueError(
+                "For NVFP4 weights, input quantization must be NVFP4, FP8 or ",
+                "None for NVFP4A16",
+            )
+
         if self._is_fp8_w8a8(weight_quant, input_quant):
             is_static_input_scheme = input_quant and not input_quant.dynamic
             return VllmCompressedTensorsW8A8Fp8(
@@ -107,7 +147,8 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, VllmQuantConfig):
                 linear_config=linear_config,
             )
         raise NotImplementedError(
-            "No compressed-tensors compatible scheme was found.")
+            "No compressed-tensors compatible scheme was found for layer "
+            f"{layer_name}.")
 
     def get_quant_method(
         self,
@@ -118,17 +159,20 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, VllmQuantConfig):
                                ignore=self.ignore,
                                fused_mapping=self.packed_modules_mapping):
             return VllmUnquantizedConfig.get_quant_method(self, layer, prefix)
-        if isinstance(layer, LinearBase):
-            scheme = self.get_scheme(layer=layer, layer_name=prefix)
-            if scheme is None:
-                return VllmUnquantizedConfig.get_quant_method(
-                    self, layer, prefix)
-            layer.scheme = scheme
-            return CompressedTensorsLinearMethod(self)
-        if isinstance(layer, FusedMoE):
-            layer.moe_config = self.get_moe_config(layer)
-            return VllmCompressedTensorsMoEMethod.get_moe_method(
-                self, layer, layer_name=prefix)
-        if isinstance(layer, Attention):
-            return CompressedTensorsKVCacheMethod(self)
-        return None
+
+        match layer:
+            case LinearBase():
+                scheme = self.get_scheme(layer=layer, layer_name=prefix)
+                if scheme is None:
+                    return VllmUnquantizedConfig.get_quant_method(
+                        self, layer, prefix)
+                layer.scheme = scheme
+                return CompressedTensorsLinearMethod(self)
+            case RoutedExperts():
+                layer.moe_config = self.get_moe_config(layer)
+                return VllmCompressedTensorsMoEMethod.get_moe_method(
+                    self, layer, layer_name=prefix)
+            case Attention():
+                return CompressedTensorsKVCacheMethod(self)
+            case _:
+                return None

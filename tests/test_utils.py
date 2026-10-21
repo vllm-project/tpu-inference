@@ -2,18 +2,45 @@
 import os
 from unittest.mock import MagicMock, patch
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
+from jax.experimental import pallas as pl
+from jax.experimental.pallas import tpu as pltpu
 from torchax.ops.mappings import t2j as ref_t2j
 
 # Import the functions to be tested
-from tpu_inference.utils import (GBYTES, enable_megacore,
-                                 get_jax_dtype_from_str_dtype, get_megacore,
+from tpu_inference.utils import (GBYTES, enable_megacore, get_device_hbm_limit,
+                                 get_device_name, get_jax_dtype_from_str_dtype,
+                                 get_layer_kv_params, get_megacore,
                                  get_padded_head_dim, hbm_usage_bytes,
-                                 hbm_usage_gb)
+                                 hbm_usage_gb, safe_device_get)
 from tpu_inference.utils import t2j as t2j
+
+
+@pytest.mark.parametrize(
+    "raw_kind,expected_name,expected_hbm",
+    [
+        ("TPU v5p", "TPU v5p", 95 * GBYTES),
+        ("TPU v5e", "TPU v5e", 16 * GBYTES),
+        ("TPU v6e", "TPU v6e", 32 * GBYTES),
+        ("TPU7x", "TPU v7", 96 * GBYTES),
+        ("TPU8i", "TPU v8i", 144 * GBYTES),
+        ("TPU v8i", "TPU v8i", 144 * GBYTES),
+    ],
+)
+@patch("jax.devices")
+def test_get_device_name_and_hbm_limit(mock_devices, raw_kind, expected_name,
+                                       expected_hbm):
+    """Tests get_device_name and get_device_hbm_limit functions."""
+    mock_dev = MagicMock()
+    mock_dev.device_kind = raw_kind
+    mock_devices.return_value = [mock_dev]
+
+    assert get_device_name() == expected_name
+    assert get_device_hbm_limit() == expected_hbm
 
 
 def test_enable_and_get_megacore():
@@ -31,7 +58,8 @@ def test_hbm_usage_bytes_ray_backend():
         "bytes_in_use": 100 * GBYTES,
         "bytes_limit": 128 * GBYTES
     }
-    mock_device2 = MagicMock()
+    mock_device1.process_index = jax.process_index()
+    mock_device2 = MagicMock(process_index=jax.process_index())
     mock_device2.memory_stats.side_effect = Exception("Memory stats failed")
 
     devices = [mock_device1, mock_device2]
@@ -40,6 +68,65 @@ def test_hbm_usage_bytes_ray_backend():
     expected_usage = [(100 * GBYTES, 128 * GBYTES),
                       (100 * GBYTES, 128 * GBYTES)]
     assert usage == expected_usage
+
+
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
+@patch("jax.process_count", return_value=2)
+def test_hbm_usage_bytes_remote_devices_listed_first(_):
+    """A non-leader host whose devices come after remote ones in the list."""
+    remote = MagicMock(process_index=jax.process_index() + 1)
+    local = MagicMock(process_index=jax.process_index())
+    local.memory_stats.return_value = {
+        "bytes_in_use": 3 * GBYTES,
+        "bytes_limit": 96 * GBYTES
+    }
+
+    usage = hbm_usage_bytes([remote, remote, local, local])
+
+    assert usage == [(3 * GBYTES, 96 * GBYTES)] * 4
+    remote.memory_stats.assert_not_called()
+
+
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
+@patch("tpu_inference.utils.pathways_hbm_usage_gb")
+@patch("jax.process_count", return_value=2)
+def test_hbm_usage_bytes_falls_back_when_no_stats(_, mock_live_usage):
+    """No device reports stats: estimate instead of returning an empty list,
+    which would budget 0 bytes for the KV cache. Live-array accounting only
+    sees addressable shards, so remote devices reuse the local estimate."""
+    local = MagicMock(process_index=jax.process_index())
+    local.memory_stats.return_value = None
+    remote = MagicMock(process_index=jax.process_index() + 1)
+    mock_live_usage.return_value = [(1 * GBYTES, 96 * GBYTES),
+                                    (0, 96 * GBYTES)]
+
+    usage = hbm_usage_bytes([local, remote])
+
+    mock_live_usage.assert_called_once_with([local, remote])
+    assert usage == [(1 * GBYTES, 96 * GBYTES)] * 2
+
+
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
+@patch("jax.live_arrays")
+@patch("jax.devices")
+@patch("jax.process_count", return_value=2)
+def test_hbm_usage_bytes_fallback_remote_not_counted_as_empty(
+        _, mock_devices, mock_live_arrays):
+    """End to end through the live-array estimator: a remote device must not
+    be reported as 0 bytes used, which would over-size the KV cache."""
+    mock_devices.return_value = [MagicMock(device_kind="TPU v6e")]
+    local = MagicMock(process_index=jax.process_index())
+    local.memory_stats.return_value = None
+    remote = MagicMock(process_index=jax.process_index() + 1)
+    shard = MagicMock()
+    shard.data.device = local
+    shard.data.nbytes = 5 * GBYTES
+    mock_live_arrays.return_value = [MagicMock(addressable_shards=[shard])]
+
+    usage = hbm_usage_bytes([local, remote])
+
+    assert usage == [(5 * GBYTES, 32 * GBYTES)] * 2
+    remote.memory_stats.assert_not_called()
 
 
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
@@ -56,12 +143,51 @@ def test_hbm_usage_bytes_pathways_disabled():
         "bytes_limit": 128 * GBYTES
     }
 
+    mock_device1.process_index = jax.process_index()
+    mock_device2.process_index = jax.process_index()
+
     devices = [mock_device1, mock_device2]
     usage = hbm_usage_bytes(devices)
 
     expected_usage = [(100 * GBYTES, 128 * GBYTES),
                       (50 * GBYTES, 128 * GBYTES)]
     assert usage == expected_usage
+
+
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
+def test_hbm_usage_bytes_counts_only_given_devices():
+    """A worker using a subset of the host's devices counts only that subset."""
+    used = MagicMock(process_index=jax.process_index())
+    used.memory_stats.return_value = {
+        "bytes_in_use": 1 * GBYTES,
+        "bytes_limit": 96 * GBYTES
+    }
+    unused = MagicMock(process_index=jax.process_index())
+
+    with patch("jax.local_devices", return_value=[used, unused]):
+        usage = hbm_usage_bytes([used])
+
+    assert usage == [(1 * GBYTES, 96 * GBYTES)]
+    unused.memory_stats.assert_not_called()
+
+
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
+@patch("jax.process_count", return_value=2)
+def test_hbm_usage_bytes_non_addressable_devices(_):
+    """Remote devices are not queried and reuse a local device's stats."""
+    local = MagicMock(process_index=jax.process_index())
+    local.memory_stats.return_value = {
+        "bytes_in_use": 2 * GBYTES,
+        "bytes_limit": 96 * GBYTES
+    }
+    remote = MagicMock(process_index=jax.process_index() + 1)
+    remote.memory_stats.side_effect = RuntimeError(
+        "MemoryStats is only supported for addressable PjRt devices.")
+
+    usage = hbm_usage_bytes([local, remote])
+
+    assert usage == [(2 * GBYTES, 96 * GBYTES)] * 2
+    remote.memory_stats.assert_not_called()
 
 
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
@@ -232,3 +358,246 @@ def test_t2j_falls_back_on_exception(caplog):
 
     reference = ref_t2j(t)
     np.testing.assert_array_equal(result, reference)
+
+
+def poison_tpu_memory():
+    """Fills TPU VMEM and SMEM with NaNs to simulate garbage state."""
+    if jax.devices()[0].platform != "tpu":
+        return
+    tpu_info = pltpu.get_tpu_info()
+    # Security: Use a large but safe portion of VMEM/SMEM to avoid OOM.
+    vmem_size = (4 * 1024 * 1024) // 4  # 4MB
+    smem_size = (tpu_info.smem_capacity_bytes // 4) - 8192
+
+    def poison_kernel(in_ref, out_ref, v_scratch, s_scratch):
+        del in_ref, out_ref
+        v_scratch[...] = jnp.full_like(v_scratch, jnp.nan)
+        for i in range(s_scratch.shape[0]):
+            s_scratch[i] = 0x7FC00000  # IEEE 754 NaN bit pattern
+
+    pl.pallas_call(
+        poison_kernel,
+        out_shape=jax.ShapeDtypeStruct((1, ), jnp.float32),
+        grid=(1, ),
+        scratch_shapes=[
+            pltpu.VMEM((vmem_size // 128, 128), jnp.float32),
+            pltpu.SMEM((smem_size, ), jnp.int32),
+        ],
+        compiler_params=pltpu.CompilerParams(disable_bounds_checks=True),
+    )(jnp.zeros((1, ), dtype=jnp.float32))
+
+
+class _FlatGemma4Config:
+    """Flat (transformers < 5.15) Gemma4-style text config."""
+
+    def __init__(self, **overrides):
+        self.head_dim = 256
+        self.global_head_dim = 512
+        self.num_key_value_heads = 16
+        self.num_global_key_value_heads = 4
+        self.attention_k_eq_v = True
+        for key, value in overrides.items():
+            setattr(self, key, value)
+
+
+class _PerLayerConfig:
+
+    def __init__(self, head_dim, num_key_value_heads):
+        self.head_dim = head_dim
+        self.num_key_value_heads = num_key_value_heads
+
+
+class _HeterogeneousGemma4Config:
+    """transformers >= 5.15 style config: per-layer values, guarded flat reads."""
+
+    is_heterogeneous = True
+    layer_types = ["sliding_attention", "full_attention"]
+    per_layer_config = [_PerLayerConfig(256, 16), _PerLayerConfig(512, 4)]
+
+    @property
+    def head_dim(self):
+        # Emulates AmbiguousGlobalPerLayerAttributeError: a RuntimeError, so
+        # getattr defaults must not be relied on to swallow it.
+        raise RuntimeError("head_dim is a per-layer attribute")
+
+    @property
+    def num_key_value_heads(self):
+        raise RuntimeError("num_key_value_heads is a per-layer attribute")
+
+
+def test_get_layer_kv_params_flat_sliding():
+    config = _FlatGemma4Config()
+    assert get_layer_kv_params(config, "sliding_attention") == (256, 16)
+
+
+def test_get_layer_kv_params_flat_full_with_k_eq_v():
+    config = _FlatGemma4Config()
+    assert get_layer_kv_params(config, "full_attention") == (512, 4)
+
+
+def test_get_layer_kv_params_flat_full_without_k_eq_v():
+    config = _FlatGemma4Config(attention_k_eq_v=False)
+    assert get_layer_kv_params(config, "full_attention") == (512, 16)
+
+
+def test_get_layer_kv_params_flat_full_none_globals():
+    # Gemma-4 E2B style: global attributes present but None.
+    config = _FlatGemma4Config(global_head_dim=None,
+                               num_global_key_value_heads=None)
+    assert get_layer_kv_params(config, "full_attention") == (256, 16)
+
+
+def test_get_layer_kv_params_flat_missing_attrs():
+
+    class Empty:
+        pass
+
+    assert get_layer_kv_params(Empty(), "full_attention") == (None, None)
+    assert get_layer_kv_params(Empty(), "sliding_attention") == (None, None)
+
+
+def test_get_layer_kv_params_heterogeneous():
+    config = _HeterogeneousGemma4Config()
+    assert get_layer_kv_params(config, "sliding_attention") == (256, 16)
+    assert get_layer_kv_params(config, "full_attention") == (512, 4)
+
+
+def test_get_layer_kv_params_heterogeneous_unknown_layer_type():
+    # A layer type not present in layer_types falls back to layer 0.
+    config = _HeterogeneousGemma4Config()
+    assert get_layer_kv_params(config, "chunked_attention") == (256, 16)
+
+
+def test_get_layer_kv_params_magicmock_takes_flat_path():
+    # MagicMock auto-creates a truthy Mock for is_heterogeneous; the helper
+    # must still take the flat path so mock-based tests keep working.
+    config = MagicMock()
+    config.head_dim = 256
+    config.global_head_dim = 512
+    config.num_key_value_heads = 16
+    config.num_global_key_value_heads = 4
+    config.attention_k_eq_v = True
+    assert get_layer_kv_params(config, "full_attention") == (512, 4)
+    assert get_layer_kv_params(config, "sliding_attention") == (256, 16)
+
+
+def test_safe_device_get_uses_addressable_shard_when_replicated():
+    """Replicated multi-host array: read the local shard, never device_get/gather.
+
+    A fully replicated global jax.Array holds the complete value on every host's
+    first process-local shard, so safe_device_get must read that shard directly
+    and never trigger an illegal cross-host fetch or a collective.
+    """
+    expected = np.array([7, 8, 9], dtype=np.int32)
+    shard = MagicMock()
+    shard.data = expected
+    fake_arr = MagicMock()
+    fake_arr.addressable_shards = [shard]
+    fake_arr.is_fully_addressable = False
+    fake_arr.is_fully_replicated = True
+
+    with patch("tpu_inference.utils.jax.device_get") as mock_device_get, \
+         patch("tpu_inference.utils.multihost_utils.process_allgather") \
+            as mock_allgather:
+        mock_device_get.side_effect = AssertionError(
+            "jax.device_get must not be called for a replicated array")
+        result = safe_device_get(fake_arr)
+
+    mock_allgather.assert_not_called()
+    assert isinstance(result, np.ndarray)
+    np.testing.assert_array_equal(result, expected)
+
+
+def test_safe_device_get_gathers_when_sharded():
+    """Sharded multi-host array: gather across processes, don't take one shard.
+
+    Taking a single shard of a sharded array would silently return partial data,
+    so safe_device_get must reconstruct the full value via process_allgather.
+    """
+    full = np.array([1, 2, 3, 4], dtype=np.int32)
+    partial_shard = MagicMock()
+    partial_shard.data = np.array([1, 2], dtype=np.int32)  # only half
+    fake_arr = MagicMock()
+    fake_arr.addressable_shards = [partial_shard]
+    fake_arr.is_fully_addressable = False
+    fake_arr.is_fully_replicated = False
+
+    with patch("tpu_inference.utils.multihost_utils.process_allgather",
+               return_value=full) as mock_allgather:
+        result = safe_device_get(fake_arr)
+
+    mock_allgather.assert_called_once_with(fake_arr, tiled=True)
+    np.testing.assert_array_equal(result, full)
+
+
+def test_safe_device_get_falls_back_without_addressable_shards():
+    """Non-jax / shardless input falls back to jax.device_get."""
+    plain = [1, 2, 3]
+    with patch("tpu_inference.utils.jax.device_get",
+               return_value=np.array(plain)) as mock_device_get:
+        result = safe_device_get(plain)
+
+    mock_device_get.assert_called_once_with(plain)
+    np.testing.assert_array_equal(result, np.array(plain))
+
+
+def test_safe_device_get_single_host_jax_array_roundtrips():
+    """Single-host real jax.Array roundtrips to the correct numpy values."""
+    arr = jnp.arange(6, dtype=jnp.int32)
+    result = safe_device_get(arr)
+    assert isinstance(result, np.ndarray)
+    np.testing.assert_array_equal(result, np.arange(6, dtype=np.int32))
+
+
+def test_safe_device_get_single_process_uses_device_get_not_gather():
+    """Fully addressable (single-process) array: plain device_get, no collective.
+
+    Even a sharded array is safe to device_get when every shard is local, so the
+    is_fully_addressable fast path must avoid process_allgather entirely.
+    """
+    expected = np.array([4, 5, 6], dtype=np.int32)
+    fake_arr = MagicMock()
+    fake_arr.addressable_shards = [MagicMock()]
+    fake_arr.is_fully_addressable = True
+    fake_arr.is_fully_replicated = False
+
+    with patch("tpu_inference.utils.jax.device_get",
+               return_value=expected) as mock_device_get, \
+         patch("tpu_inference.utils.multihost_utils.process_allgather") \
+            as mock_allgather:
+        result = safe_device_get(fake_arr)
+
+    mock_device_get.assert_called_once_with(fake_arr)
+    mock_allgather.assert_not_called()
+    np.testing.assert_array_equal(result, expected)
+
+
+def test_safe_device_get_maps_over_pytree():
+    """A tuple/dict of arrays is handled per-leaf, like jax.device_get((a, b))."""
+    a = jnp.arange(3, dtype=jnp.int32)
+    b = jnp.arange(2, dtype=jnp.int32)
+    out_tuple = safe_device_get((a, b))
+    assert isinstance(out_tuple, tuple) and len(out_tuple) == 2
+    np.testing.assert_array_equal(out_tuple[0], np.arange(3, dtype=np.int32))
+    np.testing.assert_array_equal(out_tuple[1], np.arange(2, dtype=np.int32))
+
+    out_dict = safe_device_get({"x": a, "y": b})
+    assert set(out_dict) == {"x", "y"}
+    np.testing.assert_array_equal(out_dict["x"], np.arange(3, dtype=np.int32))
+    np.testing.assert_array_equal(out_dict["y"], np.arange(2, dtype=np.int32))
+
+
+def test_safe_device_get_replicated_on_submesh_without_local_shards():
+    """Replicated on a sub-mesh where a host has no local shards falls back to process_allgather."""
+    expected = np.array([7, 8, 9], dtype=np.int32)
+    fake_arr = MagicMock()
+    fake_arr.addressable_shards = []
+    fake_arr.is_fully_addressable = False
+    fake_arr.is_fully_replicated = True
+
+    with patch("tpu_inference.utils.multihost_utils.process_allgather",
+               return_value=np.stack([expected, expected])) as mock_allgather:
+        result = safe_device_get(fake_arr)
+
+    mock_allgather.assert_called_once_with(fake_arr, tiled=False)
+    np.testing.assert_array_equal(result, expected)

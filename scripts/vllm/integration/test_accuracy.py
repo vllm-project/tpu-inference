@@ -11,10 +11,11 @@ sure that the zmq frontend mp RPC message passing and
 AsyncLLMEngine are working correctly.
 """
 
+import os
 import threading
 
-import lm_eval
 import pytest
+from lm_eval_accuracy import evaluate_with_vllm
 from vllm.platforms import current_platform
 
 MODEL_NAMES = []
@@ -43,15 +44,29 @@ def run_test(model_name, expected_value, more_args=None):
     if more_args is not None:
         model_args = "{},{}".format(model_args, more_args)
 
-    results = lm_eval.simple_evaluate(
-        model="vllm",
+    apply_chat_template = os.environ.get("USE_CHAT_TEMPLATE", "0") == "1"
+    if apply_chat_template:
+        print("USE_CHAT_TEMPLATE=1: enabling apply_chat_template + "
+              "fewshot_as_multiturn for lm_eval. Required for instruction-"
+              "tuned BOS-sensitive models like gemma-4-it.")
+
+    results = evaluate_with_vllm(
         model_args=model_args,
         tasks="gsm8k",
         batch_size="auto",
+        apply_chat_template=apply_chat_template,
+        fewshot_as_multiturn=apply_chat_template,
     )
 
-    measured_value = results["results"][TASK][FILTER]
+    # gsm8k emits two filters: strict-match (default gate) and flexible-extract.
+    # Print both so CI logs let reviewers compare across runs/kernels.
+    task_results = results["results"][TASK]
+    measured_value = task_results[FILTER]
+    flex_value = task_results.get("exact_match,flexible-extract")
     print(f"measured accuracy: {measured_value}")
+    print(f"measured accuracy (strict-match): {measured_value}")
+    if flex_value is not None:
+        print(f"measured accuracy (flexible-extract): {flex_value}")
     assert measured_value >= expected_value - RTOL, f"Expected: {expected_value} |  Measured: {measured_value}"
 
 

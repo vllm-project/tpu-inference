@@ -24,9 +24,13 @@ import pytest
 from flax.typing import PRNGKey
 from jax import numpy as jnp
 from jax.sharding import Mesh
-from vllm.config import ModelConfig
+from vllm.config import AuxOutputConfig, ModelConfig
 from vllm.model_executor.model_loader import LoadConfig, register_model_loader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+
+from tpu_inference.layers.common.sharding import (ShardingConfigManager,
+                                                  ShardingStrategy)
+from tpu_inference.layers.jax import JaxModule
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +68,7 @@ def mock_vllm_config():
 
         def __init__(self, model: str, kv_cache_dtype: str):
             self.model_config = ModelConfig(model)
+            self.aux_output_config = AuxOutputConfig()
             self.model_config.dtype = jnp.bfloat16
             self.load_config = LoadConfig(load_format="auto")
             self.load_config.download_dir = None
@@ -71,6 +76,7 @@ def mock_vllm_config():
             self.quant_config = None
             self.additional_config = {}
             self.parallel_config = None
+            self.sharding_config = ShardingConfigManager(ShardingStrategy())
 
     return MockVllmConfig
 
@@ -103,12 +109,12 @@ class SkipLayersModelLoaderForTest(DefaultModelLoader):
             yield name, param
 
 
-def count_model_param_bytes(model) -> int:
+def count_model_param_bytes(model: JaxModule) -> int:
     """Count total bytes of all parameters in a model."""
     total = 0
     for _, param in model.named_parameters():
-        if hasattr(param, 'value') and hasattr(param.value, 'nbytes'):
-            total += param.value.nbytes
+        if hasattr(param.get_value(), 'nbytes'):
+            total += param.get_value().nbytes
     return total
 
 

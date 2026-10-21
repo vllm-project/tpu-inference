@@ -11,3 +11,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from tpu_inference.layers.vllm import backends as backends
+from tpu_inference.layers.vllm import custom_ops as custom_ops
+from tpu_inference.layers.vllm import ops as ops
+from tpu_inference.layers.vllm import quantization as quantization
+
+
+# NOTE: this function is the entry_points target for the vllm general plugin.
+def register_layers():
+    # Override vLLM's built-in model classes with TPU-specific implementations
+    # (e.g. DeepseekV4ForCausalLM). Done here because this is the plugin hook
+    # that vLLM invokes at startup, before any model is loaded.
+    from tpu_inference.models.vllm.experimental import register_models
+    register_models()
+
+    # Let --attention-backend flywheel select the FlyWheel kernels.
+    from tpu_inference.layers.vllm.backends.flywheel import \
+        register_flywheel_attention_backend
+    register_flywheel_attention_backend()

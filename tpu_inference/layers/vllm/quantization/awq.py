@@ -20,21 +20,26 @@ import torch
 from jax.sharding import Mesh, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
-from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
+from vllm.model_executor.layers import linear
+from vllm.model_executor.layers.fused_moe import (FusedMoEMethodBase,
+                                                  FusedMoeWeightScaleSupported,
+                                                  RoutedExperts)
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.layer import \
-    FusedMoeWeightScaleSupported
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
-from vllm.model_executor.layers.quantization.awq import (AWQConfig,
-                                                         AWQLinearMethod)
+from vllm.model_executor.layers.quantization.auto_awq import \
+    AutoAWQConfig as AWQConfig
+from vllm.model_executor.layers.quantization.auto_awq import \
+    AutoAWQLinearMethod as AWQLinearMethod
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizeMethodBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
+from tpu_inference.layers.common.moe import \
+    FusedMoEMethodBase as TpuFusedMoEMethodBase
 from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
@@ -45,8 +50,8 @@ from tpu_inference.layers.common.quantization import awq_u32_unpack_u4
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
-from tpu_inference.layers.vllm.moe import (
-    MoEBackend, select_moe_backend_from_fused_moe_config, vllm_moe_apply)
+from tpu_inference.layers.vllm.interface.moe import (
+    select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
 from tpu_inference.layers.vllm.quantization.unquantized import \
@@ -75,18 +80,24 @@ class VllmAWQConfig(AWQConfig, VllmQuantConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional[Union["LinearMethodBase", "QuantizeMethodBase"]]:
-        if isinstance(layer, LinearBase):
-            linear_config = self.get_linear_config(layer)
-            if is_layer_skipped(prefix, self.modules_to_not_convert):
-                return VllmUnquantizedLinearMethod(linear_config)
-            return VllmAWQLinearMethod(self, linear_config)
-        elif isinstance(layer, FusedMoE):
-            layer.moe_config = self.get_moe_config(layer)
-            return VllmAWQMoEMethod(self, layer, self.mesh)
-        return None
+        match layer:
+            case LinearBase():
+                linear_config = self.get_linear_config(layer)
+                if is_layer_skipped(prefix, self.modules_to_not_convert):
+                    return VllmUnquantizedLinearMethod(linear_config)
+                return VllmAWQLinearMethod(self, linear_config)
+            case RoutedExperts():
+                layer.moe_config = self.get_moe_config(layer)
+                return VllmAWQMoEMethod(self, layer, self.mesh)
+            case _:
+                return None
 
 
 class VllmAWQLinearMethod(AWQLinearMethod):
+
+    # Dynamically register this method to support weight_loader_v2 in vLLM.
+    if "VllmAWQLinearMethod" not in linear.WEIGHT_LOADER_V2_SUPPORTED:
+        linear.WEIGHT_LOADER_V2_SUPPORTED.append("VllmAWQLinearMethod")
 
     def __init__(self, quant_config: VllmAWQConfig,
                  linear_config: VllmQuantLinearConfig):
@@ -136,7 +147,6 @@ class VllmAWQLinearMethod(AWQLinearMethod):
                 fused=self.linear_config.fuse_matmuls,
                 output_sizes=self.linear_config.output_sizes,
                 reorder_size=self.linear_config.n_shards,
-                transposed=False,
             )
 
         weights = process_awq_linear_weights(weight, weight_scale, zero_point,
@@ -147,7 +157,6 @@ class VllmAWQLinearMethod(AWQLinearMethod):
                 mesh=self.linear_config.mesh,
                 weight_p_spec=self.linear_config.weight_sharding,
                 bias_p_spec=self.linear_config.bias_sharding,
-                transposed=False,
             ))
 
         if self.linear_config.fuse_matmuls:
@@ -243,9 +252,7 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
         self.quant_config = quant_config
         self.mesh = mesh
         self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
-        self.extra_backend_kwargs = {}
-        if self.moe_backend == MoEBackend.FUSED_MOE:
-            self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name)
+        TpuFusedMoEMethodBase.__init__(self, self.moe_backend, ep_axis_name)
 
     @property
     def is_monolithic(self) -> bool:
@@ -373,7 +380,7 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
             set_weight_attrs(w2_bias, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        assert isinstance(layer, FusedMoE)
+        assert isinstance(layer, RoutedExperts)
 
         w13_qweight = t2j(layer.w13_qweight, use_dlpack=False)
         delattr(layer, "w13_qweight")
@@ -479,9 +486,10 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
 
     def apply_monolithic(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         weights = FusedMoEWeights(
             w13_weight=jax_view(layer.w13_weight),
@@ -495,4 +503,5 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
                               weights=weights,
                               quant_method_instance=self,
                               x=x,
-                              router_logits=router_logits)
+                              router_logits=router_logits,
+                              input_ids=input_ids)

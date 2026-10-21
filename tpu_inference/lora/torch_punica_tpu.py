@@ -44,6 +44,9 @@ class PunicaWrapperTPU(PunicaWrapperBase):
     def _get_token_lora_indices(self, x: torch.Tensor) -> torch.IntTensor:
         return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
 
+    def _get_sampler_indices(self, x: torch.Tensor) -> torch.IntTensor:
+        return torch.narrow(self._sampler_indices, 0, 0, x.size(0))
+
     @property
     def embeddings_indices(self) -> torch.Tensor:
         """
@@ -140,8 +143,17 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             lora_b_stacked (torch.Tensor): lora_b's weights.
             add_inputs (bool): Default to True.
         """
-        raise NotImplementedError(
-            "NYI: torch_punica_tpu.PunicaWrapperTPU.add_lora_embedding.")
+        y_orig = y
+        y = y.view(-1, y.shape[-1])
+        x = x.view(-1, x.shape[-1])
+
+        add_inputs = kwargs.get('add_inputs', add_inputs)
+
+        # Embedding layer only needs the expand operation as lookup in LoRA A is done beforehand.
+        y = bgmv_expand_slice(x, lora_b_stacked, y,
+                              self._get_token_lora_indices(x), 0, y.shape[-1],
+                              add_inputs)
+        return y.view(y_orig.shape)
 
     def add_lora_linear(self,
                         y: torch.Tensor,
@@ -218,8 +230,57 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             scale (float): Scaling factor.
             buffer (Optional[torch.Tensor]):Default to None.
         """
-        raise NotImplementedError(
-            "NYI: torch_punica_tpu.PunicaWrapperTPU.add_lora_logits.")
+
+        # Note: We use per-token indices here because the TPU bgmv ops expect a tensor
+        # of shape [num_tokens].
+
+        # Step 1: Shrink operation
+        buffer = bgmv_shrink(x, lora_a_stacked, self._get_sampler_indices(x),
+                             scale)
+
+        y_orig = y
+        y = y.view(-1, y.shape[-1])
+
+        # Step 2: Expand operation
+        y = bgmv_expand_slice(buffer, lora_b_stacked, y,
+                              self._get_sampler_indices(x), 0, y.shape[-1],
+                              True)
+
+        return y.view(y_orig.shape)
+
+    def apply_lora_full_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        weight_stacked: torch.Tensor,
+        bias_stacked: torch.Tensor,
+        module_enabled: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        """
+        Applies request-routed full (dense) linear weights to selected rows,
+        used by ClassificationHeadWithLoRA for modules_to_save.
+
+        Semantics:
+            for i in range(num_tokens):
+                lora_id = sampler_indices[i]
+                if lora_id >= 0 and module_enabled[lora_id]:
+                    y[i] = x[i] @ weight_stacked[lora_id, 0].T + bias_stacked[lora_id]
+                # else y[i] is left unchanged
+
+        Args:
+            y (torch.Tensor): Output tensor (num_tokens, out_features).
+            x (torch.Tensor): Input tensor (num_tokens, in_features).
+            weight_stacked (torch.Tensor): Full linear weights of shape
+                (max_loras, 1, out_features, in_features).
+            bias_stacked (torch.Tensor): Full linear bias of shape
+                (max_loras, out_features).
+            module_enabled (torch.Tensor): Bool tensor of shape (max_loras,)
+                indicating which adapters have a saved full linear module.
+        """
+        indices = self._get_sampler_indices(x)
+        adapter_y = bgmv_shrink(x, weight_stacked, indices, 1.0)
+        return self._select_full_linear_output(y, adapter_y, bias_stacked,
+                                               module_enabled)
 
     @property
     def token_lora_indices(self) -> torch.Tensor:
@@ -257,7 +318,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             lora_index_to_id,
             max_loras,
             vocab_size,
-            0,  # extra_vocab_size
             "cpu",
         )
         with torchax.default_env():
@@ -272,8 +332,9 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                 self._sampler_indices_padded.shape,
                 dims=1).to(self.device)
             self._embeddings_indices = self._pad_to_shape(
-                embeddings_indices, self._embeddings_indices.shape,
-                dims=2).to(self.device)
+                embeddings_indices,
+                self._embeddings_indices.shape,
+                dims=self._embeddings_indices.ndim).to(self.device)
             self.indices_len[:] = indices_len
 
     def _update_prefill_metadata(self,

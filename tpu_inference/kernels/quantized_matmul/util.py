@@ -66,49 +66,6 @@ def get_kernel_name(tuned_value: TunedValue):
     )
 
 
-def xla_quantized_matmul(
-    x: jax.Array,
-    w_q: jax.Array,
-    w_scale: jax.Array,
-    quantize_activation=True,
-) -> jax.Array:
-    """
-    Reference (pure JAX) implementation of the quantized matmul kernel below.
-
-    Args:
-        x:  Activation.
-        w_q: Weight quantized array. [n_output_features, n_input_features]
-        w_s: Weight quantization scale. [n_output_features]
-        mesh: Mesh to shard on.
-        weight_sharding: PartitionSpec for the weight tensor.
-
-    Returns:
-        Output of the quantized matmul.
-    """
-    if quantize_activation:
-        acc_dtype = jnp.float32
-        if quantize_activation and jnp.issubdtype(w_q.dtype, jnp.integer):
-            acc_dtype = jnp.int32
-
-        x_q, x_scale = quantize_tensor(x, w_q.dtype)
-        out = jax.lax.dot_general(
-            x_q,
-            w_q,
-            dimension_numbers=(((1, ), (1, )), ((), ())),
-            preferred_element_type=acc_dtype,
-        ).astype(jnp.float32)
-        out *= x_scale
-    else:
-        out = jax.lax.dot_general(
-            x,
-            w_q,
-            dimension_numbers=(((1, ), (1, )), ((), ())),
-            preferred_element_type=jnp.float32,
-        )
-    out *= jnp.expand_dims(w_scale, 0)
-    return out.astype(x.dtype)
-
-
 def xla_quantized_batched_matmul(
     x: jax.Array,
     w_q: jax.Array,

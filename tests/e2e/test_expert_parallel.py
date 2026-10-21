@@ -3,10 +3,10 @@
 
 import os
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 
 import pytest
-from vllm import LLM, EngineArgs, SamplingParams
+from vllm import LLM, SamplingParams
 
 
 @dataclass
@@ -71,7 +71,7 @@ def _run_inference(
     sampling_params: SamplingParams,
 ) -> tuple[list, float]:
     """Run inference with the given configuration."""
-    engine_args = EngineArgs(
+    llm = LLM(
         model=config.model_name,
         max_model_len=config.max_model_len,
         tensor_parallel_size=config.tensor_parallel_size,
@@ -84,15 +84,11 @@ def _run_inference(
         enable_expert_parallel=config.enable_expert_parallel,
     )
 
-    engine_args_dict = asdict(engine_args)
-    llm = LLM(**engine_args_dict)
-
     start_time = time.time()
     outputs = llm.generate(test_prompts, sampling_params)
     elapsed_time = time.time() - start_time
 
-    del llm
-    time.sleep(10)
+    llm.llm_engine.engine_core.shutdown()
     return outputs, elapsed_time
 
 

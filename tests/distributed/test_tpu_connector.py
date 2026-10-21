@@ -12,13 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import threading
 import unittest
-from unittest.mock import MagicMock, patch
+from functools import partial
+from unittest.mock import ANY, MagicMock, call, patch
 
+import numpy as np
+from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import RequestStatus
 
-from tpu_inference.distributed import tpu_connector
+from tpu_inference.distributed import tpu_connector, tpu_connector_hma
+from tpu_inference.distributed.tpu_connector_stats import (
+    TpuKVConnectorPromMetrics, TpuKVConnectorStats)
+
+
+def _make_test_kv_cache_config() -> KVCacheConfig:
+    return KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
 
 
 class MockVllmConfig:
@@ -44,7 +55,8 @@ class TestTPUConnector(unittest.TestCase):
         SCHEDULER role.
         """
         connector = tpu_connector.TPUConnector(self.vllm_config,
-                                               KVConnectorRole.SCHEDULER)
+                                               KVConnectorRole.SCHEDULER,
+                                               _make_test_kv_cache_config())
         mock_scheduler_cls.assert_called_once_with(self.vllm_config)
         mock_worker_cls.assert_not_called()
         self.assertIsNotNone(connector.connector_scheduler)
@@ -56,7 +68,8 @@ class TestTPUConnector(unittest.TestCase):
         role.
         """
         connector = tpu_connector.TPUConnector(self.vllm_config,
-                                               KVConnectorRole.WORKER)
+                                               KVConnectorRole.WORKER,
+                                               _make_test_kv_cache_config())
         mock_worker_cls.assert_called_once_with(self.vllm_config)
         mock_scheduler_cls.assert_not_called()
         self.assertIsNone(connector.connector_scheduler)
@@ -67,7 +80,8 @@ class TestTPUConnector(unittest.TestCase):
         """Tests that scheduler-side methods are correctly delegated."""
         mock_scheduler_instance = mock_scheduler_cls.return_value
         connector = tpu_connector.TPUConnector(self.vllm_config,
-                                               KVConnectorRole.SCHEDULER)
+                                               KVConnectorRole.SCHEDULER,
+                                               _make_test_kv_cache_config())
 
         mock_request = MagicMock()
         mock_blocks = MagicMock()
@@ -93,7 +107,8 @@ class TestTPUConnector(unittest.TestCase):
         """Tests that worker-side methods are correctly delegated."""
         mock_worker_instance = mock_worker_cls.return_value
         connector = tpu_connector.TPUConnector(self.vllm_config,
-                                               KVConnectorRole.WORKER)
+                                               KVConnectorRole.WORKER,
+                                               _make_test_kv_cache_config())
         connector._connector_metadata = tpu_connector.TPUConnectorMetadata(
         )  # need to set this for start_load_kv
 
@@ -110,6 +125,55 @@ class TestTPUConnector(unittest.TestCase):
         connector.get_finished(set())
         mock_worker_instance.get_finished.assert_called_once_with()
 
+        mock_worker_instance.get_block_ids_with_load_errors.return_value = {3}
+        self.assertEqual(connector.get_block_ids_with_load_errors(), {3})
+
+    def test_scheduler_reports_no_load_errors(self, mock_scheduler_cls,
+                                              mock_worker_cls):
+        """The scheduler-role connector has no worker and no load errors."""
+        connector = tpu_connector.TPUConnector(self.vllm_config,
+                                               KVConnectorRole.SCHEDULER,
+                                               _make_test_kv_cache_config())
+        self.assertEqual(connector.get_block_ids_with_load_errors(), set())
+
+
+@patch("tpu_inference.distributed.tpu_connector_hma.TPUConnectorHMAWorker")
+@patch("tpu_inference.distributed.tpu_connector_hma.TPUConnectorHMAScheduler")
+class TestTPUConnectorHMA(unittest.TestCase):
+
+    def setUp(self):
+        self.vllm_config = MockVllmConfig()
+
+    def test_init_scheduler_role(self, mock_scheduler_cls, mock_worker_cls):
+        connector = tpu_connector_hma.TPUConnectorHMA(
+            self.vllm_config, KVConnectorRole.SCHEDULER,
+            _make_test_kv_cache_config())
+
+        mock_scheduler_cls.assert_called_once_with(self.vllm_config)
+        mock_worker_cls.assert_not_called()
+        self.assertIs(connector._vllm_config, self.vllm_config)
+        self.assertIs(connector._kv_transfer_config,
+                      self.vllm_config.kv_transfer_config)
+        self.assertEqual(connector.role, KVConnectorRole.SCHEDULER)
+        self.assertTrue(connector.requires_kv_delivery)
+        self.assertIsNotNone(connector.connector_scheduler)
+        self.assertIsNone(connector.connector_worker)
+
+    def test_init_worker_role(self, mock_scheduler_cls, mock_worker_cls):
+        connector = tpu_connector_hma.TPUConnectorHMA(
+            self.vllm_config, KVConnectorRole.WORKER,
+            _make_test_kv_cache_config())
+
+        mock_worker_cls.assert_called_once_with(self.vllm_config)
+        mock_scheduler_cls.assert_not_called()
+        self.assertIs(connector._vllm_config, self.vllm_config)
+        self.assertIs(connector._kv_transfer_config,
+                      self.vllm_config.kv_transfer_config)
+        self.assertEqual(connector.role, KVConnectorRole.WORKER)
+        self.assertTrue(connector.requires_kv_delivery)
+        self.assertIsNone(connector.connector_scheduler)
+        self.assertIsNotNone(connector.connector_worker)
+
 
 class TestTPUConnectorScheduler(unittest.TestCase):
 
@@ -118,10 +182,12 @@ class TestTPUConnectorScheduler(unittest.TestCase):
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.kv_transfer_config.is_kv_producer = False
 
-        with patch("tpu_inference.distributed.tpu_connector.get_kv_ips",
-                   return_value="1.1.1.1"), patch(
-                       "tpu_inference.distributed.tpu_connector.get_kv_ports",
-                       return_value=12345):
+        with patch(
+                "tpu_inference.distributed.tpu_connector.dist_utils.get_kv_ips",
+                return_value="1.1.1.1"
+        ), patch(
+                "tpu_inference.distributed.tpu_connector.dist_utils.get_kv_ports",
+                return_value=12345):
             self.scheduler = tpu_connector.TPUConnectorScheduler(
                 self.vllm_config)
 
@@ -202,6 +268,7 @@ class TestTPUConnectorScheduler(unittest.TestCase):
             "remote_port": 54321
         }
         mock_blocks = MagicMock()
+        mock_blocks.get_block_ids.return_value = [[1, 2]]
         num_external_tokens = 0
 
         self.scheduler.update_state_after_alloc(mock_request, mock_blocks,
@@ -210,7 +277,7 @@ class TestTPUConnectorScheduler(unittest.TestCase):
         self.assertIn("req1", self.scheduler.reqs_to_load)
         load_meta = self.scheduler.reqs_to_load["req1"]
         self.assertEqual(load_meta.uuid, 123)
-        self.assertIsNone(load_meta.local_block_ids)
+        self.assertEqual(load_meta.local_block_ids, [1, 2])
         self.assertIsNone(load_meta.remote_block_ids)
 
     def test_build_connector_meta(self):
@@ -296,15 +363,16 @@ class TestTPUConnectorWorker(unittest.TestCase):
             "jax":
             patch('tpu_inference.distributed.tpu_connector.jax'),
             "get_host_ip":
-            patch('tpu_inference.distributed.tpu_connector.get_host_ip',
-                  return_value='127.0.0.1'),
+            patch(
+                'tpu_inference.distributed.tpu_connector.dist_utils.get_host_ip',
+                return_value='127.0.0.1'),
             "get_kv_transfer_port":
             patch(
-                'tpu_inference.distributed.tpu_connector.get_kv_transfer_port',
+                'tpu_inference.distributed.tpu_connector.dist_utils.get_kv_transfer_port',
                 return_value=10000),
             "get_side_channel_port":
             patch(
-                'tpu_inference.distributed.tpu_connector.get_side_channel_port',
+                'tpu_inference.distributed.tpu_connector.dist_utils.get_side_channel_port',
                 return_value=20000),
             "start_transfer_server":
             patch(
@@ -323,8 +391,8 @@ class TestTPUConnectorWorker(unittest.TestCase):
             patch(
                 'tpu_inference.distributed.tpu_connector.select_from_kv_caches'
             ),
-            "scatter_kv_slices":
-            patch('tpu_inference.distributed.tpu_connector.scatter_kv_slices'),
+            "insert_kv_chunks":
+            patch('tpu_inference.distributed.tpu_connector.insert_kv_chunks'),
             "time":
             patch('tpu_inference.distributed.tpu_connector.time'),
             "make_zmq_path":
@@ -345,7 +413,6 @@ class TestTPUConnectorWorker(unittest.TestCase):
         self.all_mocks["zmq"].Context.assert_called_once()
         self.all_mocks["threading"].Thread.assert_called_once()
         self.all_mocks["threading"].Event.assert_called()
-        self.all_mocks["ThreadPoolExecutor"].assert_not_called()
         self.assertTrue(worker.is_producer)
 
     def test_init_consumer(self):
@@ -356,7 +423,7 @@ class TestTPUConnectorWorker(unittest.TestCase):
         self.all_mocks["zmq"].Context.assert_called_once()
         self.all_mocks["threading"].Thread.assert_not_called()
         self.all_mocks["ThreadPoolExecutor"].assert_called_once_with(
-            max_workers=64)
+            max_workers=128)
         self.assertFalse(worker.is_producer)
 
     def test_register_runner(self):
@@ -368,7 +435,10 @@ class TestTPUConnectorWorker(unittest.TestCase):
         mock_kv_cache_layer = MagicMock()
         mock_kv_cache_layer.shape = [10, 20, 30, 40]
         mock_kv_cache_layer.dtype = 'float32'
-        mock_kv_cache_layer.sharding = 'sharding_spec'
+        mock_sharding = MagicMock()
+        mock_sharding.mesh = 'mesh'
+        mock_sharding.spec = 'sharding_spec'
+        mock_kv_cache_layer.sharding = mock_sharding
         mock_runner.kv_caches = [mock_kv_cache_layer] * 5
         mock_runner.mesh = 'mesh'
 
@@ -380,7 +450,7 @@ class TestTPUConnectorWorker(unittest.TestCase):
         self.assertEqual(worker.num_layers, 5)
         self.assertEqual(worker.shape, [10, 20, 30, 40])
         self.assertEqual(worker.dtype, 'float32')
-        self.assertEqual(worker.sharding, 'sharding_spec')
+        self.assertEqual(worker.sharding, mock_sharding)
 
     def test_process_send_load_for_producer(self):
         """Tests process_send_load for the producer role."""
@@ -419,10 +489,11 @@ class TestTPUConnectorWorker(unittest.TestCase):
         worker._maybe_build_kv_connection.assert_called_once_with(load_meta)
         self.all_mocks[
             "ThreadPoolExecutor"].return_value.submit.assert_called_once_with(
-                worker._pull_kv, "req1", "conn", load_meta, mock_indices)
+                worker._pull_kv, "req1", "conn", load_meta)
 
     def test_process_send_load_for_consumer_notifying(self):
         """Tests process_send_load for a consumer that needs to notify."""
+        self.all_mocks["time"].perf_counter.side_effect = [0.0, 1.0]
         self.vllm_config.kv_transfer_config.is_kv_producer = False
         worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
         worker._maybe_build_notif_socket = MagicMock(return_value="socket")
@@ -436,52 +507,43 @@ class TestTPUConnectorWorker(unittest.TestCase):
                                            remote_port=123)
         meta.reqs_to_load = {"req1": load_meta}
 
+        worker.runner = MagicMock()
+        original_kv_caches = worker.runner.kv_caches
+        worker.sharding = MagicMock()
+        worker.sharding.spec = "mock_spec"
+        worker.mesh = "mock_mesh"
+        worker.reqs_pulling = {"req1": [None, "kv_data", [1]]}
+        self.all_mocks['insert_kv_chunks'].return_value = "new_kv_caches"
+
         worker.process_send_load(meta)
 
+        self.all_mocks['insert_kv_chunks'].assert_called_once_with(
+            original_kv_caches, "kv_data", [1], "mock_mesh", "mock_spec")
+        self.assertEqual(worker.runner.kv_caches, "new_kv_caches")
+        self.assertNotIn("req1", worker.reqs_pulling)
         worker._maybe_build_notif_socket.assert_called_once_with(load_meta)
         worker._notify_pull_done.assert_called_once_with(
             "socket", "req1", uuid)
 
-    @patch('tpu_inference.distributed.tpu_connector.jnp')
-    def test_get_finished_recving(self, mock_jnp):
+    def test_get_finished_recving(self):
         """Tests get_finished for a request that has finished pulling."""
         self.vllm_config.kv_transfer_config.is_kv_producer = False
         worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
         worker.runner = MagicMock()
-        worker.num_layers = 1
-        original_kv_caches = worker.runner.kv_caches
 
         mock_future = MagicMock()
         mock_future.done.return_value = True
-        mock_kv_data = [MagicMock(name="kv_data_layer0")]
-        mock_indices = MagicMock(name="indices")
-        mock_future.result.return_value = (mock_kv_data, mock_indices)
-        worker.reqs_pulling = {"req1": mock_future}
-
-        mock_merged_kvs = MagicMock(name="merged_kvs")
-        mock_merged_indices = MagicMock(name="merged_indices")
-
-        def mock_concatenate(elements, axis=0):
-            if elements[0] is mock_indices:
-                return mock_merged_indices
-            elif elements[0] is mock_kv_data[0]:
-                return mock_merged_kvs
-            return MagicMock()
-
-        mock_jnp.concatenate.side_effect = mock_concatenate
+        mock_future.result.return_value = ('kv_data', 'indices', [1])
+        worker.reqs_pulling = {'req1': [mock_future, None, [1]]}
 
         done_sending, done_recving = worker.get_finished()
 
         self.assertEqual(done_sending, set())
-        self.assertEqual(done_recving, {"req1"})
-        self.assertNotIn("req1", worker.reqs_pulling)
-
-        # The new implementation merges kv and indices before scattering
-        merged_kvs = [mock_merged_kvs]
-        merged_indices = mock_merged_indices
-
-        self.all_mocks["scatter_kv_slices"].assert_called_once_with(
-            original_kv_caches, merged_kvs, merged_indices)
+        self.assertEqual(done_recving, {'req1'})
+        self.assertIn('req1', worker.reqs_pulling)
+        self.assertEqual(worker.reqs_pulling['req1'][1],
+                         ('kv_data', 'indices', [1]))
+        self.all_mocks['insert_kv_chunks'].assert_not_called()
 
     def test_get_finished_sending_expired(self):
         """Tests get_finished for a request that has expired."""
@@ -489,13 +551,571 @@ class TestTPUConnectorWorker(unittest.TestCase):
         worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
 
         self.all_mocks['time'].perf_counter.return_value = 1000
-        worker.reqs_wait_pull = {'req1': ['kv_data', 900]}
+        worker.reqs_wait_pull = {'req1': ['kv_data', 900, -1]}
 
         done_sending, done_recving = worker.get_finished()
 
         self.assertEqual(done_sending, {'req1'})
         self.assertEqual(done_recving, set())
         self.assertNotIn('req1', worker.reqs_wait_pull)
+
+    def test_maybe_start_p2p_server_ipv6(self):
+        """Tests that _maybe_start_p2p_server formats IPv6 addresses with brackets."""
+        self.vllm_config.kv_transfer_config.is_kv_producer = False
+        worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
+        worker.host_ip = "2001:db8::1"
+        worker.kv_transfer_port = 9100
+
+        worker._maybe_start_p2p_server()
+
+        self.all_mocks["start_transfer_server"].assert_called_once()
+        call_args, _ = self.all_mocks["start_transfer_server"].call_args
+        server_addr = call_args[1]
+        transport_addrs = call_args[2]
+
+        self.assertEqual(server_addr, "[2001:db8::1]:9100")
+        for addr in transport_addrs:
+            self.assertEqual(addr, "[2001:db8::1]:0")
+
+    def test_maybe_build_kv_connection_ipv6(self):
+        """Tests that _maybe_build_kv_connection formats IPv6 addresses with brackets."""
+        self.vllm_config.kv_transfer_config.is_kv_producer = False
+        worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
+        mock_server = MagicMock()
+        worker.kv_transfer_server = mock_server
+
+        # Single string host/port
+        load_meta_single = tpu_connector.LoadMeta(uuid=1,
+                                                  local_block_ids=[1],
+                                                  remote_block_ids=[10],
+                                                  remote_host="2001:db8::1",
+                                                  remote_port=9100)
+        worker._maybe_build_kv_connection(load_meta_single)
+        mock_server.connect.assert_called_with("[2001:db8::1]:9100")
+
+        # List host/port
+        load_meta_list = tpu_connector.LoadMeta(
+            uuid=2,
+            local_block_ids=[1],
+            remote_block_ids=[10],
+            remote_host=["2001:db8::2", "2001:db8::3"],
+            remote_port=[9101, 9102])
+        worker._maybe_build_kv_connection(load_meta_list)
+        mock_server.connect.assert_called_with("[2001:db8::2]:9101")
+
+    def test_pull_notify_listener_ipv6(self):
+        """Tests that _pull_notify_listener binds to :: when host_ip is IPv6."""
+        self.vllm_config.kv_transfer_config.is_kv_producer = False
+        worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
+        worker.host_ip = "2001:db8::1"
+        worker.side_channel_port = 9600
+
+        mock_sock = MagicMock()
+        mock_sock.recv_multipart.side_effect = KeyboardInterrupt
+        self.all_mocks["make_zmq_socket"].return_value = mock_sock
+
+        ready_event = threading.Event()
+        try:
+            worker._pull_notify_listener(ready_event)
+        except KeyboardInterrupt:
+            pass
+
+        self.assertTrue(ready_event.is_set())
+        self.all_mocks["make_zmq_path"].assert_called_with("tcp", "::", 9600)
+        self.all_mocks["make_zmq_socket"].assert_called_with(
+            ctx=worker.zmq_cxt,
+            path=self.all_mocks["make_zmq_path"].return_value,
+            socket_type=self.all_mocks["zmq"].ROUTER,
+            bind=True,
+        )
+
+    def test_pull_notify_listener_ipv4(self):
+        """Tests that _pull_notify_listener binds to * when host_ip is IPv4."""
+        self.vllm_config.kv_transfer_config.is_kv_producer = False
+        worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
+        worker.host_ip = "127.0.0.1"
+        worker.side_channel_port = 9600
+
+        mock_sock = MagicMock()
+        mock_sock.recv_multipart.side_effect = KeyboardInterrupt
+        self.all_mocks["make_zmq_socket"].return_value = mock_sock
+
+        ready_event = threading.Event()
+        try:
+            worker._pull_notify_listener(ready_event)
+        except KeyboardInterrupt:
+            pass
+
+        self.assertTrue(ready_event.is_set())
+        self.all_mocks["make_zmq_path"].assert_called_with("tcp", "*", 9600)
+        self.all_mocks["make_zmq_socket"].assert_called_with(
+            ctx=worker.zmq_cxt,
+            path=self.all_mocks["make_zmq_path"].return_value,
+            socket_type=self.all_mocks["zmq"].ROUTER,
+            bind=True,
+        )
+
+    def _make_producer(self):
+        self.vllm_config.kv_transfer_config.is_kv_producer = True
+        worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
+        worker.kv_transfer_server = MagicMock()
+        self.all_mocks[
+            "jax"].profiler.TraceAnnotation.is_enabled.return_value = False
+        return worker
+
+    def test_process_send_load_for_consumer_full_prefix_hit_notifies(self):
+        """D notifies P even when it skipped the pull (full prefix-cache hit)."""
+        self.vllm_config.kv_transfer_config.is_kv_producer = False
+        worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
+        worker._maybe_build_notif_socket = MagicMock(return_value="socket")
+        worker._notify_pull_done = MagicMock()
+        meta = tpu_connector.TPUConnectorMetadata()
+        load_meta = tpu_connector.LoadMeta(uuid=10,
+                                           local_block_ids=[1],
+                                           remote_block_ids=None,
+                                           remote_host="host",
+                                           remote_port=123)
+        meta.reqs_to_load = {"req1": load_meta}
+
+        worker.process_send_load(meta)
+
+        self.all_mocks["insert_kv_chunks"].assert_not_called()
+        worker._maybe_build_notif_socket.assert_called_once_with(load_meta)
+        worker._notify_pull_done.assert_called_once_with("socket", "req1", 10)
+
+    def test_pull_done_releases_kv_and_drops_pull_entry(self):
+        """A notification frees P's copy and the transfer server's reference."""
+        worker = self._make_producer()
+        worker.host_kv_pool = MagicMock()
+        worker.reqs_wait_pull = {"req1": ["buf", 100, 3]}
+        worker.kv_pull_uuid_to_req_id_map = {7: "req1"}
+
+        worker._handle_pull_done(7)
+
+        self.assertEqual(worker.reqs_wait_pull["req1"][1:], [-1, -1])
+        self.assertEqual(worker.kv_pull_uuid_to_req_id_map, {})
+        worker.host_kv_pool.return_buffer.assert_called_once_with(3, "buf")
+        worker.kv_transfer_server.await_pull.assert_called_once_with(
+            7, [], timeout=ANY)
+
+    def test_pull_done_before_registration_released_after_await_pull(self):
+        """A notification that beats registration releases the KV right after."""
+        worker = self._make_producer()
+
+        worker._handle_pull_done(7)
+
+        self.assertIn(7, worker._early_pull_done)
+        worker.kv_transfer_server.await_pull.assert_not_called()
+
+        send_meta = tpu_connector.SendMeta(uuid=7,
+                                           local_block_ids=[1],
+                                           expiration_time=100)
+        worker._register_kv_for_pull("req1", send_meta, "kv", buffer_idx=-1)
+
+        self.assertEqual(
+            worker.kv_transfer_server.await_pull.call_args_list,
+            [call(7, "kv"), call(7, [], timeout=ANY)])
+        self.assertEqual(worker.reqs_wait_pull["req1"][1], -1)
+        self.assertEqual(worker._early_pull_done, {})
+        self.assertEqual(worker.kv_pull_uuid_to_req_id_map, {})
+
+    def test_register_kv_for_pull_without_notification(self):
+        """Without a notification the KV stays registered until D pulls it."""
+        worker = self._make_producer()
+        send_meta = tpu_connector.SendMeta(uuid=7,
+                                           local_block_ids=[1],
+                                           expiration_time=100)
+
+        worker._register_kv_for_pull("req1",
+                                     send_meta,
+                                     "host_kv",
+                                     buffer_idx=2,
+                                     pool_buffer="pool_buf")
+
+        worker.kv_transfer_server.await_pull.assert_called_once_with(
+            7, "host_kv")
+        self.assertEqual(worker.reqs_wait_pull["req1"], ["pool_buf", 100, 2])
+        self.assertEqual(worker.kv_pull_uuid_to_req_id_map, {7: "req1"})
+
+    def test_get_finished_timeout_drops_pull_entry(self):
+        """A pull timeout also frees the transfer server's reference."""
+        worker = self._make_producer()
+        self.all_mocks["time"].perf_counter.return_value = 1000
+        worker.reqs_wait_pull = {"req1": ["kv", 900, -1]}
+        worker.kv_pull_uuid_to_req_id_map = {7: "req1"}
+
+        done_sending, _ = worker.get_finished()
+
+        self.assertEqual(done_sending, {"req1"})
+        self.assertEqual(worker.kv_pull_uuid_to_req_id_map, {})
+        worker.kv_transfer_server.await_pull.assert_called_once_with(
+            7, [], timeout=ANY)
+
+    def test_get_finished_after_notification_keeps_pull_entry(self):
+        """A notified request is not treated as a timeout."""
+        worker = self._make_producer()
+        self.all_mocks["time"].perf_counter.return_value = 1000
+        worker.reqs_wait_pull = {"req1": ["kv", -1, -1]}
+
+        done_sending, _ = worker.get_finished()
+
+        self.assertEqual(done_sending, {"req1"})
+        worker.kv_transfer_server.await_pull.assert_not_called()
+
+    @patch(
+        'tpu_inference.distributed.tpu_connector.dist_utils.get_p2p_wait_pull_timeout',
+        return_value=180)
+    def test_get_finished_purges_stale_early_notifications(self, _):
+        """Unmatched notifications are dropped after the pull timeout."""
+        worker = self._make_producer()
+        self.all_mocks["time"].perf_counter.return_value = 1000
+        worker.reqs_wait_pull = {"req2": ["kv", 2000, -1]}
+        worker._early_pull_done = {7: 0.0, 8: 990.0}
+
+        worker.get_finished()
+
+        self.assertEqual(worker._early_pull_done, {8: 990.0})
+
+    def _make_consumer_for_pull(self):
+        self.vllm_config.kv_transfer_config.is_kv_producer = False
+        worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
+        worker._get_kv_spec = MagicMock(return_value="kv_spec")
+        self.all_mocks[
+            "jax"].profiler.TraceAnnotation.is_enabled.return_value = False
+        load_meta = tpu_connector.LoadMeta(uuid=7,
+                                           local_block_ids=[1, 2],
+                                           remote_block_ids=[10, 11],
+                                           remote_host="host",
+                                           remote_port=123)
+        return worker, load_meta
+
+    @patch(
+        'tpu_inference.distributed.tpu_connector.dist_utils.get_p2p_wait_pull_timeout',
+        return_value=180)
+    @patch(
+        'tpu_inference.distributed.tpu_connector.dist_utils.get_enable_block_kv_transfer',
+        return_value=True)
+    def test_pull_kv_returns_kv_when_ready(self, *_):
+        worker, load_meta = self._make_consumer_for_pull()
+        chunk = MagicMock(nbytes=1024 * 1024)
+        chunk.is_ready.return_value = True
+        conn = MagicMock()
+        conn.pull.return_value = [chunk]
+        self.all_mocks["time"].perf_counter.return_value = 0.0
+
+        self.assertEqual(worker._pull_kv("req1", conn, load_meta), [chunk])
+
+    @patch(
+        'tpu_inference.distributed.tpu_connector.dist_utils.get_p2p_wait_pull_timeout',
+        return_value=180)
+    @patch(
+        'tpu_inference.distributed.tpu_connector.dist_utils.get_enable_block_kv_transfer',
+        return_value=True)
+    def test_pull_kv_returns_none_on_timeout(self, *_):
+        """A pull whose KV never arrives must not hand back unready arrays."""
+        worker, load_meta = self._make_consumer_for_pull()
+        chunk = MagicMock(nbytes=1024 * 1024)
+        chunk.is_ready.return_value = False
+        conn = MagicMock()
+        conn.pull.return_value = [chunk]
+        # start, end of prepare, then past the 180s timeout.
+        self.all_mocks["time"].perf_counter.side_effect = [0.0, 0.0, 181.0]
+
+        self.assertIsNone(worker._pull_kv("req1", conn, load_meta))
+
+    def test_pull_kv_returns_none_when_pull_raises(self):
+        worker, load_meta = self._make_consumer_for_pull()
+        conn = MagicMock()
+        conn.pull.side_effect = RuntimeError("connection refused")
+        self.all_mocks["time"].perf_counter.return_value = 0.0
+
+        self.assertIsNone(worker._pull_kv("req1", conn, load_meta))
+
+    def _assert_failed_pull_reported(self, future):
+        self.vllm_config.kv_transfer_config.is_kv_producer = False
+        worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
+        ok_future = MagicMock()
+        ok_future.done.return_value = True
+        ok_future.result.return_value = "kv_ok"
+        worker.reqs_pulling = {
+            "req_failed": [future, None, [1, 2]],
+            "req_ok": [ok_future, None, [3]],
+        }
+
+        _, done_recving = worker.get_finished()
+
+        # Both finish receiving; only the failed one reports its blocks and
+        # drops its pull state, so its KV is never inserted.
+        self.assertEqual(done_recving, {"req_failed", "req_ok"})
+        self.assertNotIn("req_failed", worker.reqs_pulling)
+        self.assertEqual(worker.reqs_pulling["req_ok"][1], "kv_ok")
+        self.assertEqual(worker.get_block_ids_with_load_errors(), {1, 2})
+        # Reported once.
+        self.assertEqual(worker.get_block_ids_with_load_errors(), set())
+        return worker
+
+    def test_get_finished_reports_failed_pull(self):
+        future = MagicMock()
+        future.done.return_value = True
+        future.result.return_value = None
+        self._assert_failed_pull_reported(future)
+
+    def test_get_finished_reports_pull_that_raised(self):
+        future = MagicMock()
+        future.done.return_value = True
+        future.result.side_effect = RuntimeError("boom")
+        self._assert_failed_pull_reported(future)
+
+    def test_failed_pull_is_not_inserted(self):
+        """After a failed pull, a later load step only notifies P."""
+        future = MagicMock()
+        future.done.return_value = True
+        future.result.return_value = None
+        worker = self._assert_failed_pull_reported(future)
+        worker._maybe_build_notif_socket = MagicMock(return_value="socket")
+        worker._notify_pull_done = MagicMock()
+        meta = tpu_connector.TPUConnectorMetadata()
+        meta.reqs_to_load = {
+            "req_failed":
+            tpu_connector.LoadMeta(uuid=7,
+                                   local_block_ids=[1, 2],
+                                   remote_block_ids=None,
+                                   remote_host="host",
+                                   remote_port=123)
+        }
+
+        worker.process_send_load(meta)
+
+        self.all_mocks["insert_kv_chunks"].assert_not_called()
+        worker._notify_pull_done.assert_called_once_with(
+            "socket", "req_failed", 7)
+
+    def test_flatten_block_ids(self):
+        self.assertEqual(tpu_connector._flatten_block_ids([1, 2]), [1, 2])
+        self.assertEqual(tpu_connector._flatten_block_ids([[1], [2, 3]]),
+                         [1, 2, 3])
+        self.assertEqual(tpu_connector._flatten_block_ids([]), [])
+
+
+class TestTPUConnectorUtils(unittest.TestCase):
+
+    @patch("tpu_inference.distributed.tpu_connector.multi_layer_copy")
+    def test_insert_kv_chunks_unmocked_contiguous(self, mock_multi_layer_copy):
+        """
+        Tests that insert_kv_chunks groups contiguous block numbers into a single
+        chunk when calling multi_layer_copy.
+        """
+        from tpu_inference.distributed.tpu_connector import insert_kv_chunks
+
+        # We need mock arrays that have .shape attribute
+        y_slice = MagicMock()
+        y_slice.shape = [4, 10]
+        kv_slices = [y_slice]
+        kv_caches = [MagicMock()]
+        mesh = MagicMock()
+        spec = MagicMock()
+
+        block_numbers = [5, 6, 7, 8, 10, 11, 17, 18, 19]
+
+        insert_kv_chunks(kv_caches, kv_slices, block_numbers, mesh, spec)
+
+        mock_multi_layer_copy.assert_called_once()
+        _, kwargs = mock_multi_layer_copy.call_args
+
+        self.assertEqual(kwargs['dest_offsets'].shape[0], 9)
+        np.testing.assert_array_equal(kwargs['dest_offsets'][:3], [5, 10, 17])
+        self.assertEqual(kwargs['chunk_sizes'].shape[0], 9)
+        np.testing.assert_array_equal(kwargs['chunk_sizes'][:3], [4, 2, 3])
+        np.testing.assert_array_equal(kwargs['num_chunks'], [3])
+
+
+class TestTPUConnectorStats(unittest.TestCase):
+
+    def setUp(self):
+        self.registry = CollectorRegistry()
+        metric_types = {
+            Gauge: partial(Gauge, registry=self.registry),
+            Counter: partial(Counter, registry=self.registry),
+            Histogram: partial(Histogram, registry=self.registry),
+        }
+        labelnames = ["model_name", "engine"]
+        per_engine_labelvalues = {0: ["my_model", "0"]}
+        self.metrics = TpuKVConnectorPromMetrics(
+            vllm_config=MagicMock(),
+            metric_types=metric_types,
+            labelnames=labelnames,
+            per_engine_labelvalues=per_engine_labelvalues)
+
+        mock_data = {
+            "d2h_slice_time": [10.0, 20.0, 30.0],
+            "d2h_transfer_time": [100.0, 200.0, 300.0],
+            "prepare_time": [1.1, 2.2, 3.3],
+            "transfer_time": [1200.0, 5400.0, 12000.0],
+            "mb_transferred": [128.0, 256.0, 2048.0],
+            "num_failed_transfers": [0, 1, 2],
+            "num_requests_being_pulled": [1, 2, 5],
+            "num_requests_waiting_pull": [2, 3, 4],
+        }
+
+        self.metrics.observe(mock_data, engine_idx=0)
+
+    def validate_prometheus_histogram_buckets(self, hist, num_buckets,
+                                              non_zero_buckets):
+        assert len(
+            hist._buckets
+        ) == num_buckets, f"Incorrect number of buckets returned: expected {num_buckets} actual {len(hist._buckets)}"
+        for i in range(num_buckets):
+            if i in non_zero_buckets:
+                assert hist._buckets[i].get() == non_zero_buckets[
+                    i], f"Incorrect value for bucket {i}: expected {non_zero_buckets[i]} actual: {hist._buckets[i].get()}"
+            else:
+                assert hist._buckets[i].get(
+                ) == 0, f"Incorrect value for bucket {i}: expected 0 actual: {hist._buckets[i].get()}"
+
+    def test_tpu_stats_aggregation_d2h_transfer(self):
+        stats = TpuKVConnectorStats()
+
+        reduced = stats.reduce()
+        assert reduced["Avg D2H slice time (ms)"] == 0.0
+        assert reduced["P90 D2H slice time (ms)"] == 0.0
+        assert reduced["Avg D2H transfer time (ms)"] == 0.0
+        assert reduced["P90 D2H transfer time (ms)"] == 0.0
+        assert stats.is_empty() is True
+
+        for i in range(10):
+            stats.record_d2h_transfer(d2h_slice_time=100.0 + i,
+                                      d2h_transfer_time=200.0 + i)
+        reduced = stats.reduce()
+
+        assert reduced["Avg D2H slice time (ms)"] == 104.5
+        assert reduced["P90 D2H slice time (ms)"] == 108.1
+        assert reduced["Avg D2H transfer time (ms)"] == 204.5
+        assert reduced["P90 D2H transfer time (ms)"] == 208.1
+        assert stats.is_empty() is False
+
+    def test_tpu_stats_aggregation_successful_transfer(self):
+        stats = TpuKVConnectorStats()
+
+        reduced = stats.reduce()
+        assert reduced["Avg KV transfer prepare time (ms)"] == 0.0
+        assert reduced["P90 KV transfer prepare time (ms)"] == 0.0
+        assert reduced["Avg KV transfer time (ms)"] == 0.0
+        assert reduced["P90 KV transfer time (ms)"] == 0.0
+        assert reduced["Avg MB per transfer"] == 0.0
+        assert stats.is_empty() is True
+
+        for i in range(10):
+            stats.record_successful_transfer(prepare_time=100.0 + i,
+                                             transfer_time=200.0 + i,
+                                             mb_transferred=20 + i)
+        reduced = stats.reduce()
+
+        assert reduced["Avg KV transfer prepare time (ms)"] == 104.5
+        assert reduced["P90 KV transfer prepare time (ms)"] == 108.1
+        assert reduced["Avg KV transfer time (ms)"] == 204.5
+        assert reduced["P90 KV transfer time (ms)"] == 208.1
+        assert reduced["Avg MB per transfer"] == 24.5
+        assert stats.is_empty() is False
+
+    def test_tpu_stats_aggregation_failed_transfer(self):
+        stats = TpuKVConnectorStats()
+
+        reduced = stats.reduce()
+        assert sum(reduced["Num failed transfers"]) == 0
+        assert stats.is_empty() is True
+
+        for i in range(10):
+            stats.record_failed_transfer()
+        reduced = stats.reduce()
+
+        assert sum(reduced["Num failed transfers"]) == 10
+        assert stats.is_empty() is False
+
+    def test_tpu_stats_aggregation_queue_lengths(self):
+        stats = TpuKVConnectorStats()
+
+        reduced = stats.reduce()
+        assert reduced["Avg requests being pulled"] == 0.0
+        assert reduced["Avg requests waiting to be pulled"] == 0.0
+        assert stats.is_empty() is True
+
+        for i in range(5):
+            stats.record_queue_lengths(num_requests_being_pulled=2 + i,
+                                       num_requests_waiting_pull=1 + i)
+        reduced = stats.reduce()
+
+        assert reduced["Avg requests being pulled"] == 4.0
+        assert reduced["Avg requests waiting to be pulled"] == 3.0
+        assert stats.is_empty() is False
+
+    def test_prometheus_histogram_d2h_slice_time(self):
+        hist = self.metrics.tpu_histogram_d2h_slice_time[0]
+        assert hist._sum.get() == 60.0
+        num_buckets = 14
+        non_zero_buckets = {
+            1: 1.0,
+            2: 2.0,
+        }
+        self.validate_prometheus_histogram_buckets(hist, num_buckets,
+                                                   non_zero_buckets)
+
+    def test_prometheus_histogram_d2h_transfer_time(self):
+        hist = self.metrics.tpu_histogram_d2h_transfer_time[0]
+        assert hist._sum.get() == 600.0
+        num_buckets = 14
+        non_zero_buckets = {
+            2: 1.0,
+            3: 1.0,
+            4: 1.0,
+        }
+        self.validate_prometheus_histogram_buckets(hist, num_buckets,
+                                                   non_zero_buckets)
+
+    def test_prometheus_histogram_kv_prepare_time(self):
+        hist = self.metrics.tpu_histogram_kv_prepare_time[0]
+        assert hist._sum.get() == 6.6
+        num_buckets = 14
+        non_zero_buckets = {
+            1: 3.0,
+        }
+        self.validate_prometheus_histogram_buckets(hist, num_buckets,
+                                                   non_zero_buckets)
+
+    def test_prometheus_histogram_kv_transfer_time(self):
+        hist = self.metrics.tpu_histogram_kv_transfer_time[0]
+        assert hist._sum.get() == 18600.0
+        num_buckets = 14
+        non_zero_buckets = {
+            7: 1.0,
+            9: 1.0,
+            11: 1.0,
+        }
+        self.validate_prometheus_histogram_buckets(hist, num_buckets,
+                                                   non_zero_buckets)
+
+    def test_prometheus_histogram_kv_megabytes_transferred(self):
+        hist = self.metrics.tpu_histogram_kv_megabytes_transferred[0]
+        assert hist._sum.get() == 2432.0
+        num_buckets = 9
+        non_zero_buckets = {
+            2: 1.0,
+            3: 1.0,
+            6: 1.0,
+        }
+        self.validate_prometheus_histogram_buckets(hist, num_buckets,
+                                                   non_zero_buckets)
+
+    def test_prometheus_counter_num_failed_transfers(self):
+        counter = self.metrics.counter_tpu_num_failed_transfers[0]
+        assert counter._value.get() == 3.0
+
+    def test_prometheus_gauge_requests_being_pulled(self):
+        gauge = self.metrics.gauge_tpu_num_requests_being_pulled[0]
+        assert gauge._value.get() == 5.0
+
+    def test_prometheus_gauge_requests_waiting_pull(self):
+        gauge = self.metrics.gauge_tpu_num_requests_waiting_pull[0]
+        assert gauge._value.get() == 4.0
 
 
 if __name__ == "__main__":

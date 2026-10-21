@@ -8,7 +8,7 @@ NIGHTLY_SCRIPT="${SCRIPT_DIR}/../../nightly_benchmarking.sh"
 
 # Adjust model-path, max-seqs, and code-hash below when officially serving DeepSeek.
 bash "${NIGHTLY_SCRIPT}" \
-  --model-path "gs://tpu-commons-ci/deepseek/r1" \
+  --model-path "/mnt/disks/checkpoint/hub/models--deepseek-ai--DeepSeek-R1/snapshots/56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad/" \
   --model-name "DeepSeek-R1" \
   --tokenizer "deepseek-ai/DeepSeek-R1" \
   --input-len 1024 \
@@ -21,10 +21,9 @@ bash "${NIGHTLY_SCRIPT}" \
   --dataset-name "random" \
   --run-type "DAILY" \
   --device "tpu7x-16" \
-  --code-hash "deepseek-hash-placeholder" \
   --created-by "bm-scheduler" \
   --new-model-design "1" \
-  --gpu-memory-utilization "0.92" \
+  --gpu-memory-utilization "0.95" \
   --enable-expert-parallel \
   --additional-config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true}}}' \
   --disable-shared-experts-stream "0" \
@@ -32,4 +31,7 @@ bash "${NIGHTLY_SCRIPT}" \
   --vllm-mla-disable "0" \
   --moe-requantize-block-size "512" \
   --moe-requantize-weight-dtype "fp4" \
-  --run-accuracy "mmlu"
+  --api-server-count 3 \
+  --moe-all-gather-activation-dtype "fp8" \
+  --run-accuracy "mmlu" \
+  --mmlu-output-len "4"
