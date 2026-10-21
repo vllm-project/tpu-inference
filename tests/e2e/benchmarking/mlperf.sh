@@ -208,12 +208,9 @@ echo extra_serve_args: "${extra_serve_args[@]}"
 
 echo "Using the dataset at $dataset_path"
 
-cd "$root_dir"/vllm || exit
+cd "$root_dir"/tpu_inference || exit
 echo "Current working directory: $(pwd)"
-echo "Using vLLM hash: $(git rev-parse HEAD)"
-
-# Overwrite a few of the vLLM benchmarking scripts with the TPU Inference ones
-cp -r "$root_dir"/tpu_inference/scripts/vllm/benchmarking/*.py "$root_dir"/vllm/benchmarks/
+echo "Using vLLM hash: $(python3 -c 'import importlib.metadata as m, json; d = json.loads(m.distribution("vllm").read_text("direct_url.json") or "{}"); print(d.get("vcs_info", {}).get("commit_id", "unknown"))' 2>/dev/null || echo "unknown")"
 echo "Using TPU Inference hash: $(git -C "$root_dir"/tpu_inference rev-parse HEAD)"
 
 checkThroughputAndRouge() {
@@ -353,7 +350,7 @@ for model_name in $model_list; do
 
     echo "Starting the benchmark for $served_name..."
     echo "Current working directory: $(pwd)"
-    python benchmarks/benchmark_serving.py \
+    python scripts/vllm/benchmarking/benchmark_serving.py \
     --backend vllm \
     --model "$served_name" \
     --dataset-name "$dataset_name" \

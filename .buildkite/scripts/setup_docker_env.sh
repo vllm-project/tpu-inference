@@ -87,29 +87,22 @@ cleanup_docker_resource() {
 # integration (HEAD vLLM) pipelines build the same tpu-inference commit
 # concurrently, they previously shared a vLLM-agnostic tag and could clobber
 # each other's image in the registry. No-op when the expected hash is empty
-# (local/dev builds that clone vLLM HEAD) or for PyPI builds (no
-# /workspace/vllm git checkout to inspect).
+# (local/dev builds that leave the pyproject.toml pin as is).
 verify_image_vllm() {
   local image_ref="$1"
   local expected_vllm="${2:-}"
   if [[ -z "${expected_vllm}" ]]; then
     return 0
   fi
-  if [[ "${RUN_WITH_PYPI:-false}" == "true" ]]; then
-    echo "[verify-vllm] RUN_WITH_PYPI=true; skipping vLLM commit verification."
-    return 0
-  fi
-  # Read the vLLM commit baked into the image. Capture the exit code separately
-  # so an infra failure to *read* the commit (git missing, /workspace/vllm
-  # absent, safe.directory "dubious ownership", etc.) is reported as such
-  # instead of masquerading as a vLLM mismatch. -c safe.directory pre-empts the
-  # most common trip: the container running git as a non-owner user.
+  # Read the vLLM commit baked into the image from Python package metadata
+  # (direct_url.json written by uv/pip when installing vllm from git).
   local actual_vllm rc=0 err
   err=$(mktemp)
-  actual_vllm=$(docker run --rm --entrypoint git "${image_ref}" \
-    -C /workspace/vllm -c safe.directory=/workspace/vllm rev-parse HEAD 2>"${err}") || rc=$?
-  if [[ ${rc} -ne 0 ]]; then
-    echo "[FATAL][verify-vllm] Could not read the vLLM commit from ${image_ref} (git exit ${rc}):" >&2
+  actual_vllm=$(docker run --rm --entrypoint python3 "${image_ref}" \
+    -c 'import importlib.metadata as m, json, sys; exp = sys.argv[1]; d = json.loads(m.distribution("vllm").read_text("direct_url.json") or "{}"); vcs = d.get("vcs_info", {}); cid = vcs.get("commit_id", ""); rev = vcs.get("requested_revision", ""); print(exp if exp and exp in (cid, rev) else (cid or rev))' \
+    "${expected_vllm}" 2>"${err}") || rc=$?
+  if [[ ${rc} -ne 0 || -z "${actual_vllm}" ]]; then
+    echo "[FATAL][verify-vllm] Could not read the vLLM commit from ${image_ref} (exit ${rc}):" >&2
     cat "${err}" >&2
     rm -f "${err}"
     exit 1
@@ -178,15 +171,7 @@ setup_environment() {
     fi
   fi 
 
-  local DOCKERFILE_NAME="Dockerfile"
-
-# Determine whether to build from PyPI packages or source.
-  if [[ "${RUN_WITH_PYPI:-false}" == "true" ]]; then
-    DOCKERFILE_NAME="Dockerfile.pypi"
-    echo "Building from PyPI packages. Using docker/${DOCKERFILE_NAME}"
-  else
-    echo "Building from source. Using docker/${DOCKERFILE_NAME}"
-  fi
+  echo "Building from source via ./docker/build_image.sh (target: dev)"
 
   if ! grep -q "^HF_TOKEN=" /etc/environment; then
     gcloud secrets versions access latest --secret=bm-agent-hf-token --quiet | \
@@ -201,8 +186,8 @@ setup_environment() {
   cleanup_docker_resource "${IMAGE_NAME}"
 
   if [ -z "${BUILDKITE:-}" ]; then
-      if [ "${USE_VLLM_LKG:-false}" == "true" ] && [ -f ".buildkite/vllm_lkg.version" ]; then
-          VLLM_COMMIT_HASH=$(cat .buildkite/vllm_lkg.version)
+      if [ "${USE_VLLM_LKG:-false}" == "true" ] && [ -f "pyproject.toml" ]; then
+          VLLM_COMMIT_HASH=$(sed -nE 's/.*vllm @ git\+https:\/\/github\.com\/vllm-project\/vllm\.git@([a-zA-Z0-9.-]+).*/\1/p' pyproject.toml | head -n 1)
       else
           VLLM_COMMIT_HASH=""
       fi
@@ -217,7 +202,7 @@ setup_environment() {
   fi
 
   # Non-empty only in the tokamax integration pipeline, which validates a
-  # candidate nightly that is not yet pinned in requirements.txt. Every other
+  # candidate nightly that is not yet pinned in pyproject.toml. Every other
   # pipeline leaves this empty and is unaffected by the two blocks below.
   local TOKAMAX_CANDIDATE_VERSION=""
   if [ -n "${BUILDKITE:-}" ]; then
@@ -234,11 +219,12 @@ setup_environment() {
   local CACHE_TAG="${TPU_INFERENCE_HASH}-${LOCAL_TPU_VERSION}"
   if [[ -n "${VLLM_COMMIT_HASH}" ]]; then
     CACHE_TAG="${TPU_INFERENCE_HASH}-${VLLM_COMMIT_HASH}-${LOCAL_TPU_VERSION}"
-  elif [[ -n "${BUILDKITE:-}" && "${RUN_WITH_PYPI:-false}" != "true" ]]; then
-    # In a real pipeline an empty VLLM_COMMIT_HASH is a bug (bootstrap didn't set
-    # the metadata, or the Dockerfile will clone vLLM HEAD non-deterministically).
-    # Falling back to the vLLM-agnostic tag here would silently re-introduce the
-    # cross-pipeline clobber this change eliminates, so fail loudly instead.
+  elif [[ -n "${BUILDKITE:-}" ]]; then
+    # In a real pipeline an empty VLLM_COMMIT_HASH is a bug: bootstrap didn't set
+    # the metadata, so the image would build from whatever pin the checkout has
+    # rather than the commit this build is meant to test. Falling back to the
+    # vLLM-agnostic tag here would silently re-introduce the cross-pipeline
+    # clobber this change eliminates, so fail loudly instead.
     echo "[FATAL][setup_docker_env] VLLM_COMMIT_HASH is empty in a Buildkite build." >&2
     echo "[FATAL][setup_docker_env] Refusing the vLLM-agnostic tag '${CACHE_TAG}' (can collide" >&2
     echo "[FATAL][setup_docker_env] across CI/integration). Ensure bootstrap set the" >&2
@@ -268,19 +254,18 @@ setup_environment() {
 
   if [[ -n "${TOKAMAX_CANDIDATE_VERSION}" ]]; then
     echo "[tokamax] Pinning the build context to tokamax==${TOKAMAX_CANDIDATE_VERSION}"
-    sed -i "s/^tokamax==.*$/tokamax==${TOKAMAX_CANDIDATE_VERSION}/" requirements.txt
-    grep -n '^tokamax==' requirements.txt
+    sed -i -E "s|^([[:space:]]*\"tokamax==)[^\"]+(\".*)|\1${TOKAMAX_CANDIDATE_VERSION}\2|" pyproject.toml
+    grep -n '"tokamax==' pyproject.toml
   fi
 
   # Build with specific hash and 'latest' tag for convenience
-  DOCKER_BUILDKIT=1 docker build \
-      --build-arg VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH}" \
-      --build-arg IS_TEST="true" \
-      --build-arg BM_INFRA="${BM_INFRA:-false}" \
-      --no-cache -f docker/"${DOCKERFILE_NAME}" \
-      -t "${IMAGE_NAME}:${TPU_INFERENCE_HASH}" \
-      -t "${IMAGE_NAME}:latest" \
-      -t "${IMAGE_NAME}:${CACHE_TAG}" .
+  ./docker/build_image.sh \
+      --target dev \
+      --no-cache \
+      -t "${IMAGE_NAME}:${CACHE_TAG}" \
+      -c "${VLLM_COMMIT_HASH}"
+  docker tag "${IMAGE_NAME}:${CACHE_TAG}" "${IMAGE_NAME}:${TPU_INFERENCE_HASH}"
+  docker tag "${IMAGE_NAME}:${CACHE_TAG}" "${IMAGE_NAME}:latest"
 
   # Fail fast if the freshly built image does not contain the expected vLLM
   # commit (guards against a mis-set VLLM_COMMIT_HASH build-arg).

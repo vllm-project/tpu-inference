@@ -30,25 +30,27 @@ export PRIORITY_KERNEL_TUNING=-10
 upload_with_priority() {
   local yaml_file=$1
   local JOB_PRIORITY=$2
-  echo "--- :pipeline: Uploading $yaml_file with priority ${JOB_PRIORITY:-PRIORITY_DEFAULT}"
-  { 
-    echo "priority: ${JOB_PRIORITY:-PRIORITY_DEFAULT}"; 
-    cat "$yaml_file"; 
+  echo "--- :pipeline: Uploading $yaml_file with priority ${JOB_PRIORITY:-$PRIORITY_DEFAULT}"
+  {
+    echo "priority: ${JOB_PRIORITY:-$PRIORITY_DEFAULT}";
+    cat "$yaml_file";
   } | buildkite-agent pipeline upload
 }
 
 get_vllm_commit_hash() {
-  # load vllm commit hash from vllm_lkg.version file, if not exists, get the latest commit hash from vllm repo
-  local commit_hash=""
-  local version_file=".buildkite/vllm_lkg.version"
+  # Extract the pinned vLLM commit directly from pyproject.toml; fail loud if missing
+  local config_dir repo_root pyproject_path commit_hash=""
+  config_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  repo_root="$(cd "${config_dir}/../../.." && pwd)"
 
-  if [ -f "$version_file" ]; then
-    commit_hash="$(cat "$version_file")"
-  fi
+  pyproject_path="${repo_root}/pyproject.toml"
+
+  commit_hash="$(sed -nE 's/.*vllm @ git\+https:\/\/github\.com\/vllm-project\/vllm\.git@([a-zA-Z0-9.-]+).*/\1/p' "${pyproject_path}" | head -n 1)"
+
   if [ -z "${commit_hash:-}" ]; then
-    commit_hash=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
+    echo "ERROR: vLLM commit hash is missing from pyproject.toml. Cannot proceed without a pinned hash." >&2
+    exit 1
   fi
-
   echo "$commit_hash"
 }
 

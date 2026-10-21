@@ -51,7 +51,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.x'
+        python-version: '3.12'
 
     - name: Determine Version
       id: vars
@@ -67,7 +67,10 @@ jobs:
 
     - name: Build package (sdist and wheel)
       env:
-          VLLM_VERSION_OVERRIDE: ${{ steps.vars.outputs.VERSION }}
+          # setuptools_scm reads the version from this scoped override; a plain
+          # checkout on the nightly cron would otherwise yield a +gSHA local
+          # version that PyPI rejects.
+          SETUPTOOLS_SCM_PRETEND_VERSION_FOR_TPU_INFERENCE: ${{ steps.vars.outputs.VERSION }}
       run: python3 -m build
 
     - name: Publish package distributions to PyPI

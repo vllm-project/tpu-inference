@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # Bootstrap for the tpu-inference-dev (dev/experimental) pipeline.
-# Sets VLLM_COMMIT_HASH from vllm_lkg.version and uploads pipeline_kernel_tuning.yml.
+# Sets VLLM_COMMIT_HASH from pyproject.toml and uploads pipeline_kernel_tuning.yml.
 # Configure the Buildkite pipeline's "Steps" to run this script.
 
 set -euo pipefail
@@ -66,22 +66,9 @@ set_jax_envs() {
     esac
 }
 
-echo "--- :git: Setting VLLM_COMMIT_HASH from vllm_lkg.version"
+echo "--- :git: Setting VLLM_COMMIT_HASH from pyproject.toml"
 
-LKG_FILE=".buildkite/vllm_lkg.version"
-
-if [ ! -f "${LKG_FILE}" ]; then
-    echo "ERROR: ${LKG_FILE} not found. Cannot determine vllm commit hash."
-    exit 1
-fi
-
-VLLM_COMMIT_HASH="$(cat "${LKG_FILE}")"
-
-if [ -z "${VLLM_COMMIT_HASH}" ]; then
-    echo "ERROR: ${LKG_FILE} is empty. Cannot determine vllm commit hash."
-    exit 1
-fi
-
+VLLM_COMMIT_HASH="$(get_vllm_commit_hash)"
 buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
 echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
 

@@ -190,9 +190,9 @@ export VLLM_XLA_CHECK_RECOMPILATION="${VLLM_XLA_CHECK_RECOMPILATION:-1}"
 # JAX bump moves the cache with it. Empty is fatal rather than silently naming
 # a namespace nobody has written.
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." &>/dev/null && pwd)
-jax_version=$(sed -n 's/^jax==\([^ #]*\).*/\1/p' "${repo_root}/requirements.txt" | head -1)
+jax_version=$(sed -nE 's/^[[:space:]]*"jax==([^"]+)".*/\1/p' "${repo_root}/pyproject.toml" | head -1)
 if [[ -z "$jax_version" ]]; then
-  echo "$0: no 'jax==' pin in ${repo_root}/requirements.txt" >&2
+  echo "$0: no 'jax==' pin in ${repo_root}/pyproject.toml" >&2
   exit 2
 fi
 export CACHE_NAMESPACE="${CACHE_NAMESPACE:-${TPU_VERSION:-tpu6e}/jax-${jax_version}}"
