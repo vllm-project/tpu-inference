@@ -66,19 +66,19 @@ set_jax_envs() {
     esac
 }
 
-echo "--- :git: Setting VLLM_COMMIT_HASH from vllm_lkg.version"
+echo "--- :git: Setting VLLM_COMMIT_HASH from pyproject.toml"
 
-LKG_FILE=".buildkite/vllm_lkg.version"
+PYPROJECT_FILE="pyproject.toml"
 
-if [ ! -f "${LKG_FILE}" ]; then
-    echo "ERROR: ${LKG_FILE} not found. Cannot determine vllm commit hash."
+if [ ! -f "${PYPROJECT_FILE}" ]; then
+    echo "ERROR: ${PYPROJECT_FILE} not found. Cannot determine vllm commit hash."
     exit 1
 fi
 
-VLLM_COMMIT_HASH="$(cat "${LKG_FILE}")"
+VLLM_COMMIT_HASH="$(sed -nE 's/.*vllm @ git\+https:\/\/github\.com\/vllm-project\/vllm\.git@([a-zA-Z0-9._-]+).*/\1/p' "${PYPROJECT_FILE}" | head -n 1)"
 
 if [ -z "${VLLM_COMMIT_HASH}" ]; then
-    echo "ERROR: ${LKG_FILE} is empty. Cannot determine vllm commit hash."
+    echo "ERROR: Could not parse vllm commit hash from ${PYPROJECT_FILE}."
     exit 1
 fi
 

@@ -25,7 +25,7 @@ fi
 TARGET_BRANCH="main"
 
 NEW_LKG_HASH=$1
-VERSION_FILE=".buildkite/vllm_lkg.version"
+VERSION_FILE="pyproject.toml"
 
 
 # Configure credentials
@@ -37,10 +37,10 @@ git fetch origin "${TARGET_BRANCH}"
 git checkout -f "${TARGET_BRANCH}"
 git reset --hard origin/"${TARGET_BRANCH}"
 
-# Update vllm_lkg.version
+# Update vLLM commit pin in pyproject.toml
 echo "Current directory: $(pwd)" # debug
-echo "Updating $VERSION_FILE to: $NEW_LKG_HASH"
-echo "$NEW_LKG_HASH" > "$VERSION_FILE"
+echo "Updating $VERSION_FILE vLLM pin to: $NEW_LKG_HASH"
+sed -i -E "s|(git\+https://github\.com/vllm-project/vllm\.git@)[a-zA-Z0-9._-]+|\1${NEW_LKG_HASH}|g" "$VERSION_FILE"
 
 # Check in file
 git add "$VERSION_FILE"

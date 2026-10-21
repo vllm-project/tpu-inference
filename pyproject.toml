@@ -11,3 +11,134 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel", "setuptools_scm[toml]>=8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tpu-inference"
+dynamic = ["version"]
+description = "TPU inference plugin for vLLM"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+authors = [
+    { name = "tpu_inference Contributors" }
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "tpu-info==0.7.1",
+    "absl-py",
+    "numpy",
+    "google-cloud-storage",
+    "jax==0.11.2",
+    "jaxlib==0.11.2",
+    "libtpu==0.0.48",
+    "jaxtyping",
+    # Temporarily restrict fastapi version due to https://github.com/vllm-project/vllm/pull/45629
+    # TODO(lk-chen): remove once LKG moves past above commit
+    "fastapi[standard]<0.137.0",
+    "flax==0.12.10",
+    "torchax==0.0.13",
+    "qwix==0.1.2",
+    # Keep torch pinned in lockstep with torchvision on the CPU wheel index.
+    "torch==2.10.0",
+    "torchvision==0.25.0",
+    "pathwaysutils",
+    "numba==0.62.1",
+    "runai-model-streamer[s3,gcs]==0.15.9",
+    "gcsfs==2026.1.0",
+    # Upstream pins to 5.5.3 https://github.com/vllm-project/vllm/blob/de3fe8dc62f3d77eb8dab8125ca90436f606bccb/requirements/test/nightly-torch.txt#L32
+    "transformers>=5.8.0",
+    "tokamax==0.0.17.dev20261015",
+    "flywheel-tpu==0.2.0",
+    "packaging>=24.2",
+    "jinja2>=3.1.6",
+    "ray[default]",
+    "ray[data]",
+    "nixl==0.3.0",
+]
+
+[project.optional-dependencies]
+# These are required for running any benchmarking
+# See more information at scripts/vllm/benchmarking/README.md
+benchmarking = [
+    "nltk",
+    "evaluate",
+    "datasets",
+    "rouge-score",
+    "scikit-learn",
+    "pandas",
+    "gdown<6.0.0",
+    "google-cloud-bigquery",
+    "lm-eval[api,math]==0.4.12",
+]
+
+[project.entry-points."vllm.general_plugins"]
+register_layers = "tpu_inference.layers.vllm:register_layers"
+
+# Dev / CI / Docker only. These are PEP 735 dependency groups, not extras:
+# groups are never written into the built wheel's metadata, so their git URLs
+# do not block a PyPI upload (PyPI rejects direct-URL requirements, even in
+# extras). Install with `--group <name>` (uv, or pip >= 25.1).
+[dependency-groups]
+# vLLM built from source. Deliberately NOT in `dependencies`: the combined
+# `vllm-tpu` wheel already provides vLLM, and installing the real `vllm`
+# on top would overwrite it. Opt in with `uv pip install -e . --group vllm`.
+vllm = [
+    # Note: we **intentionally** build vllm from source.
+    # Keep vllm_test_utils on the same upstream commit below.
+    "vllm @ git+https://github.com/vllm-project/vllm.git@273a04964ed9d1e389c4a7cb9d660e8294782f8d",
+]
+
+# Required for running tests
+test = [
+    "yapf==0.43.0",
+    "pytest",
+    "pytest-mock",
+    "pytest-asyncio",
+    "pytest-cov",
+    "parameterized",
+    "hypothesis==6.151.9",
+    "sortedcontainers==2.4.0",
+    "tblib",
+    "buildkite-test-collector",
+    "hf_transfer",
+    # Not published on PyPI; lives in vLLM's tests/ directory.
+    "vllm_test_utils @ git+https://github.com/vllm-project/vllm.git@273a04964ed9d1e389c4a7cb9d660e8294782f8d#subdirectory=tests/vllm_test_utils",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tpu_inference*"]
+
+[tool.setuptools.package-data]
+tpu_inference = ["**/*.yaml", "**/*.json"]
+
+[tool.setuptools_scm]
+
+# Default PyPI serves Linux x86_64 wheels of torch and torchvision built with
+# CUDA, which pulls gigabytes of unnecessary nvidia-* runtime dependencies onto
+# TPU hosts. Pin them to the official PyTorch CPU index while resolving all
+# other packages from PyPI.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }

@@ -149,15 +149,15 @@ export RUN_KERNEL_COLLECTIVES_TESTS=0
 
 # Trigger general kernel tests if any of the following are modified:
 # - tpu_inference/kernels/* or tests/kernels/*
-# - tests/conftest.py or requirements.txt
-if echo "$FILES_CHANGED" | grep -qE '^(tpu_inference/kernels|tests/kernels|tests/conftest.py|requirements.txt)'; then
+# - tests/conftest.py or pyproject.toml
+if echo "$FILES_CHANGED" | grep -qE '^(tpu_inference/kernels|tests/kernels|tests/conftest.py|pyproject.toml)'; then
     export RUN_KERNEL_TESTS=1
 fi
 
 # Trigger collective-specific kernel tests if any of the following are modified:
 # - tpu_inference/kernels/collectives/* or tests/kernels/collectives/*
-# - tests/conftest.py or requirements.txt
-if echo "$FILES_CHANGED" | grep -qE '^(tpu_inference/kernels/collectives|tests/kernels/collectives|tests/conftest.py|requirements.txt)'; then
+# - tests/conftest.py or pyproject.toml
+if echo "$FILES_CHANGED" | grep -qE '^(tpu_inference/kernels/collectives|tests/kernels/collectives|tests/conftest.py|pyproject.toml)'; then
     export RUN_KERNEL_COLLECTIVES_TESTS=1
 fi
 

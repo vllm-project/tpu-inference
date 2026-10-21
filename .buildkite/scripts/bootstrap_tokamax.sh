@@ -17,7 +17,7 @@
 #
 # 1. Resolves the newest tokamax nightly on PyPI
 # 2. Runs the JAX test suites against it.
-# 3. Only if every test passes, it pushes the requirements.txt bump to main.
+# 3. Only if every test passes, it pushes the pyproject.toml bump to main.
 #
 # On kube (ci_fleet.sh) it runs the same suites. A kube run bumps main and,
 # when scheduled, notifies only if its schedule sets KUBE_OWNS_NIGHTLY=1;
@@ -29,7 +29,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/configs/pipeline_config.sh"
 
-REQUIREMENTS_FILE="requirements.txt"
+REQUIREMENTS_FILE="pyproject.toml"
 JOB_PRIORITY="${PRIORITY_INTEGRATION}"
 export JOB_PRIORITY
 buildkite-agent meta-data set "JOB_PRIORITY" "${JOB_PRIORITY}"
@@ -115,7 +115,7 @@ set_kube_jax_envs() {
     esac
 }
 
-TOKAMAX_CURRENT_VERSION="$(sed -n 's/^tokamax==\(.*\)$/\1/p' "${REQUIREMENTS_FILE}")"
+TOKAMAX_CURRENT_VERSION="$(sed -nE 's/^[[:space:]]*"tokamax==([^"]+)".*/\1/p' "${REQUIREMENTS_FILE}" | head -n 1)"
 if [[ -z "${TOKAMAX_CURRENT_VERSION}" ]]; then
     echo "ERROR: no 'tokamax==' pin found in ${REQUIREMENTS_FILE}." >&2
     exit 1

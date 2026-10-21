@@ -38,12 +38,12 @@ upload_with_priority() {
 }
 
 get_vllm_commit_hash() {
-  # load vllm commit hash from vllm_lkg.version file, if not exists, get the latest commit hash from vllm repo
+  # Load vllm commit hash from pyproject.toml; if not found, get the latest commit hash from vllm repo.
   local commit_hash=""
-  local version_file=".buildkite/vllm_lkg.version"
+  local pyproject_file="pyproject.toml"
 
-  if [ -f "$version_file" ]; then
-    commit_hash="$(cat "$version_file")"
+  if [ -f "$pyproject_file" ]; then
+    commit_hash="$(sed -nE 's/.*vllm @ git\+https:\/\/github\.com\/vllm-project\/vllm\.git@([a-zA-Z0-9._-]+).*/\1/p' "$pyproject_file" | head -n 1)"
   fi
   if [ -z "${commit_hash:-}" ]; then
     commit_hash=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')

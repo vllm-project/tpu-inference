@@ -29,7 +29,7 @@ fi
 
 root_dir=/workspace
 dataset_name=sonnet
-dataset_path="benchmarks/sonnet.txt"
+dataset_path="scripts/vllm/benchmarking/sonnet.txt"
 # The HF hub cache, where transformers already looks for this model's config
 # and tokenizer, so the weights land beside them and are shared with every other
 # test instead of kept as a second copy.
@@ -47,7 +47,7 @@ helpFunction()
     echo "Usage: $0 [-r root-dir-path] [-d dataset-name] [-p dataset-path] [-v vllm-download-dir] [-h]"
     echo -e "\t-r, --root-dir-path\tThe path to your root directory (default: /workspace/, which is used in the Dockerfile)"
     echo -e "\t-d, --dataset-name\tThe name of the dataset to use (default: sonnet)"
-    echo -e "\t-p, --dataset-path\tThe path to the processed dataset. This is required when using a custom model (default: benchmarks/sonnet.txt)"
+    echo -e "\t-p, --dataset-path\tThe path to the processed dataset. This is required when using a custom model (default: scripts/vllm/benchmarking/sonnet.txt)"
     echo -e "\t-v, --vllm-download-dir\tWhere vLLM downloads model weights (default: the HF hub cache, \$HF_HUB_CACHE or \$HF_HOME/hub)"
     echo -e "\t-h, --help\tShow this help message"
     echo ""
@@ -138,15 +138,9 @@ echo "Using tensor parallel size $tensor_parallel_size"
 echo "Using the dataset name $dataset_name"
 echo "Using the dataset at $dataset_path"
 
-cd "$root_dir"/vllm || exit
+cd "$root_dir"/tpu_inference || exit
 echo "Current working directory: $(pwd)"
-echo "Using vLLM hash: $(git rev-parse HEAD)"
-
-# Overwrite a few of the vLLM benchmarking scripts with the TPU Commons ones
-cp -r "$root_dir"/tpu_inference/scripts/vllm/benchmarking/*.py "$root_dir"/vllm/benchmarks/
-# vLLM no longer ships benchmarks/sonnet.txt (vllm #60129); the default
-# dataset_path above still points there, so the copy kept here takes its place.
-cp "$root_dir"/tpu_inference/scripts/vllm/benchmarking/sonnet.txt "$root_dir"/vllm/benchmarks/
+echo "Using vLLM hash: $(python3 -c 'import importlib.metadata as m, json; d = json.loads(m.distribution("vllm").read_text("direct_url.json") or "{}"); print(d.get("vcs_info", {}).get("commit_id", "unknown"))' 2>/dev/null || echo "unknown")"
 echo "Using TPU Inference hash: $(git -C "$root_dir"/tpu_inference rev-parse HEAD)"
 
 checkThroughput() {
@@ -263,7 +257,7 @@ fi
 
 echo "Starting the benchmark for $test_model..."
 echo "Current working directory: $(pwd)"
-python benchmarks/benchmark_serving.py \
+python scripts/vllm/benchmarking/benchmark_serving.py \
 --backend vllm \
 --model "$test_model" \
 --dataset-name "$dataset_name" \

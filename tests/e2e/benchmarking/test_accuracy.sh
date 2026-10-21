@@ -95,10 +95,7 @@ fi
 
 echo "Using the root directory at $root_dir"
 
-cd "$root_dir"/vllm/tests/entrypoints/llm || exit
-
-# Overwrite a few of the vLLM benchmarking scripts with the TPU Inference ones
-cp "$root_dir"/tpu_inference/scripts/vllm/integration/*.py "$root_dir"/vllm/tests/entrypoints/llm/
+cd "$root_dir"/tpu_inference/scripts/vllm/integration || exit
 
 echo "--------------------------------------------------"
 echo "Running integration for model: $test_model"

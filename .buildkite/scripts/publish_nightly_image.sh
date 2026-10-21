@@ -27,7 +27,7 @@ echo "--- Building vllm/vllm-tpu:${TAG} (vLLM ${VLLM_COMMIT_HASH})"
 # -f rather than piping yes: under pipefail, yes dying of SIGPIPE once prune
 # has its answer fails the script (exit 141).
 docker system prune -a -f
-docker build --build-arg VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH}" --no-cache \
+docker build --target dev --build-arg VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH}" --no-cache \
   -f docker/Dockerfile -t vllm/vllm-tpu:nightly -t "vllm/vllm-tpu:${TAG}" .
 
 echo "--- Pushing"

@@ -13,18 +13,12 @@
 # limitations under the License.
 
 ARG BASE_IMAGE="python:3.12-slim-bookworm"
-# The latest main will be used if arg unspecified
-ARG VLLM_COMMIT_HASH=""
 
-FROM $BASE_IMAGE
+# ==============================================================================
+# Stage 1: base (Runtime dependencies + vLLM from pyproject.toml)
+# ==============================================================================
+FROM ${BASE_IMAGE} AS base
 
-ARG IS_TEST="false"
-ARG BM_INFRA="false"
-
-# Update pip
-RUN pip install --upgrade pip
-
-# Install some basic utilities
 RUN apt-get update && apt-get install -y \
     git \
     libopenmpi-dev \
@@ -39,80 +33,126 @@ RUN apt-get update && apt-get install -y \
     unzip \
     build-essential \
     cmake \
+    ninja-build \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# Conditionally install google-cloud-cli for benchmarking infrastructure
-RUN if [ "$BM_INFRA" = "true" ]; then \
-        apt-get update && apt-get install -y gnupg curl \
-        && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list \
-        && curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
-        && apt-get update && apt-get install -y google-cloud-cli \
-        && rm -rf /var/lib/apt/lists/*; \
-    fi
+# Ensure /usr/bin/python3 exists and install uv for dependency resolution.
+RUN ln -sf "$(command -v python)" /usr/bin/python3 && \
+    pip install --no-cache-dir --upgrade pip uv
 
-# The buildkite-agent CLI, so a pod can upload its own artifacts - it shares no
-# filesystem with the agent that scheduled it. The credential is not baked in;
-# the pod is handed one at run time.
-#
-# Staged to /tmp and moved, because COPY cannot be conditional and this file
-# builds the published vllm/vllm-tpu image as well as the test one. Only the
-# test image keeps the binary.
-COPY --from=buildkite/agent:3 /usr/local/bin/buildkite-agent /tmp/buildkite-agent
-RUN if [ "$IS_TEST" = "true" ]; then \
-        mv /tmp/buildkite-agent /usr/local/bin/buildkite-agent \
-        && buildkite-agent --version; \
-    else \
-        rm /tmp/buildkite-agent; \
-    fi
-
-# bktec, Buildkite Test Engine's client, which the sharded unit test steps run
-# in the pod to pick their share of the test files. Test image only, as above.
-COPY --from=buildkite/test-engine-client /usr/local/bin/bktec /tmp/bktec
-RUN if [ "$IS_TEST" = "true" ]; then \
-        mv /tmp/bktec /usr/local/bin/bktec; \
-    else \
-        rm /tmp/bktec; \
-    fi
-
-# Build vLLM
-WORKDIR /workspace/vllm
-ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_COMMIT_HASH
-
-RUN git clone $VLLM_REPO . && \
-    if [ -n "$VLLM_COMMIT_HASH" ]; then \
-        git checkout $VLLM_COMMIT_HASH; \
-    fi
-
-RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements/tpu.txt --retries 3
-RUN --mount=type=cache,target=/root/.cache/pip pip install setuptools-rust>=1.9.0
-RUN --mount=type=cache,target=/root/.cache/pip VLLM_TARGET_DEVICE="tpu" pip install --no-build-isolation -e .
-
-# Install test dependencies
-RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install -e tests/vllm_test_utils
-RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install \
-    git+https://github.com/thuml/depyf.git \
-    pytest-asyncio \
-    "lm-eval[api,math]==0.4.12" \
-    pytest-cov \
-    tblib
-
-# Install tpu_inference
 WORKDIR /workspace/tpu_inference
-# Install requirements first and cache so we don't need to re-install on code change.
-COPY requirements.txt .
-RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt --retries 3
-COPY requirements_benchmarking.txt .
-# These are needed for the E2E benchmarking tests (i.e. tests/e2e/benchmarking/mlperf.sh)
-RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements_benchmarking.txt --retries 3
-# Install test requirements
-COPY requirements_test.txt .
-RUN  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then \
-        pip install -r requirements_test.txt --retries 3; \
+
+# Copy pyproject.toml first so dependency layers stay cached across code edits.
+COPY pyproject.toml .
+
+# If VLLM_COMMIT_HASH is passed (e.g., testing upstream HEAD in CI),
+# dynamically update pyproject.toml inside the container before installing.
+ARG VLLM_COMMIT_HASH=""
+RUN if [ -n "$VLLM_COMMIT_HASH" ]; then \
+      sed -i -E "s|(git\+https://github\.com/vllm-project/vllm\.git@)[a-zA-Z0-9._-]+|\1${VLLM_COMMIT_HASH}|g" pyproject.toml; \
     fi
+
+# Build vLLM as a pure-Python package without device C++ extensions; TPU runtime
+# dependencies are declared directly in pyproject.toml.
+ENV CXX=g++
+ENV CC=gcc
+ENV VLLM_TARGET_DEVICE=empty
+ENV UV_TORCH_BACKEND=cpu
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system \
+      -r pyproject.toml \
+      --group vllm
+
+
+# ==============================================================================
+# Stage 2: ci (CI/CD system tooling: bktec, buildkite-agent, google-cloud-cli)
+# ==============================================================================
+FROM base AS ci
+
+COPY --from=buildkite/test-engine-client /usr/local/bin/bktec /usr/local/bin/bktec
+COPY --from=buildkite/agent:3 /usr/local/bin/buildkite-agent /usr/local/bin/buildkite-agent
+
+RUN apt-get update && apt-get install -y \
+    apt-transport-https \
+    ca-certificates \
+    gnupg \
+    lsof \
+    psmisc \
+    && curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list \
+    && apt-get update && apt-get install -y google-cloud-cli \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace/tpu_inference
+
+RUN git config --global --add safe.directory /workspace/tpu_inference
+
+
+# ==============================================================================
+# Stage 3: dev (Developer & CI execution image with test/benchmark dependencies)
+# ==============================================================================
+FROM ci AS dev
+
+# Pre-install test and benchmarking dependencies before copying the full source
+# tree so code changes do not invalidate the dependency layer cache.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system \
+      -r pyproject.toml \
+      --group vllm \
+      --group test \
+      --extra benchmarking
+
 COPY . .
-RUN --mount=type=cache,target=/root/.cache/pip pip install -e .
+
+ARG VLLM_COMMIT_HASH=""
+RUN if [ -n "$VLLM_COMMIT_HASH" ]; then \
+      sed -i -E "s|(git\+https://github\.com/vllm-project/vllm\.git@)[a-zA-Z0-9._-]+|\1${VLLM_COMMIT_HASH}|g" pyproject.toml; \
+    fi
+
+ARG RELEASE_VERSION="0.0.0"
+RUN --mount=type=cache,target=/root/.cache/uv \
+    SETUPTOOLS_SCM_PRETEND_VERSION_FOR_TPU_INFERENCE="${RELEASE_VERSION}" \
+    uv pip install --system --no-deps -e .
+
+# Optional local vLLM checkout override staged by docker/build_image.sh -s
+ARG VLLM_SOURCE=""
+RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ -n "$VLLM_SOURCE" ] && [ -d /workspace/tpu_inference/vllm ]; then \
+      uv pip install --system --no-deps -e /workspace/tpu_inference/vllm; \
+    else \
+      rm -rf /workspace/tpu_inference/vllm; \
+    fi
+
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD []
+
+
+# ==============================================================================
+# Stage 4: prod (Production release image without CI/test tooling)
+# ==============================================================================
+FROM base AS prod
+
+WORKDIR /workspace/tpu_inference
+COPY . .
+
+ARG VLLM_COMMIT_HASH=""
+RUN if [ -n "$VLLM_COMMIT_HASH" ]; then \
+      sed -i -E "s|(git\+https://github\.com/vllm-project/vllm\.git@)[a-zA-Z0-9._-]+|\1${VLLM_COMMIT_HASH}|g" pyproject.toml; \
+    fi
+
+ARG RELEASE_VERSION="0.0.0"
+RUN --mount=type=cache,target=/root/.cache/uv \
+    SETUPTOOLS_SCM_PRETEND_VERSION_FOR_TPU_INFERENCE="${RELEASE_VERSION}" \
+    uv pip install --system --no-deps .
+
+RUN if [ -z "${VLLM_SOURCE:-}" ] && [ -d /workspace/tpu_inference/vllm ]; then \
+      rm -rf /workspace/tpu_inference/vllm; \
+    fi
 
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

@@ -99,17 +99,15 @@ verify_image_vllm() {
     echo "[verify-vllm] RUN_WITH_PYPI=true; skipping vLLM commit verification."
     return 0
   fi
-  # Read the vLLM commit baked into the image. Capture the exit code separately
-  # so an infra failure to *read* the commit (git missing, /workspace/vllm
-  # absent, safe.directory "dubious ownership", etc.) is reported as such
-  # instead of masquerading as a vLLM mismatch. -c safe.directory pre-empts the
-  # most common trip: the container running git as a non-owner user.
+  # Read the vLLM commit baked into the image from Python package metadata
+  # (direct_url.json written by uv/pip when installing vllm from git).
   local actual_vllm rc=0 err
   err=$(mktemp)
-  actual_vllm=$(docker run --rm --entrypoint git "${image_ref}" \
-    -C /workspace/vllm -c safe.directory=/workspace/vllm rev-parse HEAD 2>"${err}") || rc=$?
-  if [[ ${rc} -ne 0 ]]; then
-    echo "[FATAL][verify-vllm] Could not read the vLLM commit from ${image_ref} (git exit ${rc}):" >&2
+  actual_vllm=$(docker run --rm --entrypoint python3 "${image_ref}" \
+    -c 'import importlib.metadata as m, json, sys; exp = sys.argv[1]; d = json.loads(m.distribution("vllm").read_text("direct_url.json") or "{}"); vcs = d.get("vcs_info", {}); cid = vcs.get("commit_id", ""); rev = vcs.get("requested_revision", ""); print(exp if exp and exp in (cid, rev) else (cid or rev))' \
+    "${expected_vllm}" 2>"${err}") || rc=$?
+  if [[ ${rc} -ne 0 || -z "${actual_vllm}" ]]; then
+    echo "[FATAL][verify-vllm] Could not read the vLLM commit from ${image_ref} (exit ${rc}):" >&2
     cat "${err}" >&2
     rm -f "${err}"
     exit 1
@@ -179,13 +177,15 @@ setup_environment() {
   fi 
 
   local DOCKERFILE_NAME="Dockerfile"
+  local -a DOCKER_TARGET_ARGS=(--target dev)
 
 # Determine whether to build from PyPI packages or source.
   if [[ "${RUN_WITH_PYPI:-false}" == "true" ]]; then
     DOCKERFILE_NAME="Dockerfile.pypi"
+    DOCKER_TARGET_ARGS=()
     echo "Building from PyPI packages. Using docker/${DOCKERFILE_NAME}"
   else
-    echo "Building from source. Using docker/${DOCKERFILE_NAME}"
+    echo "Building from source. Using docker/${DOCKERFILE_NAME} (target: dev)"
   fi
 
   if ! grep -q "^HF_TOKEN=" /etc/environment; then
@@ -201,8 +201,8 @@ setup_environment() {
   cleanup_docker_resource "${IMAGE_NAME}"
 
   if [ -z "${BUILDKITE:-}" ]; then
-      if [ "${USE_VLLM_LKG:-false}" == "true" ] && [ -f ".buildkite/vllm_lkg.version" ]; then
-          VLLM_COMMIT_HASH=$(cat .buildkite/vllm_lkg.version)
+      if [ "${USE_VLLM_LKG:-false}" == "true" ] && [ -f "pyproject.toml" ]; then
+          VLLM_COMMIT_HASH=$(sed -nE 's/.*vllm @ git\+https:\/\/github\.com\/vllm-project\/vllm\.git@([a-zA-Z0-9._-]+).*/\1/p' pyproject.toml | head -n 1)
       else
           VLLM_COMMIT_HASH=""
       fi
@@ -217,7 +217,7 @@ setup_environment() {
   fi
 
   # Non-empty only in the tokamax integration pipeline, which validates a
-  # candidate nightly that is not yet pinned in requirements.txt. Every other
+  # candidate nightly that is not yet pinned in pyproject.toml. Every other
   # pipeline leaves this empty and is unaffected by the two blocks below.
   local TOKAMAX_CANDIDATE_VERSION=""
   if [ -n "${BUILDKITE:-}" ]; then
@@ -268,12 +268,13 @@ setup_environment() {
 
   if [[ -n "${TOKAMAX_CANDIDATE_VERSION}" ]]; then
     echo "[tokamax] Pinning the build context to tokamax==${TOKAMAX_CANDIDATE_VERSION}"
-    sed -i "s/^tokamax==.*$/tokamax==${TOKAMAX_CANDIDATE_VERSION}/" requirements.txt
-    grep -n '^tokamax==' requirements.txt
+    sed -i -E "s|^([[:space:]]*\"tokamax==)[^\"]+(\".*)|\1${TOKAMAX_CANDIDATE_VERSION}\2|" pyproject.toml
+    grep -n '"tokamax==' pyproject.toml
   fi
 
   # Build with specific hash and 'latest' tag for convenience
   DOCKER_BUILDKIT=1 docker build \
+      "${DOCKER_TARGET_ARGS[@]}" \
       --build-arg VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH}" \
       --build-arg IS_TEST="true" \
       --build-arg BM_INFRA="${BM_INFRA:-false}" \
