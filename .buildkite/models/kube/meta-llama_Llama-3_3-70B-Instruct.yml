@@ -34,6 +34,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for meta-llama/Llama-3.3-70B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-3_3-70B-Instruct_UnitTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-3_3-70B-Instruct_UnitTest"
         allow_failure: true
     agents:
@@ -71,6 +72,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record accuracy result for meta-llama/Llama-3.3-70B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-3_3-70B-Instruct_Accuracy"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-3_3-70B-Instruct_Accuracy"
         allow_failure: true
     agents:
@@ -114,6 +116,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for meta-llama/Llama-3.3-70B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-3_3-70B-Instruct_Benchmark"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-3_3-70B-Instruct_Benchmark"
         allow_failure: true
     agents:

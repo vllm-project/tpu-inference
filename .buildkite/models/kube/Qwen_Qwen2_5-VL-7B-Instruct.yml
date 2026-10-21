@@ -34,6 +34,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for Qwen/Qwen2.5-VL-7B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen2_5-VL-7B-Instruct_UnitTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_UnitTest"
         allow_failure: true
     agents:
@@ -71,6 +72,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record accuracy result for Qwen/Qwen2.5-VL-7B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen2_5-VL-7B-Instruct_Accuracy"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_Accuracy"
         allow_failure: true
     agents:
@@ -118,6 +120,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for Qwen/Qwen2.5-VL-7B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen2_5-VL-7B-Instruct_Benchmark"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_Benchmark"
         allow_failure: true
     agents:

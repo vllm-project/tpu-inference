@@ -32,6 +32,7 @@ steps:
   - label: "${TPU_VERSION:-tpu6e} Record correctness test result for Step Pooling (Embedding)"
     key: "${TPU_VERSION:-tpu6e}_record_Step_Pooling_Embedding_CorrectnessTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_Step_Pooling_Embedding_CorrectnessTest"
         allow_failure: true
     env:
@@ -61,6 +62,7 @@ steps:
   - label: "${TPU_VERSION:-tpu6e} Record performance test result for Step Pooling (Embedding)"
     key: "${TPU_VERSION:-tpu6e}_record_Step_Pooling_Embedding_PerformanceTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_Step_Pooling_Embedding_PerformanceTest"
         allow_failure: true
     env:

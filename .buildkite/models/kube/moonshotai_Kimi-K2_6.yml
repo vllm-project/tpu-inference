@@ -45,6 +45,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for moonshotai/Kimi-K2_6"
     key: "${TPU_VERSION:-tpu6e}_record_moonshotai_Kimi-K2_6_UnitTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_UnitTest"
         allow_failure: true
     agents:
@@ -95,6 +96,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record accuracy result for moonshotai/Kimi-K2_6"
     key: "${TPU_VERSION:-tpu6e}_record_moonshotai_Kimi-K2_6_Accuracy"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_Accuracy"
         allow_failure: true
     agents:
@@ -130,6 +132,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for moonshotai/Kimi-K2.6"
     key: "${TPU_VERSION:-tpu6e}_record_moonshotai_Kimi-K2_6_Benchmark"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_Benchmark"
         allow_failure: true
     agents:

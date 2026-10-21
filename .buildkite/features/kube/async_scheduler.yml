@@ -32,6 +32,7 @@ steps:
   - label: "${TPU_VERSION:-tpu6e} Record correctness test result for async scheduler"
     key: "${TPU_VERSION:-tpu6e}_record_async_scheduler_CorrectnessTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_async_scheduler_CorrectnessTest"
         allow_failure: true
     env:
@@ -66,6 +67,7 @@ steps:
   - label: "${TPU_VERSION:-tpu6e} Record performance test result for async scheduler"
     key: "${TPU_VERSION:-tpu6e}_record_async_scheduler_PerformanceTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_async_scheduler_PerformanceTest"
         allow_failure: true
     env:

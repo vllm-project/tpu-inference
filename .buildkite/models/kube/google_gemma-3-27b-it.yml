@@ -34,6 +34,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for google/gemma-3-27b-it"
     key: "${TPU_VERSION:-tpu6e}_record_google_gemma-3-27b-it_UnitTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_google_gemma-3-27b-it_UnitTest"
         allow_failure: true
     agents:
@@ -71,6 +72,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record accuracy result for google/gemma-3-27b-it"
     key: "${TPU_VERSION:-tpu6e}_record_google_gemma-3-27b-it_Accuracy"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_google_gemma-3-27b-it_Accuracy"
         allow_failure: true
     agents:
@@ -114,6 +116,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for google/gemma-3-27b-it"
     key: "${TPU_VERSION:-tpu6e}_record_google_gemma-3-27b-it_Benchmark"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_google_gemma-3-27b-it_Benchmark"
         allow_failure: true
     agents:

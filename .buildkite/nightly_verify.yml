@@ -33,6 +33,12 @@ steps:
    - label: "Check Metadata Health"
      key: "check_metadata_health"
      <<: *run-on-nightly-or-tag
+     # Not the wait above: a wait is satisfied once, so after a failed image
+     # build was retried, the matrices and Notify had already run on empty
+     # results and nothing ran them again. The barrier, uploaded by "Upload
+     # Tests", waits for the image builds and every Record step, and is waited
+     # for again after a retry. See scripts/results_barrier.sh.
+     depends_on: "nightly_results_recorded"
      agents: 
        queue: cpu 
      commands: |

@@ -45,6 +45,7 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_record_multi-host_CorrectnessTest"
     if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_multi-host_CorrectnessTest"
         allow_failure: true
     env:
@@ -78,6 +79,7 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_record_multi-host_PerformanceTest"
     if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_multi-host_PerformanceTest"
         allow_failure: true
     env:

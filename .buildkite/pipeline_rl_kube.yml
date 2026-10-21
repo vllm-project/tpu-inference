@@ -64,6 +64,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for async_logprobs"
     key: "${TPU_VERSION:-tpu6e}_record_async_logprobs_CorrectnessTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_async_logprobs_CorrectnessTest"
         allow_failure: true
     agents:
@@ -99,6 +100,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for group_sampling_prefix_cache"
     key: "${TPU_VERSION:-tpu6e}_record_group_sampling_prefix_cache_CorrectnessTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_group_sampling_prefix_cache_CorrectnessTest"
         allow_failure: true
     agents:
@@ -132,6 +134,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for group_sampling_prefix_cache"
     key: "${TPU_VERSION:-tpu6e}_record_group_sampling_prefix_cache_PerformanceTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_group_sampling_prefix_cache_PerformanceTest"
         allow_failure: true
     agents:
@@ -166,6 +169,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for moe_expert_ids"
     key: "${TPU_VERSION:-tpu6e}_record_moe_expert_ids_CorrectnessTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_moe_expert_ids_CorrectnessTest"
         allow_failure: true
     agents:
@@ -200,6 +204,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for processed_logprobs"
     key: "${TPU_VERSION:-tpu6e}_record_processed_logprobs_CorrectnessTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_processed_logprobs_CorrectnessTest"
         allow_failure: true
     agents:
@@ -234,6 +239,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for rl_integration"
     key: "${TPU_VERSION:-tpu6e}_record_rl_integration_CorrectnessTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_rl_integration_CorrectnessTest"
         allow_failure: true
     agents:
@@ -268,6 +274,7 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_record_rl_integration_PauseResumeTest"
     if: "build.env(\"NIGHTLY\") == \"1\""
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_rl_integration_PauseResumeTest"
         allow_failure: true
     agents:
@@ -300,6 +307,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for rl_integration"
     key: "${TPU_VERSION:-tpu6e}_record_rl_integration_PerformanceTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_rl_integration_PerformanceTest"
         allow_failure: true
     agents:

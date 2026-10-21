@@ -52,6 +52,7 @@ steps:
   - label: "${TPU_VERSION:-tpu6e} Record correctness test result for DCN-based P/D disaggregation"
     key: "${TPU_VERSION:-tpu6e}_record_DCN_based_P-D_disaggregation_CorrectnessTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_CorrectnessTest"
         allow_failure: true
     env:
@@ -101,6 +102,7 @@ steps:
   - label: "${TPU_VERSION:-tpu6e} Record performance test result for DCN-based P/D disaggregation"
     key: "${TPU_VERSION:-tpu6e}_record_DCN_based_P-D_disaggregation_PerformanceTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_PerformanceTest"
         allow_failure: true
     env:

@@ -113,6 +113,7 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3_8-2_4T-A95B_UnitTest"
     if: 'build.env("MODEL_IMPL_TYPE") == "vllm" && "${TPU_VERSION:-tpu6e}" == "tpu7x"'
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_UnitTest"
         allow_failure: true
     agents:
@@ -150,6 +151,7 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3_8-2_4T-A95B_Accuracy"
     if: 'build.env("MODEL_IMPL_TYPE") == "vllm" && "${TPU_VERSION:-tpu6e}" == "tpu7x"'
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_Accuracy"
         allow_failure: true
     agents:
@@ -188,6 +190,7 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3_8-2_4T-A95B_Benchmark"
     if: 'build.env("MODEL_IMPL_TYPE") == "vllm" && "${TPU_VERSION:-tpu6e}" == "tpu7x"'
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_Benchmark"
         allow_failure: true
     agents:

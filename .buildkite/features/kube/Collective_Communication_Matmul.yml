@@ -32,6 +32,7 @@ steps:
   - label: "${TPU_VERSION:-tpu6e} Record correctness test result for Collective Communication Matmul"
     key: "${TPU_VERSION:-tpu6e}_record_Collective_Communication_Matmul_CorrectnessTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_Collective_Communication_Matmul_CorrectnessTest"
         allow_failure: true
     env:
@@ -61,6 +62,7 @@ steps:
   - label: "${TPU_VERSION:-tpu6e} Record performance test result for Collective Communication Matmul"
     key: "${TPU_VERSION:-tpu6e}_record_Collective_Communication_Matmul_PerformanceTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_Collective_Communication_Matmul_PerformanceTest"
         allow_failure: true
     env:

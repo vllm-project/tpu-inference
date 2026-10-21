@@ -42,6 +42,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness result for mistralai/Mistral-Small-4-119B-2603/text-only"
     key: "${TPU_VERSION:-tpu6e}_record_mistralai_Mistral-Small-4-119B-2603_text-only_Correctness"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_mistralai_Mistral-Small-4-119B-2603_text-only_Correctness"
         allow_failure: true
     agents:

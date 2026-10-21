@@ -46,6 +46,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for deepseek-ai/DeepSeek-R1"
     key: "${TPU_VERSION:-tpu6e}_record_deepseek-ai_DeepSeek-R1_UnitTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-R1_UnitTest"
         allow_failure: true
     agents:
@@ -94,6 +95,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record accuracy result for deepseek-ai/DeepSeek-R1"
     key: "${TPU_VERSION:-tpu6e}_record_deepseek-ai_DeepSeek-R1_Accuracy"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-R1_Accuracy"
         allow_failure: true
     agents:
@@ -129,6 +131,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for deepseek-ai/DeepSeek-R1"
     key: "${TPU_VERSION:-tpu6e}_record_deepseek-ai_DeepSeek-R1_Benchmark"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-R1_Benchmark"
         allow_failure: true
     agents:

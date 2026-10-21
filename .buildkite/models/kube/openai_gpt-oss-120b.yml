@@ -38,6 +38,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for openai/gpt-oss-120b"
     key: "${TPU_VERSION:-tpu6e}_record_openai_gpt-oss-120b_UnitTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_UnitTest"
         allow_failure: true
     agents:
@@ -69,6 +70,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record accuracy result for openai/gpt-oss-120b"
     key: "${TPU_VERSION:-tpu6e}_record_openai_gpt-oss-120b_Accuracy"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_UnitTest"
         allow_failure: true
     agents:
@@ -100,6 +102,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for openai/gpt-oss-120b"
     key: "${TPU_VERSION:-tpu6e}_record_openai_gpt-oss-120b_Benchmark"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_Benchmark"
         allow_failure: true
     agents:

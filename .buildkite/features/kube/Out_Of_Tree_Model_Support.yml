@@ -35,6 +35,7 @@ steps:
   - label: "${TPU_VERSION:-tpu6e} Record correctness test result for Out-of-tree model support"
     key: "${TPU_VERSION:-tpu6e}_record_out_of_tree_model_support_CorrectnessTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_out_of_tree_model_support_CorrectnessTest"
         allow_failure: true
     env:
@@ -72,6 +73,7 @@ steps:
   - label: "${TPU_VERSION:-tpu6e} Record performance test result for Out-of-tree model support"
     key: "${TPU_VERSION:-tpu6e}_record_out_of_tree_model_support_PerformanceTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_out_of_tree_model_support_PerformanceTest"
         allow_failure: true
     env:

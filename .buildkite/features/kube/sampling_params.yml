@@ -32,6 +32,7 @@ steps:
   - label: "${TPU_VERSION:-tpu6e} Record correctness test result for sampling_params"
     key: "${TPU_VERSION:-tpu6e}_record_sampling_params_CorrectnessTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_sampling_params_CorrectnessTest"
         allow_failure: true
     env:

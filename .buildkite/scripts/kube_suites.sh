@@ -60,6 +60,16 @@ add_ci_targets() {
     done < <(grep -hE '^[[:space:]]*CI_TARGET:' "$@" | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d "\"'" | sed -E 's/[[:space:]]+$//' || true)
 }
 
+# Records the Record step keys of an upload for the results barrier
+# (results_barrier.sh), when upload_models_and_features.sh has loaded it.
+note_record_keys() {
+    if declare -F add_record_keys >/dev/null; then
+        add_record_keys
+    else
+        cat >/dev/null
+    fi
+}
+
 # One kube lane. models and features keep a file per model or feature in
 # .buildkite/<lane>/kube/, beside its bare-metal file, and go up together as
 # one pipeline the way upload_models_and_features.sh sends the bare-metal ones:
@@ -70,10 +80,12 @@ upload_kube_lane() {
     local dir=".buildkite/${lane}/kube"
     if [[ ! -d "${dir}" ]]; then
         add_ci_targets "${lane}" ".buildkite/pipeline_${lane}_kube.yml"
+        note_record_keys < ".buildkite/pipeline_${lane}_kube.yml"
         upload_with_priority ".buildkite/pipeline_${lane}_kube.yml" "$JOB_PRIORITY"
         return
     fi
     add_ci_targets "${lane}" "${dir}"/*.yml
+    note_record_keys < <(cat "${dir}"/*.yml)
     echo "--- :pipeline: Uploading ${dir}/*.yml with priority ${JOB_PRIORITY:-PRIORITY_DEFAULT}"
     {
         echo "priority: ${JOB_PRIORITY:-PRIORITY_DEFAULT}"
@@ -102,6 +114,7 @@ upload_cpu_only_files() {
     done
     [[ "${#files[@]}" -gt 0 ]] || return 0
     add_ci_targets "${suite}" "${files[@]}"
+    note_record_keys < <(cat "${files[@]}")
     echo "--- :pipeline: Uploading ${#files[@]} cpu-only file(s) from .buildkite/${suite} with priority ${JOB_PRIORITY:-PRIORITY_DEFAULT}"
     {
         echo "priority: ${JOB_PRIORITY:-PRIORITY_DEFAULT}"

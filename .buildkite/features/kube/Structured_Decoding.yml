@@ -32,6 +32,7 @@ steps:
   - label: "${TPU_VERSION:-tpu6e} Record correctness test result for structured_decoding"
     key: "${TPU_VERSION:-tpu6e}_record_structured_decoding_CorrectnessTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_structured_decoding_CorrectnessTest"
         allow_failure: true
     env:

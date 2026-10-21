@@ -50,6 +50,13 @@ failure_handler() {
 # Catch ERR signals
 trap 'failure_handler $LINENO' ERR
 
+# check_metadata_health (nightly_verify.yml) waits for the results barrier, so
+# upload it on every exit, failures included: after a failure it runs and
+# check_metadata_health stops on stop_support_matrix. See results_barrier.sh.
+# shellcheck source=/dev/null
+source "$(dirname "${BASH_SOURCE[0]}")/results_barrier.sh"
+trap upload_results_barrier EXIT
+
 # A kube build sends up the kube versions of the same suites.
 if [[ "${CI_FLEET:-bare}" == "kube" ]]; then
   # shellcheck source=/dev/null
@@ -166,6 +173,7 @@ if [[ "${#pipeline_v6e_fragments[@]}" -gt 0 ]]; then
   export TENSOR_PARALLEL_SIZE_SINGLE=1
   export TENSOR_PARALLEL_SIZE_MULTI=8
   buildkite-agent meta-data set "run_v6_matrix" "true"
+  add_record_keys < <(printf "%s\n" "${pipeline_v6e_fragments[@]}")
   {
     echo "priority: ${JOB_PRIORITY:-1}"
     echo "steps:"
@@ -189,6 +197,7 @@ if [[ "${#pipeline_v7x_fragments[@]}" -gt 0 ]]; then
   export TENSOR_PARALLEL_SIZE_SINGLE=2
   export TENSOR_PARALLEL_SIZE_MULTI=8
   buildkite-agent meta-data set "run_v7_matrix" "true"
+  add_record_keys < <(printf "%s\n" "${pipeline_v7x_fragments[@]}")
   {
     echo "priority: ${JOB_PRIORITY:-1}"
     echo "steps:"

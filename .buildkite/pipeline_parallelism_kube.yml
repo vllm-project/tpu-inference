@@ -68,6 +68,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for DP (single-host)"
     key: "${TPU_VERSION:-tpu6e}_record_DP_CorrectnessTest_Single_Host"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_DP_CorrectnessTest_Single_Host"
         allow_failure: true
     agents:
@@ -102,6 +103,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for DP (single-host)"
     key: "${TPU_VERSION:-tpu6e}_record_DP_PerformanceTest_Single_Host"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_DP_PerformanceTest_Single_Host"
         allow_failure: true
     agents:
@@ -133,6 +135,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for DP (multi-host)"
     key: "${TPU_VERSION:-tpu6e}_record_DP_CorrectnessTest_Multi_Host"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_DP_CorrectnessTest_Multi_Host"
         allow_failure: true
     agents:
@@ -164,6 +167,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for DP (multi-host)"
     key: "${TPU_VERSION:-tpu6e}_record_DP_PerformanceTest_Multi_Host"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_DP_PerformanceTest_Multi_Host"
         allow_failure: true
     agents:
@@ -205,6 +209,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for EP (single-host)"
     key: "${TPU_VERSION:-tpu6e}_record_EP_CorrectnessTest_Single_Host"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_EP_CorrectnessTest_Single_Host"
         allow_failure: true
     agents:
@@ -238,6 +243,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for EP (single-host)"
     key: "${TPU_VERSION:-tpu6e}_record_EP_PerformanceTest_Single_Host"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_EP_PerformanceTest_Single_Host"
         allow_failure: true
     agents:
@@ -267,6 +273,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for EP (multi-host)"
     key: "${TPU_VERSION:-tpu6e}_record_EP_CorrectnessTest_Multi_Host"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_EP_CorrectnessTest_Multi_Host"
         allow_failure: true
     agents:
@@ -296,6 +303,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for EP (multi-host)"
     key: "${TPU_VERSION:-tpu6e}_record_EP_PerformanceTest_Multi_Host"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_EP_PerformanceTest_Multi_Host"
         allow_failure: true
     agents:
@@ -334,6 +342,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for PP (single-host)"
     key: "${TPU_VERSION:-tpu6e}_record_PP_CorrectnessTest_Single_Host"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest_Single_Host"
         allow_failure: true
     agents:
@@ -367,6 +376,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for PP (single-host)"
     key: "${TPU_VERSION:-tpu6e}_record_PP_PerformanceTest_Single_Host"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_PP_PerformanceTest_Single_Host"
         allow_failure: true
     agents:
@@ -400,6 +410,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for PP (multi-host)"
     key: "${TPU_VERSION:-tpu6e}_record_PP_CorrectnessTest_Multi_Host"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest_Multi_Host"
         allow_failure: true
     agents:
@@ -433,6 +444,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for PP (multi-host)"
     key: "${TPU_VERSION:-tpu6e}_record_PP_PerformanceTest_Multi_Host"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_PP_PerformanceTest_Multi_Host"
         allow_failure: true
     agents:
@@ -468,6 +480,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for SP (single-host)"
     key: "${TPU_VERSION:-tpu6e}_record_SP_CorrectnessTest_Single_Host"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_SP_CorrectnessTest_Single_Host"
         allow_failure: true
     agents:
@@ -497,6 +510,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for SP (single-host)"
     key: "${TPU_VERSION:-tpu6e}_record_SP_PerformanceTest_Single_Host"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_SP_PerformanceTest_Single_Host"
         allow_failure: true
     agents:
@@ -526,6 +540,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for SP (multi-host)"
     key: "${TPU_VERSION:-tpu6e}_record_SP_CorrectnessTest_Multi_Host"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_SP_CorrectnessTest_Multi_Host"
         allow_failure: true
     agents:
@@ -555,6 +570,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for SP (multi-host)"
     key: "${TPU_VERSION:-tpu6e}_record_SP_PerformanceTest_Multi_Host"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_SP_PerformanceTest_Multi_Host"
         allow_failure: true
     agents:
@@ -590,6 +606,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for TP (single-host)"
     key: "${TPU_VERSION:-tpu6e}_record_TP_CorrectnessTest_Single_Host"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_TP_CorrectnessTest_Single_Host"
         allow_failure: true
     agents:
@@ -624,6 +641,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for TP (single-host)"
     key: "${TPU_VERSION:-tpu6e}_record_TP_PerformanceTest_Single_Host"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_TP_PerformanceTest_Single_Host"
         allow_failure: true
     agents:
@@ -653,6 +671,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for TP (multi-host)"
     key: "${TPU_VERSION:-tpu6e}_record_TP_CorrectnessTest_Multi_Host"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_TP_CorrectnessTest_Multi_Host"
         allow_failure: true
     agents:
@@ -682,6 +701,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for TP (multi-host)"
     key: "${TPU_VERSION:-tpu6e}_record_TP_PerformanceTest_Multi_Host"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_TP_PerformanceTest_Multi_Host"
         allow_failure: true
     agents:

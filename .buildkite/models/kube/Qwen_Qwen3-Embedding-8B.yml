@@ -33,6 +33,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for Qwen/Qwen3-Embedding-8B"
     key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-Embedding-8B_UnitTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Embedding-8B_UnitTest"
         allow_failure: true
     agents:
@@ -69,6 +70,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record accuracy result for Qwen/Qwen3-Embedding-8B"
     key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-Embedding-8B_Accuracy"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Embedding-8B_Accuracy"
         allow_failure: true
     agents:
@@ -103,6 +105,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for Qwen/Qwen3-Embedding-8B"
     key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-Embedding-8B_Benchmark"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Embedding-8B_Benchmark"
         allow_failure: true
     agents:

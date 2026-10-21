@@ -35,6 +35,7 @@ steps:
   - label: "${TPU_VERSION:-tpu6e} Record correctness test result for Speculative Decoding: Eagle3"
     key: "${TPU_VERSION:-tpu6e}_record_Speculative_Decoding-_Eagle3_CorrectnessTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Eagle3_CorrectnessTest"
         allow_failure: true
     env:
@@ -72,6 +73,7 @@ steps:
   - label: "${TPU_VERSION:-tpu6e} Record performance test result for Speculative Decoding: Eagle3"
     key: "${TPU_VERSION:-tpu6e}_record_Speculative_Decoding-_Eagle3_PerformanceTest"
     depends_on:
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - step: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Eagle3_PerformanceTest"
         allow_failure: true
     env:
