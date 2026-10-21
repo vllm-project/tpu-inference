@@ -1171,30 +1171,55 @@ def prepare_inputs(
     num_q_heads_per_kv_head = align_to(actual_num_q_heads_per_kv_head,
                                        q_packing)
     head_dim = align_to(actual_head_dim, 128)
-    q = (
-        jnp.pad(
-            q.reshape(
-                max_num_tokens,
-                actual_num_kv_heads,
-                actual_num_q_heads_per_kv_head,
-                actual_head_dim,
-            ),
-            (
-                (0, 0),
-                (0, 0),
-                (0, num_q_heads_per_kv_head - actual_num_q_heads_per_kv_head),
-                (0, head_dim - actual_head_dim),
-            ),
-            constant_values=0,
-        ).reshape(
+    # Swap tokens and kv heads while q is still 4D, and split the q-head axis
+    # into (heads // packing, packing) only afterwards.
+    #
+    # Splitting first leaves the two minor dims at (q_packing, head_dim) =
+    # (2, 128) for bf16, and XLA cannot reach that layout from a transpose
+    # directly: it stages through VMEM, so the swap costs a copy in, a bitcast
+    # and a copy back out. On the 4D view the minor dims stay
+    # (num_q_heads_per_kv_head, head_dim), which a single HBM-to-HBM copy does
+    # reach, and the trailing reshape is then a pure bitcast onto exactly the
+    # operand the kernel already asks for -- bf16[K,T,G/p,p,H] with layout
+    # {4,3,2,1,0:T(2,128)(2,1)}. The bytes handed to the kernel are unchanged,
+    # so nothing downstream moves.
+    #
+    # v6e-1, Qwen3-4B, one 2048-token prefill step, total device self time:
+    #   bf16       36,406 us -> 36,116 us
+    #   int8 W8A8  30,202 us -> 28,929 us   (the layout ops around the kernel
+    #                                        drop from 5.9 ms to 4.6 ms)
+    # Greedy generations are token-for-token identical.
+    #
+    # The win needs num_q_heads_per_kv_head to be a power of two -- XLA tiles
+    # T(4,128)/T(8,128)/T(16,128) cleanly but not T(6,128)/T(12,128) -- and it
+    # scales with q_packing, so a quantized q moves the threshold from 4 to 8.
+    # Everything else (MHA, ratio 2, non-power-of-two ratios, one kv head) is a
+    # no-op rather than a regression: num_q_heads_per_kv_head is align_to(...,
+    # q_packing), so the 4D minor dims are never smaller than the 5D ones.
+    #
+    # TODO(jevinjiang): Explore fusing swapping non-tiling axis to DMA. That
+    # would remove the remaining copy entirely, not just the VMEM round trip.
+    q = jnp.pad(
+        q.reshape(
             max_num_tokens,
             actual_num_kv_heads,
-            num_q_heads_per_kv_head // q_packing,
-            q_packing,
-            head_dim,
-        )
-        # TODO(jevinjiang): Explore fusing swapping non-tiling axis to DMA.
-        .swapaxes(0, 1))
+            actual_num_q_heads_per_kv_head,
+            actual_head_dim,
+        ),
+        (
+            (0, 0),
+            (0, 0),
+            (0, num_q_heads_per_kv_head - actual_num_q_heads_per_kv_head),
+            (0, head_dim - actual_head_dim),
+        ),
+        constant_values=0,
+    ).swapaxes(0, 1).reshape(
+        actual_num_kv_heads,
+        max_num_tokens,
+        num_q_heads_per_kv_head // q_packing,
+        q_packing,
+        head_dim,
+    )
     # TODO(kyuyeunk, chengjiyao): Add kv quantization here.
     kv = merge_kv(k, v)
     return q, kv
