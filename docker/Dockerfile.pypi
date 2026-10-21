@@ -1,27 +1,30 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # ==============================================================================
 # Dockerfile.pypi Purpose:
-# This Dockerfile is used for building and testing vLLM-TPU as a distributable 
-# Python package. 
-#
-# Key differences from the standard Dockerfile:
-# 1. It builds a redistributable wheel (.whl) for vllm-tpu.
-# 2. It installs the 'tpu-inference' package from a package index.
-# 3. Use this file if you are verifying the PyPI distribution flow or need 
-#    a production-ready wheel installation rather than an editable source build.
+# This Dockerfile is used for building and testing vLLM-TPU as a distributable
+# Python package.
 # ==============================================================================
 
 ARG BASE_IMAGE="python:3.12-slim-bookworm"
-# The latest main will be used if arg unspecified
 ARG VLLM_COMMIT_HASH=""
 
 FROM $BASE_IMAGE
 
 ARG IS_TEST="false"
 
-# Update pip
-RUN pip install --upgrade pip
-
-# Install some basic utilities
 RUN apt-get update && apt-get install -y \
     git \
     libopenmpi-dev \
@@ -33,35 +36,40 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     build-essential \
     cmake \
+    ninja-build \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# Install tpu_inference
+RUN ln -sf "$(command -v python)" /usr/bin/python3 && \
+    pip install --no-cache-dir --upgrade pip uv build
+
+ENV CXX=g++
+ENV CC=gcc
+ENV VLLM_TARGET_DEVICE=empty
+ENV UV_TORCH_BACKEND=cpu
+
 WORKDIR /workspace/tpu_inference
-COPY requirements.txt .
-RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt --retries 3
-COPY requirements_benchmarking.txt .
-# These are needed for the E2E benchmarking tests (i.e. tests/e2e/benchmarking/mlperf.sh)
-RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements_benchmarking.txt --retries 3
-# Install test requirements
-COPY requirements_test.txt .
-RUN  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then \
-        pip install -r requirements_test.txt --retries 3; \
+COPY pyproject.toml .
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system \
+      -r pyproject.toml \
+      --extra benchmarking
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ "$IS_TEST" = "true" ]; then \
+        uv pip install --system -r pyproject.toml --group test; \
     fi
 
 COPY . .
-# Build tpu_inference
-RUN python3 -m pip install build
-RUN python3 -m build
-
-# Build vllm-tpu wheel
-WORKDIR /workspace
 ARG VLLM_COMMIT_HASH
 RUN VLLM_TPU_VERSION=$(date -u +%Y%m%d) && \
-    bash tpu_inference/.buildkite/scripts/build_vllm_tpu.sh --local "${VLLM_TPU_VERSION}" "${VLLM_COMMIT_HASH}"
+    RELEASE_VERSION="0.0.0.dev${VLLM_TPU_VERSION}" \
+    bash .buildkite/scripts/build_core_wheel.sh && \
+    RELEASE_VERSION="0.0.0.dev${VLLM_TPU_VERSION}" \
+    VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH}" \
+    bash .buildkite/scripts/build_vllm_tpu.sh
 
-# Install vllm-tpu wheel
-RUN pip install --no-cache-dir vllm/dist/*.whl
-
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system --find-links dist dist/tpu_inference-*.whl dist/vllm_tpu-*.whl
 
 CMD ["/bin/bash"]
