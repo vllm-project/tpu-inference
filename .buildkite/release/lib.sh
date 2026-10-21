@@ -19,7 +19,10 @@
 # Where the release image is staged before anyone approves it. GAR is internal;
 # Docker Hub is what users pull.
 RELEASE_GAR="${RELEASE_GAR:-us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci}"
-RELEASE_IMAGE="${RELEASE_GAR}/vllm-tpu-release"
+# The same image as CI's, under release-* tags, which CI's
+# <commit>-<vllm commit>-<tpu> tags never collide with.
+RELEASE_IMAGE="${RELEASE_GAR}/vllm-tpu"
+RELEASE_TAG_PREFIX="release-"
 RELEASE_DOCKERHUB_REPO="${RELEASE_DOCKERHUB_REPO:-vllm/vllm-tpu}"
 RELEASE_DOCKERHUB_USERNAME="${RELEASE_DOCKERHUB_USERNAME:-tpuinference}"
 

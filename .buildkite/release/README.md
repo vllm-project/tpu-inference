@@ -23,7 +23,8 @@ code being released: its `docker/Dockerfile` and `.buildkite/vllm_lkg.version`.
      to be a version of the branch's `X.Y.Z`) and warns if `vX.Y.Z` is already
      on Docker Hub;
    - **builds once**: the image, from the release checkout's Dockerfile and vLLM
-     pin, staged in GAR as `vllm-tpu-release:<version>-build<N>`.
+     pin, staged in GAR as `vllm-tpu:release-<version>-build<N>` (CI's own
+     `vllm-tpu` tags are `<commit>-<vllm commit>-<tpu>`, so they never collide).
 4. **Approve** the publish block. It names the staged digest and asks whether
    to move `latest` (never for a pre-release; no default) and whether an
    existing Docker Hub tag may be replaced.
@@ -66,3 +67,6 @@ Build env knobs:
   `us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci`
   (as CI's image builders on `cpu_64_core` already do) and have `docker buildx` with
   `imagetools create --prefer-index`.
+- That repository's cleanup policy keeps `vllm-tpu:release-*` tags at least
+  until they are published: CI pushes many `vllm-tpu` tags a day, so a
+  "keep the newest N" rule would otherwise remove a staged release image.

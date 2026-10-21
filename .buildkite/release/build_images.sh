@@ -14,9 +14,9 @@
 # limitations under the License.
 
 # Build vllm/vllm-tpu from the release checkout and stage it in GAR as
-# <version>-build<N>. Nothing goes to Docker Hub here: the publish step copies
-# the staged image there by digest, so users get the exact bytes this build
-# made.
+# vllm-tpu:release-<version>-build<N>. Nothing goes to Docker Hub here: the
+# publish step copies the staged image there by digest, so users get the exact
+# bytes this build made.
 #
 # Built the way the nightly image is, from the release checkout's own
 # docker/Dockerfile and vLLM pin (.buildkite/vllm_lkg.version), which belong
@@ -26,7 +26,7 @@ set -euo pipefail
 source "${RELEASE_TOOLS}/release/lib.sh"
 
 VERSION="$(release_version)"
-TAG="${RELEASE_IMAGE}:${VERSION}-build${BUILDKITE_BUILD_NUMBER}"
+TAG="${RELEASE_IMAGE}:${RELEASE_TAG_PREFIX}${VERSION}-build${BUILDKITE_BUILD_NUMBER}"
 
 # A release is built from the pinned vLLM, never from vLLM HEAD.
 VLLM_COMMIT_HASH="$(tr -d '[:space:]' < .buildkite/vllm_lkg.version 2>/dev/null || true)"
@@ -34,9 +34,11 @@ VLLM_COMMIT_HASH="$(tr -d '[:space:]' < .buildkite/vllm_lkg.version 2>/dev/null 
   || die ".buildkite/vllm_lkg.version does not hold a vLLM commit: '${VLLM_COMMIT_HASH}'."
 
 # Leftovers of earlier release builds that failed before their own cleanup, and
-# the build cache. Only ours: other images on the agent aren't ours to remove.
+# the build cache. Only our release-* tags: CI's vllm-tpu images and the
+# agent's other images aren't ours to remove.
 echo "--- :broom: Cleaning up earlier release images and the build cache"
-docker images --format '{{.Repository}}:{{.Tag}}' "${RELEASE_IMAGE}" \
+docker images --filter "reference=${RELEASE_IMAGE}:${RELEASE_TAG_PREFIX}*" \
+  --format '{{.Repository}}:{{.Tag}}' \
   | xargs -r docker rmi -f >/dev/null 2>&1 || true
 docker builder prune -f >/dev/null 2>&1 || true
 
