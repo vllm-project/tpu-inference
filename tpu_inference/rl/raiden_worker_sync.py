@@ -329,7 +329,8 @@ class RaidenWorkerSync:
         self.names: List[str] = []
         self.arrays: List[Any] = []
         self.ip = bind_ip or local_ip()
-        self._parallelism = parallelism
+        self._parallelism = int(
+            os.getenv("RAIDEN_PARALLELISM", str(parallelism)))
         self._auto_h2d: bool = ((not is_parallel_h2h_enabled())
                                 if auto_h2d is None else bool(auto_h2d))
         self._effective_auto_h2d: bool = self._auto_h2d
@@ -354,6 +355,20 @@ class RaidenWorkerSync:
             else:
                 self._auto_h2d = requested_auto_h2d
         self.names, self.arrays = _filter_bindable(*flatten_weights(state))
+        # The synchronizer's host-side allocation is the usual suspect when bind
+        # fails with a bare `MemoryError: std::bad_alloc`, and the message says
+        # nothing about size. Log both footprints: `global` is every shard of
+        # every bound array, `addressable` only the shards this process owns.
+        # They differ by the number of hosts, so which one the allocation tracks
+        # decides whether a given model fits.
+        _global_bytes = sum(getattr(a, "nbytes", 0) for a in self.arrays)
+        _local_bytes = sum(
+            getattr(getattr(s, "data", None), "nbytes", getattr(
+                s, "nbytes", 0)) for a in self.arrays
+            for s in getattr(a, "addressable_shards", ()))
+        logger.info(
+            "binding %d weight arrays: global=%.1f GiB, addressable=%.1f GiB",
+            len(self.arrays), _global_bytes / 2**30, _local_bytes / 2**30)
         if _ws_lib is None:
             raise RuntimeError(
                 f"{self.job_name}: tpu_sync is not importable, cannot bind "
@@ -570,7 +585,8 @@ class RaidenWorkerSync:
                 "job_name":
                 self.job_name,
                 "job_replica_id":
-                str(self.worker_index) if self.worker_index else "",
+                str(self.worker_index)
+                if self.worker_index is not None else "",
             },
             "shards": shards_list,
             "control_plane_rpc_address": control_addr,
