@@ -90,6 +90,8 @@ if TYPE_CHECKING:
     MOE_FOLD_ROUTING_INTO_DISPATCH: bool = False
     RAGGED_GATHER_MAX_ROW_SUBCHUNKS: int = 4
     RAGGED_GATHER_TRIM_ROWS: bool = True
+    MOE_TC_PERMUTE: bool = False
+    MOE_TC_PERMUTE_CAPACITY_FACTOR: float = 2.0
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
@@ -571,6 +573,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # off, the block-padded output goes straight to gmm_v2, skipping the copy.
     "RAGGED_GATHER_TRIM_ROWS":
     env_bool("RAGGED_GATHER_TRIM_ROWS", default=True),
+    # EP dispatch permute and combine on the TensorCore instead of the
+    # SparseCore kernels: each EP shard gathers only its own rows into a
+    # compact buffer, runs the GMMs on it and combines with a one-hot matmul
+    # over those rows. For chips where the SparseCore is the bottleneck (TPU8i:
+    # one per chip, shared by both TensorCores). See fused_moe_gmm.py.
+    "MOE_TC_PERMUTE":
+    env_bool("MOE_TC_PERMUTE", default=False),
+    # Size of that compact buffer: this many times a shard's mean row count,
+    # rounded up to a multiple of 128 and at least 512. A shard with more rows
+    # loops over them a buffer-full at a time (correct, but slower).
+    "MOE_TC_PERMUTE_CAPACITY_FACTOR":
+    lambda: float(os.getenv("MOE_TC_PERMUTE_CAPACITY_FACTOR") or "2.0"),
     # Gap between token-bucket padding sizes for TPU precompilation. When 0,
     # buckets grow as powers of two; otherwise buckets increase by this gap
     # once past the power-of-two ramp. Previously provided by vllm.envs, which

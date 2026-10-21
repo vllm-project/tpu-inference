@@ -34,7 +34,7 @@ from tpu_inference.layers.common.linear import _safe_calculate_tiling
 from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_mesh_shape_product
+from tpu_inference.utils import align_to, get_mesh_shape_product
 
 logger = init_logger(__name__)
 
@@ -219,6 +219,118 @@ def _hierarchical_collect_plan(mesh: Mesh, hidden: int) -> tuple | None:
     return pair_axis, perm
 
 
+# MOE_TC_PERMUTE: batches of up to this many tokens gather a shard's rows with
+# a one-hot matmul (capacity x tokens x hidden on the MXU); larger ones use a
+# plain gather, whose cost doesn't grow with the number of tokens.
+_TC_PERMUTE_ONEHOT_GATHER_MAX_TOKENS = 1024
+
+
+def tc_permute_capacity(num_rows: int, num_ep_shards: int) -> int:
+    """Rows in each EP shard's compact buffer.
+
+    The capacity factor times the shard's average share of num_rows (one data
+    shard's tokens * topk), rounded up to a multiple of 128. At least 512, and
+    never more than num_rows.
+    """
+    factor = envs.MOE_TC_PERMUTE_CAPACITY_FACTOR
+    if factor <= 0:
+        raise ValueError(
+            f"MOE_TC_PERMUTE_CAPACITY_FACTOR must be positive, got {factor}")
+    # round, not ceil: 1.1 * 1280 is 1408.0000000000002 in float.
+    capacity = align_to(round(factor * num_rows / num_ep_shards), 128)
+    return min(num_rows, max(512, capacity))
+
+
+def _tc_local_moe(tokens: jax.Array, token_indices_sorted: jax.Array,
+                  w1: jax.Array, w1_scale: jax.Array | None,
+                  w1_bias: jax.Array | None, w2: jax.Array,
+                  w2_scale: jax.Array | None, w2_bias: jax.Array | None,
+                  group_sizes: jax.Array, group_offset: jax.Array,
+                  topk_argsort_revert_indices: jax.Array,
+                  topk_weights: jax.Array, *, activation: str, topk: int,
+                  capacity: int) -> jax.Array:
+    """Runs this shard's experts, gathering and combining on the TensorCore.
+
+    1. Gather: copy the shard's rows (its slice of the expert-sorted order)
+       into a compact buffer of `capacity` rows.
+    2. Experts: run both GMMs on the buffer. gmm_v2 reads group g from row
+       sum(group_sizes[:g]), so passing each group's row count within the
+       buffer (0 for other shards' experts) makes it start at row 0.
+    3. Combine: add each row's result, times its top-k weight, into its
+       token, with a one-hot matmul.
+
+    A shard with more rows than `capacity` repeats these steps one
+    buffer-full at a time and adds up the results, so the buffer never
+    grows.
+
+    Returns the shard's partial sums, [num_tokens, hidden]; adding them up
+    over the EP shards gives the layer's output.
+    """
+    num_rows = token_indices_sorted.shape[0]
+    num_tokens = tokens.shape[0]
+    capacity = min(capacity, num_rows)
+    group_start = group_offset[0]
+    group_offsets = jnp.cumulative_sum(group_sizes, include_initial=True)
+    start = group_offsets[group_start]
+    end = group_offsets[group_start + w1.shape[0]]
+    # Each group's rows relative to the shard's first row; other groups empty.
+    groups = jnp.arange(group_sizes.size)
+    local = (groups >= group_start) & (groups < group_start + w1.shape[0])
+    group_lo = jnp.where(local, group_offsets[:-1] - start, 0)
+    group_hi = jnp.where(local, group_offsets[1:] - start, 0)
+    padded_indices = jnp.pad(token_indices_sorted, (0, capacity))
+    revert = topk_argsort_revert_indices.reshape(num_tokens, topk) - start
+    weights = topk_weights.reshape(num_tokens, topk).astype(tokens.dtype)
+
+    def chunk(k: jax.Array) -> jax.Array:
+        """Steps 1-3 for the shard's k-th buffer-full of rows."""
+        lo = k * capacity
+        idx = jax.lax.dynamic_slice(padded_indices, (start + lo, ),
+                                    (capacity, ))
+        if num_tokens <= _TC_PERMUTE_ONEHOT_GATHER_MAX_TOKENS:
+            x = jnp.dot(jax.nn.one_hot(idx, num_tokens, dtype=tokens.dtype),
+                        tokens,
+                        preferred_element_type=jnp.float32).astype(
+                            tokens.dtype)
+        else:
+            x = tokens[idx]
+        chunk_group_sizes = (jnp.clip(group_hi - lo, 0, capacity) -
+                             jnp.clip(group_lo - lo, 0, capacity))
+        gmm1_res = gmm_wrapper(x,
+                               w1,
+                               w1_scale,
+                               w1_bias,
+                               chunk_group_sizes,
+                               group_offset,
+                               fuse_act=activation,
+                               preferred_element_type=x.dtype)
+        gmm1_res = gmm1_res[:, :w2.shape[1]]
+        gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias,
+                               chunk_group_sizes, group_offset)
+        # gmm_v2 runs with zero_initialize=False: rows past the chunk's are
+        # stale HBM, and 0 * NaN in the matmul below would spread.
+        gmm2_res = jnp.where((jnp.arange(capacity)
+                              < end - start - lo)[:, None], gmm2_res, 0)
+        rel = jnp.where((revert >= lo) & (revert < lo + capacity), revert - lo,
+                        -1)
+        sel = (jax.nn.one_hot(rel, capacity, dtype=tokens.dtype) *
+               weights[..., None]).sum(axis=1)
+        return jnp.dot(sel, gmm2_res, preferred_element_type=jnp.float32)
+
+    def all_chunks() -> jax.Array:
+        return jax.lax.fori_loop(
+            0, (end - start + capacity - 1) // capacity,
+            lambda k, acc: acc + chunk(k),
+            jnp.zeros((num_tokens, w2.shape[2]), jnp.float32))
+
+    if capacity == num_rows:
+        out = chunk(0)
+    else:
+        out = jax.lax.cond(end - start <= capacity, lambda: chunk(0),
+                           all_chunks)
+    return out.astype(tokens.dtype)
+
+
 def moe_gmm_local(x: jax.Array,
                   w1: jax.Array,
                   w1_scale: jax.Array | None,
@@ -230,6 +342,7 @@ def moe_gmm_local(x: jax.Array,
                   group_offset: jax.Array,
                   topk_argsort_revert_indices: jax.Array,
                   topk_weights: jax.Array,
+                  token_indices_sorted: jax.Array | None = None,
                   *,
                   activation: str,
                   topk: int,
@@ -239,16 +352,23 @@ def moe_gmm_local(x: jax.Array,
                   scatter_results: bool = False,
                   moe_chunk_size: int = 0,
                   defer_all_reduce: bool = False,
-                  hierarchical_collect: tuple | None = None) -> jax.Array:
+                  hierarchical_collect: tuple | None = None,
+                  tc_capacity: int = 0) -> jax.Array:
     """Main MoE logic on a local shard can run in TP or EP mode.
 
     Set parallelism for "tp" or "ep"
+
+    With MOE_TC_PERMUTE (EP only), token_indices_sorted is given and x holds
+    the tokens before the permute, [tokens, hidden]; _tc_local_moe then does
+    the gather, the GMMs and the combine.
     """
 
     assert parallelism in ["tp", "ep"]
+    use_tc_permute = token_indices_sorted is not None
+    assert not use_tc_permute or (parallelism == "ep" and tc_capacity > 0)
 
     # GMM1 computes x @ (W_up | W_gate) together and activation, output is [tokens,padded_intermediate_size]
-    gmm1_res = gmm_wrapper(
+    gmm1_res = None if use_tc_permute else gmm_wrapper(
         x,
         w1,
         w1_scale,
@@ -265,9 +385,10 @@ def moe_gmm_local(x: jax.Array,
     if parallelism == "tp" and w2_bias is not None:
         shard_id = jax.lax.axis_index(ShardingAxisName.MLP_TENSOR).sum()
         w2_bias = jnp.where(shard_id == 0, w2_bias, 0)
-    gmm1_res = gmm1_res[:, :w2.shape[1]]  # trim to hidden size if padded
-    gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
-                           group_offset)
+    if not use_tc_permute:
+        gmm1_res = gmm1_res[:, :w2.shape[1]]  # trim to hidden size if padded
+        gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
+                               group_offset)
 
     # Not gmm2_res.shape[0]: x may carry padding rows past the last group
     # (RAGGED_GATHER_TRIM_ROWS=False).
@@ -306,7 +427,8 @@ def moe_gmm_local(x: jax.Array,
     is_onehot = (local_group_size < group_sizes.size) and (
         onehot_moe_permute_threshold > 0
         and batch_size <= onehot_moe_permute_threshold)
-    if moe_chunk_size > 0 and num_tokens > moe_chunk_size * scatter_axis_size and not is_onehot:
+    if (moe_chunk_size > 0 and num_tokens > moe_chunk_size * scatter_axis_size
+            and not is_onehot and not use_tc_permute):
         actual_chunk_size = moe_chunk_size * scatter_axis_size
     else:
         actual_chunk_size = num_tokens
@@ -324,7 +446,9 @@ def moe_gmm_local(x: jax.Array,
             revert_indices_2d, scatter_axis_size, num_chunks)
         topk_argsort_revert_indices = revert_indices_2d.flatten()
 
-    if local_group_size < group_sizes.size:
+    if use_tc_permute:
+        mask = None
+    elif local_group_size < group_sizes.size:
         row_mask = valid_rows_mask(
             gmm1_res.shape[0],
             group_sizes,
@@ -351,9 +475,25 @@ def moe_gmm_local(x: jax.Array,
 
         cur_indices = topk_argsort_revert_indices[start_idx:end_idx]
         cur_weights = topk_weights[start_tok:end_tok]
-        cur_mask = mask[start_tok:end_tok]
 
-        if local_group_size < group_sizes.size:
+        if use_tc_permute:
+            chunk_hidden = _tc_local_moe(x,
+                                         token_indices_sorted,
+                                         w1,
+                                         w1_scale,
+                                         w1_bias,
+                                         w2,
+                                         w2_scale,
+                                         w2_bias,
+                                         group_sizes,
+                                         group_offset,
+                                         topk_argsort_revert_indices,
+                                         topk_weights,
+                                         activation=activation,
+                                         topk=topk,
+                                         capacity=tc_capacity)
+        elif local_group_size < group_sizes.size:
+            cur_mask = mask[start_tok:end_tok]
             if onehot_moe_permute_threshold > 0 and batch_size <= onehot_moe_permute_threshold:
                 revert_indices = cur_indices.reshape(-1, topk)
                 onehot = jax.nn.one_hot(revert_indices,
@@ -513,7 +653,13 @@ def expert_parallel_gmm(
     moe_chunk_size: int = 0,
     scatter_results: bool = False,
     defer_all_reduce: bool = False,
+    token_indices_sorted: jax.Array | None = None,
 ) -> jax.Array:
+    """Runs the MoE experts with expert parallelism (see moe_gmm_local).
+
+    token_indices_sorted is given only with MOE_TC_PERMUTE; x then holds the
+    tokens before the permute.
+    """
     ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
     ep_p_spec = P(ShardingAxisName.EXPERT)
     data_p_spec = P(ShardingAxisName.MLP_DATA)
@@ -540,12 +686,31 @@ def expert_parallel_gmm(
     else:
         final_out_specs = data_p_spec
 
+    tc_capacity = 0
+    if token_indices_sorted is not None:
+        # The rows of every data shard, concatenated; each device has one data
+        # shard's rows, split over the EP shards by expert.
+        local_rows = token_indices_sorted.shape[0] // get_mesh_shape_product(
+            mesh, ShardingAxisName.MLP_DATA)
+        tc_capacity = tc_permute_capacity(local_rows, ep_size)
+        logger.info_once(
+            "MOE_TC_PERMUTE: EP permute and combine on the TensorCore, "
+            "compact buffer of %d rows (of %d) per shard", tc_capacity,
+            local_rows)
+        if moe_chunk_size > 0:
+            logger.warning_once(
+                "MOE_TC_PERMUTE: moe_chunk_size=%d is ignored. The TensorCore "
+                "path gathers, runs the experts and combines all tokens in "
+                "one pass, so its combine and reduce aren't split into token "
+                "chunks.", moe_chunk_size)
+
     return jax.shard_map(
         functools.partial(
             moe_gmm_local,
             activation=activation,
             topk=topk,
             parallelism="ep",
+            tc_capacity=tc_capacity,
             onehot_moe_permute_threshold=onehot_moe_permute_threshold,
             enable_rs_kernel=enable_rs_kernel,
             scatter_results=scatter_results,
@@ -566,6 +731,7 @@ def expert_parallel_gmm(
             ep_p_spec,
             data_p_spec,
             data_p_spec,
+            None if token_indices_sorted is None else data_p_spec,
         ),
         out_specs=(final_out_specs),
         check_vma=False,
@@ -581,6 +747,7 @@ def expert_parallel_gmm(
         group_offset,
         topk_argsort_revert_indices,
         topk_weights,
+        token_indices_sorted,
     )
 
 
@@ -971,6 +1138,13 @@ def fused_moe_func(
             "kernel (use_ep=%s, use_gmm_fused_rs_kernel=%s).", use_ep,
             use_gmm_fused_rs_kernel)
 
+    if envs.MOE_TC_PERMUTE and (not use_ep or use_gmm_fused_rs_kernel):
+        logger.warning_once(
+            "MOE_TC_PERMUTE is set but ignored: it only applies to the "
+            "expert-parallel GMM path without the fused reduce-scatter kernel "
+            "(use_ep=%s, use_gmm_fused_rs_kernel=%s).", use_ep,
+            use_gmm_fused_rs_kernel)
+
     if use_ep and use_gmm_fused_rs_kernel:
         from tpu_inference.kernels.experimental.fused_moe.fused_moe_rs import \
             fused_moe_func_rs
@@ -1067,6 +1241,16 @@ def fused_moe_func(
         topk_indices = _override_token_indices_for_random_routing(
             topk_indices, global_num_experts)
 
+    # MOE_TC_PERMUTE: the permute moves into moe_gmm_local (_tc_local_moe), so
+    # the tokens and their expert-sorted indices are passed on as they are.
+    use_tc_permute = use_ep and envs.MOE_TC_PERMUTE
+    if use_tc_permute and num_valid_tokens is not None:
+        logger.warning_once(
+            "MOE_TC_PERMUTE with padding routed to expert 0 "
+            "(MOE_ROUTE_PADDING_TO_EXPERT0): every padding row goes to the EP "
+            "shard holding expert 0, which can overflow its compact buffer "
+            "and loop over many buffer-fulls while the other shards wait.")
+
     def _process_tokens_locally(hidden_states_local, topk_indices_local):
         num_tokens_local = hidden_states_local.shape[0]
         topk_indices_flat = topk_indices_local.flatten()
@@ -1094,7 +1278,9 @@ def fused_moe_func(
             shard_output_start = group_offsets[experts_start]
             shard_output_end = group_offsets[experts_end]
             num_tokens = token_indices_sorted.shape[0]
-            if num_tokens <= onehot_moe_permute_threshold:
+            if use_tc_permute:
+                x = hidden_states_local
+            elif num_tokens <= onehot_moe_permute_threshold:
                 # Use one-hot matmul for permutation, which can be faster
                 # for small batch size
                 onehot = jax.nn.one_hot(token_indices_sorted,
@@ -1113,6 +1299,9 @@ def fused_moe_func(
         else:
             x = hidden_states_local[token_indices_sorted]
 
+        if use_tc_permute:
+            return (x, group_sizes_local, topk_argsort_revert_indices,
+                    token_indices_sorted)
         return x, group_sizes_local, topk_argsort_revert_indices
 
     if not fold_routing:
@@ -1120,20 +1309,19 @@ def fused_moe_func(
                                         mesh,
                                         fp8=all_gather_fp8)
 
-    x, group_sizes, topk_argsort_revert_indices = jax.shard_map(
+    outs = jax.shard_map(
         _process_tokens_locally,
         mesh=mesh,
         in_specs=(
             P(ShardingAxisName.MLP_DATA, None),
             P(ShardingAxisName.MLP_DATA, None),
         ),
-        out_specs=(
-            P(ShardingAxisName.MLP_DATA),
-            P(ShardingAxisName.MLP_DATA),
-            P(ShardingAxisName.MLP_DATA),
-        ),
+        out_specs=(P(ShardingAxisName.MLP_DATA), ) *
+        (4 if use_tc_permute else 3),
         check_vma=False,
     )(hidden_states, topk_indices)
+    x, group_sizes, topk_argsort_revert_indices = outs[:3]
+    token_indices_sorted = outs[3] if use_tc_permute else None
 
     try:
         x = jnp.pad(x, ((0, 0), (0, padded_hidden_size - hidden_size)))
@@ -1162,6 +1350,7 @@ def fused_moe_func(
             scatter_results=scatter_results,
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
+            token_indices_sorted=token_indices_sorted,
         )
     else:
         x = tensor_parallel_gmm(
