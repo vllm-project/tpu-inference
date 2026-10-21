@@ -27,6 +27,7 @@ import torch
 from flywheel_tpu import flash_attn_func, flash_attn_with_kvcache
 from flywheel_tpu.flash_attn_interface import PAGE_SIZE_MULTIPLE
 from flywheel_tpu.pallas.block_sizes import FWD_BLOCKS, NUM_LANES
+from flywheel_tpu.pallas.copy_utils import merged_cache_heads
 from flywheel_tpu.pallas.kv_cache_write import write_kv_cache_pages
 from jax import lax
 from jax.sharding import Mesh, NamedSharding
@@ -55,7 +56,8 @@ logger = init_logger(__name__)
 flash_attn_varlen_func = jax.jit(
     flywheel_tpu.flash_attn_varlen_func,
     static_argnames=("max_seqlen_q", "max_seqlen_k", "softmax_scale", "causal",
-                     "interpret", "token_major"),
+                     "interpret", "token_major", "k_descale", "v_descale",
+                     "nheads_k"),
 )
 
 
@@ -294,13 +296,18 @@ def paged_cache_decode(
     num_active: jax.Array,  # i32 scalar: leading rows that are requests
     *,
     sm_scale: float,
+    num_kv_heads: int,
+    k_scale: float,
+    v_scale: float,
 ) -> tuple[jax.Array, jax.Array]:
     """One query token per row against the paged cache, for the leading
     min(max_num_seqs, T) rows of the token bucket; returns those rows, NOT
     padded back to T, and the cache the kernel aliased through.
 
     Passing k/v lets the kernel append them to the pages itself; None means
-    the DMA writer has already copied this step's tokens there.
+    the DMA writer has already copied this step's tokens there. num_kv_heads
+    is the shard's KV head count, which an fp8 cache's padded head axis does
+    not give.
     """
     max_num_seqs = kv_lens.shape[0]
     pages_per_seq = page_indices.shape[0] // max_num_seqs
@@ -324,6 +331,9 @@ def paged_cache_decode(
         block_table=block_table,
         num_active=num_active,
         softmax_scale=sm_scale,
+        k_descale=k_scale,
+        v_descale=v_scale,
+        nheads_k=num_kv_heads,
     )
     return output[:, 0], cache
 
@@ -338,6 +348,9 @@ def _paged_extend_rows(
     num_active: jax.Array,
     *,
     sm_scale: float,
+    num_kv_heads: int,
+    k_scale: float,
+    v_scale: float,
 ) -> jax.Array:
     """The paged varlen kernel over the requests after the leading
     num_decode decode rows, reading their cached prefix through the block
@@ -376,43 +389,53 @@ def _paged_extend_rows(
         block_table=block_table_window,
         seqused_k=kv_lens_window,
         num_active=num_active - num_decode,
+        k_descale=k_scale,
+        v_descale=v_scale,
+        nheads_k=num_kv_heads,
     ).transpose(1, 0, 2)
 
 
 def _dense_prefill_rows(q: jax.Array, k: jax.Array, v: jax.Array, *,
-                        sm_scale: float) -> jax.Array:
+                        sm_scale: float, k_scale: float,
+                        v_scale: float) -> jax.Array:
     """The dense kernel on the step's one (1, T) row of this step's K/V."""
     num_tokens, num_heads, head_dim = q.shape
+    # Note: the prefill kernels take bf16 K/V. Every fp8 value is exact in
+    # bf16, so an fp8 step attends the very values the cache keeps for later
+    # steps, with k_scale in the softmax scale and v_scale on the output.
     output = flash_attn_func(
         fold_heads_outer(q),
-        fold_heads_outer(k),
-        fold_heads_outer(v),
+        fold_heads_outer(k.astype(q.dtype)),
+        fold_heads_outer(v.astype(q.dtype)),
         causal=True,
-        softmax_scale=sm_scale,
+        softmax_scale=sm_scale * k_scale,
         token_major=False,
         heads_outer_fold=True,
     )
     # Note: a trailing transpose, which XLA folds into o_proj instead of
     # copying.
-    return output.reshape(num_heads, num_tokens, head_dim).transpose(1, 0, 2)
+    output = output.reshape(num_heads, num_tokens, head_dim).transpose(1, 0, 2)
+    return (output.astype(jnp.float32) * v_scale).astype(q.dtype)
 
 
 def _ragged_prefill_rows(q: jax.Array, k: jax.Array, v: jax.Array,
-                         cu_q_lens: jax.Array, *, span: int,
-                         sm_scale: float) -> jax.Array:
+                         cu_q_lens: jax.Array, *, span: int, sm_scale: float,
+                         k_scale: float, v_scale: float) -> jax.Array:
     """The ragged kernel at block span `span` on this step's K/V."""
-    return flash_attn_varlen_func(
+    # Note: bf16 K/V and the K/V scales, as in _dense_prefill_rows.
+    output = flash_attn_varlen_func(
         q.transpose(1, 0, 2),
-        k.transpose(1, 0, 2),
-        v.transpose(1, 0, 2),
+        k.astype(q.dtype).transpose(1, 0, 2),
+        v.astype(q.dtype).transpose(1, 0, 2),
         cu_q_lens,
         cu_q_lens,
         max_seqlen_q=span,
         max_seqlen_k=span,
         causal=True,
-        softmax_scale=sm_scale,
+        softmax_scale=sm_scale * k_scale,
         token_major=False,
     ).transpose(1, 0, 2)
+    return (output.astype(jnp.float32) * v_scale).astype(q.dtype)
 
 
 def _step_kernel_rows(
@@ -428,6 +451,8 @@ def _step_kernel_rows(
     num_active: jax.Array,
     *,
     sm_scale: float,
+    k_scale: float,
+    v_scale: float,
 ) -> jax.Array:
     """The rows after the decode rows, by one step_kernels entry. kernel is a
     Python value, so each lax.switch branch traces only its own kernel: the
@@ -443,16 +468,26 @@ def _step_kernel_rows(
                                   cu_q_lens,
                                   num_decode,
                                   num_active,
-                                  sm_scale=sm_scale)
+                                  sm_scale=sm_scale,
+                                  num_kv_heads=k.shape[1],
+                                  k_scale=k_scale,
+                                  v_scale=v_scale)
     elif kernel == _DENSE_KERNEL:
-        return _dense_prefill_rows(q, k, v, sm_scale=sm_scale)
+        return _dense_prefill_rows(q,
+                                   k,
+                                   v,
+                                   sm_scale=sm_scale,
+                                   k_scale=k_scale,
+                                   v_scale=v_scale)
     else:  # an int: the ragged prefill block span
         return _ragged_prefill_rows(q,
                                     k,
                                     v,
                                     cu_q_lens,
                                     span=kernel,
-                                    sm_scale=sm_scale)
+                                    sm_scale=sm_scale,
+                                    k_scale=k_scale,
+                                    v_scale=v_scale)
 
 
 def step_kernels(padded_num_tokens_per_dp_rank: int) -> tuple[str | int, ...]:
@@ -472,7 +507,7 @@ def flywheel_tpu_attention(
     q: jax.Array,  # [T, N, D]
     k: jax.Array,  # [T, H, D]
     v: jax.Array,  # [T, H, D]
-    kv_cache: jax.Array,  # [num_pages, page_size, 2 * H, D]
+    kv_cache: jax.Array,  # [num_pages, page_size, merged_cache_heads(H), D]
     kv_lens: jax.Array,  # i32[max_num_seqs]
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
@@ -482,6 +517,8 @@ def flywheel_tpu_attention(
     kernel_index: jax.Array,  # i32[1]: into step_kernels(T)
     *,
     sm_scale: float,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
 ) -> tuple[jax.Array, jax.Array]:
     """One shard's attention for any step, in one executable per bucket.
 
@@ -495,6 +532,9 @@ def flywheel_tpu_attention(
     RPA's cumulative request counts of its three request groups. The runner
     puts no request in the middle, prefill-only group, so it is
     [num_decode, num_decode, num_reqs], and only entries 0 and 2 are read.
+
+    An fp8 cache takes k and v as quantize_kv stores them, K / k_scale and
+    V / v_scale in the cache's dtype, with those per-tensor scales.
     """
     head_dim = q.shape[-1]
     if k.shape[-1] != head_dim or v.shape != k.shape:
@@ -525,12 +565,19 @@ def flywheel_tpu_attention(
                                               kv_lens,
                                               page_indices,
                                               num_decode,
-                                              sm_scale=sm_scale)
+                                              sm_scale=sm_scale,
+                                              num_kv_heads=k.shape[1],
+                                              k_scale=k_scale,
+                                              v_scale=v_scale)
 
     # Note: each branch binds one step_kernels entry, a Python value, when
     # the backbone is traced; the traced kernel_index only picks a branch.
     branches = [
-        functools.partial(_step_kernel_rows, kernel, sm_scale=sm_scale)
+        functools.partial(_step_kernel_rows,
+                          kernel,
+                          sm_scale=sm_scale,
+                          k_scale=k_scale,
+                          v_scale=v_scale)
         for kernel in step_kernels(padded_q.shape[0])
     ]
     output = lax.switch(kernel_index[0], branches, padded_q, padded_k,
@@ -571,6 +618,8 @@ def sharded_flywheel_tpu_attention(
     kernel_index: jax.Array,  # i32[dp]
     *,
     sm_scale: float,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
 ) -> tuple[jax.Array, jax.Array]:
     """Shards along KV heads, mirroring sharded_ragged_paged_attention."""
     tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
@@ -588,7 +637,7 @@ def sharded_flywheel_tpu_attention(
 
     qkv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
     # Note: the cache's head axis splits into each shard's
-    # contiguous run of interleaved (K, V) row pairs.
+    # contiguous run of merged K/V head rows (get_kv_cache_shape).
     kv_cache_spec = P(ShardingAxisName.ATTN_DATA, None,
                       ShardingAxisName.ATTN_HEAD, None)
     in_specs = ((qkv_spec, qkv_spec, qkv_spec, kv_cache_spec) +
@@ -596,7 +645,10 @@ def sharded_flywheel_tpu_attention(
     out_specs = (qkv_spec, kv_cache_spec)
 
     def _attention(*args: jax.Array) -> tuple[jax.Array, jax.Array]:
-        return flywheel_tpu_attention(*args, sm_scale=sm_scale)
+        return flywheel_tpu_attention(*args,
+                                      sm_scale=sm_scale,
+                                      k_scale=k_scale,
+                                      v_scale=v_scale)
 
     return jax.shard_map(
         _attention,
@@ -615,8 +667,6 @@ def check_supported(
     attention_chunk_size: int | None,
     attn_logits_soft_cap: float | None,
     q_scale: float | None,
-    k_scale: float | None,
-    v_scale: float | None,
     update_kv_cache: bool,
     use_causal_mask: bool,
 ) -> None:
@@ -638,8 +688,8 @@ def check_supported(
         attention_chunk_size is not None,
         "logits soft cap":
         attn_logits_soft_cap is not None,
-        "q_scale/k_scale/v_scale (quantized KV)":
-        any(s is not None for s in (q_scale, k_scale, v_scale)),
+        "q_scale (quantized Q; per-tensor k_scale and v_scale are supported)":
+        q_scale is not None,
         "update_kv_cache=False (KV-share layers)":
         not update_kv_cache,
         "use_causal_mask=False (non-causal attention)":
@@ -740,9 +790,14 @@ class FlywheelAttentionBackend(AttentionBackend):
             problems.append(
                 f"head_dim {model_config.get_head_size()} is not one of the "
                 f"decode kernel's {_DECODE_HEAD_DIMS}")
-        if cache_config.cache_dtype not in ("auto", "bfloat16"):
+        # Note: an fp8 cache ("fp8" and "fp8_e4m3" are float8_e4m3fn,
+        # "fp8_e5m2" is float8_e5m2) holds quantize_kv's output, which the
+        # kernels read as stored with the layer's per-tensor K/V scales.
+        if cache_config.cache_dtype not in ("auto", "bfloat16", "fp8",
+                                            "fp8_e4m3", "fp8_e5m2"):
             problems.append(
-                f"kv cache dtype {cache_config.cache_dtype!r} is not bfloat16")
+                f"kv cache dtype {cache_config.cache_dtype!r} is not bfloat16 "
+                "or fp8 (fp8_e4m3, fp8_e5m2)")
         if model_config.dtype != torch.bfloat16:
             problems.append(
                 f"model dtype {model_config.dtype} is not bfloat16")
@@ -755,13 +810,16 @@ class FlywheelAttentionBackend(AttentionBackend):
     def get_kv_cache_shape(self, total_num_pages: int, page_size: int,
                            num_kv_heads: int, head_dim: int,
                            kv_dtype: jnp.dtype) -> tuple[int, ...]:
-        # Note: K and V rows interleave per KV head, [k0, v0, k1, v1,
-        # ...] (RPA v3's order). The kernels read a head's (K, V) pair as one
-        # u32 word per lane and stage it as a 2-row window, and the layout has
-        # no singleton axis at one KV head per chip, which XLA laid out with
-        # two whole-cache copies per written layer. bf16 only, so kv_dtype
-        # does not size the cache.
-        return (total_num_pages, page_size, 2 * num_kv_heads,
+        # Note: K and V rows interleave in u32 words per lane: a bf16 word
+        # is one KV head's (K, V) pair, [k0, v0, k1, v1, ...] (RPA v3's
+        # order), and an fp8 word is one head pair's (K, K, V, V), [k0, k1,
+        # v0, v1, ...], an odd head count padded with one zero head. The
+        # kernels read a head's K and V rows with one word load and stage
+        # them as a window of the head axis, and the layout has no singleton
+        # axis at one KV head per chip, which XLA laid out with two
+        # whole-cache copies per written layer.
+        cache_heads = merged_cache_heads(num_kv_heads, kv_dtype)
+        return (total_num_pages, page_size, cache_heads,
                 align_head_dim(head_dim))
 
     def attention(
@@ -795,8 +853,6 @@ class FlywheelAttentionBackend(AttentionBackend):
             attention_chunk_size=attention_chunk_size,
             attn_logits_soft_cap=attn_logits_soft_cap,
             q_scale=q_scale,
-            k_scale=k_scale,
-            v_scale=v_scale,
             update_kv_cache=update_kv_cache,
             use_causal_mask=use_causal_mask,
         )
@@ -821,6 +877,11 @@ class FlywheelAttentionBackend(AttentionBackend):
             shared_md.request_distribution,
             flywheel_md.kernel_index,
             sm_scale=sm_scale,
+            # Note: vLLM passes the per-tensor scales with any
+            # --kv-cache-dtype but auto, whose cache holds quantize_kv's
+            # K / k_scale and V / v_scale; None is a cache of K and V as is.
+            k_scale=1.0 if k_scale is None else k_scale,
+            v_scale=1.0 if v_scale is None else v_scale,
         )
         return kv_cache, output
 
