@@ -220,14 +220,20 @@ def _hierarchical_collect_plan(mesh: Mesh, hidden: int) -> tuple | None:
     return pair_axis, perm
 
 
-# MOE_TC_PERMUTE: batches of up to this many tokens gather a shard's rows with
-# a one-hot matmul (capacity x tokens x hidden on the MXU); larger ones use a
-# plain gather, whose cost doesn't grow with the number of tokens.
+# MOE_TC_PERMUTE thresholds, found by sweeping Qwen3.8-2.4T with random 8k
+# input / 1k output requests. The best values depend on the model and on how
+# evenly tokens spread over the experts.
+#
+# Up to this many tokens, the gather is a one-hot matmul, which beats a plain
+# gather on small batches. Its cost grows with the square of the token count,
+# so larger batches use a plain gather.
 _TC_PERMUTE_ONEHOT_GATHER_MAX_TOKENS = 1024
-# Batches of at least this many tokens combine with _tc_banded_combine (linear
-# in the number of tokens) instead of one one-hot matmul over the whole buffer
-# (tokens x capacity x hidden, and capacity grows with the tokens).
+# From this many tokens, the combine uses _tc_banded_combine instead of one
+# one-hot matmul, whose cost grows with the square of the token count. On one
+# v7x device the banded combine is slower at 2,048 tokens (125 vs 84 us) and
+# faster at 4,096 (195 vs 269 us).
 _TC_PERMUTE_BANDED_COMBINE_MIN_TOKENS = 4096
+# Tokens per block in _tc_banded_combine.
 _TC_PERMUTE_COMBINE_BLOCK_TOKENS = 512
 
 
@@ -1357,15 +1363,20 @@ def fused_moe_func(
         num_tokens_local = hidden_states_local.shape[0]
         topk_indices_flat = topk_indices_local.flatten()
         topk_argsort_indices = jnp.argsort(topk_indices_flat)
-        token_indices = jnp.arange(num_tokens_local,
-                                   dtype=jnp.int32).repeat(topk)
-        token_indices_sorted = token_indices[topk_argsort_indices]
         # Below one_hot is equivalent to jnp.bincount(topk_indices_flat,
         # length=global_num_experts) but is more performant.
         group_sizes_local = jax.nn.one_hot(topk_indices_flat,
                                            global_num_experts,
                                            dtype=jnp.int32).sum(axis=0)
         topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
+        if use_tc_permute:
+            # _tc_local_moe gathers each shard's rows itself.
+            return (hidden_states_local, group_sizes_local,
+                    topk_argsort_revert_indices, topk_argsort_indices)
+
+        token_indices = jnp.arange(num_tokens_local,
+                                   dtype=jnp.int32).repeat(topk)
+        token_indices_sorted = token_indices[topk_argsort_indices]
 
         if use_ep:
             num_ep_shard = get_mesh_shape_product(mesh,
@@ -1380,9 +1391,7 @@ def fused_moe_func(
             shard_output_start = group_offsets[experts_start]
             shard_output_end = group_offsets[experts_end]
             num_tokens = token_indices_sorted.shape[0]
-            if use_tc_permute:
-                x = hidden_states_local
-            elif num_tokens <= onehot_moe_permute_threshold:
+            if num_tokens <= onehot_moe_permute_threshold:
                 # Use one-hot matmul for permutation, which can be faster
                 # for small batch size
                 onehot = jax.nn.one_hot(token_indices_sorted,
@@ -1401,9 +1410,6 @@ def fused_moe_func(
         else:
             x = hidden_states_local[token_indices_sorted]
 
-        if use_tc_permute:
-            return (x, group_sizes_local, topk_argsort_revert_indices,
-                    topk_argsort_indices)
         return x, group_sizes_local, topk_argsort_revert_indices
 
     if not fold_routing:

@@ -580,9 +580,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # one per chip, shared by both TensorCores). See fused_moe_gmm.py.
     "MOE_TC_PERMUTE":
     env_bool("MOE_TC_PERMUTE", default=False),
-    # Size of that compact buffer: this many times a shard's mean row count,
+    # Size of that compact buffer: this many times a shard's average row count,
     # rounded up to a multiple of 128 and at least 512. A shard with more rows
-    # loops over them a buffer-full at a time (correct, but slower).
+    # loops over them a buffer-full at a time while the other shards wait.
+    # Raise it if routing is uneven and many shards loop; lower it to save
+    # memory. At 2.0, Qwen3.8-2.4T (8k/1k requests, 16,384 tokens per step)
+    # overflows in about 1 in 10 MoE layers on each device.
     "MOE_TC_PERMUTE_CAPACITY_FACTOR":
     lambda: float(os.getenv("MOE_TC_PERMUTE_CAPACITY_FACTOR") or "2.0"),
     # Gap between token-bucket padding sizes for TPU precompilation. When 0,
