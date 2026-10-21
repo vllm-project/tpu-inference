@@ -42,32 +42,30 @@ def patch_vllm_scheduler_for_continue_decode():
                                 new_token_ids,
                                 is_stale=False,
                                 **kwargs):
+            # AsyncScheduler's original may call super() without forwarding
+            # is_stale, so check _cd_stale_in_flight as well.
+            stale = is_stale or getattr(scheduler_self, "_cd_stale_in_flight",
+                                        False)
+            computed_before = request.num_computed_tokens
             # Original update appends new_token_ids to request output and trims on stop token.
             res_token_ids, stopped = original_update_base(scheduler_self,
                                                           request,
                                                           new_token_ids,
-                                                          is_stale=is_stale,
+                                                          is_stale=stale,
                                                           **kwargs)
 
-            # schedule() only incremented num_computed_tokens by 1. Advance by the remaining
-            # (N - 1) tokens generated on-device so host-side num_computed_tokens is accurate.
-            # A stale delivery predates the preemption rollback of
-            # num_computed_tokens and must not advance it (mirrors the
-            # `if not output_is_stale` guards in vLLM's update_from_output).
-            # AsyncScheduler's original calls super() WITHOUT forwarding
-            # is_stale, so the async wrapper threads staleness through
-            # _cd_stale_in_flight instead — check both.
-            stale = is_stale or getattr(scheduler_self, "_cd_stale_in_flight",
-                                        False)
-            diff = len(res_token_ids) - 1
-            if diff > 0 and not stale:
-                request.num_computed_tokens += diff
-                if getattr(scheduler_self, "_cd_in_async_update", False):
-                    # In AsyncScheduler, _update_after_schedule() added 1 in-flight placeholder token.
-                    # original_async_update_req subtracts len(res_token_ids) (after stop-token
-                    # trimming) from num_output_placeholders. Pre-compensate by adding diff here
-                    # using the trimmed res_token_ids so num_output_placeholders decrements by 1.
-                    request.num_output_placeholders += diff
+            # schedule() only incremented num_computed_tokens (and in-flight
+            # placeholders under AsyncScheduler) by 1. Reconcile against the
+            # trimmed output count, accounting for any stop-trimmed subtraction
+            # performed by the base scheduler. A stale delivery predates
+            # preemption rollback and must not advance either counter.
+            if res_token_ids and not stale:
+                delta = (computed_before + len(res_token_ids) -
+                         1) - request.num_computed_tokens
+                if delta > 0:
+                    request.num_computed_tokens += delta
+                    if getattr(scheduler_self, "_cd_in_async_update", False):
+                        request.num_output_placeholders += delta
 
             return res_token_ids, stopped
 
