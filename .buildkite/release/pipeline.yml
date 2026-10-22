@@ -27,7 +27,7 @@ steps:
   # Each command step starts by unpacking main's release tooling, pinned to the
   # commit this file was uploaded from, into $RELEASE_TOOLS.
 
-  - label: ":clipboard: Preflight: version"
+  - label: ":clipboard: Preflight: version, Docker Hub"
     key: preflight
     if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
     agents: &queue
@@ -41,13 +41,15 @@ steps:
         export RELEASE_TOOLS="$$RELEASE_TOOLS/.buildkite"
       - bash "$$RELEASE_TOOLS/release/preflight.sh"
 
-  # Placeholder: building and staging the release image comes in a follow-up.
-  - label: ":docker: Build and stage the image (placeholder)"
+  - label: ":docker: Build and stage the image"
     key: build_images
     depends_on: preflight
     if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
     agents: *queue
-    command: 'echo "Docker image: not handled by this pipeline yet."'
+    timeout_in_minutes: 180
+    commands:
+      - *tools
+      - bash "$$RELEASE_TOOLS/release/build_images.sh"
 
   # Placeholder: PyPI is published by .github/workflows/release.yml today.
   - label: ":package: Build the wheels (placeholder)"

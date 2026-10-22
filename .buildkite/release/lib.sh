@@ -29,3 +29,42 @@ release_version() {
 is_prerelease() {
   [[ "$1" =~ (a|b|rc|dev)[0-9]+ ]]
 }
+
+# --- Docker image -------------------------------------------------------------
+
+# Where the release image is staged before anyone approves it: the same image
+# as CI's, under release-* tags, which CI's <commit>-<vllm commit>-<tpu> tags
+# never collide with. GAR is internal; Docker Hub is what users pull.
+RELEASE_GAR="${RELEASE_GAR:-us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci}"
+# shellcheck disable=SC2034 # Read by build_images.sh.
+RELEASE_IMAGE="${RELEASE_GAR}/vllm-tpu"
+# shellcheck disable=SC2034 # Read by build_images.sh.
+RELEASE_TAG_PREFIX="release-"
+RELEASE_DOCKERHUB_REPO="${RELEASE_DOCKERHUB_REPO:-vllm/vllm-tpu}"
+# shellcheck disable=SC2034 # Read by publish_images.sh.
+RELEASE_DOCKERHUB_USERNAME="${RELEASE_DOCKERHUB_USERNAME:-tpuinference}"
+
+# The digest part of <repo>@sha256:<hex>.
+digest_of() {
+  echo "${1##*@}"
+}
+
+# The digest Docker Hub serves for RELEASE_DOCKERHUB_REPO:<tag> to an anonymous
+# user, or nothing if the tag doesn't exist. A HEAD request, which Docker Hub
+# doesn't count against the pull rate limit.
+dockerhub_digest() {
+  local tag="$1" token headers status
+  token="$(curl -fsS --max-time 30 \
+    "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${RELEASE_DOCKERHUB_REPO}:pull" \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])')" \
+    || die "no anonymous Docker Hub token for ${RELEASE_DOCKERHUB_REPO}."
+  headers="$(curl -sS --max-time 30 -I -H "Authorization: Bearer ${token}" \
+    -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json" \
+    "https://registry-1.docker.io/v2/${RELEASE_DOCKERHUB_REPO}/manifests/${tag}" | tr -d '\r')"
+  status="$(head -n 1 <<< "${headers}" | awk '{print $2}')"
+  case "${status}" in
+    200) sed -n 's/^[Dd]ocker-[Cc]ontent-[Dd]igest: //p' <<< "${headers}" ;;
+    404) ;;
+    *) die "Docker Hub answered '${status}' for ${RELEASE_DOCKERHUB_REPO}:${tag}." ;;
+  esac
+}
