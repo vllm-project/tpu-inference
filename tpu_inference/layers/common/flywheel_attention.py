@@ -52,12 +52,12 @@ logger = init_logger(__name__)
 
 # Note: jit here so that every layer calls one shared traced kernel,
 # as flash_attn_with_kvcache and the KV writer already do. Inlined, every layer
-# would lower its own copy, which a warm compile cache does not skip.
+# would lower its own copy, which a warm compile cache does not skip. The K/V
+# descales stay traced, so layers with their own scales share it too.
 flash_attn_varlen_func = jax.jit(
     flywheel_tpu.flash_attn_varlen_func,
     static_argnames=("max_seqlen_q", "max_seqlen_k", "softmax_scale", "causal",
-                     "interpret", "token_major", "k_descale", "v_descale",
-                     "nheads_k"),
+                     "interpret", "token_major", "nheads_k"),
 )
 
 
@@ -395,6 +395,11 @@ def _paged_extend_rows(
     ).transpose(1, 0, 2)
 
 
+def _scale_q(q: jax.Array, k_scale: float) -> jax.Array:
+    """q times the per-tensor K scale in f32, in q's dtype."""
+    return (q.astype(jnp.float32) * k_scale).astype(q.dtype)
+
+
 def _dense_prefill_rows(q: jax.Array, k: jax.Array, v: jax.Array, *,
                         sm_scale: float, k_scale: float,
                         v_scale: float) -> jax.Array:
@@ -402,13 +407,15 @@ def _dense_prefill_rows(q: jax.Array, k: jax.Array, v: jax.Array, *,
     num_tokens, num_heads, head_dim = q.shape
     # Note: the prefill kernels take bf16 K/V. Every fp8 value is exact in
     # bf16, so an fp8 step attends the very values the cache keeps for later
-    # steps, with k_scale in the softmax scale and v_scale on the output.
+    # steps, with k_scale on Q and v_scale on the output. k_scale stays out
+    # of the static softmax_scale, so layers with their own scales share one
+    # kernel, at the cost of one more bf16 rounding of Q.
     output = flash_attn_func(
-        fold_heads_outer(q),
+        fold_heads_outer(_scale_q(q, k_scale)),
         fold_heads_outer(k.astype(q.dtype)),
         fold_heads_outer(v.astype(q.dtype)),
         causal=True,
-        softmax_scale=sm_scale * k_scale,
+        softmax_scale=sm_scale,
         token_major=False,
         heads_outer_fold=True,
     )
@@ -424,7 +431,7 @@ def _ragged_prefill_rows(q: jax.Array, k: jax.Array, v: jax.Array,
     """The ragged kernel at block span `span` on this step's K/V."""
     # Note: bf16 K/V and the K/V scales, as in _dense_prefill_rows.
     output = flash_attn_varlen_func(
-        q.transpose(1, 0, 2),
+        _scale_q(q, k_scale).transpose(1, 0, 2),
         k.astype(q.dtype).transpose(1, 0, 2),
         v.astype(q.dtype).transpose(1, 0, 2),
         cu_q_lens,
@@ -432,7 +439,7 @@ def _ragged_prefill_rows(q: jax.Array, k: jax.Array, v: jax.Array,
         max_seqlen_q=span,
         max_seqlen_k=span,
         causal=True,
-        softmax_scale=sm_scale * k_scale,
+        softmax_scale=sm_scale,
         token_major=False,
     ).transpose(1, 0, 2)
     return (output.astype(jnp.float32) * v_scale).astype(q.dtype)

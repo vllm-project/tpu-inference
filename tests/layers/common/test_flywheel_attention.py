@@ -587,24 +587,26 @@ class TestFp8KvCache:
         }
         assert paged.items() <= seen["decode"].items()
         assert paged.items() <= seen["extend"].items()
-        # The prefill kernels attend this step's K/V cast to bf16.
+        # The prefill kernels attend this step's K/V cast to bf16; k_scale
+        # rides on Q, not in the static softmax_scale.
         prefill = {
-            "softmax_scale": FP8_SM_SCALE * K_SCALE,
+            "softmax_scale": FP8_SM_SCALE,
             "k_dtype": jnp.bfloat16,
             "v_dtype": jnp.bfloat16,
         }
         assert prefill.items() <= seen["dense"].items()
         assert prefill.items() <= seen["ragged"].items()
 
-    # The paged extend kernel applies v_descale itself; the prefill kernels
-    # leave V's scale to the backend.
+    # The paged extend kernel applies both descales itself; the prefill
+    # kernels get Q times k_scale, which their stubs return, and leave V's
+    # scale to the backend.
     @pytest.mark.parametrize(("kernel", "output_scale"), [
-        (fa._DENSE_KERNEL, V_SCALE),
-        (FP8_STEP_TOKENS, V_SCALE),
+        (fa._DENSE_KERNEL, K_SCALE * V_SCALE),
+        (FP8_STEP_TOKENS, K_SCALE * V_SCALE),
         (fa._EXTEND_PHASE, 1.0),
     ])
-    def test_output_takes_v_scale_once(self, monkeypatch, kernel,
-                                       output_scale):
+    def test_output_takes_each_scale_once(self, monkeypatch, kernel,
+                                          output_scale):
         q, output, _ = self.run_step(monkeypatch, jnp.float8_e4m3fn, kernel)
 
         np.testing.assert_array_equal(np.asarray(output, np.float32),
