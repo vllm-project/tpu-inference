@@ -18,11 +18,14 @@ set -euo pipefail
 
 # TEST ONLY (jefft/test_pipe): run the release pipeline from this branch instead
 # of CI. The real pipeline pins its tooling to main and runs on releases/* only.
-# RELEASE_QUEUE (New Build env) moves every step to another queue.
+# release-tpu-inference isn't in this cluster, so every step runs on cpu; the
+# env reaches plan_publish.py, which reads RELEASE_QUEUE for the steps it adds.
 buildkite-agent meta-data set release-tools-commit "$BUILDKITE_COMMIT"
-sed -e '/^    if: build.branch/d' \
-  -e "s/queue: release-tpu-inference/queue: ${RELEASE_QUEUE:-release-tpu-inference}/" \
-  .buildkite/release/pipeline.yml | buildkite-agent pipeline upload
+{
+  printf 'env:\n  RELEASE_QUEUE: cpu\n'
+  sed -e '/^    if: build.branch/d' -e 's/queue: release-tpu-inference/queue: cpu/' \
+    .buildkite/release/pipeline.yml
+} | buildkite-agent pipeline upload
 exit 0
 
 # Resolve the absolute directory path of the current script.
