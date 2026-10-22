@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe import RoutedExperts
 
 from tpu_inference import envs
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
+from tpu_inference.layers.common import fused_ep_moe_v2
 from tpu_inference.layers.common.fused_moe_gmm import fused_moe_func
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import to_jax_dtype
@@ -57,6 +58,11 @@ class MoEBackend(Enum):
     # Same as GMM_EP but uses `tensor_sharded_gmm_*` for the GMM calls and is production ready
     GMM_TP = "gmm_tp"
 
+    # FUSED_EP_MOE_V2 is tokamax's fused expert-parallel kernel (fused_ep_moe_v2), wrapped in
+    # tpu-inference/tpu_inference/layers/common/fused_ep_moe_v2.py. Selected by USE_FUSED_EP_MOE_V2.
+    # It uses GMM_EP's weights (see weights_like); layers it can't run fall back to GMM_EP.
+    FUSED_EP_MOE_V2 = "fused_ep_moe_v2"
+
     # DENSE_MAT uses a simple dense matmul for the MoE backend,  is intended for testing, and is
     # only used in the JAX path for now
     # NOTE: for DENSE_MAT in the JAX/Flax path, there are no changes for weights for the unfused backends (DENSE_MAT and MEGABLOX_GMM).
@@ -68,7 +74,11 @@ class MoEBackend(Enum):
     @classmethod
     def fused_moe_backends(cls):
         """Returns those backends that use fused weights"""
-        return {cls.FUSED_MOE, cls.GMM_EP, cls.GMM_TP}
+        return {cls.FUSED_MOE, cls.GMM_EP, cls.GMM_TP, cls.FUSED_EP_MOE_V2}
+
+    def weights_like(self) -> "MoEBackend":
+        """The backend whose weight layout and sharding this one uses."""
+        return MoEBackend.GMM_EP if self is MoEBackend.FUSED_EP_MOE_V2 else self
 
 
 def moe_apply(
@@ -102,6 +112,16 @@ def moe_apply(
             swiglu_limit = getattr(layer, "swiglu_limit", None)
             if swiglu_limit is not None and swiglu_limit > 0:
                 activation = "silu_and_mul_with_clamp"
+        if moe_backend == MoEBackend.FUSED_EP_MOE_V2:
+            reason = fused_ep_moe_v2.unsupported_reason(
+                mesh, weights.w13_weight, weights.w13_weight_scale, activation,
+                layer.scoring_func,
+                extra_backend_kwargs.get("hash_based_topk_indices", None))
+            if reason is not None:
+                logger.warning_once(
+                    "[MoE]: fused_ep_moe_v2 can't run this layer (%s); using "
+                    "the GMM EP kernel instead.", reason)
+                moe_backend = MoEBackend.GMM_EP
         match moe_backend:
             case MoEBackend.FUSED_MOE:
                 subc_quant_w1_sz = None
@@ -178,6 +198,32 @@ def moe_apply(
                     moe_chunk_size=moe_chunk_size,
                     num_valid_tokens=extra_backend_kwargs.get(
                         "num_valid_tokens", None),
+                )
+            case MoEBackend.FUSED_EP_MOE_V2:
+                # num_valid_tokens is a traced array: test it against None.
+                for name, ignored in (
+                    ("moe_chunk_size", moe_chunk_size > 0),
+                    ("num_valid_tokens",
+                     extra_backend_kwargs.get("num_valid_tokens") is not None),
+                ):
+                    if ignored:
+                        logger.warning_once(
+                            "[MoE]: fused_ep_moe_v2 ignores %s.", name)
+                output = fused_ep_moe_v2.fused_ep_moe_v2_func(
+                    hidden_states=x,
+                    w1=weights.w13_weight,
+                    w2=weights.w2_weight,
+                    w1_scale=weights.w13_weight_scale,
+                    w2_scale=weights.w2_weight_scale,
+                    w1_bias=weights.w13_bias,
+                    w2_bias=weights.w2_bias,
+                    gating_output=gating_output,
+                    topk=layer.top_k,
+                    renormalize=layer.renormalize,
+                    mesh=mesh,
+                    scoring_fn=layer.scoring_func,
+                    score_bias=extra_backend_kwargs.get(
+                        "e_score_correction_bias", None),
                 )
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance

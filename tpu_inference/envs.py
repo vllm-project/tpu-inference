@@ -92,6 +92,9 @@ if TYPE_CHECKING:
     RAGGED_GATHER_TRIM_ROWS: bool = True
     MOE_TC_PERMUTE: bool = False
     MOE_TC_PERMUTE_CAPACITY_FACTOR: float = 2.0
+    USE_FUSED_EP_MOE_V2: bool = False
+    FUSED_EP_MOE_V2_CAPACITY: int = 128
+    FUSED_EP_MOE_V2_SHARDED_PLAN: bool = True
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
@@ -588,6 +591,24 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # overflows in about 1 in 10 MoE layers on each device.
     "MOE_TC_PERMUTE_CAPACITY_FACTOR":
     lambda: float(os.getenv("MOE_TC_PERMUTE_CAPACITY_FACTOR") or "2.0"),
+    # EP MoE layers through tokamax's fused expert-parallel kernel
+    # (MoEBackend.FUSED_EP_MOE_V2) instead of the GMM path: one Pallas kernel
+    # per layer gathers each shard's token rows into VMEM, runs its experts and
+    # sends each result row, in fp8, to the device that owns the token, so there
+    # is no dense reduce-scatter. Takes fp8 weights with per-channel scales or
+    # bf16 weights; other layers fall back to GMM_EP. See
+    # layers/common/fused_ep_moe_v2.py.
+    "USE_FUSED_EP_MOE_V2":
+    env_bool("USE_FUSED_EP_MOE_V2", default=False),
+    # Rows per tile in that kernel. Every expert's whole weights sit in VMEM, so
+    # larger tiles may not fit beside them (on v7x, 128 is the most that fits at
+    # hidden 8192 x intermediate 2048).
+    "FUSED_EP_MOE_V2_CAPACITY":
+    lambda: int(os.getenv("FUSED_EP_MOE_V2_CAPACITY") or "128"),
+    # Each device builds only its own slices of the kernel's routing tables,
+    # instead of all of them. Faster at every size measured on Qwen3.8-2.4T.
+    "FUSED_EP_MOE_V2_SHARDED_PLAN":
+    env_bool("FUSED_EP_MOE_V2_SHARDED_PLAN", default=True),
     # Gap between token-bucket padding sizes for TPU precompilation. When 0,
     # buckets grow as powers of two; otherwise buckets increase by this gap
     # once past the power-of-two ramp. Previously provided by vllm.envs, which
