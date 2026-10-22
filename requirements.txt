@@ -25,5 +25,5 @@ hypothesis==6.151.9
 sortedcontainers==2.4.0
 # Upstream pins to 5.5.3 https://github.com/vllm-project/vllm/blob/de3fe8dc62f3d77eb8dab8125ca90436f606bccb/requirements/test/nightly-torch.txt#L32
 transformers>=5.8.0
-tokamax==0.0.17.dev20261015
+tokamax==0.0.18.dev20261021
 flywheel-tpu==0.2.0
