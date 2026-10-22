@@ -120,6 +120,13 @@ class TestTpuPlatform:
                 in TpuPlatform.additional_env_vars)
         assert "MOE_FOLD_ROUTING_INTO_DISPATCH" in envs.environment_variables
 
+    @pytest.mark.parametrize(
+        "name", ["MOE_TC_PERMUTE", "MOE_TC_PERMUTE_CAPACITY_FACTOR"])
+    def test_additional_env_vars_covers_moe_tc_permute(self, name):
+        """Workers trace the TensorCore permute, so they need both env vars."""
+        assert name in TpuPlatform.additional_env_vars
+        assert name in envs.environment_variables
+
     def test_get_device_total_memory(self):
         with pytest.raises(NotImplementedError):
             TpuPlatform.get_device_total_memory()
@@ -426,35 +433,9 @@ class TestTpuPlatform:
     @patch(
         "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
     )
-    def test_check_and_update_config_ray(self, mock_update, mock_sharding,
-                                         vllm_config, monkeypatch):
-        vllm_config.cache_config = None
-        monkeypatch.setattr(
-            "tpu_inference.platforms.tpu_platform.vllm_envs.VLLM_USE_RAY_V2_EXECUTOR_BACKEND",
-            False,
-        )
-
-        with patch.dict(
-                'sys.modules',
-            {'tpu_inference.executors.ray_distributed_executor': MagicMock()}):
-            from tpu_inference.executors.ray_distributed_executor import \
-                RayDistributedExecutor
-            TpuPlatform.check_and_update_config(vllm_config)
-            assert vllm_config.parallel_config.distributed_executor_backend == RayDistributedExecutor
-
-    @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
-           "ray")
-    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
-    @patch(
-        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
-    )
     def test_check_and_update_config_ray_v2(self, mock_update, mock_sharding,
-                                            vllm_config, monkeypatch):
+                                            vllm_config):
         vllm_config.cache_config = None
-        monkeypatch.setattr(
-            "tpu_inference.platforms.tpu_platform.vllm_envs.VLLM_USE_RAY_V2_EXECUTOR_BACKEND",
-            True,
-        )
 
         with patch.dict(
                 'sys.modules', {
