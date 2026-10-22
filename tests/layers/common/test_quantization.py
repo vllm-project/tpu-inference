@@ -56,6 +56,37 @@ class QuantizationTest(jtu.JaxTestCase):
 
         self.assertAllClose(dequantized, original, rtol=0.1, atol=0.1)
 
+    @parameterized.product(
+        dtype=[jnp.float8_e4m3fn, jnp.int8],
+        input_dtype=[jnp.float16, jnp.bfloat16, jnp.float32],
+        axis=[None, -1],
+        block_size=[None, 4],
+        magnitude=[1e-3, 1e-6],
+    )
+    def test_small_value_quantization(self, dtype, input_dtype, axis,
+                                      block_size, magnitude):
+        values = jnp.array([1.0, -1.0, 0.5, -0.5, 0.25, -0.25, 0.0, 0.0],
+                           dtype=input_dtype)
+        rows = jnp.array([1.0, 0.0, 0.5, 2.0], dtype=input_dtype)
+        original = rows[:, None] * values[None, :] * magnitude
+
+        @jax.jit
+        def round_trip(tensor):
+            tensor_q, scale = quantize_tensor(dtype, tensor, axis, block_size)
+            restored = dequantize_tensor(tensor_q,
+                                         scale,
+                                         axis,
+                                         out_dtype=jnp.float32)
+            return restored, scale
+
+        restored, scale = round_trip(original)
+        self.assertEqual(scale.dtype, jnp.float32)
+        self.assertTrue(jnp.all(jnp.isfinite(restored)))
+        self.assertAllClose(restored,
+                            original.astype(jnp.float32),
+                            rtol=0.1,
+                            atol=magnitude * 0.02)
+
     @parameterized.product(dtype=[jnp.float8_e4m3fn, jnp.int8],
                            axis=[-1, 1],
                            block_size=[32, 64])
