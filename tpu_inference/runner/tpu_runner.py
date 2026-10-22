@@ -1336,9 +1336,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                     and not disable_mm_from_limits)
 
         # Clear JIT compilation caches from weight loading to free XLA
-        # program reservations (bytes_reserved) on TPU HBM.
-        jax.clear_caches()
-        logger.info("Cleared JIT caches after weight loading")
+        # program reservations (bytes_reserved) on TPU HBM. Skip when loading
+        # dummy weights so initializing multiple in-process DP replicas
+        # sequentially does not evict already-compiled XLA executables.
+        load_format = getattr(self.load_config, "load_format", None)
+        if load_format not in ("dummy", "jax_dummy", "pathways_dummy"):
+            jax.clear_caches()
+            logger.info("Cleared JIT caches after weight loading")
 
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")

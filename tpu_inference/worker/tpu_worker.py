@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import functools
 import math
 import os
 import re
@@ -13,7 +14,8 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           has_kv_transfer_group)
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
-                                             init_distributed_environment)
+                                             init_distributed_environment,
+                                             model_parallel_is_initialized)
 from vllm.tasks import SupportedTask
 from vllm.v1 import utils as vllm_utils
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -34,6 +36,18 @@ from tpu_inference.offload.metrics import TPUKVCacheStatsLogger
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
+
+
+@functools.cache
+def _start_jax_profiler_server(port: int) -> None:
+    """Starts the JAX profiler server at most once per process.
+
+    JAX allows a single profiler server per process, so multiple in-process
+    TPUWorker instances (e.g. independent DP replicas on disjoint sub-meshes)
+    must share it instead of each trying to start one.
+    """
+    logger.info(f"Starting JAX profiler server on port {port}")
+    jax.profiler.start_server(port)
 
 
 @dataclass
@@ -254,11 +268,7 @@ class TPUWorker(WorkerBase):
         # Only one instance of profiler is allowed
         if use_jax_profiler_server and self.rank < 1:
             if not self.devices or 0 in self.device_ranks:
-                jax_profiler_server_port = envs.JAX_PROFILER_SERVER_PORT
-                logger.info(
-                    f"Starting JAX profiler server on port {jax_profiler_server_port}"
-                )
-                jax.profiler.start_server(jax_profiler_server_port)
+                _start_jax_profiler_server(envs.JAX_PROFILER_SERVER_PORT)
 
         # step_counter is used to calculate uuid to transfer intermediate tensors.
         self.step_counter = 0
@@ -423,27 +433,34 @@ class TPUWorker(WorkerBase):
         # missing TP-partner ranks. Force a singleton view for this init only.
         saved_dp_size = self.parallel_config.data_parallel_size
         self.parallel_config.data_parallel_size = 1
+        temp_file = None
         try:
             with set_current_vllm_config(self.vllm_config):
-                # Close the file descriptor returned by mkstemp to prevent a resource leak.
-                # In multihost environments, leaving this fd open on Host 0 (which runs both
-                # Ray GCS and the engine core) can conflict with Gloo's file locking and socket
-                # binding, resulting in a startup hang.
-                fd, temp_file = tempfile.mkstemp()
-                os.close(fd)
-                init_distributed_environment(
-                    world_size=1,
-                    rank=0,
-                    local_rank=0,
-                    distributed_init_method=f"file://{temp_file}",
-                    backend="gloo",
-                )
-                ensure_model_parallel_initialized(
-                    tensor_model_parallel_size=1,
-                    pipeline_model_parallel_size=1,
-                )
+                if not model_parallel_is_initialized():
+                    # Close the file descriptor returned by mkstemp to prevent a resource leak.
+                    # In multihost environments, leaving this fd open on Host 0 (which runs both
+                    # Ray GCS and the engine core) can conflict with Gloo's file locking and socket
+                    # binding, resulting in a startup hang.
+                    fd, temp_file = tempfile.mkstemp()
+                    os.close(fd)
+                    init_distributed_environment(
+                        world_size=1,
+                        rank=0,
+                        local_rank=0,
+                        distributed_init_method=f"file://{temp_file}",
+                        backend="gloo",
+                    )
+                    ensure_model_parallel_initialized(
+                        tensor_model_parallel_size=1,
+                        pipeline_model_parallel_size=1,
+                    )
         finally:
             self.parallel_config.data_parallel_size = saved_dp_size
+            if temp_file is not None and os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except OSError:
+                    pass
 
         pp_rank = 0 if self.parallel_config.pipeline_parallel_size == 1 else self.rank
         jax_parallel_state.init_pp_distributed_environment(
