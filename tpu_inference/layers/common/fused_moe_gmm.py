@@ -69,63 +69,44 @@ def _single_sort_permutation(
     return sorted_indices, revert, sorted_indices // topk
 
 
-def _can_use_moe_lowtok_ep(hidden, w1, w2, s1, s2, b1, b2, *, activation,
-                           rhs_quant_dtype, local_num_experts):
-    if activation != "silu" or rhs_quant_dtype is not None:
-        return False
-    if b1 is not None or b2 is not None or s1 is None or s2 is None:
-        return False
-    if hidden.ndim != 2 or w1.ndim != 3 or w2.ndim != 3:
-        return False
-    h = hidden.shape[1]
-    _, i, out = w2.shape
-    e = local_num_experts
-    if not 0 < e <= 128 or out != h or w1.shape[1] != h or w1.shape[2] != 2 * i:
-        return False
-    if (2 * i) % 512:
-        return False
-    if (hidden.dtype != jnp.bfloat16 or w1.dtype != jnp.float8_e4m3fn
-            or w2.dtype != jnp.float8_e4m3fn):
-        return False
-    return s1.shape[-1] == 2 * i and s2.shape[-1] == h
+def _split_reduce_scatter_axes(reduction_axis) -> tuple[tuple, tuple]:
+    """Splits `reduction_axis` for scatter_results: the axes to psum over and
+    the attention-DP axes to psum_scatter the tokens back over."""
+    dp_axes = ShardingAxisName.ATTN_DATA
+    if not isinstance(dp_axes, tuple):
+        dp_axes = (dp_axes, )
+    if isinstance(reduction_axis, tuple):
+        reduce_axes = tuple(a for a in reduction_axis if a not in dp_axes)
+        scatter_axes = tuple(a for a in reduction_axis if a in dp_axes)
+    else:
+        reduce_axes = () if reduction_axis in dp_axes else (reduction_axis, )
+        scatter_axes = (reduction_axis, ) if reduction_axis in dp_axes else ()
+    return reduce_axes, scatter_axes
 
 
-def _can_use_dense_expert_ep(
-    hidden,
-    w1,
-    w2,
-    s1,
-    s2,
-    b1,
-    b2,
-    *,
-    activation,
-    rhs_quant_dtype,
-    skip_padded_tokens=False,
-    local_num_experts: int,
-):
-    if activation != "silu":
-        return False
-    if rhs_quant_dtype not in (None, jnp.float8_e4m3fn):
-        return False
-    if b1 is not None or b2 is not None or s1 is None or s2 is None:
-        return False
-    if hidden.ndim != 2 or w1.ndim != 3 or w2.ndim != 3:
-        return False
-    m, h = hidden.shape
-    _, i, out = w2.shape
-    e = local_num_experts
-    if min(m, h, i, e) <= 0:
-        return False
-    if m % 8 or h % 512 or i % 512:
-        return False
-    if out != h or w1.shape[1] != h or w1.shape[2] != 2 * i:
-        return False
-    if (hidden.dtype != jnp.bfloat16 or w1.dtype != jnp.float8_e4m3fn
-            or w2.dtype != jnp.float8_e4m3fn):
-        return False
-    return (s1.shape[-1] == 2 * i and s2.shape[-1] == h
-            and s1.dtype == jnp.float32 and s2.dtype == jnp.float32)
+def _reduce_local_moe_output(local_out: jax.Array, reduction_axis, *,
+                             scatter_results: bool, defer_all_reduce: bool,
+                             dtype: jnp.dtype) -> jax.Array:
+    """The collective that follows one shard's routed-MoE partial sum.
+
+    Inside shard_map. With scatter_results the partial sums are reduced over
+    `reduction_axis` and the tokens scattered back over the attention-DP
+    axes; with defer_all_reduce the partial sum is returned as is, because
+    the caller folds this all-reduce into the one it runs over the shared
+    expert (VllmMoERunner._fused_output_is_reduced); otherwise psum.
+    """
+    if scatter_results:
+        reduce_axes, scatter_axes = _split_reduce_scatter_axes(reduction_axis)
+        if reduce_axes:
+            local_out = jax.lax.psum(local_out, axis_name=reduce_axes)
+        if scatter_axes:
+            local_out = jax.lax.psum_scatter(local_out,
+                                             axis_name=scatter_axes,
+                                             scatter_dimension=0,
+                                             tiled=True)
+    elif not defer_all_reduce:
+        local_out = jax.lax.psum(local_out, axis_name=reduction_axis)
+    return local_out.astype(dtype)
 
 
 def _ep_kernel_local(
@@ -140,7 +121,15 @@ def _ep_kernel_local(
     kernel_mode: str,
     local_num_experts: int,
     scatter_results: bool,
+    defer_all_reduce: bool,
 ):
+    """One EP shard's MoE through moe_lowtok or dense_expert_moe.
+
+    Inside shard_map. The kernels take this shard's experts as local ids
+    0..local_num_experts-1 with -1 for an expert held elsewhere, and return
+    the shard's partial sum over its experts; the same collective as the GMM
+    path then combines the shards.
+    """
     shard_idx = jax.lax.axis_index(ShardingAxisName.EXPERT)
     experts_start = shard_idx * local_num_experts
     local_ids = topk_ids_local - experts_start
@@ -165,35 +154,53 @@ def _ep_kernel_local(
             num_primary_experts=local_num_experts,
         )
 
-    if scatter_results:
-        dp_axes = ShardingAxisName.ATTN_DATA
-        if not isinstance(dp_axes, tuple):
-            dp_axes = (dp_axes, )
-        reduction_axis = ShardingAxisName.EXPERT
-        if isinstance(reduction_axis, tuple):
-            reduce_axes = tuple(a for a in reduction_axis if a not in dp_axes)
-            scatter_axes = tuple(a for a in reduction_axis if a in dp_axes)
-        else:
-            reduce_axes = () if reduction_axis in dp_axes else (
-                reduction_axis, )
-            scatter_axes = (
-                reduction_axis, ) if reduction_axis in dp_axes else ()
-        if reduce_axes:
-            local_out = jax.lax.psum(local_out, axis_name=reduce_axes)
-        if scatter_axes:
-            out = jax.lax.psum_scatter(
-                local_out,
-                axis_name=scatter_axes,
-                scatter_dimension=0,
-                tiled=True,
-            ).astype(hidden_local.dtype)
-        else:
-            out = local_out
-    else:
-        out = jax.lax.psum(local_out,
-                           axis_name=ShardingAxisName.EXPERT).astype(
-                               hidden_local.dtype)
-    return out
+    return _reduce_local_moe_output(local_out,
+                                    ShardingAxisName.EXPERT,
+                                    scatter_results=scatter_results,
+                                    defer_all_reduce=defer_all_reduce,
+                                    dtype=hidden_local.dtype)
+
+
+def _select_ep_kernel(hidden_states, w1, w2, w1_scale, w2_scale, w1_bias,
+                      w2_bias, *, activation: str,
+                      local_num_experts: int) -> str | None:
+    """Which experimental EP decode kernel, if any, this call should take.
+
+    Each is opt-in by its env var and limited to a token count; the
+    kernels' own eligibility checks run against the per-shard expert count,
+    with the weights still in their global [num_experts, ...] shapes.
+    """
+    num_tokens = hidden_states.shape[0]
+    if (envs.TPU_MOE_LOWTOK
+            and 0 < num_tokens <= envs.TPU_MOE_LOWTOK_MAX_TOKENS
+            and can_use_moe_lowtok(hidden_states,
+                                   w1,
+                                   w2,
+                                   w1_scale,
+                                   w2_scale,
+                                   w1_bias,
+                                   w2_bias,
+                                   activation=activation,
+                                   rhs_quant_dtype=None,
+                                   num_experts=local_num_experts)):
+        logger.info_once(
+            "Selected experimental small-batch MoE (max tokens %d)",
+            envs.TPU_MOE_LOWTOK_MAX_TOKENS)
+        return "lowtok"
+    if (0 < num_tokens <= envs.TPU_MOE_DENSE_EXPERT_THRESHOLD
+            and can_use_dense_expert(hidden_states,
+                                     w1,
+                                     w2,
+                                     w1_scale,
+                                     w2_scale,
+                                     w1_bias,
+                                     w2_bias,
+                                     activation=activation,
+                                     rhs_quant_dtype=None,
+                                     num_experts=local_num_experts)):
+        logger.info_once("Selected experimental dense-expert decode MoE")
+        return "dense_expert"
+    return None
 
 
 def _ep_dispatch_kernel(
@@ -209,6 +216,7 @@ def _ep_dispatch_kernel(
     kernel_mode: str,
     local_num_experts: int,
     scatter_results: bool,
+    defer_all_reduce: bool,
 ):
     ep_p_spec = P(ShardingAxisName.EXPERT)
     data_p_spec = P(ShardingAxisName.MLP_DATA)
@@ -224,6 +232,7 @@ def _ep_dispatch_kernel(
             kernel_mode=kernel_mode,
             local_num_experts=local_num_experts,
             scatter_results=scatter_results,
+            defer_all_reduce=defer_all_reduce,
         ),
         mesh=mesh,
         in_specs=(
@@ -725,17 +734,7 @@ def moe_gmm_local(x: jax.Array,
         for axis in reduction_axes:
             scatter_axis_size *= jax.lax.axis_size(axis)
     elif scatter_results:
-        dp_axes = ShardingAxisName.ATTN_DATA
-        if not isinstance(dp_axes, tuple):
-            dp_axes = (dp_axes, )
-        if isinstance(reduction_axis, tuple):
-            reduce_axes = tuple(a for a in reduction_axis if a not in dp_axes)
-            scatter_axes = tuple(a for a in reduction_axis if a in dp_axes)
-        else:
-            reduce_axes = () if reduction_axis in dp_axes else (
-                reduction_axis, )
-            scatter_axes = (
-                reduction_axis, ) if reduction_axis in dp_axes else ()
+        reduce_axes, scatter_axes = _split_reduce_scatter_axes(reduction_axis)
         for a in scatter_axes:
             scatter_axis_size *= jax.lax.axis_size(a)
 
@@ -841,23 +840,12 @@ def moe_gmm_local(x: jax.Array,
             out = _hierarchical_collect(chunk_hidden, *hierarchical_collect,
                                         reduce_axes,
                                         scatter_axes).astype(x.dtype)
-        elif scatter_results:
-            if reduce_axes:
-                chunk_hidden = jax.lax.psum(chunk_hidden,
-                                            axis_name=reduce_axes)
-            if scatter_axes:
-                out = jax.lax.psum_scatter(chunk_hidden,
-                                           axis_name=scatter_axes,
-                                           scatter_dimension=0,
-                                           tiled=True).astype(x.dtype)
-            else:
-                out = chunk_hidden.astype(x.dtype)
         else:
-            if not defer_all_reduce:
-                out = jax.lax.psum(chunk_hidden,
-                                   axis_name=reduction_axis).astype(x.dtype)
-            else:
-                out = chunk_hidden.astype(x.dtype)
+            out = _reduce_local_moe_output(chunk_hidden,
+                                           reduction_axis,
+                                           scatter_results=scatter_results,
+                                           defer_all_reduce=defer_all_reduce,
+                                           dtype=x.dtype)
         out_list.append(out)
 
     return jnp.concatenate(out_list,
@@ -1396,10 +1384,6 @@ def _apply_hierarchical_dispatch_gather(hidden_states: jax.Array,
     "scatter_results",
     "moe_chunk_size",
     "defer_all_reduce",
-    "rhs_quant_dtype",
-    "skip_padded_tokens",
-    "num_primary_experts",
-    "use_sparse_core",
 ))
 def fused_moe_func(
     hidden_states: jax.Array,
@@ -1409,15 +1393,13 @@ def fused_moe_func(
     w2_scale: jax.Array | None,
     w1_bias: jax.Array | None,
     w2_bias: jax.Array | None,
-    gating_output: jax.Array | None = None,
-    topk_ids: jax.Array | None = None,
-    experts_start: jax.Array | None = None,
-    topk: int = 1,
-    renormalize: bool = True,
-    mesh: Mesh | None = None,
-    use_ep: bool = False,
-    activation: str = "silu",
-    scoring_fn: str = "softmax",
+    gating_output: jax.Array,
+    topk: int,
+    renormalize: bool,
+    mesh: Mesh,
+    use_ep: bool,
+    activation: str,
+    scoring_fn: str,
     all_gather_fp8: bool = False,
     enable_rs_kernel: bool = False,
     use_gmm_fused_rs_kernel: bool = False,
@@ -1428,12 +1410,6 @@ def fused_moe_func(
     expert_score_correction_bias: jax.Array | None = None,
     moe_chunk_size: int = 0,
     num_valid_tokens: jax.Array | None = None,
-    *,
-    topk_weights: jax.Array | None = None,
-    rhs_quant_dtype: jnp.dtype | None = None,
-    skip_padded_tokens: bool = False,
-    num_primary_experts: int | None = None,
-    use_sparse_core: bool = True,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -1493,177 +1469,88 @@ def fused_moe_func(
                                  scoring_fn=scoring_fn,
                                  fp8_post_gather=all_gather_fp8)
 
-    # Convert 3D scale [experts, blocks, N] to 4D [experts, blocks, 1, N]
-    # expected by gmm_v2 and dense_expert_moe.
-    if w1_scale is not None and w1_scale.ndim == 3:
-        w1_scale = jnp.expand_dims(w1_scale, 2)
-    if w2_scale is not None and w2_scale.ndim == 3:
-        w2_scale = jnp.expand_dims(w2_scale, 2)
-
     num_tokens, hidden_size = hidden_states.shape
     global_num_experts, padded_hidden_size, _ = w1.shape
     dtype = hidden_states.dtype
 
-    if topk_ids is not None:
-        topk_indices = topk_ids
-        if topk_weights is None:
-            topk_weights = gating_output
-        gating_output = None
+    assert gating_output.shape == (num_tokens, global_num_experts)
 
-    if experts_start is not None:
-        owned = w1.shape[
-            0] if num_primary_experts is None else num_primary_experts
-        if not 0 < owned <= w1.shape[0]:
-            raise ValueError(
-                "num_primary_experts must fit the local weight slots")
-        local_ids = topk_indices - experts_start
-        valid = (local_ids >= 0) & (local_ids < owned)
-        topk_weights = jnp.where(valid, topk_weights,
-                                 jnp.zeros_like(topk_weights))
-        topk_ids_local = jnp.where(valid, local_ids,
-                                   jnp.full_like(local_ids, -1))
-
-        if (envs.TPU_MOE_LOWTOK and use_ep
-                and 0 < num_tokens <= envs.TPU_MOE_LOWTOK_MAX_TOKENS
-                and can_use_moe_lowtok(
-                    hidden_states,
-                    w1,
-                    w2,
-                    w1_scale,
-                    w2_scale,
-                    w1_bias,
-                    w2_bias,
-                    activation=activation,
-                    rhs_quant_dtype=rhs_quant_dtype,
-                )):
-            logger.info_once(
-                "Selected experimental small-batch MoE (max tokens %d)",
-                envs.TPU_MOE_LOWTOK_MAX_TOKENS,
-            )
-            route = moe_lowtok_routing_table(topk_ids_local, topk_weights,
-                                             owned)
-            return moe_lowtok(hidden_states, route, w1, w1_scale, w2, w2_scale)
-
-        if 0 < num_tokens <= envs.TPU_MOE_DENSE_EXPERT_THRESHOLD and can_use_dense_expert(
-                hidden_states,
-                w1,
-                w2,
-                w1_scale,
-                w2_scale,
-                w1_bias,
-                w2_bias,
-                activation=activation,
-                rhs_quant_dtype=rhs_quant_dtype,
-                skip_padded_tokens=skip_padded_tokens,
-        ):
-            logger.info_once("Selected experimental dense-expert decode MoE")
-            return dense_expert_moe(
-                hidden_states,
-                w1,
-                w2,
-                w1_scale,
-                w2_scale,
-                topk_weights,
-                topk_ids_local,
-                num_primary_experts=owned,
-            )
-
-    hierarchical = use_ep and envs.MOE_HIERARCHICAL_DISPATCH
-    dispatch_gather = (_apply_hierarchical_dispatch_gather
-                       if hierarchical else _apply_one_step_dispatch_gather)
-    fold_routing = False
-
-    if gating_output is not None:
-        assert gating_output.shape == (num_tokens, global_num_experts)
-
-        topk_weights = apply_scoring_fn(scoring_fn, gating_output)
-        if hash_based_topk_indices is not None:
-            topk_indices = hash_based_topk_indices
+    topk_weights = apply_scoring_fn(scoring_fn, gating_output)
+    if hash_based_topk_indices is not None:
+        topk_indices = hash_based_topk_indices
+        topk_weights = jnp.take_along_axis(topk_weights, topk_indices, axis=-1)
+    elif envs.MOE_APPROX_TOPK:
+        topk_weights, topk_indices = jax.lax.approx_max_k(
+            topk_weights,
+            k=topk,
+            recall_target=envs.MOE_APPROX_TOPK_RECALL_TARGET)
+    else:
+        # TPU_MOE_ROUTER_TOPK=rowmax: k row-max passes instead of a sort.
+        select_topk = (functools.partial(router_topk, k=topk)
+                       if envs.TPU_MOE_ROUTER_TOPK == "rowmax" else
+                       functools.partial(jax.lax.top_k, k=topk))
+        if expert_score_correction_bias is not None:
+            _, topk_indices = select_topk(
+                topk_weights + expert_score_correction_bias[None, :])
             topk_weights = jnp.take_along_axis(topk_weights,
                                                topk_indices,
                                                axis=-1)
-        elif envs.MOE_APPROX_TOPK:
-            topk_weights, topk_indices = jax.lax.approx_max_k(
-                topk_weights,
-                k=topk,
-                recall_target=envs.MOE_APPROX_TOPK_RECALL_TARGET)
         else:
-            if expert_score_correction_bias is not None:
-                if envs.TPU_MOE_ROUTER_TOPK == "rowmax":
-                    _, topk_indices = router_topk(
-                        topk_weights + expert_score_correction_bias[None, :],
-                        topk)
-                else:
-                    _, topk_indices = jax.lax.top_k(
-                        topk_weights + expert_score_correction_bias[None, :],
-                        k=topk)
-                topk_weights = jnp.take_along_axis(topk_weights,
-                                                   topk_indices,
-                                                   axis=-1)
-            else:
-                if envs.TPU_MOE_ROUTER_TOPK == "rowmax":
-                    topk_weights, topk_indices = router_topk(
-                        topk_weights, topk)
-                else:
-                    topk_weights, topk_indices = jax.lax.top_k(topk_weights,
-                                                               k=topk)
-        if renormalize:
-            topk_weights = topk_weights / topk_weights.sum(axis=-1,
-                                                           keepdims=True)
-        # Route padding tokens to expert 0 instead of picking a selected expert. This
-        # is especially useful when we have a low number of tokens (e.g. low
-        # concurrency), where padding tokens may activate unnecessary expert weights
-        # and slow down the gmm kernel.
-        if num_valid_tokens is not None:
-            token_valid = (jnp.arange(num_tokens) < num_valid_tokens)[:, None]
-            topk_indices = jnp.where(token_valid, topk_indices, 0)
-            topk_weights = jnp.where(token_valid, topk_weights, 0.0)
-        # All gathering topk_indices and topk_weights if attention dp is used.
-        # MOE_FOLD_ROUTING_INTO_DISPATCH gathers them in the token all-gather.
-        fold_routing = (envs.MOE_FOLD_ROUTING_INTO_DISPATCH
-                        and mesh is not None and bool(_attn_only_axes(mesh)))
-        if fold_routing:
-            logger.info_once(
-                "MOE_FOLD_ROUTING_INTO_DISPATCH: the top-k ids and weights ride "
-                "in the %s dispatch all-gather of the tokens.",
-                "hierarchical" if hierarchical else "one-step")
-            # The same dtypes all_gather_topk_indices_and_weights gathers in.
-            routing = (topk_indices.astype(jnp.int32),
-                       topk_weights.astype(jnp.float32))
-            hidden_states, topk_indices, topk_weights = dispatch_gather(
-                hidden_states, mesh, fp8=all_gather_fp8, routing=routing)
-        elif mesh is not None and get_mesh_shape_product(
-                mesh, ShardingAxisName.ATTN_DATA) > 1:
-            topk_indices, topk_weights = all_gather_topk_indices_and_weights(
-                topk_indices, topk_weights, dtype, mesh)
-        topk_weights = topk_weights.astype(dtype)
-        if mesh is not None:
-            topk_weights = jax.lax.with_sharding_constraint(
-                topk_weights,
-                NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
+            topk_weights, topk_indices = select_topk(topk_weights)
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
+    # Route padding tokens to expert 0 instead of picking a selected expert. This
+    # is especially useful when we have a low number of tokens (e.g. low
+    # concurrency), where padding tokens may activate unnecessary expert weights
+    # and slow down the gmm kernel.
+    if num_valid_tokens is not None:
+        token_valid = (jnp.arange(num_tokens) < num_valid_tokens)[:, None]
+        topk_indices = jnp.where(token_valid, topk_indices, 0)
+        topk_weights = jnp.where(token_valid, topk_weights, 0.0)
+    # All gathering topk_indices and topk_weights if attention dp is used.
+    # MOE_FOLD_ROUTING_INTO_DISPATCH gathers them in the token all-gather.
+    hierarchical = use_ep and envs.MOE_HIERARCHICAL_DISPATCH
+    dispatch_gather = (_apply_hierarchical_dispatch_gather
+                       if hierarchical else _apply_one_step_dispatch_gather)
+    fold_routing = (envs.MOE_FOLD_ROUTING_INTO_DISPATCH
+                    and bool(_attn_only_axes(mesh)))
+    if fold_routing:
+        logger.info_once(
+            "MOE_FOLD_ROUTING_INTO_DISPATCH: the top-k ids and weights ride "
+            "in the %s dispatch all-gather of the tokens.",
+            "hierarchical" if hierarchical else "one-step")
+        # The same dtypes all_gather_topk_indices_and_weights gathers in.
+        routing = (topk_indices.astype(jnp.int32),
+                   topk_weights.astype(jnp.float32))
+        hidden_states, topk_indices, topk_weights = dispatch_gather(
+            hidden_states, mesh, fp8=all_gather_fp8, routing=routing)
+    elif get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA) > 1:
+        topk_indices, topk_weights = all_gather_topk_indices_and_weights(
+            topk_indices, topk_weights, dtype, mesh)
+    topk_weights = topk_weights.astype(dtype)
+    topk_weights = jax.lax.with_sharding_constraint(
+        topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
 
-    if use_ep and mesh is not None:
-        ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
-        local_num_experts = global_num_experts // ep_size
+    if not fold_routing:
+        hidden_states = dispatch_gather(hidden_states,
+                                        mesh,
+                                        fp8=all_gather_fp8)
 
-        if (envs.TPU_MOE_LOWTOK
-                and 0 < num_tokens <= envs.TPU_MOE_LOWTOK_MAX_TOKENS
-                and _can_use_moe_lowtok_ep(
-                    hidden_states,
-                    w1,
-                    w2,
-                    w1_scale,
-                    w2_scale,
-                    w1_bias,
-                    w2_bias,
-                    activation=activation,
-                    rhs_quant_dtype=rhs_quant_dtype,
-                    local_num_experts=local_num_experts,
-                )):
-            logger.info_once(
-                "Selected experimental small-batch MoE (max tokens %d)",
-                envs.TPU_MOE_LOWTOK_MAX_TOKENS,
-            )
+    # TPU_MOE_LOWTOK / TPU_MOE_DENSE_EXPERT_THRESHOLD: small decode batches
+    # under EP run one Pallas kernel per shard instead of permute + GMM.
+    if use_ep:
+        local_num_experts = global_num_experts // get_mesh_shape_product(
+            mesh, ShardingAxisName.EXPERT)
+        ep_kernel = _select_ep_kernel(hidden_states,
+                                      w1,
+                                      w2,
+                                      w1_scale,
+                                      w2_scale,
+                                      w1_bias,
+                                      w2_bias,
+                                      activation=activation,
+                                      local_num_experts=local_num_experts)
+        if ep_kernel is not None:
             return _ep_dispatch_kernel(
                 hidden_states,
                 w1,
@@ -1673,38 +1560,10 @@ def fused_moe_func(
                 topk_weights,
                 topk_indices,
                 mesh=mesh,
-                kernel_mode="lowtok",
+                kernel_mode=ep_kernel,
                 local_num_experts=local_num_experts,
                 scatter_results=scatter_results,
-            )
-
-        if (0 < num_tokens <= envs.TPU_MOE_DENSE_EXPERT_THRESHOLD
-                and _can_use_dense_expert_ep(
-                    hidden_states,
-                    w1,
-                    w2,
-                    w1_scale,
-                    w2_scale,
-                    w1_bias,
-                    w2_bias,
-                    activation=activation,
-                    rhs_quant_dtype=rhs_quant_dtype,
-                    skip_padded_tokens=skip_padded_tokens,
-                    local_num_experts=local_num_experts,
-                )):
-            logger.info_once("Selected experimental dense-expert decode MoE")
-            return _ep_dispatch_kernel(
-                hidden_states,
-                w1,
-                w2,
-                w1_scale,
-                w2_scale,
-                topk_weights,
-                topk_indices,
-                mesh=mesh,
-                kernel_mode="dense_expert",
-                local_num_experts=local_num_experts,
-                scatter_results=scatter_results,
+                defer_all_reduce=defer_all_reduce,
             )
 
     assert (num_tokens * topk) % 16 == 0, (
@@ -1712,13 +1571,10 @@ def fused_moe_func(
         f"16 but got {num_tokens}*{topk}={num_tokens*topk}")
 
     # Only enable Reduce-Scatter if flag is on and Attention is pure DP
-    if mesh is not None:
-        total_num_devices = mesh.devices.size
-        is_attn_dp = get_mesh_shape_product(
-            mesh, ShardingAxisName.ATTN_DATA) == total_num_devices
-        actual_enable_rs_kernel = enable_rs_kernel and is_attn_dp
-    else:
-        actual_enable_rs_kernel = False
+    total_num_devices = mesh.devices.size
+    is_attn_dp = get_mesh_shape_product(
+        mesh, ShardingAxisName.ATTN_DATA) == total_num_devices
+    actual_enable_rs_kernel = enable_rs_kernel and is_attn_dp
 
     if envs.FORCE_MOE_RANDOM_ROUTING:
         logger.warning(
@@ -1770,23 +1626,17 @@ def fused_moe_func(
                     topk_argsort_revert_indices, topk_argsort_indices)
 
         if use_ep:
-            if mesh is not None:
-                num_ep_shard = get_mesh_shape_product(mesh,
-                                                      ShardingAxisName.EXPERT)
-                local_num_experts = global_num_experts // num_ep_shard
-                shard_idx = jax.lax.axis_index(ShardingAxisName.EXPERT)
-            else:
-                num_ep_shard = 1
-                local_num_experts = global_num_experts
-                shard_idx = 0
+            num_ep_shard = get_mesh_shape_product(mesh,
+                                                  ShardingAxisName.EXPERT)
+            local_num_experts = global_num_experts // num_ep_shard
+            shard_idx = jax.lax.axis_index(ShardingAxisName.EXPERT)
 
-            experts_start_idx = experts_start if experts_start is not None else shard_idx * local_num_experts
-            experts_start_val = experts_start_idx
-            experts_end_val = experts_start_val + local_num_experts
+            experts_start = shard_idx * local_num_experts
+            experts_end = experts_start + local_num_experts
             group_offsets = jnp.cumulative_sum(group_sizes_local,
                                                include_initial=True)
-            shard_output_start = group_offsets[experts_start_val]
-            shard_output_end = group_offsets[experts_end_val]
+            shard_output_start = group_offsets[experts_start]
+            shard_output_end = group_offsets[experts_end]
             num_tokens = token_indices_sorted.shape[0]
             if num_tokens <= onehot_moe_permute_threshold:
                 # Use one-hot matmul for permutation, which can be faster
@@ -1809,25 +1659,17 @@ def fused_moe_func(
 
         return x, group_sizes_local, topk_argsort_revert_indices
 
-    if mesh is not None and not fold_routing:
-        hidden_states = dispatch_gather(hidden_states,
-                                        mesh,
-                                        fp8=all_gather_fp8)
-
-    if mesh is not None:
-        outs = jax.shard_map(
-            _process_tokens_locally,
-            mesh=mesh,
-            in_specs=(
-                P(ShardingAxisName.MLP_DATA, None),
-                P(ShardingAxisName.MLP_DATA, None),
-            ),
-            out_specs=(P(ShardingAxisName.MLP_DATA), ) *
-            (4 if use_tc_permute else 3),
-            check_vma=False,
-        )(hidden_states, topk_indices)
-    else:
-        outs = _process_tokens_locally(hidden_states, topk_indices)
+    outs = jax.shard_map(
+        _process_tokens_locally,
+        mesh=mesh,
+        in_specs=(
+            P(ShardingAxisName.MLP_DATA, None),
+            P(ShardingAxisName.MLP_DATA, None),
+        ),
+        out_specs=(P(ShardingAxisName.MLP_DATA), ) *
+        (4 if use_tc_permute else 3),
+        check_vma=False,
+    )(hidden_states, topk_indices)
     x, group_sizes, topk_argsort_revert_indices = outs[:3]
     topk_argsort_indices = outs[3] if use_tc_permute else None
 
