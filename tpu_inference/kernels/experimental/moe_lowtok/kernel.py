@@ -57,9 +57,23 @@ _FP8 = jnp.float8_e4m3fn
 _FP8_MAX = 448.0
 
 
-def can_use_moe_lowtok(hidden, w1, w2, s1, s2, b1, b2, *, activation,
-                       rhs_quant_dtype):
-    """Check arithmetic/layout support; the caller applies the token cap."""
+def can_use_moe_lowtok(hidden,
+                       w1,
+                       w2,
+                       s1,
+                       s2,
+                       b1,
+                       b2,
+                       *,
+                       activation,
+                       rhs_quant_dtype,
+                       num_experts: int | None = None):
+    """Check arithmetic/layout support; the caller applies the token cap.
+
+    `num_experts` is the per-shard expert count when the weights are still
+    in their global [num_experts, ...] shape (expert-parallel callers before
+    shard_map); it defaults to the weights' leading dimension.
+    """
     if activation != "silu" or rhs_quant_dtype is not None:
         return False
     if b1 is not None or b2 is not None or s1 is None or s2 is None:
@@ -68,15 +82,17 @@ def can_use_moe_lowtok(hidden, w1, w2, s1, s2, b1, b2, *, activation,
         return False
     h = hidden.shape[1]
     e, i, out = w2.shape
-    if not 0 < e <= _MAX_LOCAL_EXPERTS or out != h or w1.shape != (e, h,
-                                                                   2 * i):
+    if num_experts is not None:
+        e = num_experts
+    if not 0 < e <= _MAX_LOCAL_EXPERTS or out != h or w1.shape[1:] != (h,
+                                                                       2 * i):
         return False
     if (2 * i) % 512:
         return False
     if (hidden.dtype != jnp.bfloat16 or w1.dtype != jnp.float8_e4m3fn
             or w2.dtype != jnp.float8_e4m3fn):
         return False
-    return s1.shape == (e, 1, 1, 2 * i) and s2.shape == (e, 1, 1, h)
+    return s1.shape[1:] == (1, 1, 2 * i) and s2.shape[1:] == (1, 1, h)
 
 
 def _vmem_budget(rows, hidden, inter, w13_parts, lanes):

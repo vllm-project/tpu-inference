@@ -60,12 +60,16 @@ def can_use_dense_expert(hidden,
                          *,
                          activation,
                          rhs_quant_dtype,
-                         skip_padded_tokens=False):
+                         skip_padded_tokens=False,
+                         num_experts: int | None = None):
     """Check arithmetic/layout support; the compiler owns resource limits.
 
     Zero routing coefficients already suppress padded tokens, so either
     skip_padded_tokens setting is supported. There is no prefill/decode
     inference here: the MoE entry applies its configurable token threshold.
+    `num_experts` is the per-shard expert count when the weights are still
+    in their global [num_experts, ...] shape (expert-parallel callers before
+    shard_map); it defaults to the weights' leading dimension.
     """
     if activation != "silu":
         return False
@@ -77,16 +81,18 @@ def can_use_dense_expert(hidden,
         return False
     m, h = hidden.shape
     e, i, out = w2.shape
+    if num_experts is not None:
+        e = num_experts
     if min(m, h, i, e) <= 0:
         return False
     if m % 8 or h % 512 or i % 512:
         return False
-    if out != h or w1.shape != (e, h, 2 * i):
+    if out != h or w1.shape[1:] != (h, 2 * i):
         return False
     if (hidden.dtype != jnp.bfloat16 or w1.dtype != jnp.float8_e4m3fn
             or w2.dtype != jnp.float8_e4m3fn):
         return False
-    return (s1.shape == (e, 1, 1, 2 * i) and s2.shape == (e, 1, 1, h)
+    return (s1.shape[1:] == (1, 1, 2 * i) and s2.shape[1:] == (1, 1, h)
             and s1.dtype == jnp.float32 and s2.dtype == jnp.float32)
 
 
