@@ -120,6 +120,13 @@ class TestTpuPlatform:
                 in TpuPlatform.additional_env_vars)
         assert "MOE_FOLD_ROUTING_INTO_DISPATCH" in envs.environment_variables
 
+    @pytest.mark.parametrize(
+        "name", ["MOE_TC_PERMUTE", "MOE_TC_PERMUTE_CAPACITY_FACTOR"])
+    def test_additional_env_vars_covers_moe_tc_permute(self, name):
+        """Workers trace the TensorCore permute, so they need both env vars."""
+        assert name in TpuPlatform.additional_env_vars
+        assert name in envs.environment_variables
+
     def test_get_device_total_memory(self):
         with pytest.raises(NotImplementedError):
             TpuPlatform.get_device_total_memory()
