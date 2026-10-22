@@ -16,7 +16,7 @@
 CPU tests (run anywhere):
 1. `_single_sort_permutation` matches the standard 3-sort reference.
 2. `rowmax_topk` matches `jax.lax.top_k` across shapes and edge cases.
-3. `router_topk` delegates to `rowmax_topk` on CPU platform.
+3. `router_topk` (pure-JAX `rowmax_topk`) matches `jax.lax.top_k`.
 4. `select(..., interpret=True)` matches `rowmax_topk` on CPU.
 5. The kernels' `can_use_*` eligibility checks.
 
@@ -144,7 +144,7 @@ def test_rowmax_topk_softmax_distribution():
     np.testing.assert_array_equal(np.asarray(rowmax_ids), np.asarray(lax_ids))
 
 
-def test_router_topk_cpu_fallback():
+def test_router_topk_matches_lax_topk():
     scores = jax.random.normal(jax.random.PRNGKey(123), (16, EXPERTS))
     rv, ri = router_topk(scores, TOPK)
     lv, li = jax.lax.top_k(scores, TOPK)

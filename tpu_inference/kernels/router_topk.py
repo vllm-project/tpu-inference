@@ -148,13 +148,11 @@ def rowmax_topk(scores: jax.Array, k: int) -> tuple[jax.Array, jax.Array]:
 
 
 def router_topk(scores: jax.Array, k: int) -> tuple[jax.Array, jax.Array]:
-    """Sort-free router top-k with CPU fallback.
+    """Sort-free router top-k: k row-max passes instead of a sort.
 
-    On TPU platform, calls the Pallas kernel. On other platforms (CPU),
-    falls back to the pure-JAX `rowmax_topk`.
+    Pure JAX (`rowmax_topk`), not the Pallas `select` kernel: fused_moe_func
+    calls this on the gating scores before its shard_map, under auto-SPMD
+    partitioning, where a Mosaic kernel cannot be partitioned. `select`
+    remains for callers that run it on a per-shard array.
     """
-    if jax.devices()[0].platform != "tpu":
-        return rowmax_topk(scores, k)
-    orig_dtype = scores.dtype
-    weights, ids = select(scores.astype(jnp.float32), k)
-    return weights.astype(orig_dtype), ids
+    return rowmax_topk(scores, k)
