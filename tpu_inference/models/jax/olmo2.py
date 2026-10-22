@@ -12,10 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Iterable
+
 import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
+from torch import Tensor
 from transformers import Olmo2Config
 from vllm.config import VllmConfig
 
@@ -30,6 +33,7 @@ from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.models.jax.qwen2 import (Qwen2ForCausalLM, Qwen2MLP,
                                             Qwen2Model)
 from tpu_inference.models.jax.qwen3 import Qwen3Attention
+from tpu_inference.utils import to_torch_dtype
 
 init_fn = nnx.initializers.uniform()
 
@@ -191,3 +195,14 @@ class Olmo2ForCausalLM(Qwen2ForCausalLM):
                 rngs=rng,
                 prefix="lm_head",
             )
+
+    def load_weights(self, weights: Iterable[tuple[str, Tensor]]) -> set[str]:
+        # Official checkpoints store FP32 weights; keep the requested model
+        # dtype when the iterator loader replaces the initialized parameters.
+        dtypes = {
+            name: to_torch_dtype(param.get_value().dtype)
+            for name, param in self.named_parameters()
+        }
+        return super().load_weights(
+            (name, weight.to(dtype=dtypes.get(name, weight.dtype)))
+            for name, weight in weights)

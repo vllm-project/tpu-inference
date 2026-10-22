@@ -39,5 +39,7 @@ OLMO2_TEST_MODEL=allenai/OLMo-2-0425-1B \
 ```
 
 `OLMO2_TEST_MODEL` also accepts a local ModelScope checkpoint directory. The
-checkpoint test compares BF16 JAX logits with FP32 Transformers logits and checks
-that greedy prefill and decode predictions agree.
+checkpoint test compares BF16 JAX with FP32 Transformers and checks that greedy
+prefill and decode predictions agree. It also compares output distributions,
+using Transformers' own BF16 error as a rounding baseline, since a uniform logit
+shift does not change sampling probabilities.
