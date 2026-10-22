@@ -18,8 +18,8 @@
 Runs once everything is built: the approval block, the publishes, and the
 check that what users get is what was built. Uploaded rather than written into
 pipeline.yml so the approval prompt can name the exact version, and so the team
-restriction is added only when it is set. --no-interpolation keeps the $VAR
-references in the commands for the shell that runs them.
+restriction is added only when it is set. --no-interpolation: nothing in it is
+for Buildkite to interpolate.
 
 Optional build env:
   RELEASE_APPROVER_TEAMS=a,b   Buildkite team slugs allowed to approve
@@ -44,6 +44,18 @@ def meta(key):
 QUEUE = {"queue": os.environ.get("RELEASE_QUEUE", "release-tpu-inference")}
 
 
+def command_step(label, key, depends_on, commands, **extra):
+    step = {
+        "label": label,
+        "key": key,
+        "depends_on": depends_on,
+        "agents": QUEUE,
+        "commands": commands,
+    }
+    step.update(extra)
+    return step
+
+
 def placeholder_step(label, key, depends_on, what):
     return {
         "label": f"{label} (placeholder)",
@@ -65,7 +77,9 @@ def main():
         "key":
         "approve_publish",
         "depends_on": ["plan_publish"],
-        "prompt": (f"Publish tpu-inference {version} from {branch}. "
+        "prompt": (f"Publish tpu-inference {version} from {branch}: "
+                   f"tpu-inference and vllm-tpu {version} to PyPI. "
+                   "PyPI releases can't be replaced. "
                    "Check that tpu-inference-ci passed on this commit first."),
     }
     teams = [
@@ -75,19 +89,40 @@ def main():
         block["allowed_teams"] = teams
     steps.append(block)
 
-    # Placeholders: the Docker image and PyPI publishes come in follow-ups.
+    # Placeholder: publishing the Docker image comes in a follow-up.
     steps.append(
         placeholder_step(":docker: Publish the image to Docker Hub",
                          "publish_images", ["approve_publish"],
                          "Docker image"))
     steps.append(
-        placeholder_step(":package: Publish to PyPI", "publish_pypi",
-                         ["approve_publish"], "PyPI"))
+        command_step(
+            ":package: Publish tpu-inference to PyPI",
+            "publish_core",
+            ["approve_publish"],
+            ["bash .buildkite/scripts/publish_wheel.sh tpu-inference"],
+            env={"PUBLISH_PYPI": "tpu-inference"},
+            concurrency=1,
+            concurrency_group="tpu-inference-publish",
+        ))
+    # The combined wheel pins tpu-inference==<version>, so it goes up only
+    # once the core is installable.
+    steps.append(
+        command_step(
+            ":package: Publish vllm-tpu to PyPI",
+            "publish_vllm_tpu",
+            ["publish_core"],
+            ["bash .buildkite/scripts/publish_wheel.sh vllm-tpu"],
+            env={"PUBLISH_PYPI": "vllm-tpu"},
+            concurrency=1,
+            concurrency_group="vllm-tpu-publish",
+        ))
+    # Placeholder: checking what users get comes in a follow-up. Each
+    # publish_wheel.sh run already waits until its wheel installs from PyPI.
     steps.append(
         placeholder_step(":white_check_mark: Check what users get",
                          "verify_published",
-                         ["publish_images", "publish_pypi"],
-                         "Docker image and PyPI"))
+                         ["publish_images", "publish_vllm_tpu"],
+                         "Checking the published image and wheels"))
 
     print(json.dumps({"steps": steps}, indent=2))
 

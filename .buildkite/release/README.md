@@ -1,15 +1,18 @@
 # tpu-inference-release
 
 One Buildkite pipeline for each tpu-inference release: it settles the version,
-builds what the release ships, waits for approval, then publishes it. This is
-the pipeline's skeleton: the Docker image and PyPI steps are placeholders, to be
-filled in by follow-ups (PyPI is still published by
-`.github/workflows/release.yml`).
+builds what the release ships, waits for approval, then publishes it. It builds
+the two wheels (`tpu-inference` and the combined `vllm-tpu`) once, checks them,
+and publishes those same bytes to PyPI. The Docker image steps are still
+placeholders, to be filled in by a follow-up.
 
-The pipeline's settings upload [`pipeline.yml`](pipeline.yml) **from main**,
-whatever branch a build is on, and every step runs main's tooling (this
-directory) against the build's checkout. A release branch supplies only the
-code being released.
+The pipeline's settings upload [`pipeline.yml`](pipeline.yml) from the build's
+own checkout, and only for builds of `main` and `releases/v*`. A release branch
+runs the release tooling (this directory and `.buildkite/scripts`) it was cut
+with; a tooling fix a release needs goes to main and is cherry-picked to the
+branch, or committed to the branch directly for one-off debugging. A release
+branch cut before this tooling existed needs it cherry-picked before its first
+release build.
 
 ## Cut a release
 
@@ -20,12 +23,17 @@ code being released.
    that commit. For a pre-release set `RELEASE_VERSION=vX.Y.Zrc1`.
 3. The build then, without anyone's help:
    - **preflight**: settles the version (branch or `RELEASE_VERSION`, which has
-     to be a version of the branch's `X.Y.Z`) and records it for every later
-     step;
-   - **builds**: the image and the wheels (placeholders for now);
+     to be a version of the branch's `X.Y.Z`), records it for every later
+     step, and checks PyPI doesn't have it yet;
+   - **builds once**: both wheels (the image is a placeholder for now);
+   - **checks**: the wheels resolve together from pypi.org for CPython 3.12
+     on x86_64 Linux (`check_wheels.sh`);
    - **plans the publish**: uploads the approval block and the publish steps.
-4. **Approve** the publish block.
-5. The build publishes and checks what users get (placeholders for now).
+4. **Approve** the publish block. PyPI releases can't be replaced.
+5. The build publishes what it built and checked: `tpu-inference`, then
+   `vllm-tpu`, to PyPI with Trusted Publishing
+   (`.buildkite/scripts/publish_wheel.sh`). Publishing the image and checking
+   what users get are placeholders for now.
 
 Build env knobs:
 
@@ -42,23 +50,27 @@ Build env knobs:
 
   ```yaml
   steps:
-    - label: ":pipeline: Upload the release pipeline from main"
+    - label: ":pipeline: Upload the release pipeline"
+      branches: "main releases/v*"
       agents:
         queue: release-tpu-inference
-      command: |
-        git fetch -q origin main
-        tools="$$(git rev-parse FETCH_HEAD)"
-        buildkite-agent meta-data set release-tools-commit "$$tools"
-        git show "$$tools:.buildkite/release/pipeline.yml" | buildkite-agent pipeline upload
+      command: buildkite-agent pipeline upload .buildkite/release/pipeline.yml
   ```
+
+## One-time setup outside this repo
+
+- PyPI: a Google Trusted Publisher on both `tpu-inference` and `vllm-tpu` for
+  the service account of the agents on the `release-tpu-inference` queue.
+  Without it, `publish_wheel.sh` can't mint a token and uploads nothing.
+- `.github/workflows/release.yml` also publishes `tpu-inference` to PyPI, for
+  `v*` tags on main. Only one of them can publish a given version: PyPI
+  rejects the second upload.
 
 ## Try the pipeline
 
-While the build and publish steps are placeholders, a build builds and
-publishes nothing, even when approved, so it is safe to run on any release
-branch, e.g. `releases/v0.31.0`: check that preflight settles the version and
-that the approval block and the placeholder steps appear.
-
-Before this directory is on main, point the settings step at the branch under
-review instead (`git fetch -q origin <branch>`), and set it back to `main`
-afterwards.
+Approving the publish block uploads the wheels to PyPI, where a version can
+never be reused. To try the pipeline without publishing, stop at the approval
+block: check that preflight settles the version and that both wheels build and
+pass `check_wheels.sh`, then cancel the build instead of approving it. The
+steps run only on `releases/vX.Y.Z` branches, so try it on a release branch
+that has this directory.
