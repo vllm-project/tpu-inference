@@ -16,6 +16,15 @@
 # Exit on error, exit on unset variable, fail on pipe errors.
 set -euo pipefail
 
+# TEST ONLY (jefft/test_pipe): run the release pipeline from this branch instead
+# of CI. The real pipeline pins its tooling to main and runs on releases/* only.
+# RELEASE_QUEUE (New Build env) moves every step to another queue.
+buildkite-agent meta-data set release-tools-commit "$BUILDKITE_COMMIT"
+sed -e '/^    if: build.branch/d' \
+  -e "s/queue: release-tpu-inference/queue: ${RELEASE_QUEUE:-release-tpu-inference}/" \
+  .buildkite/release/pipeline.yml | buildkite-agent pipeline upload
+exit 0
+
 # Resolve the absolute directory path of the current script.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
