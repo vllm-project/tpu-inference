@@ -187,6 +187,25 @@ def test_moe_fold_routing_into_dispatch(monkeypatch: pytest.MonkeyPatch):
     assert envs.MOE_FOLD_ROUTING_INTO_DISPATCH is False
 
 
+def test_moe_gmm_ep_ragged_a2a(monkeypatch: pytest.MonkeyPatch):
+    """MOE_GMM_EP_RAGGED_A2A is opt-in; its dropless rounds are on by default."""
+    for name in ("MOE_GMM_EP_RAGGED_A2A", "MOE_RAGGED_A2A_CAPACITY_FACTOR",
+                 "MOE_RAGGED_A2A_DROPLESS"):
+        monkeypatch.delenv(name, raising=False)
+    assert envs.MOE_GMM_EP_RAGGED_A2A is False
+    assert envs.MOE_RAGGED_A2A_CAPACITY_FACTOR == 2.0
+    assert envs.MOE_RAGGED_A2A_DROPLESS is True
+
+    monkeypatch.setenv("MOE_GMM_EP_RAGGED_A2A", "1")
+    assert envs.MOE_GMM_EP_RAGGED_A2A is True
+
+    monkeypatch.setenv("MOE_RAGGED_A2A_CAPACITY_FACTOR", "1.5")
+    assert envs.MOE_RAGGED_A2A_CAPACITY_FACTOR == 1.5
+
+    monkeypatch.setenv("MOE_RAGGED_A2A_DROPLESS", "0")
+    assert envs.MOE_RAGGED_A2A_DROPLESS is False
+
+
 def test_dp_sched_routing(monkeypatch: pytest.MonkeyPatch):
     """DP_SCHED_ROUTING defaults to least_loaded and only accepts known policies."""
     monkeypatch.delenv("DP_SCHED_ROUTING", raising=False)

@@ -19,6 +19,7 @@ from typing import Literal
 import jax
 import numpy as np
 from jax import numpy as jnp
+from jax.experimental.pallas import tpu as pltpu
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from tokamax._src.ops.experimental.gmm_v2.gmm_v2 import gmm_v2
@@ -1173,6 +1174,290 @@ def _apply_hierarchical_dispatch_gather(hidden_states: jax.Array,
     )(*args)
 
 
+def _exclusive_cumsum(x: jax.Array, axis: int) -> jax.Array:
+    return jnp.cumsum(x, axis=axis) - x
+
+
+def _ragged_a2a_row_split(hidden_size: int) -> int:
+    """Rows per token in the [rows, row_split, hidden / row_split] view.
+
+    Uses the TPU sublane count (8 on TPU v2 to 7x and TPU8i, 16 on TPU8t),
+    halved until hidden / row_split is a multiple of the lane count. Falls back
+    to (8 sublanes, 128 lanes) when no TPU is attached (e.g. CPU tests).
+    """
+    try:
+        info = pltpu.get_tpu_info()
+        row_split, lanes = info.num_sublanes, info.num_lanes
+    except (ValueError, RuntimeError):
+        row_split, lanes = 8, 128
+    while row_split > 1 and hidden_size % (row_split * lanes):
+        row_split //= 2
+    return row_split
+
+
+def _ragged_a2a_expert_parallel_gmm(
+    hidden_states: jax.Array,
+    topk_indices: jax.Array,
+    topk_weights: jax.Array,
+    w1: jax.Array,
+    w1_scale: jax.Array | None,
+    w1_bias: jax.Array | None,
+    w2: jax.Array,
+    w2_scale: jax.Array | None,
+    w2_bias: jax.Array | None,
+    *,
+    mesh: Mesh,
+    activation: str,
+    topk: int,
+) -> jax.Array:
+    """GMM_EP with ragged all-to-all dispatch and combine (true EP).
+
+    Tokens stay sharded over all devices (EXPERT_DATA). Each device sorts its
+    own (token, k) rows by expert, sends each row only to the device that owns
+    that expert (ragged all-to-all), runs both GMMs on the rows it received,
+    sends the results back to the token's device (ragged all-to-all) and does
+    the top-k weighted sum locally.
+
+    The receive buffer has a static capacity of
+    MOE_RAGGED_A2A_CAPACITY_FACTOR x the rows per device. Rows beyond it are
+    sent in extra rounds of the same size (MOE_RAGGED_A2A_DROPLESS=1,
+    default), so no row is dropped; the extra rounds only run on steps where
+    some device receives more than `capacity` rows.
+
+    topk_indices >= num_experts marks rows that are not sent (padding tokens).
+
+    Returns [num_tokens, hidden_size] sharded P(EXPERT_DATA, None).
+    """
+    num_tokens, hidden_size = hidden_states.shape
+    num_experts, padded_hidden_size, _ = w1.shape
+    dtype = hidden_states.dtype
+    ep_axis = ShardingAxisName.EXPERT
+    ep_size = get_mesh_shape_product(mesh, ep_axis)
+    tok_axis = ShardingAxisName.EXPERT_DATA
+    tok_shards = get_mesh_shape_product(mesh, tok_axis)
+    local_experts = num_experts // ep_size
+    local_tokens = num_tokens // tok_shards
+    rows = local_tokens * topk
+    capacity_factor = envs.MOE_RAGGED_A2A_CAPACITY_FACTOR
+    capacity = -(-int(rows * capacity_factor) // 512) * 512
+    # MOE_RAGGED_A2A_DROPLESS=1 (default): rows beyond `capacity` are sent in
+    # extra rounds instead of being dropped. 0 drops them (for comparison
+    # only; it loses expert contributions under skewed routing).
+    dropless = envs.MOE_RAGGED_A2A_DROPLESS
+    logger.info_once(
+        "[MoE]: GMM_EP ragged all-to-all: %d devices, %d experts / device, "
+        "%d tokens / device, %d rows / device, receive capacity %d rows, "
+        "dropless %s.", ep_size, local_experts, local_tokens, rows, capacity,
+        dropless)
+
+    # In prefill (large token count) use one ragged slice per (device, local
+    # expert) so rows arrive grouped by local expert; in decode use one slice
+    # per peer device to avoid per-slice RDMA overhead.
+    use_per_expert_a2a = local_tokens > 64
+
+    # View each token row as [row_split, hidden_size // row_split] for the
+    # sender gather, both ragged all-to-alls, and the combine gather +
+    # weighted sum. A 2D row gather on [rows, hidden] touches one row of each
+    # tile; with row_split = the TPU sublane count each row covers whole
+    # tiles, which removes the read amplification and the layout copies
+    # around the collectives. Numerically exact.
+    row_split = _ragged_a2a_row_split(hidden_size)
+    if row_split > 1:
+        logger.info_once(
+            "[MoE]: GMM_EP ragged all-to-all rows viewed as "
+            "[%d, %d].", row_split, hidden_size // row_split)
+
+    def _split_rows(a):
+        # [n, hidden_size] -> [n, row_split, hidden_size / row_split].
+        return a if row_split == 1 else a.reshape(a.shape[0], row_split, -1)
+
+    def _expert_ffn(xr, row_expert, group_sizes, w1, w1_scale, w1_bias, w2,
+                    w2_scale, w2_bias):
+        # With per-peer slices (row_expert given), sort the received rows by
+        # local expert before the GMMs and unsort after. With per-expert
+        # slices the rows already arrive grouped by local expert.
+        if row_expert is not None:
+            perm = jnp.argsort(row_expert).astype(jnp.int32)
+            xr = xr[perm]
+        xr = jnp.pad(xr, ((0, 0), (0, padded_hidden_size - hidden_size)))
+        group_offset = jnp.zeros((1, ), jnp.int32)
+        gmm1_res = gmm_wrapper(xr,
+                               w1,
+                               w1_scale,
+                               w1_bias,
+                               group_sizes,
+                               group_offset,
+                               fuse_act=activation,
+                               preferred_element_type=dtype)
+        gmm1_res = gmm1_res[:, :w2.shape[1]]
+        gmm2_res = gmm_wrapper(gmm1_res,
+                               w2,
+                               w2_scale,
+                               w2_bias,
+                               group_sizes,
+                               group_offset,
+                               preferred_element_type=dtype)
+        gmm2_res = gmm2_res[:, :hidden_size].astype(dtype)
+        if row_expert is not None:
+            gmm2_res = gmm2_res[jnp.argsort(perm)]
+        return gmm2_res
+
+    def _local(x, ids, wts, w1, w1_scale, w1_bias, w2, w2_scale, w2_bias):
+        me = jax.lax.axis_index(ep_axis)
+        ids_flat = ids.reshape(-1).astype(jnp.int32)
+        # Sorting by expert also groups rows by destination device, since
+        # device n owns experts [n * local_experts, (n + 1) * local_experts).
+        sort_idx = jnp.argsort(ids_flat).astype(jnp.int32)
+        tok_of_row = sort_idx // topk
+        # Row counts per global expert; out-of-range ids (padding) count 0.
+        counts = jax.nn.one_hot(ids_flat, num_experts,
+                                dtype=jnp.int32).sum(axis=0)
+        all_counts = jax.lax.all_gather(counts, ep_axis)  # [sender, expert]
+        c3 = all_counts.reshape(ep_size, ep_size, local_experts)
+
+        payload = _split_rows(x)
+        tx = payload[tok_of_row]
+
+        # Each receiver n lays out its incoming rows in a fixed order (see
+        # below) and receives them in rounds of `capacity` rows: round r
+        # carries the rows at positions [r * capacity, (r + 1) * capacity)
+        # of that order. Round 0 always runs; further rounds run only when
+        # some device receives more than `capacity` rows (skewed routing).
+        # seg_count[g, n] / seg_pos[g, n]: size and position (in receiver n's
+        # order) of segment g of rows sent to receiver n.
+        # seg_base[s, n, e]: offset of the rows of (sender s, receiver n,
+        # local expert e) in sender s's tx.
+        if use_per_expert_a2a:
+            # Receiver n orders slices by (local expert e, sender s).
+            seg_count = jnp.moveaxis(c3, 2, 0).reshape(local_experts * ep_size,
+                                                       ep_size)
+            seg_base = _exclusive_cumsum(c3.reshape(ep_size, -1),
+                                         axis=1).reshape(
+                                             ep_size, ep_size, local_experts)
+
+            def to_sne(a):  # [(e, s), n] -> [s, n, e]
+                return jnp.moveaxis(a.reshape(local_experts, ep_size, ep_size),
+                                    0, 2)
+        else:
+            # Receiver n orders slices by sender s (each sorted by expert).
+            seg_count = c3.sum(axis=2)  # [sender, receiver]
+            seg_base = _exclusive_cumsum(seg_count, axis=1)
+
+            def to_sne(a):
+                return a
+
+        seg_pos = _exclusive_cumsum(seg_count, axis=0)
+        total_recv = seg_count.sum(axis=0)  # [receiver]
+        mine = c3[:, me, :]  # [sender, local expert]
+        mine_pos = _exclusive_cumsum(mine.reshape(-1), axis=0)
+
+        def window(r, count, pos):
+            # Part of each segment [pos, pos + count) that falls in round r:
+            # (size, offset in the round's receive buffer, rows already sent).
+            lo = jnp.maximum(pos, r * capacity)
+            hi = jnp.minimum(pos + count, (r + 1) * capacity)
+            size = jnp.maximum(hi - lo, 0)
+            return (size, jnp.where(size > 0, lo - r * capacity,
+                                    0), jnp.where(size > 0, lo - pos, 0))
+
+        def run_round(r, back):
+            size, recv_off, done = window(r, seg_count, seg_pos)
+            sizes, start = to_sne(size), to_sne(recv_off)
+            send_off = seg_base + to_sne(done)
+            recv_buf = jnp.zeros((capacity, ) + payload.shape[1:],
+                                 payload.dtype)
+            if use_per_expert_a2a:
+                xr = jax.lax.ragged_all_to_all(tx,
+                                               recv_buf,
+                                               send_off[me].reshape(-1),
+                                               sizes[me].reshape(-1),
+                                               start[me].reshape(-1),
+                                               sizes[:, me, :].reshape(-1),
+                                               axis_name=ep_axis)
+                gmm2_res = _expert_ffn(
+                    xr.reshape(capacity, hidden_size), None,
+                    sizes[:, me, :].sum(axis=0).astype(jnp.int32), w1,
+                    w1_scale, w1_bias, w2, w2_scale, w2_bias)
+                return jax.lax.ragged_all_to_all(_split_rows(gmm2_res),
+                                                 back,
+                                                 start[:, me, :].reshape(-1),
+                                                 sizes[:, me, :].reshape(-1),
+                                                 send_off[:,
+                                                          me, :].reshape(-1),
+                                                 sizes[me].reshape(-1),
+                                                 axis_name=ep_axis)
+            xr = jax.lax.ragged_all_to_all(tx,
+                                           recv_buf,
+                                           send_off[me],
+                                           sizes[me],
+                                           start[me],
+                                           sizes[:, me],
+                                           axis_name=ep_axis)
+            # Buffer row p holds my received row q = r * capacity + p; find
+            # its (sender, local expert) segment to get the local expert.
+            q = r * capacity + jnp.arange(capacity, dtype=jnp.int32)
+            seg = (q[:, None] >= (mine_pos + mine.reshape(-1))[None, :]).sum(
+                axis=1, dtype=jnp.int32)
+            row_expert = jnp.where(q < total_recv[me], seg % local_experts,
+                                   local_experts)
+            kept, _, _ = window(r, mine.reshape(-1), mine_pos)
+            gmm2_res = _expert_ffn(
+                xr.reshape(capacity, hidden_size), row_expert,
+                kept.reshape(ep_size,
+                             local_experts).sum(axis=0).astype(jnp.int32), w1,
+                w1_scale, w1_bias, w2, w2_scale, w2_bias)
+            return jax.lax.ragged_all_to_all(_split_rows(gmm2_res),
+                                             back,
+                                             start[:, me],
+                                             sizes[:, me],
+                                             send_off[:, me],
+                                             sizes[me],
+                                             axis_name=ep_axis)
+
+        back = run_round(jnp.int32(0),
+                         _split_rows(jnp.zeros((rows, hidden_size), dtype)))
+        if dropless:
+            # Same value on every device (all_counts is global), so all
+            # devices run the same number of collective rounds.
+            num_rounds = (jnp.max(total_recv) + capacity - 1) // capacity
+            _, back = jax.lax.while_loop(
+                lambda c: c[0] < num_rounds, lambda c:
+                (c[0] + 1, run_round(c[0], c[1])), (jnp.int32(1), back))
+        # Gather in (topk, local_tokens) order so reshaping to
+        # [topk, local_tokens, ...] keeps the sublane dim = local_tokens and
+        # compiles to a zero-cost bitcast. With row_split > 1 the minor
+        # [row_split, hidden / row_split] view is kept through the weighted
+        # sum and only the small output is reshaped.
+        revert = jnp.argsort(sort_idx).reshape(local_tokens,
+                                               topk).T.reshape(-1)
+        per_k = back[revert].reshape((topk, local_tokens) + back.shape[1:])
+        w = wts.T.astype(jnp.float32).reshape((topk, local_tokens) + (1, ) *
+                                              (back.ndim - 1))
+        out = (per_k.astype(jnp.float32) * w).sum(axis=0)
+        return out.reshape(local_tokens, hidden_size).astype(dtype)
+
+    tok_spec = P(tok_axis, None)
+    ep_spec = P(ep_axis)
+    return jax.shard_map(
+        _local,
+        mesh=mesh,
+        in_specs=(
+            tok_spec,
+            tok_spec,
+            tok_spec,
+            ep_spec,
+            None if w1_scale is None else ep_spec,
+            None if w1_bias is None else ep_spec,
+            ep_spec,
+            None if w2_scale is None else ep_spec,
+            None if w2_bias is None else ep_spec,
+        ),
+        out_specs=tok_spec,
+        check_vma=False,
+    )(hidden_states, topk_indices, topk_weights, w1, w1_scale, w1_bias, w2,
+      w2_scale, w2_bias)
+
+
 @jax.jit(static_argnames=(
     "topk",
     "renormalize",
@@ -1310,6 +1595,49 @@ def fused_moe_func(
         token_valid = (jnp.arange(num_tokens) < num_valid_tokens)[:, None]
         topk_indices = jnp.where(token_valid, topk_indices, 0)
         topk_weights = jnp.where(token_valid, topk_weights, 0.0)
+    # GMM_EP ragged all-to-all dispatch / combine (MOE_GMM_EP_RAGGED_A2A).
+    # Its output is fully reduced, so it is not used when the caller defers
+    # the all-reduce.
+    if (use_ep and envs.MOE_GMM_EP_RAGGED_A2A and not defer_all_reduce
+            and num_tokens %
+            get_mesh_shape_product(mesh, ShardingAxisName.EXPERT_DATA) == 0):
+        if envs.FORCE_MOE_RANDOM_ROUTING:
+            # Keep rows that are not routed (ids >= num_experts) unrouted.
+            topk_indices = jnp.where(
+                topk_indices < global_num_experts,
+                _override_token_indices_for_random_routing(
+                    topk_indices, global_num_experts),
+                global_num_experts,
+            )
+        if all_gather_fp8:
+            logger.warning_once(
+                "MOE_GMM_EP_RAGGED_A2A does not support FP8 activation "
+                "dispatch (MOE_ALL_GATHER_ACTIVATION_DTYPE / activation_dtype "
+                "= fp8): the ragged all-to-all sends the tokens in %s "
+                "instead, so the MoE output differs from the FP8 all-gather "
+                "path.", str(dtype))
+        if num_valid_tokens is not None:
+            # Padding tokens are not sent anywhere (weight 0, output 0).
+            topk_indices = jnp.where(token_valid, topk_indices,
+                                     global_num_experts)
+        out = _ragged_a2a_expert_parallel_gmm(
+            hidden_states,
+            topk_indices,
+            topk_weights.astype(dtype),
+            w1,
+            w1_scale,
+            w1_bias,
+            w2,
+            w2_scale,
+            w2_bias,
+            mesh=mesh,
+            activation=activation,
+            topk=topk,
+        )
+        out_spec = (P(ShardingAxisName.ATTN_DATA, None)
+                    if scatter_results else P(ShardingAxisName.MLP_DATA, None))
+        return jax.lax.with_sharding_constraint(out,
+                                                NamedSharding(mesh, out_spec))
     # All gathering topk_indices and topk_weights if attention dp is used.
     # MOE_FOLD_ROUTING_INTO_DISPATCH gathers them in the token all-gather.
     hierarchical = use_ep and envs.MOE_HIERARCHICAL_DISPATCH

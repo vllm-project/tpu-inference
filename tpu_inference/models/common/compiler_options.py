@@ -57,6 +57,11 @@ def get_step_fn_compiler_options():
         compiler_options[
             "xla_tpu_sparse_core_all_gather_offload_min_size_in_bytes"] = (
                 threshold_bytes)
+    if envs.MOE_GMM_EP_RAGGED_A2A:
+        # The GMM_EP ragged all-to-all MoE dispatch / combine needs this for
+        # the prefill programs to compile.
+        compiler_options[
+            "xla_tpu_force_custom_barrier_for_ragged_all_to_all"] = "false"
 
     return compiler_options
 
