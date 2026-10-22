@@ -716,6 +716,50 @@ class TestDPScheduler:
         scheduler._send_command.assert_any_call(
             1, SchedulerCommand.HAS_FINISHED_REQUESTS)
 
+    def test_has_request_unknown(self, mock_vllm_config, mock_kv_cache_config,
+                                 mock_structured_output_manager):
+        """Test has_request returns False without IPC for unknown request."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+        scheduler._send_command = MagicMock()
+
+        assert scheduler.has_request("unknown-req") is False
+        scheduler._send_command.assert_not_called()
+
+    def test_has_request_pending(self, mock_vllm_config, mock_kv_cache_config,
+                                 mock_structured_output_manager):
+        """Test has_request returns True when request is in pending buffer."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+        scheduler._send_command = MagicMock()
+        pending_req = MagicMock(spec=Request)
+        pending_req.request_id = "pending-req"
+        scheduler._pending_new_requests = [pending_req]
+
+        assert scheduler.has_request("pending-req") is True
+        scheduler._send_command.assert_not_called()
+
+    def test_has_request_assigned_rank(self, mock_vllm_config,
+                                       mock_kv_cache_config,
+                                       mock_structured_output_manager):
+        """Test has_request queries the assigned DP rank worker."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+        scheduler.assigned_dp_rank = {"req1": 1}
+        scheduler._send_command = MagicMock()
+        scheduler._get_result = MagicMock(side_effect=[True, False])
+
+        assert scheduler.has_request("req1") is True
+        scheduler._send_command.assert_called_once_with(
+            1, SchedulerCommand.HAS_REQUEST, "req1")
+        scheduler._get_result.assert_called_once_with(
+            1, SchedulerCommand.HAS_REQUEST)
+
+        assert scheduler.has_request("req1") is False
+
     def test_get_request_counts(self, mock_vllm_config, mock_kv_cache_config,
                                 mock_structured_output_manager):
         """Test get_request_counts queries all workers."""

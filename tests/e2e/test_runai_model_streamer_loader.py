@@ -147,7 +147,7 @@ def test_correctness_torchax_ray_distributed_executor(
     """
     Compare the outputs of a codegemma model loaded from GCS via
     runai_model_streamer, and a model loaded from
-    Hugging Face, both using RayDistributedExecutor. The outputs should be the same.
+    Hugging Face, both using RayDistributedExecutorV2. The outputs should be the same.
     Note that these are run on the same node since a multi-node TPU setup would
     require additional changes to the CI pipeline. This test uses the default 
     HTTP GCS RunAI model streamer client.

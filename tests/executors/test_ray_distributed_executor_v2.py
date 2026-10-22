@@ -201,3 +201,268 @@ class TestTpuRayDistributedExecutorV2(unittest.TestCase):
         call_order.clear()
         executor.shutdown()
         self.assertEqual(call_order, [])
+
+    def test_initialize_ray_cluster_filters_non_tpu_nodes(
+            self, mock_wait_until_pg_ready, mock_get_ip, mock_platform,
+            mock_ray):
+        """Non-TPU nodes (e.g. a KubeRay head) must not get a bundle."""
+        mock_platform.ray_device_key = "TPU"
+        mock_platform.device_name = "tpu"
+        mock_ray.is_initialized.return_value = True
+        mock_ray.nodes.return_value = [
+            {
+                "NodeID": "head_node",
+                "Resources": {
+                    "CPU": 8
+                }
+            },
+            {
+                "NodeID": "tpu_node_1",
+                "Resources": {
+                    "TPU": 4,
+                    "CPU": 160
+                }
+            },
+            {
+                "NodeID": "tpu_node_2",
+                "Resources": {
+                    "TPU": 4,
+                    "CPU": 160
+                }
+            },
+            {
+                "NodeID": "no_resources_node"
+            },
+        ]
+        mock_placement_group = MagicMock()
+        mock_ray.util.placement_group.return_value = mock_placement_group
+
+        executor = self.RayDistributedExecutorV2(self.vllm_config)
+        executor.vllm_config = self.vllm_config
+        executor.parallel_config = self.vllm_config.parallel_config
+
+        executor._initialize_ray_cluster()
+
+        mock_ray.init.assert_not_called()
+        specs = mock_ray.util.placement_group.call_args[0][0]
+        self.assertEqual(specs, [
+            {
+                "TPU": 4,
+                "node:127.0.0.1": 0.001
+            },
+            {
+                "TPU": 4
+            },
+        ])
+        self.assertEqual(
+            mock_ray.util.placement_group.call_args[1]["strategy"], "PACK")
+        mock_wait_until_pg_ready.assert_called_once_with(mock_placement_group)
+        self.assertEqual(executor.parallel_config.placement_group,
+                         mock_placement_group)
+
+    def test_initialize_ray_cluster_pipeline_parallel(self,
+                                                      mock_wait_until_pg_ready,
+                                                      mock_get_ip,
+                                                      mock_platform, mock_ray):
+        """With PP>1, one bundle per PP stage sized by sharding_config."""
+        mock_platform.ray_device_key = "TPU"
+        mock_ray.is_initialized.return_value = True
+        mock_ray.nodes.return_value = [{
+            "NodeID": f"tpu_node_{i}",
+            "Resources": {
+                "TPU": 4
+            }
+        } for i in range(2)]
+        self.vllm_config.parallel_config.pipeline_parallel_size = 2
+        self.vllm_config.sharding_config.total_devices = 4
+
+        executor = self.RayDistributedExecutorV2(self.vllm_config)
+        executor.vllm_config = self.vllm_config
+        executor.parallel_config = self.vllm_config.parallel_config
+
+        executor._initialize_ray_cluster()
+
+        specs = mock_ray.util.placement_group.call_args[0][0]
+        self.assertEqual(specs, [
+            {
+                "TPU": 4,
+                "node:127.0.0.1": 0.001
+            },
+            {
+                "TPU": 4
+            },
+        ])
+
+    def test_initialize_ray_cluster_pipeline_parallel_node_count_mismatch(
+            self, mock_wait_until_pg_ready, mock_get_ip, mock_platform,
+            mock_ray):
+        """PP size must equal the number of TPU hosts."""
+        mock_platform.ray_device_key = "TPU"
+        mock_ray.is_initialized.return_value = True
+        mock_ray.nodes.return_value = [{
+            "NodeID": f"tpu_node_{i}",
+            "Resources": {
+                "TPU": 4
+            }
+        } for i in range(3)]
+        self.vllm_config.parallel_config.pipeline_parallel_size = 2
+
+        executor = self.RayDistributedExecutorV2(self.vllm_config)
+        executor.vllm_config = self.vllm_config
+        executor.parallel_config = self.vllm_config.parallel_config
+
+        with self.assertRaisesRegex(AssertionError,
+                                    "Cannot use PP across hosts"):
+            executor._initialize_ray_cluster()
+        mock_ray.util.placement_group.assert_not_called()
+
+    def test_initialize_ray_cluster_platform_without_ray_raises(
+            self, mock_wait_until_pg_ready, mock_get_ip, mock_platform,
+            mock_ray):
+        mock_platform.ray_device_key = ""
+        mock_platform.device_name = "fake_device"
+        mock_ray.is_initialized.return_value = True
+
+        executor = self.RayDistributedExecutorV2(self.vllm_config)
+        executor.vllm_config = self.vllm_config
+        executor.parallel_config = self.vllm_config.parallel_config
+
+        with self.assertRaisesRegex(ValueError, "does not support ray"):
+            executor._initialize_ray_cluster()
+        mock_ray.util.placement_group.assert_not_called()
+
+    def _run_init_executor(self, super_init_side_effect=None):
+        """Runs _init_executor with the parent init and cluster init mocked.
+
+        Returns (executor, mocks) where mocks records what the parent
+        RayExecutorV2._init_executor observed.
+        """
+        import vllm.v1.executor.ray_executor_v2 as ray_executor_v2
+
+        orig_init_ray_cluster = ray_executor_v2.initialize_ray_cluster
+        observed = {}
+
+        def fake_super_init(_self):
+            observed["init_ray_cluster"] = (
+                ray_executor_v2.initialize_ray_cluster)
+            observed["cluster_initialized_first"] = (
+                _self._initialize_ray_cluster.called)
+            if super_init_side_effect is not None:
+                raise super_init_side_effect
+
+        executor = self.RayDistributedExecutorV2(self.vllm_config)
+        executor.vllm_config = self.vllm_config
+        executor.parallel_config = self.vllm_config.parallel_config
+        executor._initialize_ray_cluster = MagicMock()
+        executor.collective_rpc = MagicMock(
+            return_value=["10.0.0.1:1234", "10.0.0.2:1234"])
+
+        with patch(
+                "vllm.v1.executor.ray_executor_v2.RayExecutorV2._init_executor",
+                fake_super_init), patch(
+                    "tpu_inference.executors.ray_distributed_executor_v2."
+                    "maybe_install_hybrid_coordinator_hooks"
+                ) as mock_hooks, patch(
+                    "tpu_inference.executors.ray_distributed_executor_v2."
+                    "set_node_kv_ip_port") as mock_set_kv:
+            try:
+                executor._init_executor()
+            finally:
+                # The vLLM hook must always be restored.
+                self.assertIs(ray_executor_v2.initialize_ray_cluster,
+                              orig_init_ray_cluster)
+
+        observed["orig_init_ray_cluster"] = orig_init_ray_cluster
+        observed["hooks"] = mock_hooks
+        observed["set_kv"] = mock_set_kv
+        return executor, observed
+
+    def test_init_executor_without_kv_connector(self, mock_wait_until_pg_ready,
+                                                mock_get_ip, mock_platform,
+                                                mock_ray):
+        self.vllm_config.kv_transfer_config = None
+
+        executor, observed = self._run_init_executor()
+
+        observed["hooks"].assert_called_once_with(self.vllm_config)
+        executor._initialize_ray_cluster.assert_called_once()
+        self.assertTrue(observed["cluster_initialized_first"])
+        # vLLM's initialize_ray_cluster is a no-op during the parent init so
+        # that it doesn't reject multi-chip TPU bundles.
+        self.assertIsNot(observed["init_ray_cluster"],
+                         observed["orig_init_ray_cluster"])
+        self.assertIsNone(observed["init_ray_cluster"](MagicMock()))
+        self.assertFalse(executor.has_connector)
+        executor.collective_rpc.assert_not_called()
+        observed["set_kv"].assert_not_called()
+
+    def test_init_executor_with_kv_connector(self, mock_wait_until_pg_ready,
+                                             mock_get_ip, mock_platform,
+                                             mock_ray):
+        self.vllm_config.kv_transfer_config = MagicMock()
+
+        executor, observed = self._run_init_executor()
+
+        self.assertTrue(executor.has_connector)
+        executor.collective_rpc.assert_called_once_with("get_node_kv_ip_port")
+        self.assertEqual(
+            [c.args for c in observed["set_kv"].call_args_list],
+            [("10.0.0.1:1234", ), ("10.0.0.2:1234", )],
+        )
+
+    def test_init_executor_restores_ray_cluster_hook_on_failure(
+            self, mock_wait_until_pg_ready, mock_get_ip, mock_platform,
+            mock_ray):
+        with self.assertRaisesRegex(RuntimeError, "parent init failed"):
+            # _run_init_executor asserts the hook is restored in `finally`.
+            self._run_init_executor(
+                super_init_side_effect=RuntimeError("parent init failed"))
+
+    def test_post_init_executor_connects_pp_stages(self,
+                                                   mock_wait_until_pg_ready,
+                                                   mock_get_ip, mock_platform,
+                                                   mock_ray):
+        self.vllm_config.parallel_config.pipeline_parallel_size = 4
+        executor = self.RayDistributedExecutorV2(self.vllm_config)
+        executor.parallel_config = self.vllm_config.parallel_config
+        executor.world_size = 4
+        executor.collective_rpc = MagicMock()
+
+        executor._post_init_executor()
+
+        self.assertEqual(
+            [c.kwargs for c in executor.collective_rpc.call_args_list],
+            [{
+                "unique_reply_rank": 1
+            }, {
+                "unique_reply_rank": 2
+            }, {
+                "unique_reply_rank": 3
+            }],
+        )
+        for c in executor.collective_rpc.call_args_list:
+            self.assertEqual(c.args, ("initialize_pp_transfer_connect", ))
+
+    def test_post_init_executor_noop_without_pp(self, mock_wait_until_pg_ready,
+                                                mock_get_ip, mock_platform,
+                                                mock_ray):
+        self.vllm_config.parallel_config.pipeline_parallel_size = 1
+        executor = self.RayDistributedExecutorV2(self.vllm_config)
+        executor.parallel_config = self.vllm_config.parallel_config
+        executor.world_size = 2
+        executor.collective_rpc = MagicMock()
+
+        executor._post_init_executor()
+
+        executor.collective_rpc.assert_not_called()
+
+    def test_output_rank_and_driver_worker(self, mock_wait_until_pg_ready,
+                                           mock_get_ip, mock_platform,
+                                           mock_ray):
+        executor = self.RayDistributedExecutorV2(self.vllm_config)
+        executor.world_size = 4
+
+        # The last PP stage produces the final outputs.
+        self.assertEqual(executor._get_output_rank(), 3)
+        for rank in range(executor.world_size):
+            self.assertTrue(executor._is_driver_worker(rank))

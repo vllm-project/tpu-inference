@@ -67,6 +67,7 @@ class SchedulerCommand(Enum):
     RESET_PREFIX_CACHE = "reset_prefix_cache"
     GET_NUM_UNFINISHED_REQUESTS = "get_num_unfinished_requests"
     HAS_FINISHED_REQUESTS = "has_finished_requests"
+    HAS_REQUEST = "has_request"
     GET_REQUEST_COUNTS = "get_request_counts"
     GET_TOKEN_COUNT = "get_token_count"
     GET_PENDING_PREFILL_TOKENS = "get_pending_prefill_tokens"
@@ -239,58 +240,8 @@ def _scheduler_worker_process(
                 case SchedulerCommand.UPDATE_FROM_OUTPUT:
                     model_runner_output = data
                     scheduler_output = _cached_scheduler_outputs.popleft()
-
-                    # Tokens removed by the rewrite below, per request.
-                    shortfalls: Dict[str, int] = {}
-
-                    if model_runner_output.sampled_token_ids:
-                        # Synchronize the locally cached `num_scheduled_tokens` with the actual
-                        # count of generated tokens from the continue-decode multi-step execution.
-                        # This ensures correct request state updates and MoE experts slicing inside
-                        # local `scheduler.update_from_output(...)`.
-                        cached_data = scheduler_output.scheduled_cached_reqs
-                        num_output_tokens_dict = dict(
-                            zip(cached_data.req_ids,
-                                cached_data.num_output_tokens))
-                        for req_id, req_idx in model_runner_output.req_id_to_index.items(
-                        ):
-                            if num_output_tokens_dict.get(req_id, 0) > 0:
-                                num_sampled = len(model_runner_output.
-                                                  sampled_token_ids[req_idx])
-                                if num_sampled > 0:
-                                    original = (scheduler_output.
-                                                num_scheduled_tokens[req_id])
-                                    if original != num_sampled:
-                                        shortfalls[req_id] = (original -
-                                                              num_sampled)
-                                    scheduler_output.num_scheduled_tokens[
-                                        req_id] = num_sampled
-
                     result = scheduler.update_from_output(
                         scheduler_output, model_runner_output)
-
-                    # Track in-flight and stale output tokens on the
-                    # SCHEDULED count, not the SAMPLED count.
-                    # _update_after_schedule (vllm scheduler.py) adds the
-                    # scheduled count to num_in_flight_tokens, but
-                    # update_from_output subtracts the sampled count the
-                    # overwrite above left there, and the difference stays
-                    # attached to the request.
-                    #
-                    # Preemption copies that difference into
-                    # num_stale_output_tokens, and schedule()
-                    # then parks the request forever, waiting on output
-                    # tokens that never arrive.
-                    for req_id, shortfall in shortfalls.items():
-                        request = scheduler.requests.get(req_id)
-                        if request is None:
-                            continue  # finished and dropped during the update
-                        request.num_in_flight_tokens = max(
-                            0, request.num_in_flight_tokens - shortfall)
-                        if request.num_stale_output_tokens > 0:
-                            request.num_stale_output_tokens = max(
-                                0, request.num_stale_output_tokens - shortfall)
-
                     _send_result(result)
 
                 case SchedulerCommand.GET_GRAMMAR_BITMASK:
@@ -322,6 +273,14 @@ def _scheduler_worker_process(
 
                 case SchedulerCommand.HAS_FINISHED_REQUESTS:
                     result = scheduler.has_finished_requests()
+                    _send_result(result)
+
+                case SchedulerCommand.HAS_REQUEST:
+                    request_id = data
+                    if hasattr(scheduler, "has_request"):
+                        result = scheduler.has_request(request_id)
+                    else:
+                        result = request_id in scheduler.requests
                     _send_result(result)
 
                 case SchedulerCommand.GET_REQUEST_COUNTS:
@@ -1300,19 +1259,6 @@ class DPScheduler(SchedulerInterface):
         We need to route the model runner output to the appropriate scheduler
         based on which rank each request belongs to.
         """
-        cached_data = scheduler_output.scheduled_cached_reqs
-        num_output_tokens_dict = dict(
-            zip(cached_data.req_ids, cached_data.num_output_tokens))
-
-        for req_id, req_idx in model_runner_output.req_id_to_index.items():
-            if num_output_tokens_dict.get(req_id, 0) > 0:
-                if model_runner_output.sampled_token_ids:
-                    num_sampled = len(
-                        model_runner_output.sampled_token_ids[req_idx])
-                    if num_sampled > 0:
-                        scheduler_output.num_scheduled_tokens[
-                            req_id] = num_sampled
-
         # Split model output by DP rank (each rank gets only its req_ids).
         rank_model_outputs = self._split_model_output_by_rank(
             scheduler_output, model_runner_output)
@@ -1411,6 +1357,7 @@ class DPScheduler(SchedulerInterface):
         aux_output = g.aux_output_connector_output
 
         outputs = []
+
         for rank in range(self.dp_size):
             req_ids = scheduler_output.req_ids_per_rank.get(rank, [])
 
@@ -1450,6 +1397,16 @@ class DPScheduler(SchedulerInterface):
         """Remove finished requests from our DP rank assignment tracking."""
         for req_id in finished_req_ids:
             self.assigned_dp_rank.pop(req_id, None)
+
+    def has_request(self, request_id: str) -> bool:
+        """Check if the scheduler holds the request across pending and DP ranks."""
+        if any(r.request_id == request_id for r in self._pending_new_requests):
+            return True
+        rank = self.assigned_dp_rank.get(request_id)
+        if rank is None:
+            return False
+        self._send_command(rank, SchedulerCommand.HAS_REQUEST, request_id)
+        return self._get_result(rank, SchedulerCommand.HAS_REQUEST)
 
     def finish_requests(self, request_ids,
                         finished_status) -> List[FinishedRequestInfo]:
