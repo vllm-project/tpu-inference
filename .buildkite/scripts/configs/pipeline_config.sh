@@ -26,6 +26,9 @@ export PRIORITY_DEFAULT=1
 export PRIORITY_NIGHTLY=0
 export PRIORITY_KERNEL_TUNING=-10
 
+# Release branches are exactly releases/vX.Y.Z (e.g. releases/v0.31.0); 
+export RELEASE_BRANCH_REGEX='^releases/v[0-9]+\.[0-9]+\.[0-9]+$'
+
 # Implemented dynamic job prioritization by injecting integers during upload
 upload_with_priority() {
   local yaml_file=$1

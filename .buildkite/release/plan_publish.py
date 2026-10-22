@@ -15,12 +15,12 @@
 
     plan_publish.py | buildkite-agent pipeline upload --no-interpolation
 
-Runs once the image is staged: the approval block, the Docker Hub publish, and
-the check that what users get is what was built. Uploaded rather than written
-into pipeline.yml so the approval prompt can name the exact version and staged
-digest, and so the team restriction is added only when it is set.
---no-interpolation keeps the $VAR references in the commands for the shell
-that runs them.
+Runs once the image is staged and the wheels are checked: the approval block,
+the Docker Hub and PyPI publishes, and the check that what users get is what
+was built. Uploaded rather than written into pipeline.yml so the approval
+prompt can name the exact version and staged digest, and so the team
+restriction is added only when it is set. --no-interpolation: nothing in it is
+for Buildkite to interpolate.
 
 Optional build env:
   RELEASE_APPROVER_TEAMS=a,b   Buildkite team slugs allowed to approve
@@ -43,15 +43,6 @@ def meta(key):
 
 
 QUEUE = {"queue": os.environ.get("RELEASE_QUEUE", "cpu")}
-# Every command step runs main's release tooling, pinned to the commit the
-# pipeline was uploaded from (pipeline.yml has the same block).
-TOOLS = "\n".join([
-    'T="$(buildkite-agent meta-data get release-tools-commit)"',
-    'git fetch -q origin "$T"',
-    'RELEASE_TOOLS="$(mktemp -d)"',
-    'git archive "$T" .buildkite/release | tar -x -C "$RELEASE_TOOLS"',
-    'export RELEASE_TOOLS="$RELEASE_TOOLS/.buildkite"',
-])
 
 
 def command_step(label, key, depends_on, commands, **extra):
@@ -60,7 +51,7 @@ def command_step(label, key, depends_on, commands, **extra):
         "key": key,
         "depends_on": depends_on,
         "agents": QUEUE,
-        "commands": [TOOLS] + commands,
+        "commands": commands,
     }
     step.update(extra)
     return step
@@ -86,9 +77,10 @@ def main():
         "depends_on": ["plan_publish"],
         "prompt":
         (f"Publish tpu-inference {version} from {branch}: the staged image "
-         f"{staged} to Docker Hub as {dockerhub_repo}:v{version}. "
-         "Check that tpu-inference-ci passed on this commit first. "
-         "PyPI is not handled by this pipeline yet."),
+         f"{staged} to Docker Hub as {dockerhub_repo}:v{version}, "
+         f"and tpu-inference and vllm-tpu {version} to PyPI. "
+         "PyPI releases can't be replaced. "
+         "Check that tpu-inference-ci passed on this commit first."),
         "fields": [
             {
                 # No default: the approver has to choose.
@@ -141,25 +133,39 @@ def main():
             ":docker: Publish the image to Docker Hub",
             "publish_images",
             ["approve_publish"],
-            ['bash "$RELEASE_TOOLS/release/publish_images.sh"'],
+            ["bash .buildkite/release/publish_images.sh"],
             secrets=["DOCKERHUB_TOKEN"],
             concurrency=1,
             concurrency_group="tpu-inference-dockerhub-publish",
         ))
-    # Placeholder: PyPI is published by .github/workflows/release.yml today.
-    steps.append({
-        "label": ":package: Publish to PyPI (placeholder)",
-        "key": "publish_pypi",
-        "depends_on": ["approve_publish"],
-        "agents": QUEUE,
-        "command": 'echo "PyPI: not handled by this pipeline yet."',
-    })
+    steps.append(
+        command_step(
+            ":package: Publish tpu-inference to PyPI",
+            "publish_core",
+            ["approve_publish"],
+            ["bash .buildkite/scripts/publish_wheel.sh tpu-inference"],
+            env={"PUBLISH_PYPI": "tpu-inference"},
+            concurrency=1,
+            concurrency_group="tpu-inference-publish",
+        ))
+    # The combined wheel pins tpu-inference==<version>, so it goes up only
+    # once the core is installable.
+    steps.append(
+        command_step(
+            ":package: Publish vllm-tpu to PyPI",
+            "publish_vllm_tpu",
+            ["publish_core"],
+            ["bash .buildkite/scripts/publish_wheel.sh vllm-tpu"],
+            env={"PUBLISH_PYPI": "vllm-tpu"},
+            concurrency=1,
+            concurrency_group="vllm-tpu-publish",
+        ))
     steps.append(
         command_step(
             ":white_check_mark: Check what users get",
             "verify_published",
-            ["publish_images", "publish_pypi"],
-            ['bash "$RELEASE_TOOLS/release/verify_published.sh"'],
+            ["publish_images", "publish_vllm_tpu"],
+            ["bash .buildkite/release/verify_published.sh"],
         ))
 
     print(json.dumps({"steps": steps}, indent=2))

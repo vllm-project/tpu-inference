@@ -1,15 +1,17 @@
 # tpu-inference-release
 
-One Buildkite pipeline publishes each tpu-inference release's Docker image: it
-builds `vllm/vllm-tpu` once from the release branch, stages it in GAR, waits for
-approval, then copies those same bytes to Docker Hub. PyPI is not handled here
-yet (`.github/workflows/release.yml` publishes it today); the pipeline has
-placeholder steps for it.
+One Buildkite pipeline publishes each tpu-inference release: it builds the
+`vllm/vllm-tpu` image and the two wheels (`tpu-inference` and the combined
+`vllm-tpu`) once from the release branch, checks them, waits for approval, then
+publishes those same bytes to Docker Hub and PyPI.
 
-The pipeline's settings upload [`pipeline.yml`](pipeline.yml) **from main**,
-whatever branch a build is on, and every step runs main's tooling (this
-directory) against the build's checkout. A release branch supplies only the
-code being released: its `docker/Dockerfile` and `.buildkite/vllm_lkg.version`.
+The pipeline's settings upload [`pipeline.yml`](pipeline.yml) from the build's
+own checkout, and only for builds of `main` and `releases/v*`. A release branch
+runs the release tooling (this directory and `.buildkite/scripts`) it was cut
+with; a tooling fix a release needs goes to main and is cherry-picked to the
+branch, or committed to the branch directly for one-off debugging. A release
+branch cut before this tooling existed needs it cherry-picked before its first
+release build.
 
 ## Cut a release
 
@@ -20,18 +22,23 @@ code being released: its `docker/Dockerfile` and `.buildkite/vllm_lkg.version`.
    that commit. For a pre-release set `RELEASE_VERSION=vX.Y.Zrc1`.
 3. The build then, without anyone's help:
    - **preflight**: settles the version (branch or `RELEASE_VERSION`, which has
-     to be a version of the branch's `X.Y.Z`) and warns if `vX.Y.Z` is already
-     on Docker Hub;
+     to be a version of the branch's `X.Y.Z`), warns if `vX.Y.Z` is already
+     on Docker Hub, and checks PyPI doesn't have the version yet;
    - **builds once**: the image, from the release checkout's Dockerfile and vLLM
-     pin, staged in GAR as `vllm-tpu-release:<version>-build<N>`.
+     pin, staged in GAR as `vllm-tpu-release:<version>-build<N>`, and both
+     wheels;
+   - **checks**: the wheels resolve together from pypi.org for CPython 3.12
+     on x86_64 Linux (`check_wheels.sh`).
 4. **Approve** the publish block. It names the staged digest and asks whether
    to move `latest` (never for a pre-release; no default) and whether an
    existing Docker Hub tag may be replaced.
-5. The build publishes what it built:
+5. The build publishes what it built and checked:
    - the staged image, copied by digest to Docker Hub as `vllm/vllm-tpu:vX.Y.Z`
      (and `latest` if chosen);
+   - `tpu-inference`, then `vllm-tpu`, to PyPI with Trusted Publishing
+     (`.buildkite/scripts/publish_wheel.sh`);
    - then checks, without credentials, that an anonymous pull of the tag is the
-     staged digest.
+     staged digest and that `vllm-tpu==X.Y.Z` resolves from pypi.org.
 
 Build env knobs:
 
@@ -48,14 +55,11 @@ Build env knobs:
 
   ```yaml
   steps:
-    - label: ":pipeline: Upload the release pipeline from main"
+    - label: ":pipeline: Upload the release pipeline"
+      branches: "main releases/v*"
       agents:
         queue: cpu
-      command: |
-        git fetch -q origin main
-        tools="$$(git rev-parse FETCH_HEAD)"
-        buildkite-agent meta-data set release-tools-commit "$$tools"
-        git show "$$tools:.buildkite/release/pipeline.yml" | buildkite-agent pipeline upload
+      command: buildkite-agent pipeline upload .buildkite/release/pipeline.yml
   ```
 
 ## One-time setup outside this repo
@@ -66,3 +70,6 @@ Build env knobs:
   `us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci`
   (as CI's image builders on `cpu_64_core` already do) and have `docker buildx` with
   `imagetools create --prefer-index`.
+- PyPI: a Google Trusted Publisher on both `tpu-inference` and `vllm-tpu` for
+  the service account of the agents that run the publish steps. Without it,
+  `publish_wheel.sh` can't mint a token and uploads nothing.

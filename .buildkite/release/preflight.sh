@@ -23,10 +23,11 @@
 #   Docker Hub  whether v<version> is already there (a warning: the approver
 #               decides whether to overwrite it).
 #   CI          not checked here yet: the approver checks tpu-inference-ci.
-#   PyPI        not handled by this pipeline yet.
+#   PyPI        neither tpu-inference nor vllm-tpu has this version yet.
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
-source "${RELEASE_TOOLS}/release/lib.sh"
+source "${SCRIPT_DIR}/lib.sh"
 
 echo "--- :label: Release version"
 [[ "${BUILDKITE_BRANCH}" =~ ^releases/v([0-9]+\.[0-9]+\.[0-9]+)$ ]] \
@@ -51,6 +52,17 @@ else
 fi
 echo "${DOCKERHUB_LINE}"
 
+echo "--- :package: PyPI"
+for project in tpu-inference vllm-tpu; do
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+    "https://pypi.org/pypi/${project}/${VERSION}/json")"
+  case "${code}" in
+    404) echo "${project} ${VERSION}: not on PyPI yet" ;;
+    200) die "${project} ${VERSION} is already on PyPI; a release can't replace it." ;;
+    *) die "PyPI answered ${code} for ${project} ${VERSION}." ;;
+  esac
+done
+
 buildkite-agent meta-data set release-version "${VERSION}"
 PRE="no"
 is_prerelease "${VERSION}" && PRE="yes"
@@ -59,6 +71,6 @@ buildkite-agent annotate --style info --context release-plan <<EOF
 
 - Docker Hub: ${DOCKERHUB_LINE}
 - CI: not checked automatically yet. Before approving, check that tpu-inference-ci passed on this commit: https://buildkite.com/vllm/tpu-inference-ci/builds?branch=${BUILDKITE_BRANCH}
-- PyPI: not handled by this pipeline yet.
-- Builds the image once (staged in GAR), then waits for approval before anything reaches Docker Hub.
+- PyPI: \`tpu-inference\` and \`vllm-tpu\` ${VERSION} not there yet
+- Builds the image (staged in GAR) and both wheels once, then waits for approval before anything reaches Docker Hub or PyPI.
 EOF

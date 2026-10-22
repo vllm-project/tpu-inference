@@ -18,8 +18,9 @@
 # build staged.
 set -euo pipefail
 { set +x; } 2>/dev/null # Never trace the token into the build log.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
-source "${RELEASE_TOOLS}/release/lib.sh"
+source "${SCRIPT_DIR}/lib.sh"
 
 VERSION="$(release_version)"
 STAGED="$(buildkite-agent meta-data get release-image)"

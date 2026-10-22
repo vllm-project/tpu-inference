@@ -18,12 +18,12 @@
 # the staged image there by digest, so users get the exact bytes this build
 # made.
 #
-# Built the way the nightly image is, from the release checkout's own
-# docker/Dockerfile and vLLM pin (.buildkite/vllm_lkg.version), which belong
-# to the code being released.
+# Built the way the nightly image is, from docker/Dockerfile and the vLLM pin
+# in .buildkite/vllm_lkg.version.
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
-source "${RELEASE_TOOLS}/release/lib.sh"
+source "${SCRIPT_DIR}/lib.sh"
 
 VERSION="$(release_version)"
 TAG="${RELEASE_IMAGE}:${VERSION}-build${BUILDKITE_BUILD_NUMBER}"

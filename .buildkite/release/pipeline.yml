@@ -15,31 +15,22 @@
 # tpu-inference-release: a release of tpu-inference, built once, approved, then
 # published as those same bytes.
 #
-# The pipeline's settings upload this file from main whatever branch a build is
-# on, and every step runs main's release tooling against the build's own
-# checkout. A release branch only supplies the code being released, so it never
-# needs release tooling ported to it. README.md has the how-to.
+# The pipeline's settings upload this file from the build's own checkout, for
+# builds of main and releases/v* only, so a release branch runs the release
+# tooling it was cut with. README.md has the how-to.
 #
-#   releases/vX.Y.Z   build the image once, stage it in GAR, wait for approval,
-#                     then copy it to Docker Hub (plan_publish.py)
+#   releases/vX.Y.Z   build the image and the two wheels (tpu-inference and the
+#                     combined vllm-tpu) once, check the wheels, wait for
+#                     approval, then publish those same bytes (plan_publish.py)
 
 steps:
-  # Each command step starts by unpacking main's release tooling, pinned to the
-  # commit this file was uploaded from, into $RELEASE_TOOLS.
-
-  - label: ":clipboard: Preflight: version, Docker Hub"
+  - label: ":clipboard: Preflight: version, Docker Hub, PyPI"
     key: preflight
     if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
     agents: &queue
       queue: cpu
     commands:
-      - &tools |
-        T="$$(buildkite-agent meta-data get release-tools-commit)"
-        git fetch -q origin "$$T"
-        RELEASE_TOOLS="$$(mktemp -d)"
-        git archive "$$T" .buildkite/release | tar -x -C "$$RELEASE_TOOLS"
-        export RELEASE_TOOLS="$$RELEASE_TOOLS/.buildkite"
-      - bash "$$RELEASE_TOOLS/release/preflight.sh"
+      - bash .buildkite/release/preflight.sh
 
   - label: ":docker: Build and stage the image"
     key: build_images
@@ -48,24 +39,48 @@ steps:
     agents: *queue
     timeout_in_minutes: 180
     commands:
-      - *tools
-      - bash "$$RELEASE_TOOLS/release/build_images.sh"
+      - bash .buildkite/release/build_images.sh
 
-  # Placeholder: PyPI is published by .github/workflows/release.yml today.
-  - label: ":package: Build the wheels (placeholder)"
-    key: build_wheels
+  - label: ":package: Build the tpu-inference wheel"
+    key: build_tpu_inference_wheel
     depends_on: preflight
     if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
     agents: *queue
-    command: 'echo "PyPI: not handled by this pipeline yet."'
+    env:
+      PUBLISH_PYPI: "tpu-inference"  # build_tpu_inference_wheel.sh fails early if it's on PyPI
+    commands:
+      - bash .buildkite/scripts/build_tpu_inference_wheel.sh
+
+  - label: ":package: Build the vllm-tpu wheel"
+    key: build_vllm_tpu_wheel
+    depends_on: build_tpu_inference_wheel
+    if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
+    agents: *queue
+    env:
+      PUBLISH_PYPI: "vllm-tpu"  # build_vllm_tpu_wheel.sh fails early if it's on PyPI
+    commands:
+      - |
+        set -euo pipefail
+        CORE_VERSION="$$(buildkite-agent meta-data get TPU_INFERENCE_RELEASE_VERSION)"
+        bash .buildkite/scripts/build_vllm_tpu_wheel.sh "$$CORE_VERSION"
+        buildkite-agent artifact upload "dist/vllm_tpu-*.whl"
+        buildkite-agent artifact upload "dist/vllm_tpu-*.tar.gz"
+        buildkite-agent meta-data set VLLM_TPU_RELEASE_VERSION "$$CORE_VERSION"
+
+  - label: ":mag: Check the wheels install from PyPI"
+    key: check_wheels
+    depends_on: build_vllm_tpu_wheel
+    if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
+    agents: *queue
+    commands:
+      - bash .buildkite/release/check_wheels.sh
 
   - label: ":pipeline: Plan the approval and publish"
     key: plan_publish
     depends_on:
       - build_images
-      - build_wheels
+      - check_wheels
     if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
     agents: *queue
     commands:
-      - *tools
-      - python3 "$$RELEASE_TOOLS/release/plan_publish.py" | buildkite-agent pipeline upload --no-interpolation
+      - python3 .buildkite/release/plan_publish.py | buildkite-agent pipeline upload --no-interpolation

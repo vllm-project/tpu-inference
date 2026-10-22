@@ -1,0 +1,12 @@
+# Build deps for build_vllm_tpu_wheel.sh (vLLM's TPU target, built with
+# --no-isolation). Must satisfy the [build-system] requires in vLLM's
+# pyproject.toml at .buildkite/vllm_lkg.version, or `python -m build` stops
+# with "Missing dependencies"; update it when the LKG moves to a new torch.
+--extra-index-url https://download.pytorch.org/whl/cpu
+cmake>=3.26.1
+ninja
+setuptools>=78.1.1,<81.0.0
+setuptools-scm>=8
+setuptools-rust>=1.9.0
+torch==2.14.0+cpu
+wheel
