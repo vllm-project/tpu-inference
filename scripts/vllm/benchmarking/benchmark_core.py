@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass, field
-from typing import Any
+from __future__ import annotations
 
-from vllm.inputs import MultiModalDataDict
-from vllm.lora.request import LoRARequest
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from vllm.inputs import MultiModalDataDict
+    from vllm.lora.request import LoRARequest
 
 
 @dataclass
