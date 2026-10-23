@@ -1,0 +1,55 @@
+project_id  = "cloud-tpu-inference-production"
+name_prefix = "tpu-ci"
+network     = "projects/NETWORK_PROJECT/global/networks/ci"
+
+manager_region                        = "us-central1"
+manager_zones                         = ["us-central1-a", "us-central1-b", "us-central1-c"]
+manager_subnetwork                    = "projects/NETWORK_PROJECT/regions/us-central1/subnetworks/ci-manager"
+manager_cluster_secondary_range_name  = "ci-manager-pods"
+manager_services_secondary_range_name = "ci-manager-services"
+manager_master_ipv4_cidr_block        = "172.16.0.0/28"
+
+master_authorized_networks = [
+  {
+    cidr_block   = "203.0.113.10/32"
+    display_name = "terraform-runner"
+  }
+]
+
+worker_clusters = {
+  southamerica-west1-a = {
+    location                       = "southamerica-west1-a"
+    subnetwork                     = "projects/NETWORK_PROJECT/regions/southamerica-west1/subnetworks/ci-worker"
+    cluster_secondary_range_name   = "ci-worker-saw1-pods"
+    services_secondary_range_name  = "ci-worker-saw1-services"
+    master_ipv4_cidr_block         = "172.16.0.16/28"
+    system_machine_type            = "e2-standard-4"
+    system_min_nodes               = 1
+    system_max_nodes               = 3
+
+    tpu_pools = {
+      v6e-1 = {
+        machine_type     = "ct6e-standard-1t"
+        topology         = "1x1"
+        chips_per_node   = 1
+        min_nodes        = 0
+        max_nodes        = 7
+        reservation_name = "cloudtpu-REPLACE_ME"
+      }
+      v6e-8 = {
+        machine_type     = "ct6e-standard-8t"
+        topology         = "2x4"
+        chips_per_node   = 8
+        min_nodes        = 0
+        max_nodes        = 1
+        reservation_name = "cloudtpu-REPLACE_ME"
+      }
+    }
+  }
+}
+
+labels = {
+  environment = "production"
+  workload    = "tpu-ci"
+  owner       = "tpu-inference"
+}
