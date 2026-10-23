@@ -50,6 +50,7 @@ from tpu_inference.distributed.jax_parallel_state import \
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.utils import local_cpu_devices
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
     shard_model_to_tpu
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
@@ -233,7 +234,7 @@ class VllmModelWrapper:
         # under Pathways, this would cause weights to be loaded on a CPU-only
         # node, so we'll need to remove this context.
         jax_context = jax.default_device(
-            jax.devices("cpu")
+            local_cpu_devices(jax)
             [0]) if not vllm_envs.VLLM_TPU_USING_PATHWAYS else nullcontext()
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.

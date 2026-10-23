@@ -28,7 +28,8 @@ from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
 from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 
-from tpu_inference.layers.common.utils import general_device_put
+from tpu_inference.layers.common.utils import (general_device_put,
+                                               local_cpu_devices)
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.pathways_dummy_loader import (
     create_dummy_weights_on_tpu, is_pathways_dummy_load)
@@ -54,7 +55,7 @@ def shard_model_to_tpu(model: torch.nn.Module,
         torch.func.functional_call
     """
 
-    with jax.default_device(jax.devices("cpu")[0]):
+    with jax.default_device(local_cpu_devices(jax)[0]):
         _shard_module_to_tpu(model, mesh)
 
         params, buffers = _extract_all_params_buffers(model)
@@ -89,7 +90,7 @@ def _tensor_is_in_cpu(tensor: torch.tensor) -> bool:
     if not isinstance(tensor, torchax.tensor.Tensor):
         return True
     # Check if torchax tensor is still in CPU.
-    return tensor.jax_device == jax.devices('cpu')[0]
+    return tensor.jax_device in local_cpu_devices(jax)
 
 
 def _convert_to_torchax_and_shard(tensor: torch.Tensor,
