@@ -127,6 +127,9 @@ fi
 # --- Step 3: Execute the vLLM TPU build script ---
 echo "Ensuring 'build' package is installed..."
 pip install build
+echo "Installing Rust build requirements and building Rust frontend..."
+pip install -r requirements/build/rust.txt
+bash build_rust.sh
 echo "Executing the vLLM TPU build script..."
 bash tools/vllm-tpu/build.sh "${VLLM_TPU_VERSION}"
 
