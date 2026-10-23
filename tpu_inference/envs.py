@@ -105,7 +105,6 @@ if TYPE_CHECKING:
     TPU_MOE_ROUTER_TOPK: str = "sort"
     TPU_MOE_LOWTOK: bool = False
     TPU_MOE_LOWTOK_MAX_TOKENS: int = 128
-    TPU_MOE_DENSE_EXPERT_THRESHOLD: int = 0
 
 
 def env_with_choices(
@@ -663,9 +662,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("TPU_MOE_LOWTOK", default=False),
     "TPU_MOE_LOWTOK_MAX_TOKENS":
     lambda: int(os.getenv("TPU_MOE_LOWTOK_MAX_TOKENS", "128")),
-    # Maximum hidden-state row count for dense expert MoE. 0 disables it.
-    "TPU_MOE_DENSE_EXPERT_THRESHOLD":
-    lambda: int(os.getenv("TPU_MOE_DENSE_EXPERT_THRESHOLD", "0")),
 }
 
 

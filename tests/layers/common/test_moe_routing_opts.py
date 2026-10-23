@@ -22,17 +22,14 @@ CPU tests (run anywhere):
 5. The kernels' `can_use_*` eligibility checks.
 
 TPU tests:
-6. `dense_expert_moe` and `moe_lowtok` each match a jnp oracle of their own
-   arithmetic to within one bf16 ulp of the output: the production gmm_v2
-   path for dense_expert_moe (which reproduces its bf16 W8A8 scheme) and an
-   f32 transcription with the MXU fp8 dot for moe_lowtok; both stay within
-   FP8 quantization noise of exact f32 math. Random inputs with padding
-   rows and ids of -1.
+6. `moe_lowtok` matches a jnp oracle of its own arithmetic to within one bf16
+   ulp of the output: an f32 transcription with the MXU fp8 dot; stays within
+   FP8 quantization noise of exact f32 math. Random inputs with padding rows
+   and ids of -1.
 7. On 8 devices, `fused_moe_func` gives the same output with each of
-   TPU_MOE_SINGLE_SORT, TPU_MOE_ROUTER_TOPK=rowmax, TPU_MOE_LOWTOK and
-   TPU_MOE_DENSE_EXPERT_THRESHOLD on as with it off, with scatter_results
-   on and off, and with defer_all_reduce the EP kernels return the shard's
-   unreduced partial sum, as the GMM path does.
+   TPU_MOE_SINGLE_SORT, TPU_MOE_ROUTER_TOPK=rowmax, and TPU_MOE_LOWTOK on as
+   with it off, with scatter_results on and off, and with defer_all_reduce
+   the EP kernel returns the shard's unreduced partial sum, as the GMM path does.
 """
 
 import functools
@@ -47,8 +44,6 @@ from jax.sharding import PartitionSpec as P
 
 from tests.layers.common.test_moe_hierarchical_dispatch import (
     _make_mesh, _mesh_id, _sharded_hidden_states, requires_8_devices)
-from tpu_inference.kernels.experimental.moe_dense_expert import (
-    can_use_dense_expert, dense_expert_moe)
 from tpu_inference.kernels.experimental.moe_lowtok import (can_use_moe_lowtok,
                                                            moe_lowtok)
 from tpu_inference.kernels.experimental.moe_lowtok import \
@@ -207,7 +202,7 @@ def test_rowmax_topk_nan_row():
 
 
 # ---------------------------------------------------------------------------
-# The two experimental EP decode kernels: dense_expert_moe and moe_lowtok.
+# Experimental EP decode kernel: moe_lowtok.
 # ---------------------------------------------------------------------------
 
 # Both kernels need hidden and intermediate widths that are multiples of 512.
@@ -311,51 +306,12 @@ def _reference_lowtok(x, w1, w2, s1, s2, weights, ids):
     return acc.astype(jnp.bfloat16)
 
 
-def _reference_gmm(x, w1, w2, s1, s2, weights, ids):
-    """One EP shard of the production GMM path dense_expert_moe reproduces
-    (bf16 accumulation, bf16 scale arithmetic, the W8A8 quantization of
-    gmm_v2): rows gathered in expert order, gmm_v2 with the fused silu,
-    gmm_v2, then the weighted combine. ids of -1 are another shard's."""
-    num_tokens, topk = ids.shape
-    num_experts, inter, _ = w2.shape
-    flat_ids = np.asarray(ids).reshape(-1)
-    flat_weights = np.asarray(weights, np.float32).reshape(-1)
-    tokens = np.repeat(np.arange(num_tokens), topk)
-    keep = flat_ids >= 0
-    order = np.argsort(flat_ids[keep], kind="stable")
-    flat_ids = flat_ids[keep][order]
-    flat_weights = flat_weights[keep][order]
-    tokens = tokens[keep][order]
-    rows = len(tokens)
-    group_sizes = jnp.asarray(np.bincount(flat_ids, minlength=num_experts),
-                              jnp.int32)
-    # gmm_v2 tiles the rows; rows past the groups are left uninitialized.
-    gathered = jnp.pad(x[jnp.asarray(tokens)], ((0, (-rows) % 256), (0, 0)))
-    group_offset = jnp.zeros((1, ), jnp.int32)
-    gmm1 = fused_moe_gmm.gmm_wrapper(gathered,
-                                     w1,
-                                     s1,
-                                     None,
-                                     group_sizes,
-                                     group_offset,
-                                     fuse_act="silu",
-                                     preferred_element_type=x.dtype)
-    gmm2 = fused_moe_gmm.gmm_wrapper(gmm1[:, :inter], w2, s2, None,
-                                     group_sizes, group_offset)
-    valid = (jnp.arange(gathered.shape[0]) < rows)[:, None]
-    gmm2 = jnp.where(valid, gmm2, 0).astype(jnp.float32)
-    combine = jnp.zeros((num_tokens, gathered.shape[0]), jnp.float32)
-    combine = combine.at[jnp.asarray(tokens),
-                         jnp.arange(rows)].set(jnp.asarray(flat_weights))
-    return (combine @ gmm2).astype(jnp.bfloat16)
-
-
-# The kernels' bf16 output against the oracle of the same arithmetic: the
+# moe_lowtok's bf16 output against the oracle of the same arithmetic: the
 # only rounding not pinned down is the f32 summation order of the routed
 # combine, which can move the final bf16 rounding by one ulp, i.e. by at
 # most 2**-7 of the row's scale.
 _ONE_BF16_ULP = 2.0**-7
-# Against exact f32 math, both kernels (and gmm_v2) carry the FP8 activation
+# Against exact f32 math, moe_lowtok (and gmm_v2) carry the FP8 activation
 # quantization and the MXU fp8 dot's accumulation error through two matmul
 # stages: ~1e-2 of the row scale on average, with single elements an FP8
 # ulp (6%) off where a re-quantization rounds the other way.
@@ -369,40 +325,6 @@ def _row_normalized_error(out, expected):
     assert np.isfinite(out).all()
     scale = np.maximum(np.abs(expected).max(axis=1, keepdims=True), 1e-3)
     return np.abs(out / scale - expected / scale)
-
-
-def test_can_use_dense_expert_validation():
-    # Valid shape check on CPU without running Pallas kernel
-    m, h, i, e = 16, 512, 512, 4
-    x = jnp.ones((m, h), jnp.bfloat16)
-    w1 = jnp.ones((e, h, 2 * i), jnp.float8_e4m3fn)
-    w2 = jnp.ones((e, i, h), jnp.float8_e4m3fn)
-    s1 = jnp.ones((e, 1, 1, 2 * i), jnp.float32)
-    s2 = jnp.ones((e, 1, 1, h), jnp.float32)
-    ok = dict(activation="silu", rhs_quant_dtype=None)
-
-    assert can_use_dense_expert(x, w1, w2, s1, s2, None, None, **ok)
-    # An EP caller passes its per-shard expert count against global weights.
-    assert can_use_dense_expert(x,
-                                w1,
-                                w2,
-                                s1,
-                                s2,
-                                None,
-                                None,
-                                num_experts=2,
-                                **ok)
-    assert not can_use_dense_expert(
-        x, w1, w2, s1, s2, None, None, num_experts=0, **ok)
-    # Unsupported activation
-    assert not can_use_dense_expert(
-        x, w1, w2, s1, s2, None, None, activation="gelu", rhs_quant_dtype=None)
-    # Unsupported hidden dimension
-    assert not can_use_dense_expert(x[:, :256], w1, w2, s1, s2, None, None, **
-                                    ok)
-    # Blockwise scales: the kernels take one scale per output channel.
-    assert not can_use_dense_expert(x, w1, w2, jnp.ones(
-        (e, 2, 1, 2 * i)), s2, None, None, **ok)
 
 
 def test_can_use_moe_lowtok_validation():
@@ -438,41 +360,26 @@ def test_can_use_moe_lowtok_validation():
 
 
 @requires_tpu
-@pytest.mark.parametrize("kernel", ["dense_expert", "lowtok"])
 @pytest.mark.parametrize("num_tokens, num_valid", [(8, 8), (16, 11),
                                                    (128, 100)])
-def test_ep_kernel_matches_reference(kernel, num_tokens, num_valid):
-    """Each kernel matches a jnp oracle of its own arithmetic to within one
+def test_ep_kernel_matches_reference(num_tokens, num_valid):
+    """moe_lowtok matches a jnp oracle of its own arithmetic to within one
     bf16 ulp of the output on random weights, scales and routing: several
     experts hit per shard, padding rows with weight 0 and an id of -1; 128
     tokens is the default TPU_MOE_LOWTOK_MAX_TOKENS.
 
-    The two kernels do not share arithmetic: moe_lowtok is f32 end to end
-    (per-row FP8 activations, scales applied after the fp8 dot), while
-    dense_expert_moe reproduces gmm_v2's W8A8 scheme (bf16 scale arithmetic
-    and bf16 accumulation of the 512-wide quantization blocks), so its
-    oracle is the production GMM path itself. Both are also held to exact
-    f32 math at the FP8 quantization-noise level."""
+    moe_lowtok is f32 end to end (per-row FP8 activations, scales applied
+    after the fp8 dot). It is also held to exact f32 math at the FP8
+    quantization-noise level."""
     num_experts = 8
     k1, k2, k3 = jax.random.split(jax.random.key(num_tokens), 3)
     x = jax.random.normal(k1, (num_tokens, _H), jnp.bfloat16)
     w1, w2, s1, s2 = _fp8_experts(k2, num_experts)
     ids, weights = _routing(k3, num_tokens, num_experts, TOPK, num_valid)
 
-    if kernel == "dense_expert":
-        out = dense_expert_moe(x,
-                               w1,
-                               w2,
-                               s1,
-                               s2,
-                               weights,
-                               ids,
-                               num_primary_experts=num_experts)
-        oracle = _reference_gmm
-    else:
-        route = moe_lowtok_routing_table(ids, weights, num_experts)
-        out = moe_lowtok(x, route, w1, s1, w2, s2)
-        oracle = _reference_lowtok
+    route = moe_lowtok_routing_table(ids, weights, num_experts)
+    out = moe_lowtok(x, route, w1, s1, w2, s2)
+    oracle = _reference_lowtok
     out = jax.block_until_ready(out)
     assert out.shape == (num_tokens, _H)
     assert out.dtype == jnp.bfloat16
@@ -480,7 +387,7 @@ def test_ep_kernel_matches_reference(kernel, num_tokens, num_valid):
     expected = oracle(x, w1, w2, s1, s2, weights, ids)
     error = _row_normalized_error(out, expected)
     assert error.max() <= _ONE_BF16_ULP, (
-        f"{kernel} vs its oracle: max {error.max():.4f}, "
+        f"lowtok vs its oracle: max {error.max():.4f}, "
         f"mean {error.mean():.5f} of the row scale")
 
     f32 = _reference_moe_f32(x, w1, w2, s1, s2, weights, ids)
@@ -626,7 +533,6 @@ def test_fused_moe_routing_flag_matches_default(sizes, flag, scatter_results):
 
 _EP_KERNEL_FLAGS = {
     "lowtok": dict(TPU_MOE_LOWTOK=True),
-    "dense-expert": dict(TPU_MOE_DENSE_EXPERT_THRESHOLD=128),
 }
 
 
@@ -646,10 +552,10 @@ def _spy_ep_kernel():
 @pytest.mark.parametrize("sizes", _EP_MESH_SIZES, ids=_mesh_id)
 def test_fused_moe_ep_kernel_matches_gmm(sizes, flag, num_tokens,
                                          scatter_results):
-    """With TPU_MOE_LOWTOK or TPU_MOE_DENSE_EXPERT_THRESHOLD the EP kernel
-    replaces permute + GMM + combine and gives the same output, all-reduced
-    or reduce-scattered over the shards. The kernel and gmm_v2 quantize the
-    activations to FP8 the same way, so they differ only in rounding."""
+    """With TPU_MOE_LOWTOK the EP kernel replaces permute + GMM + combine and
+    gives the same output, all-reduced or reduce-scattered over the shards. The
+    kernel and gmm_v2 quantize the activations to FP8 the same way, so they
+    differ only in rounding."""
     mesh = _make_mesh(**sizes)
     kwargs = dict(scatter_results=scatter_results,
                   num_tokens=num_tokens,

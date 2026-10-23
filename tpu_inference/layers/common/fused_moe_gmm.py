@@ -25,8 +25,6 @@ from tokamax._src.ops.experimental.gmm_v2.gmm_v2 import gmm_v2
 
 import tpu_inference.envs as envs
 from tpu_inference.kernels.collectives.hierrs_sc import wrapper as hier_rs_sc
-from tpu_inference.kernels.experimental.moe_dense_expert import (
-    can_use_dense_expert, dense_expert_moe)
 from tpu_inference.kernels.experimental.moe_lowtok import (can_use_moe_lowtok,
                                                            moe_lowtok)
 from tpu_inference.kernels.experimental.moe_lowtok import \
@@ -123,7 +121,7 @@ def _ep_kernel_local(
     scatter_results: bool,
     defer_all_reduce: bool,
 ):
-    """One EP shard's MoE through moe_lowtok or dense_expert_moe.
+    """One EP shard's MoE through moe_lowtok.
 
     Inside shard_map. The kernels take this shard's experts as local ids
     0..local_num_experts-1 with -1 for an expert held elsewhere, and return
@@ -137,22 +135,11 @@ def _ep_kernel_local(
     local_weights = jnp.where(valid, topk_weights_local, 0.0)
     local_ids = jnp.where(valid, local_ids, -1)
 
-    if kernel_mode == "lowtok":
-        route = moe_lowtok_routing_table(local_ids, local_weights,
-                                         local_num_experts)
-        local_out = moe_lowtok(hidden_local, route, w1_local, s1_local,
-                               w2_local, s2_local)
-    else:
-        local_out = dense_expert_moe(
-            hidden_local,
-            w1_local,
-            w2_local,
-            s1_local,
-            s2_local,
-            local_weights,
-            local_ids,
-            num_primary_experts=local_num_experts,
-        )
+    assert kernel_mode == "lowtok"
+    route = moe_lowtok_routing_table(local_ids, local_weights,
+                                     local_num_experts)
+    local_out = moe_lowtok(hidden_local, route, w1_local, s1_local, w2_local,
+                           s2_local)
 
     return _reduce_local_moe_output(local_out,
                                     ShardingAxisName.EXPERT,
@@ -187,19 +174,6 @@ def _select_ep_kernel(hidden_states, w1, w2, w1_scale, w2_scale, w1_bias,
             "Selected experimental small-batch MoE (max tokens %d)",
             envs.TPU_MOE_LOWTOK_MAX_TOKENS)
         return "lowtok"
-    if (0 < num_tokens <= envs.TPU_MOE_DENSE_EXPERT_THRESHOLD
-            and can_use_dense_expert(hidden_states,
-                                     w1,
-                                     w2,
-                                     w1_scale,
-                                     w2_scale,
-                                     w1_bias,
-                                     w2_bias,
-                                     activation=activation,
-                                     rhs_quant_dtype=None,
-                                     num_experts=local_num_experts)):
-        logger.info_once("Selected experimental dense-expert decode MoE")
-        return "dense_expert"
     return None
 
 
@@ -1536,8 +1510,8 @@ def fused_moe_func(
                                         mesh,
                                         fp8=all_gather_fp8)
 
-    # TPU_MOE_LOWTOK / TPU_MOE_DENSE_EXPERT_THRESHOLD: small decode batches
-    # under EP run one Pallas kernel per shard instead of permute + GMM.
+    # TPU_MOE_LOWTOK: small decode batches under EP run one Pallas kernel per
+    # shard instead of permute + GMM.
     if use_ep:
         local_num_experts = global_num_experts // get_mesh_shape_product(
             mesh, ShardingAxisName.EXPERT)
