@@ -38,6 +38,12 @@ except ImportError as exc:
     _RAIDEN_IMPORT_ERROR = exc
 
 
+def is_parallel_h2h_enabled() -> bool:
+    """Returns True if WEIGHT_SYNC_PARALLEL_H2H is enabled in the environment."""
+    return os.environ.get("WEIGHT_SYNC_PARALLEL_H2H",
+                          "").strip().lower() in ("1", "true")
+
+
 def local_ip() -> str:
     for family, probe in (
         (socket.AF_INET, ("8.8.8.8", 80)),
@@ -316,6 +322,7 @@ class RaidenWorkerSync:
         worker_index: int = 0,
         parallelism: int = 4,
         bind_ip: Optional[str] = None,
+        auto_h2d: Optional[bool] = None,
     ):
         self.job_name = job_name
         self.worker_index = worker_index
@@ -323,14 +330,29 @@ class RaidenWorkerSync:
         self.arrays: List[Any] = []
         self.ip = bind_ip or local_ip()
         self._parallelism = parallelism
+        self._auto_h2d: bool = ((not is_parallel_h2h_enabled())
+                                if auto_h2d is None else bool(auto_h2d))
+        self._effective_auto_h2d: bool = self._auto_h2d
         self._sync: Any = None
 
     @property
     def bound(self) -> bool:
         return bool(self.names)
 
-    def bind(self, state: Any) -> None:
+    def bind(self, state: Any, *, auto_h2d: Optional[bool] = None) -> None:
         """Binds (or rebinds after a weight update) this worker's weights."""
+        if auto_h2d is not None:
+            requested_auto_h2d = bool(auto_h2d)
+            if self._sync is not None and requested_auto_h2d != self._effective_auto_h2d:
+                logger.warning(
+                    "%s: ignoring auto_h2d=%s on rebind because WeightSynchronizer "
+                    "was already created with auto_h2d=%s.",
+                    self.job_name,
+                    requested_auto_h2d,
+                    self._effective_auto_h2d,
+                )
+            else:
+                self._auto_h2d = requested_auto_h2d
         self.names, self.arrays = _filter_bindable(*flatten_weights(state))
         if _ws_lib is None:
             raise RuntimeError(
@@ -352,13 +374,14 @@ class RaidenWorkerSync:
                 # and routing out NIC 1 trips VPC anti-spoofing and the connect
                 # times out. Multi-NUMA keeps the per-submanager binding.
                 bind_ip=bind_ip_arg,
-                # Ingest each slice as it lands. At the default (False), h2d()
-                # unpacks whatever is staged when it is called, installing
-                # in-flight tensors torn -- silently, as checksums that are
-                # partway between the initial and synced values. Matches how
-                # tunix's in-process destination already binds.
-                auto_h2d=True,
+                # When auto_h2d=True (default), ingest each slice as it lands.
+                # When auto_h2d=False (parallel H2H mode), stage slices in host
+                # DRAM while rollout generation continues on TPU, then wait for
+                # transfer completion and trigger explicit h2d() during the pause
+                # window.
+                auto_h2d=self._auto_h2d,
             )
+            self._effective_auto_h2d = self._auto_h2d
         else:
             self._sync.bind_weights(self.arrays)
 
@@ -371,6 +394,22 @@ class RaidenWorkerSync:
         # h2d() is async; block so a checksum/read right after sees the
         # transferred data.
         sync = self._require_sync("h2d()")
+        if not self._effective_auto_h2d:
+            if uuid is not None and int(uuid) <= 0:
+                raise ValueError(
+                    f"{self.job_name}: invalid transfer uuid={uuid}; uuid must be > 0"
+                )
+            if hasattr(sync, "wait_for_transfer_completion"):
+                if uuid is None:
+                    raise ValueError(
+                        f"{self.job_name}: h2d() with auto_h2d=False requires a "
+                        "valid transfer uuid > 0")
+                sync.wait_for_transfer_completion(int(uuid))
+            sync.h2d()
+            jax.block_until_ready(self.arrays)
+            if envs.RAIDEN_H2D_SETTLE:
+                self._wait_until_settled()
+            return
         if hasattr(sync, "wait_for_transfer_completion"):
             sync.wait_for_transfer_completion(uuid)
             jax.block_until_ready(self.arrays)
@@ -538,4 +577,5 @@ class RaidenWorkerSync:
             "mesh_shape": list(mesh_shape),
             "variables": variables,
             "mesh_axes": list(mesh_axes) if mesh_axes else None,
+            "auto_h2d": bool(self._effective_auto_h2d),
         }
