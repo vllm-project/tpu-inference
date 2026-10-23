@@ -16,14 +16,18 @@
 CPU tests (run anywhere):
 1. `_single_sort_permutation` matches the standard 3-sort reference.
 2. `rowmax_topk` matches `jax.lax.top_k` across shapes and edge cases.
-3. `router_topk` (pure-JAX `rowmax_topk`) matches `jax.lax.top_k`.
+3. `router_topk` (pure-JAX `rowmax_topk`) matches `jax.lax.top_k`, bit for
+   bit under jit on bf16 and f32 softmax scores with ties.
 4. `select(..., interpret=True)` matches `rowmax_topk` on CPU.
 5. The kernels' `can_use_*` eligibility checks.
 
 TPU tests:
-6. `dense_expert_moe` and `moe_lowtok` match a jnp reference of the same
-   arithmetic (FP8 weights and activations) on random inputs, including
-   padding rows and ids of -1.
+6. `dense_expert_moe` and `moe_lowtok` each match a jnp oracle of their own
+   arithmetic to within one bf16 ulp of the output: the production gmm_v2
+   path for dense_expert_moe (which reproduces its bf16 W8A8 scheme) and an
+   f32 transcription with the MXU fp8 dot for moe_lowtok; both stay within
+   FP8 quantization noise of exact f32 math. Random inputs with padding
+   rows and ids of -1.
 7. On 8 devices, `fused_moe_func` gives the same output with each of
    TPU_MOE_SINGLE_SORT, TPU_MOE_ROUTER_TOPK=rowmax, TPU_MOE_LOWTOK and
    TPU_MOE_DENSE_EXPERT_THRESHOLD on as with it off, with scatter_results
@@ -31,6 +35,7 @@ TPU tests:
    unreduced partial sum, as the GMM path does.
 """
 
+import functools
 from unittest import mock
 
 import jax
@@ -156,6 +161,26 @@ def test_router_topk_matches_lax_topk():
     np.testing.assert_array_equal(np.asarray(ri), np.asarray(li))
 
 
+@pytest.mark.parametrize("dtype", [jnp.bfloat16, jnp.float32],
+                         ids=["bf16", "f32"])
+def test_router_topk_bit_identical_to_lax_topk_under_jit(dtype):
+    """On the same softmax scores, jitted, router_topk returns the same
+    weights and ids bit for bit as jax.lax.top_k, including rows with ties
+    at the top-k boundary (the lowest id wins in both). bf16 softmax over
+    16 experts ties often; the ties are also forced explicitly."""
+    logits = jax.random.normal(jax.random.key(0), (256, 16), jnp.float32)
+    logits = logits.at[::8, :4].set(1.5)  # four-way tie at the top
+    logits = logits.at[1::8, 2:4].set(logits[1::8, :1])  # tie across the cut
+    scores = jax.block_until_ready(jax.nn.softmax(logits.astype(dtype), -1))
+
+    rv, ri = jax.jit(functools.partial(router_topk, k=2))(scores)
+    lv, li = jax.jit(functools.partial(jax.lax.top_k, k=2))(scores)
+    assert rv.dtype == lv.dtype == dtype
+    np.testing.assert_array_equal(np.asarray(ri), np.asarray(li))
+    np.testing.assert_array_equal(np.asarray(rv, np.float32),
+                                  np.asarray(lv, np.float32))
+
+
 def test_select_interpret_matches_rowmax_topk():
     rng = np.random.default_rng(7)
     scores_np = rng.random((32, EXPERTS), dtype=np.float32)
@@ -232,35 +257,118 @@ def _fp8_round_trip(x):
     return (q * scale).reshape(rows, cols)
 
 
-def _reference_moe(x, w1, w2, s1, s2, weights, ids):
-    """The routed MoE in plain jnp: FP8 weights dequantized, activations put
-    through the same FP8 round trip as the kernels, the gate|up projection
-    rounded to bf16 where the kernels round, ids of -1 skipped."""
+def _reference_moe_f32(x, w1, w2, s1, s2, weights, ids):
+    """The routed MoE in exact f32 arithmetic (HIGHEST precision: TPU's
+    default f32 matmul is a single bf16 pass): FP8 weights dequantized,
+    activations put through the FP8 round trip, ids of -1 skipped. Both
+    kernels differ from this by FP8/bf16 quantization noise, so it only
+    bounds the mean error; the per-kernel oracles below are tight."""
     num_experts, _, two_i = w1.shape
     inter = two_i // 2
+    hi = jax.lax.Precision.HIGHEST
     w1 = w1.astype(jnp.float32) * s1.reshape(num_experts, 1, two_i)
     w2 = w2.astype(jnp.float32) * s2.reshape(num_experts, 1, -1)
     xq = _fp8_round_trip(x.astype(jnp.float32))
-    gate_up = jnp.einsum("th,ehn->etn", xq,
-                         w1).astype(jnp.bfloat16).astype(jnp.float32)
+    gate_up = jnp.einsum("th,ehn->etn", xq, w1, precision=hi)
     act = jax.nn.silu(gate_up[..., :inter]) * gate_up[..., inter:]
-    act = act.astype(jnp.bfloat16).astype(jnp.float32)
     act = jax.vmap(_fp8_round_trip)(act)
-    per_expert = jnp.einsum("eti,eih->eth", act,
-                            w2).astype(jnp.bfloat16).astype(jnp.float32)
+    per_expert = jnp.einsum("eti,eih->eth", act, w2, precision=hi)
     coeff = moe_lowtok_routing_table(ids, weights, num_experts)  # [t, e]
-    return jnp.einsum("te,eth->th", coeff, per_expert)
+    return jnp.einsum("te,eth->th", coeff, per_expert, precision=hi)
 
 
-def _assert_close_to_reference(out, expected):
-    """bf16 output against the f32 reference: a few bf16 ulps of the row's
-    scale, the rounding-point differences the reference does not model."""
+def _fp8_dot(a, b):
+    """The MXU's fp8 x fp8 -> f32 dot as both kernels issue it. It is not an
+    exact f32 accumulation (it differs from exact math by ~1e-3 of the row
+    scale), and XLA's lowering is bit-identical to Mosaic's, so a reference
+    has to use it rather than an f32 matmul of the dequantized values."""
+    return jnp.dot(a, b, preferred_element_type=jnp.float32)
+
+
+def _lowtok_quantize_rows(v):
+    """moe_lowtok's _quantize_rows: per-row FP8 of an f32 block."""
+    amax = jnp.max(jnp.abs(v), axis=1, keepdims=True)
+    scale = jnp.maximum(amax, 1e-12) / 448.0
+    return (v / scale).astype(jnp.float8_e4m3fn), scale
+
+
+def _reference_lowtok(x, w1, w2, s1, s2, weights, ids):
+    """moe_lowtok's arithmetic in plain jnp: f32 end to end with the MXU fp8
+    dots, per-row activation quantization, scales applied after each dot,
+    the routed sum accumulated in f32 and rounded to bf16 once."""
+    num_experts, _, two_i = w1.shape
+    inter = two_i // 2
+    xq, xs = _lowtok_quantize_rows(x.astype(jnp.float32))
+    route = moe_lowtok_routing_table(ids, weights, num_experts)  # [t, e]
+    acc = jnp.zeros(x.shape, jnp.float32)
+    for e in range(num_experts):
+        h = _fp8_dot(xq, w1[e])
+        gate = h[:, :inter] * xs * s1[e, 0, 0, :inter]
+        up = h[:, inter:] * xs * s1[e, 0, 0, inter:]
+        aq, a_s = _lowtok_quantize_rows(gate * jax.nn.sigmoid(gate) * up)
+        o = _fp8_dot(aq, w2[e])
+        acc = acc + (o * s2[e, 0, 0]) * (a_s * route[:, e:e + 1])
+    return acc.astype(jnp.bfloat16)
+
+
+def _reference_gmm(x, w1, w2, s1, s2, weights, ids):
+    """One EP shard of the production GMM path dense_expert_moe reproduces
+    (bf16 accumulation, bf16 scale arithmetic, the W8A8 quantization of
+    gmm_v2): rows gathered in expert order, gmm_v2 with the fused silu,
+    gmm_v2, then the weighted combine. ids of -1 are another shard's."""
+    num_tokens, topk = ids.shape
+    num_experts, inter, _ = w2.shape
+    flat_ids = np.asarray(ids).reshape(-1)
+    flat_weights = np.asarray(weights, np.float32).reshape(-1)
+    tokens = np.repeat(np.arange(num_tokens), topk)
+    keep = flat_ids >= 0
+    order = np.argsort(flat_ids[keep], kind="stable")
+    flat_ids = flat_ids[keep][order]
+    flat_weights = flat_weights[keep][order]
+    tokens = tokens[keep][order]
+    rows = len(tokens)
+    group_sizes = jnp.asarray(np.bincount(flat_ids, minlength=num_experts),
+                              jnp.int32)
+    # gmm_v2 tiles the rows; rows past the groups are left uninitialized.
+    gathered = jnp.pad(x[jnp.asarray(tokens)], ((0, (-rows) % 256), (0, 0)))
+    group_offset = jnp.zeros((1, ), jnp.int32)
+    gmm1 = fused_moe_gmm.gmm_wrapper(gathered,
+                                     w1,
+                                     s1,
+                                     None,
+                                     group_sizes,
+                                     group_offset,
+                                     fuse_act="silu",
+                                     preferred_element_type=x.dtype)
+    gmm2 = fused_moe_gmm.gmm_wrapper(gmm1[:, :inter], w2, s2, None,
+                                     group_sizes, group_offset)
+    valid = (jnp.arange(gathered.shape[0]) < rows)[:, None]
+    gmm2 = jnp.where(valid, gmm2, 0).astype(jnp.float32)
+    combine = jnp.zeros((num_tokens, gathered.shape[0]), jnp.float32)
+    combine = combine.at[jnp.asarray(tokens),
+                         jnp.arange(rows)].set(jnp.asarray(flat_weights))
+    return (combine @ gmm2).astype(jnp.bfloat16)
+
+
+# The kernels' bf16 output against the oracle of the same arithmetic: the
+# only rounding not pinned down is the f32 summation order of the routed
+# combine, which can move the final bf16 rounding by one ulp, i.e. by at
+# most 2**-7 of the row's scale.
+_ONE_BF16_ULP = 2.0**-7
+# Against exact f32 math, both kernels (and gmm_v2) carry the FP8 activation
+# quantization and the MXU fp8 dot's accumulation error through two matmul
+# stages: ~1e-2 of the row scale on average, with single elements an FP8
+# ulp (6%) off where a re-quantization rounds the other way.
+_QUANT_NOISE_MEAN = 2e-2
+
+
+def _row_normalized_error(out, expected):
     out = np.asarray(out, np.float32)
     expected = np.asarray(expected, np.float32)
     assert out.shape == expected.shape
     assert np.isfinite(out).all()
     scale = np.maximum(np.abs(expected).max(axis=1, keepdims=True), 1e-3)
-    np.testing.assert_allclose(out / scale, expected / scale, atol=3e-2)
+    return np.abs(out / scale - expected / scale)
 
 
 def test_can_use_dense_expert_validation():
@@ -334,9 +442,17 @@ def test_can_use_moe_lowtok_validation():
 @pytest.mark.parametrize("num_tokens, num_valid", [(8, 8), (16, 11),
                                                    (128, 100)])
 def test_ep_kernel_matches_reference(kernel, num_tokens, num_valid):
-    """Each kernel matches the jnp reference on random weights, scales and
-    routing: several experts hit per shard, padding rows with weight 0 and
-    an id of -1; 128 tokens is the default TPU_MOE_LOWTOK_MAX_TOKENS."""
+    """Each kernel matches a jnp oracle of its own arithmetic to within one
+    bf16 ulp of the output on random weights, scales and routing: several
+    experts hit per shard, padding rows with weight 0 and an id of -1; 128
+    tokens is the default TPU_MOE_LOWTOK_MAX_TOKENS.
+
+    The two kernels do not share arithmetic: moe_lowtok is f32 end to end
+    (per-row FP8 activations, scales applied after the fp8 dot), while
+    dense_expert_moe reproduces gmm_v2's W8A8 scheme (bf16 scale arithmetic
+    and bf16 accumulation of the 512-wide quantization blocks), so its
+    oracle is the production GMM path itself. Both are also held to exact
+    f32 math at the FP8 quantization-noise level."""
     num_experts = 8
     k1, k2, k3 = jax.random.split(jax.random.key(num_tokens), 3)
     x = jax.random.normal(k1, (num_tokens, _H), jnp.bfloat16)
@@ -352,18 +468,27 @@ def test_ep_kernel_matches_reference(kernel, num_tokens, num_valid):
                                weights,
                                ids,
                                num_primary_experts=num_experts)
+        oracle = _reference_gmm
     else:
         route = moe_lowtok_routing_table(ids, weights, num_experts)
         out = moe_lowtok(x, route, w1, s1, w2, s2)
+        oracle = _reference_lowtok
     out = jax.block_until_ready(out)
     assert out.shape == (num_tokens, _H)
     assert out.dtype == jnp.bfloat16
 
-    expected = _reference_moe(x, w1, w2, s1, s2, weights, ids)
-    _assert_close_to_reference(out, expected)
+    expected = oracle(x, w1, w2, s1, s2, weights, ids)
+    error = _row_normalized_error(out, expected)
+    assert error.max() <= _ONE_BF16_ULP, (
+        f"{kernel} vs its oracle: max {error.max():.4f}, "
+        f"mean {error.mean():.5f} of the row scale")
+
+    f32 = _reference_moe_f32(x, w1, w2, s1, s2, weights, ids)
+    assert _row_normalized_error(out, f32).mean() <= _QUANT_NOISE_MEAN
+    assert _row_normalized_error(expected, f32).mean() <= _QUANT_NOISE_MEAN
     # Padding rows (weight 0) and the -1 id contribute nothing.
     np.testing.assert_array_equal(np.asarray(out[num_valid:], np.float32), 0)
-    assert np.abs(np.asarray(expected[0], np.float32)).max() > 0
+    assert np.abs(np.asarray(f32[0], np.float32)).max() > 0
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +513,10 @@ def base_sharding_axes():
         yield
 
 
-def _fused_moe_inputs(mesh: Mesh, num_tokens: int, fp8: bool):
+def _fused_moe_inputs(mesh: Mesh,
+                      num_tokens: int,
+                      fp8: bool,
+                      gating_dtype=jnp.bfloat16):
     """Tokens sharded over ATTN_DATA, replicated expert weights and gating.
     fp8=True gives the FP8 weights and per-channel scales the EP kernels
     take; fp8=False the bf16 weights the other flags are tested with."""
@@ -397,7 +525,7 @@ def _fused_moe_inputs(mesh: Mesh, num_tokens: int, fp8: bool):
     gating = jax.random.normal(k2, (num_tokens, _NUM_EXPERTS), jnp.float32)
     inputs = dict(
         hidden_states=_sharded_hidden_states(mesh, num_tokens, _H),
-        gating_output=jax.device_put(gating.astype(jnp.bfloat16), rows),
+        gating_output=jax.device_put(gating.astype(gating_dtype), rows),
         w1_bias=None,
         w2_bias=None,
     )
@@ -418,7 +546,11 @@ def _fused_moe_inputs(mesh: Mesh, num_tokens: int, fp8: bool):
     return inputs
 
 
-def _run_fused_moe(mesh: Mesh, env: dict, num_tokens: int, fp8: bool,
+def _run_fused_moe(mesh: Mesh,
+                   env: dict,
+                   num_tokens: int,
+                   fp8: bool,
+                   gating_dtype=jnp.bfloat16,
                    **kwargs) -> jax.Array:
     """Runs fused_moe_func with the env flags in `env` patched in. They are
     read at trace time, so JAX caches are cleared around the run."""
@@ -432,7 +564,7 @@ def _run_fused_moe(mesh: Mesh, env: dict, num_tokens: int, fp8: bool,
             for patch in patches:
                 patch.start()
             out = fused_moe_gmm.fused_moe_func(
-                **_fused_moe_inputs(mesh, num_tokens, fp8),
+                **_fused_moe_inputs(mesh, num_tokens, fp8, gating_dtype),
                 topk=_TOPK,
                 renormalize=True,
                 mesh=mesh,
@@ -456,8 +588,16 @@ def _assert_fused_moe_close(actual, expected, atol=2e-2):
 
 
 _ROUTING_FLAGS = {
-    "single-sort": dict(TPU_MOE_SINGLE_SORT=True),
-    "rowmax": dict(TPU_MOE_ROUTER_TOPK="rowmax"),
+    "single-sort": (dict(TPU_MOE_SINGLE_SORT=True), jnp.bfloat16),
+    # f32 gating: with bf16 gating the softmax feeding the top-k is not
+    # bit-stable itself. XLA evaluates a bf16 softmax at f32 excess precision
+    # when it fuses into rowmax's reductions, but rounds its bf16 steps when
+    # it has to materialize it for lax.top_k (the default path even differs
+    # from its own eager result that way), so the routing weights can differ
+    # by one bf16 ulp while the selected experts are the same.
+    # test_router_topk_bit_identical_to_lax_topk_under_jit covers bf16 on
+    # identical scores.
+    "rowmax": (dict(TPU_MOE_ROUTER_TOPK="rowmax"), jnp.float32),
 }
 
 
@@ -473,9 +613,13 @@ def test_fused_moe_routing_flag_matches_default(sizes, flag, scatter_results):
     permutation and the top-k are computed, so the output is bit-identical to
     the default sorts, for 256 tokens on the GMM path."""
     mesh = _make_mesh(**sizes)
-    kwargs = dict(scatter_results=scatter_results, num_tokens=256, fp8=False)
+    env, gating_dtype = _ROUTING_FLAGS[flag]
+    kwargs = dict(scatter_results=scatter_results,
+                  num_tokens=256,
+                  fp8=False,
+                  gating_dtype=gating_dtype)
     expected = _run_fused_moe(mesh, {}, **kwargs)
-    actual = _run_fused_moe(mesh, _ROUTING_FLAGS[flag], **kwargs)
+    actual = _run_fused_moe(mesh, env, **kwargs)
     np.testing.assert_array_equal(np.asarray(actual, np.float32),
                                   np.asarray(expected, np.float32))
 
