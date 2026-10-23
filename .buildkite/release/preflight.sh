@@ -28,26 +28,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
 
 echo "--- :label: Release version"
-[[ "${BUILDKITE_BRANCH}" =~ ^releases/v([0-9]+\.[0-9]+\.[0-9]+)$ ]] \
-  || die "not a release branch: '${BUILDKITE_BRANCH}'."
-BRANCH_VERSION="${BASH_REMATCH[1]}"
-VERSION="${RELEASE_VERSION:-${BRANCH_VERSION}}"
-VERSION="${VERSION#v}"
-[[ "${VERSION}" =~ ^[0-9]+(\.[0-9]+)*((a|b|rc)[0-9]+)?(\.post[0-9]+)?(\.dev[0-9]+)?$ ]] \
-  || die "version '${VERSION}' is not a public PEP 440 version."
-[[ "${VERSION}" =~ ^([0-9]+\.[0-9]+\.[0-9]+) && "${BASH_REMATCH[1]}" == "${BRANCH_VERSION}" ]] \
-  || die "version '${VERSION}' is not a version of ${BUILDKITE_BRANCH}."
+VERSION="$(resolve_release_version)"
 echo "tpu-inference ${VERSION} from ${BUILDKITE_BRANCH} at ${BUILDKITE_COMMIT}"
 
 echo "--- :package: PyPI"
 for project in tpu-inference vllm-tpu; do
-  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
-    "https://pypi.org/pypi/${project}/${VERSION}/json")"
-  case "${code}" in
-    404) echo "${project} ${VERSION}: not on PyPI yet" ;;
-    200) die "${project} ${VERSION} is already on PyPI; a release can't replace it." ;;
-    *) die "PyPI answered ${code} for ${project} ${VERSION}." ;;
-  esac
+  check_not_published "${project}" "${VERSION}"
 done
 
 buildkite-agent meta-data set release-version "${VERSION}"

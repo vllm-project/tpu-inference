@@ -32,16 +32,10 @@ echo "--- :inbox_tray: Wheels built in this build"
 ls -l "${WORK}/dist"
 
 echo "--- Installing uv"
-curl -LsSf --retry 3 https://astral.sh/uv/install.sh \
-  | env UV_INSTALL_DIR="${WORK}/uv" UV_NO_MODIFY_PATH=1 sh >/dev/null
-UV="${WORK}/uv/uv"
+UV="$(install_uv "${WORK}/uv")"
 
 echo "--- :mag: Resolving vllm-tpu==${VERSION} from these wheels and pypi.org"
-echo "vllm-tpu==${VERSION}" > "${WORK}/req.in"
-"${UV}" pip compile "${WORK}/req.in" --no-config --quiet \
-  --python-version 3.12 --python-platform x86_64-manylinux_2_31 \
-  --find-links "${WORK}/dist" --index-url https://pypi.org/simple \
-  -o "${WORK}/resolved.txt"
+resolve_vllm_tpu "${UV}" "${VERSION}" "${WORK}/resolved.txt" --find-links "${WORK}/dist"
 
 grep -E "^(vllm-tpu|tpu-inference|torch|torchvision|torchax|jax|jaxlib|libtpu|flax|transformers)==" \
   "${WORK}/resolved.txt" | tee "${WORK}/pins.txt"

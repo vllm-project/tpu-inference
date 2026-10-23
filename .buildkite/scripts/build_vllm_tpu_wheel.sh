@@ -73,9 +73,6 @@
 #                          instead of vllm_lkg.version. Never set it for a
 #                          release; the result was not tested with this
 #                          tpu-inference.
-#   PUBLISH_PYPI           PyPI project checked for an existing release
-#                          (default: vllm-tpu).
-#   PYPI_BASE_URL          Index for that check (default: https://pypi.org).
 #   OUTPUT_DIR             Output directory (default: <repo-root>/dist). Old
 #                          vllm_tpu-* files are removed; tpu_inference-* files
 #                          are kept.
@@ -97,12 +94,14 @@ WHEEL_UTILS="${SCRIPT_DIR}/wheel_utils.py"
 # Provides get_vllm_commit_hash (the vLLM commit in .buildkite/vllm_lkg.version).
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/configs/pipeline_config.sh"
+# Provides die and is_valid_release_version.
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/../release/lib.sh"
 
 VLLM_REPO="${VLLM_REPO:-https://github.com/vllm-project/vllm.git}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/dist}"
 KEEP_VLLM_SRC="${KEEP_VLLM_SRC:-0}"
 PYTHON="${PYTHON:-python3}"
-PUBLISH_PYPI="${PUBLISH_PYPI:-vllm-tpu}"
 
 # auditwheel for detect-manylinux-tag.py. That script uses auditwheel
 # internals, so pin the version vLLM's .buildkite/scripts/lib/manylinux.sh
@@ -139,11 +138,6 @@ usage() {
     echo "          $0 0.31.0rc1"
 }
 
-die() {
-    echo "ERROR: $*" >&2
-    exit 1
-}
-
 require_cmd() {
     command -v "$1" >/dev/null 2>&1 || die "$2"
 }
@@ -156,6 +150,11 @@ fi
 
 CORE_VERSION=$1
 [[ -n "${CORE_VERSION}" ]] || die "<version> must not be empty."
+# The release pipeline passes the version preflight settled; this catches a
+# mistyped one in a manual run before the long build.
+is_valid_release_version "${CORE_VERSION}" \
+    || die "'${CORE_VERSION}' is not a release version PyPI accepts" \
+           "(X.Y.Z, optionally followed by aN, bN, rcN, .postN or .devN)."
 WHEEL_VERSION="${CORE_VERSION}"
 
 # The vLLM ref CI tested (vllm_lkg.version), unless overridden.
@@ -222,17 +221,6 @@ curl -fsSL --retry 3 -o "${WORK_DIR}/get-pip.py" \
 "$PY" "${WORK_DIR}/get-pip.py" --quiet
 # wheel_utils.py needs packaging.
 "$PY" -m pip install --quiet packaging
-
-# Exit 1 unless the version is valid PEP 440 and accepted by PyPI; prints it
-# normalized (e.g. 0.31.0-rc1 -> 0.31.0rc1).
-CORE_VERSION="$("$PY" "$WHEEL_UTILS" validate_version "$CORE_VERSION")" \
-    || die "'$1' is not a version PyPI accepts."
-WHEEL_VERSION="${CORE_VERSION}"
-
-# Stop before the long build if this vllm-tpu version is already on PyPI
-# (versions can't be reused).
-INDEX_BASE="${PYPI_BASE_URL:-https://pypi.org}"
-"$PY" "$WHEEL_UTILS" check_not_published "${INDEX_BASE%/}" "$PUBLISH_PYPI" "$WHEEL_VERSION"
 
 echo "--- Starting vllm-tpu wheel build ---"
 echo "tpu-inference version  : ${CORE_VERSION}"

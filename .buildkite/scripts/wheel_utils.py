@@ -28,21 +28,7 @@ import urllib.request
 
 from packaging.utils import (canonicalize_name, parse_sdist_filename,
                              parse_wheel_filename)
-from packaging.version import InvalidVersion, Version
-
-
-def validate_version(raw_version: str) -> None:
-    """Print the normalized version; exit 1 if PyPI would not accept it."""
-    try:
-        version = Version(raw_version)
-    except InvalidVersion:
-        sys.exit(f"ERROR: '{raw_version}' is not a valid PEP 440 version.")
-    # PyPI rejects local versions (e.g. 0.31.0+abc).
-    if version.local is not None:
-        sys.exit(
-            f"ERROR: '{raw_version}' has a local part (+...); PyPI rejects it."
-        )
-    print(version)
+from packaging.version import Version
 
 
 def verify_built_wheel(wheel_path: str, expected_version: str) -> None:
@@ -76,25 +62,6 @@ def verify_publish_dist(dist_path: str, project: str,
         sys.exit(f"ERROR: {filename} version {version} "
                  f"!= release version {expected_version}.")
     print(f"Publishing {filename}")
-
-
-def check_not_published(index_base: str, project: str, version: str) -> None:
-    """Exit 1 if project==version is already on the index (PyPI never allows
-    reusing a version)."""
-    url = f"{index_base}/pypi/{project}/{version}/json"
-    try:
-        with urllib.request.urlopen(url, timeout=30):
-            pass
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            print(f"{project} {version} is not on {index_base} yet.")
-            return
-        sys.exit(f"ERROR: could not check {url} (HTTP {e.code}).")
-    except urllib.error.URLError as e:
-        sys.exit(f"ERROR: could not reach {url}: {e.reason}")
-    sys.exit(f"ERROR: {project} {version} already exists on {index_base}. "
-             "PyPI versions can't be reused: use a new release branch "
-             "(e.g. releases/v0.31.1) or a new RELEASE_VERSION.")
 
 
 def fetch_oidc_audience(index_base: str) -> None:
@@ -192,10 +159,8 @@ def main() -> None:
     args = sys.argv[2:]
 
     commands = {
-        "validate_version": validate_version,
         "verify_built_wheel": verify_built_wheel,
         "verify_publish_dist": verify_publish_dist,
-        "check_not_published": check_not_published,
         "fetch_oidc_audience": fetch_oidc_audience,
         "verify_gcp_oidc_token": verify_gcp_oidc_token,
         "mint_pypi_token": mint_pypi_token,

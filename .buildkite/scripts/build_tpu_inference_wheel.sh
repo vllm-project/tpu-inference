@@ -16,16 +16,12 @@
 # ------------------------------------------------------
 # Build the tpu-inference release wheel.
 #
-# Version:
-#   - Official release (default): the release branch name without
-#     "releases/v" (releases/v0.31.0 -> 0.31.0). Must be exactly
-#     releases/vX.Y.Z (RELEASE_BRANCH_REGEX in configs/pipeline_config.sh).
-#   - Pre-release (e.g. rc): set RELEASE_VERSION when starting the build
-#     (Buildkite "New Build" -> Environment Variables), e.g.
-#     RELEASE_VERSION=v0.31.0rc1. Used as-is; a leading "v" is dropped.
-# Either way it must be a valid PEP 440 version that PyPI accepts (no local
-# "+..." part), or the script exits 1. setup.py reads the version from
-# VLLM_VERSION_OVERRIDE (it falls back to 0.0.0), so it is forced there.
+# Version (resolved by release_version in .buildkite/release/lib.sh):
+#   - Set once by preflight.sh in Buildkite meta-data (release-version), or
+#     resolved on the spot from RELEASE_VERSION / BUILDKITE_BRANCH
+#     (RELEASE_BRANCH_REGEX in .buildkite/release/lib.sh).
+#   - setup.py reads it from VLLM_VERSION_OVERRIDE (it falls back to 0.0.0),
+#     so it is forced there.
 #
 # Environment:
 #   PUBLISH_PYPI   PyPI project checked for an existing release
@@ -35,8 +31,7 @@
 #
 # Output:
 #   dist/tpu_inference-<version>-py3-none-any.whl, uploaded as a Buildkite
-#   artifact. Build meta-data TPU_INFERENCE_RELEASE_VERSION /
-#   TPU_INFERENCE_WHEEL_NAME for later steps.
+#   artifact. Build meta-data TPU_INFERENCE_WHEEL_NAME for later steps.
 #
 # ------------------------------------------------------
 
@@ -47,33 +42,21 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PYTHON="${PYTHON:-python3}"
 WHEEL_UTILS="${SCRIPT_DIR}/wheel_utils.py"
 PUBLISH_PYPI="${PUBLISH_PYPI:-tpu-inference}"
-# Provides RELEASE_BRANCH_REGEX.
+# Provides release_version, check_not_published and die.
 # shellcheck source=/dev/null
-source "${SCRIPT_DIR}/configs/pipeline_config.sh"
-
-die() {
-    echo "ERROR: $*" >&2
-    exit 1
-}
+source "${SCRIPT_DIR}/../release/lib.sh"
 
 command -v buildkite-agent >/dev/null 2>&1 \
     || die "buildkite-agent not found: this script only runs in Buildkite."
 
 # --- Resolve the release version ---------------------------------------------
 echo "--- :label: Resolving release version"
-if [[ -n "${RELEASE_VERSION:-}" ]]; then
-    VERSION="${RELEASE_VERSION#v}"
-    VERSION_SOURCE="RELEASE_VERSION=${RELEASE_VERSION}"
-    echo "Pre-release: version ${VERSION} from ${VERSION_SOURCE}"
-else
-    BRANCH="${BUILDKITE_BRANCH:-}"
-    [[ "${BRANCH}" =~ ${RELEASE_BRANCH_REGEX} ]] \
-        || die "not a release branch: '${BRANCH}' is not releases/vX.Y.Z" \
-               "(e.g. releases/v0.31.0). For an rc, set RELEASE_VERSION."
-    VERSION="${BRANCH#releases/v}"
-    VERSION_SOURCE="branch ${BRANCH}"
-    echo "Official release: version ${VERSION} from ${VERSION_SOURCE}"
-fi
+VERSION="$(release_version)"
+echo "Release version: ${VERSION}"
+
+# Stop before building if this version is already on PyPI (versions can't be
+# reused).
+check_not_published "${PUBLISH_PYPI}" "${VERSION}" "${PYPI_BASE_URL:-https://pypi.org}"
 
 # --- Private build venv ------------------------------------------------------
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tpu-inference-build.XXXXXX")"
@@ -91,17 +74,6 @@ curl -fsSL --retry 3 -o "${WORK_DIR}/get-pip.py" \
 # setup.py only needs setuptools (no [build-system] in pyproject.toml), so a
 # --no-isolation build with these is enough.
 "$PY" -m pip install --quiet build twine packaging "setuptools>=61.0.0" wheel
-
-# Exit 1 unless the version is valid PEP 440 and accepted by PyPI (e.g. a
-# mistyped RELEASE_VERSION like v0.31.x or v0.31.0+abc); prints it normalized.
-VERSION="$("$PY" "$WHEEL_UTILS" validate_version "$VERSION")" \
-    || die "version from ${VERSION_SOURCE} is not publishable to PyPI."
-echo "Release version: ${VERSION}"
-
-# Stop before building if this version is already on PyPI (versions can't be
-# reused).
-INDEX_BASE="${PYPI_BASE_URL:-https://pypi.org}"
-"$PY" "$WHEEL_UTILS" check_not_published "${INDEX_BASE%/}" "$PUBLISH_PYPI" "$VERSION"
 
 # --- Build -------------------------------------------------------------------
 echo "--- :package: Building wheel"
@@ -126,7 +98,6 @@ echo "--- :mag: Checking metadata"
 
 # --- Hand off to later steps -------------------------------------------------
 buildkite-agent artifact upload "$WHEEL"
-buildkite-agent meta-data set "TPU_INFERENCE_RELEASE_VERSION" "$VERSION"
 buildkite-agent meta-data set "TPU_INFERENCE_WHEEL_NAME" "$(basename "$WHEEL")"
 
 echo "Built ${WHEEL}"

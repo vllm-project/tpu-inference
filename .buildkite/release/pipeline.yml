@@ -54,16 +54,13 @@ steps:
     depends_on: build_tpu_inference_wheel
     if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
     agents: *queue
-    env:
-      PUBLISH_PYPI: "vllm-tpu"  # build_vllm_tpu_wheel.sh fails early if it's on PyPI
     commands:
       - |
         set -euo pipefail
-        CORE_VERSION="$$(buildkite-agent meta-data get TPU_INFERENCE_RELEASE_VERSION)"
-        bash .buildkite/scripts/build_vllm_tpu_wheel.sh "$$CORE_VERSION"
+        VERSION="$$(buildkite-agent meta-data get release-version)"
+        bash .buildkite/scripts/build_vllm_tpu_wheel.sh "$$VERSION"
         buildkite-agent artifact upload "dist/vllm_tpu-*.whl"
         buildkite-agent artifact upload "dist/vllm_tpu-*.tar.gz"
-        buildkite-agent meta-data set VLLM_TPU_RELEASE_VERSION "$$CORE_VERSION"
 
   - label: ":mag: Check the wheels install from PyPI"
     key: check_wheels
