@@ -62,9 +62,6 @@ Build env knobs:
 - PyPI: a Google Trusted Publisher on both `tpu-inference` and `vllm-tpu` for
   the service account of the agents on the `release-tpu-inference` queue.
   Without it, `publish_wheel.sh` can't mint a token and uploads nothing.
-- `.github/workflows/release.yml` also publishes `tpu-inference` to PyPI, for
-  `v*` tags on main. Only one of them can publish a given version: PyPI
-  rejects the second upload.
 
 ## Try the pipeline
 
