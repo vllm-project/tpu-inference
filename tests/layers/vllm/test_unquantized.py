@@ -814,7 +814,8 @@ def test_load_weight_for_layer_non_pathways(dtype):
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
 def test_load_weight_for_layer_pathways_real_weights(_, dtype):
     """Under Pathways (real weights) the native dtype is transferred bit-exactly."""
-    from tpu_inference.utils import free_host_tensor, to_jax_dtype
+    from tpu_inference.layers.vllm.quantization.fp8 import _free_torch_storage
+    from tpu_inference.utils import to_jax_dtype
     src = (torch.randn((4, 8)) * 4).to(dtype)
     layer = torch.nn.Module()
     layer.weight = torch.nn.Parameter(src.clone(), requires_grad=False)
@@ -827,7 +828,7 @@ def test_load_weight_for_layer_pathways_real_weights(_, dtype):
     np.testing.assert_array_equal(
         np.asarray(result).astype(np.float32), expected)
     # The host storage is now viewed by numpy, but must still be freeable.
-    free_host_tensor(layer.weight)
+    _free_torch_storage(layer.weight)
     assert layer.weight.untyped_storage().size() == 0
     np.testing.assert_array_equal(
         np.asarray(result).astype(np.float32), expected)
