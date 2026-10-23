@@ -491,46 +491,97 @@ class DPScheduler(SchedulerInterface):
         self.output_conns: List[Connection] = []  # child writes, parent reads
         self.processes: List[Process] = []
 
+        # Keep unpicklable config state out of process arguments while workers
+        # start, and restore it afterwards in a finally block.
+        compilation_config = (
+            self.vllm_config.compilation_config
+            if hasattr(self.vllm_config, 'compilation_config')
+            else None
+        )
+        cached_static_forward_context = {}
+        cached_static_all_moe_layers = []
+        if (
+            compilation_config is not None
+            and hasattr(compilation_config, 'static_forward_context')
+            and isinstance(compilation_config.static_forward_context, dict)
+        ):
+            cached_static_forward_context = dict(
+                compilation_config.static_forward_context
+            )
+            compilation_config.static_forward_context.clear()
+        if (
+            compilation_config is not None
+            and hasattr(compilation_config, 'static_all_moe_layers')
+            and isinstance(compilation_config.static_all_moe_layers, list)
+        ):
+            cached_static_all_moe_layers = list(
+                compilation_config.static_all_moe_layers
+            )
+            compilation_config.static_all_moe_layers.clear()
+        device_config = (
+            self.vllm_config.device_config
+            if hasattr(self.vllm_config, 'device_config')
+            else None
+        )
+        cached_slice = (
+            device_config.slice
+            if device_config is not None and hasattr(device_config, 'slice')
+            else None
+        )
+        if cached_slice is not None:
+            device_config.slice = None
+
         gc_was_enabled = gc.isenabled()
         if gc_was_enabled:
             gc.disable()
         gc.freeze()
 
-        for rank in range(self.dp_size):
-            # Each pipe gives (parent_end, child_end)
-            # Input pipe: parent sends commands, child receives
-            input_parent_conn, input_child_conn = ctx.Pipe()
-            # Output pipe: child sends results, parent receives
-            output_parent_conn, output_child_conn = ctx.Pipe()
+        try:
+            for rank in range(self.dp_size):
+                # Each pipe gives (parent_end, child_end)
+                # Input pipe: parent sends commands, child receives
+                input_parent_conn, input_child_conn = ctx.Pipe()
+                # Output pipe: child sends results, parent receives
+                output_parent_conn, output_child_conn = ctx.Pipe()
 
-            self.input_conns.append(input_parent_conn)
-            self.output_conns.append(output_parent_conn)
+                self.input_conns.append(input_parent_conn)
+                self.output_conns.append(output_parent_conn)
 
-            process = ctx.Process(
-                target=_scheduler_worker_process,
-                args=(
-                    rank,
-                    input_child_conn,
-                    output_child_conn,
-                    self.vllm_config,
-                    self.per_rank_kv_cache_configs[rank],
-                    structured_output_manager,
-                    block_size,
-                    self.hash_block_size,
-                    mm_registry,
-                    include_finished_set,
-                    log_stats,
-                    original_scheduler_cls,
-                ),
-            )
-            process.start()
-            # Close child ends in parent process
-            input_child_conn.close()
-            output_child_conn.close()
-            self.processes.append(process)
-
-        if gc_was_enabled:
-            gc.enable()
+                process = ctx.Process(
+                    target=_scheduler_worker_process,
+                    args=(
+                        rank,
+                        input_child_conn,
+                        output_child_conn,
+                        self.vllm_config,
+                        self.per_rank_kv_cache_configs[rank],
+                        structured_output_manager,
+                        block_size,
+                        self.hash_block_size,
+                        mm_registry,
+                        include_finished_set,
+                        log_stats,
+                        original_scheduler_cls,
+                    ),
+                )
+                process.start()
+                # Close child ends in parent process
+                input_child_conn.close()
+                output_child_conn.close()
+                self.processes.append(process)
+        finally:
+            if cached_static_forward_context and compilation_config is not None:
+                compilation_config.static_forward_context.update(
+                    cached_static_forward_context
+                )
+            if cached_static_all_moe_layers and compilation_config is not None:
+                compilation_config.static_all_moe_layers.extend(
+                    cached_static_all_moe_layers
+                )
+            if cached_slice is not None and device_config is not None:
+                device_config.slice = cached_slice
+            if gc_was_enabled:
+                gc.enable()
 
         # Reverse mapping from output connection to rank for wait()-based collection.
         self._output_conn_to_rank: Dict[int, int] = {
