@@ -223,7 +223,10 @@ def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
         is_local = [True] * len(devices)
     else:
         process_index = jax.process_index()
-        is_local = [d.process_index == process_index for d in devices]
+        is_local = [
+            getattr(d, "process_index", process_index) == process_index
+            for d in devices
+        ]
     usage = [
         _local_memory_stats(device) if local else None
         for device, local in zip(devices, is_local)
@@ -232,11 +235,17 @@ def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
         logger.warning(
             "No memory stats available for devices %s; estimating HBM "
             "usage from live arrays and the device-kind HBM limit.", devices)
-        estimate = pathways_hbm_usage_gb(devices)
+        try:
+            estimate = pathways_hbm_usage_gb(devices)
+        except Exception as e:
+            logger.warning(
+                "Failed to estimate HBM usage from live arrays: %s; "
+                "falling back to default 32GB limit.", e)
+            return [(0, 32 * GBYTES)] * len(devices)
         if not any(is_local):
-            return estimate
+            return estimate or [(0, 32 * GBYTES)] * len(devices)
         usage = [e if local else None for e, local in zip(estimate, is_local)]
-    sample = next(u for u in usage if u is not None)
+    sample = next((u for u in usage if u is not None), (0, 32 * GBYTES))
     # TODO(ranlihao): find a proper way to get the memory usage of each device.
     if any(u is None for u in usage):
         logger.info(
@@ -300,6 +309,7 @@ def pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
     live_arrays = jax.live_arrays()
     hbm_used = defaultdict(int)
     hbm_limit = get_device_hbm_limit()
+    device_set = set(devices)
 
     # Track unique buffers to avoid double-counting when multiple Python
     # variables reference the same underlying JAX array (e.g., a = jnp.ones(10); b = a)
@@ -310,7 +320,10 @@ def pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
             buffer_id = id(buffer.data)
             if buffer_id not in seen_buffers:
                 seen_buffers.add(buffer_id)
-                hbm_used[buffer.data.device] += buffer.data.nbytes
+                dev_attr = getattr(buffer.data, "device", None)
+                dev = (dev_attr if dev_attr in device_set
+                       or not callable(dev_attr) else dev_attr())
+                hbm_used[dev] += buffer.data.nbytes
 
     return [(hbm_used[device], hbm_limit) for device in devices]
 
