@@ -739,10 +739,16 @@ class TestTPUWorker:
             shape=(2, 2),
             ndim=2,
             size=4,
+            nbytes=16,
             dtype=raiden_worker_sync.jnp.dtype(raiden_worker_sync.jnp.float32),
             devices=lambda: [fake_device],
             sharding=fake_sharding,
-            addressable_shards=[SimpleNamespace(device=fake_device)],
+            addressable_shards=[
+                SimpleNamespace(
+                    device=fake_device,
+                    data=SimpleNamespace(nbytes=16),
+                )
+            ],
         )
         worker.model_runner.state = {"w": fake_arr}
         worker.model_runner.model = SimpleNamespace()
@@ -792,3 +798,16 @@ class TestTPUWorker:
             for invalid_uuid in (None, 0, -1):
                 with pytest.raises(ValueError):
                     worker.raiden_h2d(uuid=invalid_uuid)
+
+    def test_bind_raiden_sync_falls_back_to_rank(self, mock_vllm_config):
+        """Tests that bind_raiden_sync falls back to worker rank when worker_index is 0."""
+        worker = self._weight_update_worker(mock_vllm_config)
+        worker.rank = 3
+        with patch("tpu_inference.rl.raiden_worker_sync.RaidenWorkerSync"
+                   ) as mock_sync_cls:
+            mock_sync = MagicMock()
+            mock_sync_cls.return_value = mock_sync
+            worker.get_weights_state = MagicMock(return_value={})
+            worker.bind_raiden_sync(worker_index=0)
+            mock_sync_cls.assert_called_once()
+            assert mock_sync_cls.call_args.kwargs["worker_index"] == 3
