@@ -1,0 +1,69 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# tpu-inference-release: a release of tpu-inference, built once, approved, then
+# published as those same bytes.
+#
+# The pipeline's settings upload this file from main whatever branch a build is
+# on, and every step runs main's release tooling against the build's own
+# checkout. A release branch only supplies the code being released, so it never
+# needs release tooling ported to it. README.md has the how-to.
+#
+#   releases/vX.Y.Z   settle the version, build, wait for approval, then
+#                     publish (plan_publish.py)
+
+steps:
+  # Each command step starts by unpacking main's release tooling, pinned to the
+  # commit this file was uploaded from, into $RELEASE_TOOLS.
+
+  - label: ":clipboard: Preflight: version"
+    key: preflight
+    if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
+    agents: &queue
+      queue: release-tpu-inference
+    commands:
+      - &tools |
+        T="$$(buildkite-agent meta-data get release-tools-commit)"
+        git fetch -q origin "$$T"
+        RELEASE_TOOLS="$$(mktemp -d)"
+        git archive "$$T" .buildkite/release | tar -x -C "$$RELEASE_TOOLS"
+        export RELEASE_TOOLS="$$RELEASE_TOOLS/.buildkite"
+      - bash "$$RELEASE_TOOLS/release/preflight.sh"
+
+  # Placeholder: building and staging the release image comes in a follow-up.
+  - label: ":docker: Build and stage the image (placeholder)"
+    key: build_images
+    depends_on: preflight
+    if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
+    agents: *queue
+    command: 'echo "Docker image: not handled by this pipeline yet."'
+
+  # Placeholder: PyPI is published by .github/workflows/release.yml today.
+  - label: ":package: Build the wheels (placeholder)"
+    key: build_wheels
+    depends_on: preflight
+    if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
+    agents: *queue
+    command: 'echo "PyPI: not handled by this pipeline yet."'
+
+  - label: ":pipeline: Plan the approval and publish"
+    key: plan_publish
+    depends_on:
+      - build_images
+      - build_wheels
+    if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
+    agents: *queue
+    commands:
+      - *tools
+      - python3 "$$RELEASE_TOOLS/release/plan_publish.py" | buildkite-agent pipeline upload --no-interpolation
