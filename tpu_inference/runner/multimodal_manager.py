@@ -137,6 +137,42 @@ class MultiModalManager:
         encoder_outputs = []
         for modality, num_items, mm_kwargs_group in group_and_batch_mm_kwargs(
                 mm_kwargs):
+            batched_mm_inputs = mm_kwargs_group
+            # Convert torch tensors to numpy arrays that JAX can handle.
+            if "pixel_values" in batched_mm_inputs and isinstance(
+                    batched_mm_inputs["pixel_values"], list):
+                batched_mm_inputs["pixel_values"] = torch.cat(
+                    batched_mm_inputs["pixel_values"], dim=0)
+            if "pixel_values_videos" in batched_mm_inputs and isinstance(
+                    batched_mm_inputs["pixel_values_videos"], list):
+                batched_mm_inputs["pixel_values_videos"] = torch.cat(
+                    batched_mm_inputs["pixel_values_videos"], dim=0)
+
+            image_grid_thw = ()
+            for key, value in batched_mm_inputs.items():
+                if isinstance(value, torch.Tensor):
+                    if key in ('image_grid_thw', 'video_grid_thw'):
+                        # change it to tuple of tuples to make it hashable for JIT
+
+                        # Shape: (B, N, 3) -> (B*N, 3) -> tuple of tuples
+                        grid_thw_tensor = batched_mm_inputs[key]
+                        grid_thw_reshaped = grid_thw_tensor.reshape(-1, 3)
+                        grid_thw_tuple = tuple(
+                            tuple(row) for row in grid_thw_reshaped.tolist())
+                        if key == 'image_grid_thw':
+                            image_grid_thw = grid_thw_tuple
+                        batched_mm_inputs[key] = grid_thw_tuple
+
+                        continue
+
+                    if value.dtype == torch.bfloat16:
+                        batched_mm_inputs[key] = value.to(
+                            torch.float32).numpy().astype(jnp.bfloat16)
+                    else:
+                        batched_mm_inputs[key] = value.numpy()
+            if 'image_grid_thw' in batched_mm_inputs:
+                batched_mm_inputs.pop('image_grid_thw')
+
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
             # 1. A tensor of shape (num_items, feature_size, hidden_size)

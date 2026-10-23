@@ -989,6 +989,35 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         #         image_embeds=image_embeds,
         #         image_grid_thw=image_grid_thw)
 
+    def _parse_and_validate_video_input(
+        self, **kwargs: object
+    ) -> Optional[Qwen2_5_VLImageInputs]:
+        pixel_values = kwargs.pop("pixel_values_videos", None)
+        video_embeds = kwargs.pop("video_embeds", None)
+        video_grid_thw = kwargs.pop("video_grid_thw", None)
+
+        if pixel_values is None and video_embeds is None:
+            return None
+
+        if pixel_values is not None:
+            pixel_values = self._validate_and_reshape_mm_tensor(
+                pixel_values, "video pixel values")
+
+            if not isinstance(pixel_values, jax.Array):
+                raise ValueError("Incorrect type of video pixel values. "
+                                 f"Got type: {type(pixel_values)}")
+
+            return Qwen2_5_VLImagePixelInputs(type="pixel_values",
+                                              pixel_values=pixel_values,
+                                              image_grid_thw=video_grid_thw)
+
+    def _parse_and_validate_multimodal_inputs(self,
+                                              image_grid_thw: tuple[tuple[int,
+                                                                          int,
+                                                                          int],
+                                                                    ...],
+                                              **kwargs: object) -> dict:
+        mm_input_by_modality = {}
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         # Convert torch tensors to numpy arrays that JAX can handle.
         if "pixel_values" in kwargs and isinstance(kwargs["pixel_values"],
@@ -1017,6 +1046,12 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             if input_key in ("pixel_values", "image_embeds"
                              ) and "image" not in mm_input_by_modality:
                 mm_input_by_modality[
+                    "image"] = self._parse_and_validate_image_input(
+                        image_grid_thw, **kwargs)
+            if input_key in ("pixel_values_videos", "video_embeds"
+                             ) and "video" not in mm_input_by_modality:
+                mm_input_by_modality[
+                    "video"] = self._parse_and_validate_video_input(**kwargs)
                     "image"] = self._parse_and_validate_image_input(**kwargs)
             # if input_key in ("pixel_values_videos", "video_embeds"
             #                  ) and "video" not in mm_input_by_modality:
@@ -1063,6 +1098,13 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         split_indices = np.cumsum(sizes)[:-1]
         return tuple(jnp.split(image_embeds, split_indices))
 
+    def _process_video_input(
+            self, video_input: Qwen2_5_VLImageInputs) -> tuple[jax.Array, ...]:
+        return self._process_image_input(video_input)
+
+    def embed_multimodal(self, image_grid_thw: tuple[tuple[int, int, int],
+                                                     ...],
+                         **kwargs: object) -> MultiModalEmbeddings:
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
 
         if not self.is_first_rank:
@@ -1084,9 +1126,9 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             if modality == "image":
                 vision_embeddings = self._process_image_input(multimodal_input)
                 multimodal_embeddings += vision_embeddings
-            # if modality == "video":
-            #     video_embeddings = self._process_video_input(multimodal_input)
-            #     multimodal_embeddings += video_embeddings
+            if modality == "video":
+                video_embeddings = self._process_video_input(multimodal_input)
+                multimodal_embeddings += video_embeddings
 
         return multimodal_embeddings
 
