@@ -2,6 +2,7 @@
 
 import contextlib
 import importlib
+import math
 import os
 import random
 from typing import TYPE_CHECKING, Optional, Tuple, Union
@@ -183,6 +184,27 @@ def _disable_uniproc_startup_thread_cap() -> None:
                 "(vllm#58946) on TPU.")
 
 
+class _PaddedHiddenSize(int):
+    """int subclass that returns head_dim when floor-divided by padded_num_heads."""
+
+    def __new__(cls, value: int, padded_num_heads: int, head_dim: int):
+        obj = super().__new__(cls, value)
+        obj._padded_num_heads = padded_num_heads
+        obj._head_dim = head_dim
+        return obj
+
+    def __floordiv__(self, other):
+        if other == self._padded_num_heads:
+            return self._head_dim
+        return int(self) // other
+
+    def __reduce__(self):
+        return (
+            _PaddedHiddenSize,
+            (int(self), self._padded_num_heads, self._head_dim),
+        )
+
+
 class TpuPlatform(Platform):
     _enum = PlatformEnum.TPU
     device_name: str = "tpu"
@@ -229,6 +251,7 @@ class TpuPlatform(Platform):
         "MOE_ALL_GATHER_ACTIVATION_DTYPE",
         "SKIP_MAMBA_SCHEDULER_BLOCKS",
         "TPU_MESH_ATTN_DP_RING",
+        "TPU_PAD_GQA_HEADS",
     ]
 
     @classmethod
@@ -368,8 +391,109 @@ class TpuPlatform(Platform):
                     os.environ["TPU_MULTIPROCESS_DP"])
 
     @classmethod
-    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+    def _maybe_pad_gqa_attention_heads_for_model(
+        cls,
+        model_config: Optional[ModelConfig],
+        parallel_config: Optional[object],
+    ) -> None:
+        """Pads GQA query heads when total_num_attention_heads % tp_size != 0."""
+        if not envs.TPU_PAD_GQA_HEADS:
+            return
+        if model_config is None or parallel_config is None:
+            return
+        tp_size = getattr(parallel_config, "tensor_parallel_size", 1)
+        if tp_size <= 1:
+            return
+        hf_text_config = getattr(model_config, "hf_text_config", None)
+        if hf_text_config is None:
+            return
+        orig_num_heads = getattr(
+            hf_text_config,
+            "_unpadded_num_attention_heads",
+            getattr(hf_text_config, "num_attention_heads", None),
+        )
+        num_kv_heads = getattr(hf_text_config, "num_key_value_heads",
+                               orig_num_heads)
+        raw_hidden_size = getattr(hf_text_config, "hidden_size", None)
+        if (not isinstance(orig_num_heads, int)
+                or not isinstance(num_kv_heads, int)
+                or not isinstance(raw_hidden_size, int) or orig_num_heads <= 0
+                or num_kv_heads <= 0):
+            return
+        if orig_num_heads % tp_size == 0:
+            return
+        if orig_num_heads % num_kv_heads != 0 or (tp_size % num_kv_heads != 0
+                                                  and
+                                                  num_kv_heads % tp_size != 0):
+            return
 
+        hidden_size = int(raw_hidden_size)
+        head_dim = getattr(hf_text_config, "head_dim", None) or (
+            hidden_size // orig_num_heads)
+        lcm_heads = math.lcm(num_kv_heads, tp_size)
+        padded_num_heads = math.ceil(orig_num_heads / lcm_heads) * lcm_heads
+        if (getattr(hf_text_config, "num_attention_heads", None)
+                == padded_num_heads and isinstance(
+                    getattr(hf_text_config, "hidden_size", None),
+                    _PaddedHiddenSize)):
+            return
+
+        for cfg in (hf_text_config, getattr(model_config, "hf_config", None)):
+            if cfg is not None and hasattr(cfg, "num_attention_heads"):
+                cfg._unpadded_num_attention_heads = orig_num_heads
+                cfg.head_dim = head_dim
+                cfg.hidden_size = _PaddedHiddenSize(hidden_size,
+                                                    padded_num_heads, head_dim)
+                cfg.num_attention_heads = padded_num_heads
+
+        if hasattr(model_config, "get_model_arch_config"):
+            model_config.model_arch_config = (
+                model_config.get_model_arch_config())
+        logger.info(
+            "Padded GQA num_attention_heads %d -> %d (num_kv_heads=%d,"
+            " head_dim=%d) for tensor_parallel_size=%d.",
+            orig_num_heads,
+            padded_num_heads,
+            num_kv_heads,
+            head_dim,
+            tp_size,
+        )
+
+    @classmethod
+    def _maybe_pad_gqa_attention_heads(cls, vllm_config: VllmConfig) -> None:
+        cls._maybe_pad_gqa_attention_heads_for_model(
+            vllm_config.model_config, vllm_config.parallel_config)
+
+    @classmethod
+    def _install_gqa_head_padding_config_hook(cls) -> None:
+        """Hooks ModelConfig.verify_with_parallel_config to pad GQA heads before validation."""
+        try:
+            from vllm.config.model import ModelConfig as _VllmModelConfig
+        except ImportError:
+            return
+        if getattr(
+                _VllmModelConfig.verify_with_parallel_config,
+                "_tpu_gqa_padding_patched",
+                False,
+        ):
+            return
+        orig_verify = _VllmModelConfig.verify_with_parallel_config
+
+        def _verify_with_parallel_config(self, parallel_config):
+            cls._maybe_pad_gqa_attention_heads_for_model(self, parallel_config)
+            return orig_verify(self, parallel_config)
+
+        _verify_with_parallel_config._tpu_gqa_padding_patched = True
+        _VllmModelConfig.verify_with_parallel_config = (
+            _verify_with_parallel_config)
+
+    @classmethod
+    def pre_register_and_update(cls, parser=None) -> None:
+        cls._install_gqa_head_padding_config_hook()
+
+    @classmethod
+    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        cls._maybe_pad_gqa_attention_heads(vllm_config)
         cls._resolve_multiprocess_dp(vllm_config)
 
         if vllm_envs.VLLM_TPU_USING_PATHWAYS:
@@ -655,3 +779,6 @@ class TpuPlatform(Platform):
     def manual_seed_all(cls, seed: int) -> None:
         random.seed(seed)
         numpy.random.seed(seed)
+
+
+TpuPlatform._install_gqa_head_padding_config_hook()
