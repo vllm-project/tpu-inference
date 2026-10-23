@@ -493,41 +493,26 @@ class DPScheduler(SchedulerInterface):
 
         # Keep unpicklable config state out of process arguments while workers
         # start, and restore it afterwards in a finally block.
-        compilation_config = (
-            self.vllm_config.compilation_config
-            if hasattr(self.vllm_config, 'compilation_config')
-            else None
-        )
+        compilation_config = (self.vllm_config.compilation_config if hasattr(
+            self.vllm_config, 'compilation_config') else None)
         cached_static_forward_context = {}
         cached_static_all_moe_layers = []
-        if (
-            compilation_config is not None
-            and hasattr(compilation_config, 'static_forward_context')
-            and isinstance(compilation_config.static_forward_context, dict)
-        ):
+        if (compilation_config is not None
+                and hasattr(compilation_config, 'static_forward_context') and
+                isinstance(compilation_config.static_forward_context, dict)):
             cached_static_forward_context = dict(
-                compilation_config.static_forward_context
-            )
+                compilation_config.static_forward_context)
             compilation_config.static_forward_context.clear()
-        if (
-            compilation_config is not None
-            and hasattr(compilation_config, 'static_all_moe_layers')
-            and isinstance(compilation_config.static_all_moe_layers, list)
-        ):
+        if (compilation_config is not None
+                and hasattr(compilation_config, 'static_all_moe_layers') and
+                isinstance(compilation_config.static_all_moe_layers, list)):
             cached_static_all_moe_layers = list(
-                compilation_config.static_all_moe_layers
-            )
+                compilation_config.static_all_moe_layers)
             compilation_config.static_all_moe_layers.clear()
-        device_config = (
-            self.vllm_config.device_config
-            if hasattr(self.vllm_config, 'device_config')
-            else None
-        )
-        cached_slice = (
-            device_config.slice
-            if device_config is not None and hasattr(device_config, 'slice')
-            else None
-        )
+        device_config = (self.vllm_config.device_config if hasattr(
+            self.vllm_config, 'device_config') else None)
+        cached_slice = (device_config.slice if device_config is not None
+                        and hasattr(device_config, 'slice') else None)
         if cached_slice is not None:
             device_config.slice = None
 
@@ -572,12 +557,10 @@ class DPScheduler(SchedulerInterface):
         finally:
             if cached_static_forward_context and compilation_config is not None:
                 compilation_config.static_forward_context.update(
-                    cached_static_forward_context
-                )
+                    cached_static_forward_context)
             if cached_static_all_moe_layers and compilation_config is not None:
                 compilation_config.static_all_moe_layers.extend(
-                    cached_static_all_moe_layers
-                )
+                    cached_static_all_moe_layers)
             if cached_slice is not None and device_config is not None:
                 device_config.slice = cached_slice
             if gc_was_enabled:

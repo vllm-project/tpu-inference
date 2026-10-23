@@ -1408,10 +1408,10 @@ class TestDPScheduler:
                 spawn_vllm_config.compilation_config.static_all_moe_layers)
             pickle.dumps(spawn_vllm_config.device_config.slice)
             observed_during_spawn.append((
-                dict(spawn_vllm_config.compilation_config.static_forward_context
+                dict(spawn_vllm_config.compilation_config.
+                     static_forward_context),
+                list(spawn_vllm_config.compilation_config.static_all_moe_layers
                      ),
-                list(
-                    spawn_vllm_config.compilation_config.static_all_moe_layers),
                 spawn_vllm_config.device_config.slice,
             ))
             return MagicMock()
@@ -1494,8 +1494,7 @@ class TestDPScheduler:
         assert gc.isenabled()
 
     def test_init_spawns_real_forkserver_workers_with_unpicklable_compiled_state(
-        self,
-    ):
+        self, ):
         """End-to-end test using real multiprocessing.get_context('forkserver') IPC pickling."""
         import multiprocessing
         import threading
@@ -1553,8 +1552,6 @@ class TestDPScheduler:
             unpicklable_moe
         ]
         assert vllm_config.device_config.slice is unpicklable_slice
-
-
 
 
 class TestUpdateVllmConfigForDPScheduler:
