@@ -649,7 +649,8 @@ class TPUWorker(WorkerBase):
                     "tpu_num_sparse_cores_to_trace": 1,
                     "tpu_num_sparse_core_tiles_to_trace": 1,
                 })
-
+            if envs.ENABLE_CONTINUOUS_PROFILING:
+                advanced_config["enable_continuous_profiling"] = True
             # Override with parsed options
             for key, val in standard_opts.items():
                 if hasattr(options, key):
