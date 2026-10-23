@@ -297,8 +297,13 @@ def _compute_probs(
     top_p = sampling_metadata.top_p[segment_ids]
     temperatures = sampling_metadata.temperature[segment_ids]
 
-    # Apply top-k and top-p masking
+    # Apply temperature scaling
     logits = logits.astype(jnp.float32)
+    temperatures = jnp.expand_dims(temperatures, axis=-1)
+    # Add epsilon to avoid division by zero
+    logits /= (temperatures + 1e-9)
+
+    # Apply top-k and top-p masking
     # Only apply top-k masking if k > 0 for each token
     should_apply_topk = jnp.expand_dims(top_k > 0, axis=-1)
     topk_masked = topk_mask(logits, top_k, replace_val=-jnp.inf)
@@ -308,11 +313,6 @@ def _compute_probs(
     should_apply_topp = jnp.expand_dims(top_p < 1.0, axis=-1)
     topp_masked = topp_mask(logits, top_p, replace_val=-jnp.inf)
     logits = jnp.where(should_apply_topp, topp_masked, logits)
-
-    # Apply temperature scaling
-    temperatures = jnp.expand_dims(temperatures, axis=-1)
-    # Add epsilon to avoid division by zero
-    logits /= (temperatures + 1e-9)
 
     return jax.nn.softmax(logits, axis=-1)
 
