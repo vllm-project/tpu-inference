@@ -151,6 +151,43 @@ def is_attn_dp(mesh: Mesh) -> bool:
     return (attn_dp_size // dp_size) > 1
 
 
+def keeps_tokens_sharded(mesh: Mesh | None, enable_sp: bool) -> bool:
+    """Whether the residual stream stays token-sharded over EXPERT_DATA.
+
+    Sequence parallelism (`enable_sp`) under attention DP with GMM_EP
+    (`USE_MOE_EP_KERNEL=0`, `expert_parallel_gmm`): the MoE consumes and produces tokens sharded over all devices
+    (EXPERT_DATA), so instead of resharding to ATTN_DATA around every linear
+    and the MoE, the activations outside attention stay token-sharded:
+    column-parallel projections all-gather (FP8) tokens over the attention TP
+    axis, row-parallel ones reduce-scatter, and router / shared expert / norms
+    run on the local token slice.
+
+    Only under attention DP with attention TP > 1 and GMM_EP; otherwise
+    `enable_sp` keeps its MLP_TENSOR input / output sharding.
+    """
+    if not enable_sp or envs.USE_MOE_EP_KERNEL:
+        return False
+    if mesh is None or not is_attn_dp(mesh):
+        return False
+    return (utils.get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD) > 1
+            and utils.get_mesh_shape_product(mesh,
+                                             ShardingAxisName.EXPERT_DATA) > 1)
+
+
+def sp_token_axes(mesh: Mesh, keep_tokens_sharded: bool, num_tokens: int):
+    """EXPERT_DATA if `num_tokens` tokens stay sharded over it, else None.
+
+    Requires the token count to divide EXPERT_DATA; otherwise the linears use
+    the usual ATTN_DATA token sharding (XLA reshards around them).
+    """
+    if not keep_tokens_sharded:
+        return None
+    if num_tokens % utils.get_mesh_shape_product(mesh,
+                                                 ShardingAxisName.EXPERT_DATA):
+        return None
+    return ShardingAxisName.EXPERT_DATA
+
+
 @dataclass
 class ShardingStrategy:
     """Defines the high-level parallelism strategy.
