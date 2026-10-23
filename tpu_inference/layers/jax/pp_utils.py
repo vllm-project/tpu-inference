@@ -19,6 +19,9 @@ from vllm.distributed.utils import get_pp_indices
 
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.jax import JaxModule
+from tpu_inference.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class PPMissingLayer(JaxModule):
@@ -33,10 +36,19 @@ class PPMissingLayer(JaxModule):
         """Return the first arg from args or the first value from kwargs."""
         return args[0] if args else next(iter(kwargs.values()))
 
-    def load_weights(self, weights: Iterable, *args, **kwargs):
-        """No-op for loading weights."""
-        for _ in weights:
-            pass
+    def load_weights(self, weights: Iterable, *args, **kwargs) -> set[str]:
+        """Consume and drop weights owned by other pipeline stages.
+
+        Returns an empty set: nothing is loaded on this rank. Returning a
+        set (instead of None) tells vLLM's AutoWeightsLoader that the
+        weights were handled, so it does not emit a per-layer
+        "Unable to collect loaded parameters" warning during loading.
+        """
+        num_dropped = sum(1 for _ in weights)
+        logger.debug(
+            "[pp] PPMissingLayer dropped %d weights owned by another "
+            "pipeline stage", num_dropped)
+        return set()
 
 
 class LayerFn(Protocol):
