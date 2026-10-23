@@ -93,6 +93,7 @@ if TYPE_CHECKING:
     MOE_TC_PERMUTE_CAPACITY_FACTOR: float = 2.0
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
+    VLLM_INCREMENTAL_MXFP4_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
     TPU_MESH_ATTN_DP_RING: bool = False
     VERIFY_WEIGHTS: bool = False
@@ -644,6 +645,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # See core/runner_slot_mamba.py.
     "SKIP_MAMBA_SCHEDULER_BLOCKS":
     env_bool("SKIP_MAMBA_SCHEDULER_BLOCKS", default=False),
+    # Controls whether MXFP4 MoE layers perform incremental weight
+    # loading, sharding, and immediate host RAM cleanup on TPU v6e.
+    "VLLM_INCREMENTAL_MXFP4_LOADING":
+    env_bool("VLLM_INCREMENTAL_MXFP4_LOADING", default=False),
 }
 
 
