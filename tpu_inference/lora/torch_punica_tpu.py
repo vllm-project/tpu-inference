@@ -115,7 +115,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         """
         y_orig = y
         y = y.view(-1, y.shape[-1])
-        offset_left = 0
+        offset_left = offset_start
 
         for slice_idx in range(len(lora_b_stacked)):
             y = bgmv_expand_slice(x[slice_idx], lora_b_stacked[slice_idx], y,
