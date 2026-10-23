@@ -28,3 +28,48 @@ steps:
       - docker-login#v3.0.0:
           username: tpuinference
           password-env: DOCKERHUB_TOKEN
+
+  # Release images: a build of releases/vX.Y.Z started by hand waits here, like
+  # a wait step, until someone approves; scheduled builds skip it. This
+  # pipeline runs no tests, so the approver checks that the tpu-inference CI
+  # build of this commit passed. The secret policy must admit releases/*.
+  - block: ":rotating_light: Approve vllm/vllm-tpu release image"
+    key: "approve_release_image"
+    if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/ && build.source != "schedule"
+    prompt: "Did the tpu-inference CI build of this commit pass? Publish this release image?"
+    # TODO(release-approvers): limit who can unblock to a Buildkite team.
+    fields:
+      - select: "Move the latest tag on Docker Hub to this version?"
+        key: "dockerhub_move_latest"
+        hint: "Choose No for a patch to an older release. A pre-release (RELEASE_VERSION) never moves latest."
+        required: true
+        options:
+          - label: "Yes"
+            value: "yes"
+          - label: "No"
+            value: "no"
+      - select: "Overwrite the tag if it is already on Docker Hub?"
+        key: "dockerhub_overwrite"
+        hint: "Released tags should not change; choose Yes only to replace a broken image."
+        required: true
+        default: "no"
+        options:
+          - label: "No"
+            value: "no"
+          - label: "Yes"
+            value: "yes"
+
+  - label: ":docker: Publish vllm/vllm-tpu release image"
+    key: "publish_release_image"
+    if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/ && build.source != "schedule"
+    depends_on: "approve_release_image"
+    agents:
+      queue: cpu
+    env:
+      DOCKERHUB_REPO: "vllm/vllm-tpu"
+      # The same account and secret as the nightly step above.
+      DOCKERHUB_USERNAME: "tpuinference"
+    secrets:
+      - DOCKERHUB_TOKEN
+    commands:
+      - bash .buildkite/scripts/publish_release_image.sh
