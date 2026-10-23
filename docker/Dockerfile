@@ -37,9 +37,7 @@ RUN apt-get update && apt-get install -y \
     bc \
     ca-certificates \
     unzip \
-    build-essential \
     cmake \
-    g++ \
     && rm -rf /var/lib/apt/lists/*
 
 # Conditionally install google-cloud-cli for benchmarking infrastructure
