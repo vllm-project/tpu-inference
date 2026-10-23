@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 
 from tpu_inference.layers.jax.sample.rejection_sampler import (
-    PLACEHOLDER_TOKEN_ID, RejectionSampler)
+    PLACEHOLDER_TOKEN_ID, RejectionSampler, rejection_sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 
@@ -500,6 +500,58 @@ def test_factory():
 
 
 # ======================== TEST CLASSES ========================
+
+
+@pytest.mark.parametrize("sampling_mode", ["greedy", "random", "draft_probs"])
+@pytest.mark.parametrize("padding", [0, 1, 8])
+@pytest.mark.parametrize(
+    "draft_tokens,target_tokens,draft_lengths,expected",
+    [
+        ([1, 2], [3, 2], [1, 1], [[3], [2, 4]]),
+        ([1, 2, 3], [2, 2, 3], [1, 2], [[2], [2, 3, 4]]),
+        ([1, 2], [3, 2], [1, 0, 1], [[3], [4], [2, 4]]),
+        ([1, 2], [3, 2], [1, 1, 0], [[3], [2, 4], [4]]),
+        ([1, 2], [1, 2], [1, 1], [[1, 4], [2, 4]]),
+        ([1, 2], [1, 3], [1, 1], [[1, 4], [3]]),
+    ],
+    ids=[
+        "last-accepts", "multiple-drafts", "empty-middle", "empty-last",
+        "all-accept", "last-rejects"
+    ],
+)
+def test_rejection_sampler_token_padding(sampling_mode, padding, draft_tokens,
+                                         target_tokens, draft_lengths,
+                                         expected):
+    """Padded rows must not reject a fully accepted request's bonus token."""
+    num_tokens = len(draft_tokens) + padding
+    batch_size = len(draft_lengths)
+    # The runner pads gather indices with zero, repeating the first row.
+    draft_ids = jnp.array(draft_tokens + [draft_tokens[0]] * padding,
+                          dtype=jnp.int32)
+    target_probs = jax.nn.one_hot(
+        jnp.array(target_tokens + [target_tokens[0]] * padding), 5)
+    draft_probs = (jax.nn.one_hot(draft_ids, 5)
+                   if sampling_mode == "draft_probs" else None)
+    sample_fn = jax.jit(rejection_sample, static_argnames=("do_sampling", ))
+    output = sample_fn(
+        draft_ids,
+        jnp.array(draft_lengths, dtype=jnp.int32),
+        draft_probs,
+        target_probs,
+        jnp.full((batch_size, ), 4, dtype=jnp.int32),
+        do_sampling=sampling_mode != "greedy",
+        key=jax.random.PRNGKey(0),
+    )
+    parsed = RejectionSampler.parse_output(
+        output,
+        vocab_size=5,
+        num_draft_tokens_cpu=np.array(draft_lengths),
+        batch_size=batch_size,
+        padded_tokens_length=num_tokens,
+        dp_size=1,
+        req_indices_dp={0: list(range(batch_size))},
+    )
+    assert parsed == expected
 
 
 class TestRejectionSampler:
