@@ -127,6 +127,14 @@ class TestTpuPlatform:
         assert name in TpuPlatform.additional_env_vars
         assert name in envs.environment_variables
 
+    def test_additional_env_vars_covers_moe_ragged_a2a(self):
+        """The ragged all-to-all dispatch is traced in the workers, so they
+        must see its flags."""
+        for name in ("MOE_GMM_EP_RAGGED_A2A", "MOE_RAGGED_A2A_CAPACITY_FACTOR",
+                     "MOE_RAGGED_A2A_DROPLESS"):
+            assert name in TpuPlatform.additional_env_vars
+            assert name in envs.environment_variables
+
     def test_get_device_total_memory(self):
         with pytest.raises(NotImplementedError):
             TpuPlatform.get_device_total_memory()
