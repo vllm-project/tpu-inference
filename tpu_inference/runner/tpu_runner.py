@@ -73,7 +73,8 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.compilation_manager import CompilationManager
-from tpu_inference.runner.decode_loop import TpuSamplingState, continue_decode
+from tpu_inference.runner.decode_loop import (TpuSamplingState, _alldone_note,
+                                              continue_decode)
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 from tpu_inference.runner.kv_cache_manager import KVCacheManager
 from tpu_inference.runner.lora_utils import LoraUtils
@@ -195,6 +196,8 @@ def _log_continue_decode_summary(
     num_eos_hits: int,
 ) -> None:
     """Log debug summary for continue_decode completion."""
+    # CONTINUE_DECODE_ALL_DONE_EXIT log line (no-op when off).
+    _alldone_note(actual_steps, max_decode_steps, num_reqs)
     termination_reason = REASON_UNKNOWN
     if actual_steps < max_decode_steps:
         termination_reason = REASON_EOS_HIT
