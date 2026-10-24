@@ -101,6 +101,8 @@ if TYPE_CHECKING:
     ENABLE_TOPK_PREFILTER: bool = False
     RAIDEN_H2D_SETTLE: bool = True
     SKIP_MAMBA_SCHEDULER_BLOCKS: bool = False
+    # RPA v3 DECODE scoped-VMEM cap, MiB
+    RPA_V3_DECODE_VMEM_LIMIT_MIB: int = 0
 
 
 def env_with_choices(
@@ -644,6 +646,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # See core/runner_slot_mamba.py.
     "SKIP_MAMBA_SCHEDULER_BLOCKS":
     env_bool("SKIP_MAMBA_SCHEDULER_BLOCKS", default=False),
+    # Cap the RPA v3 DECODE pallas_call scoped-VMEM limit at this many MiB
+    # so XLA can prefetch the next weights across the attention call;
+    # PREFILL/MIXED keep the full capacity. A value below what the DECODE
+    # tiles need fails to compile. 0 (default) = stock full-capacity limit.
+    "RPA_V3_DECODE_VMEM_LIMIT_MIB":
+    lambda: int(os.getenv("RPA_V3_DECODE_VMEM_LIMIT_MIB") or "0"),
 }
 
 
