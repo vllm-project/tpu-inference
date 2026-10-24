@@ -1379,6 +1379,35 @@ class TestTPUJaxRunnerPadding:
             assert spec.dtype == 'float32'
             assert spec.sharding == 'mock_sharding'
 
+    def test_get_intermediate_tensor_spec_deepseek_v4_hc_mult(self):
+        """Test that get_intermediate_tensor_spec returns 3D shape (tokens, hc_mult, hidden_size) when hc_mult is present."""
+        mock_output = MagicMock()
+        mock_output.total_num_scheduled_tokens = 12
+        mock_output.max_num_scheduled_tokens_per_dp_rank = 6
+
+        mock_spec_instance = MagicMock()
+        mock_spec_instance.shape = (16, 4, 128)
+        mock_spec_instance.dtype = 'bfloat16'
+        mock_spec_instance.sharding = 'mock_sharding'
+
+        mock_hf_config = MagicMock()
+        mock_hf_config.hc_mult = 4
+        self.runner.model_config.hf_config = mock_hf_config
+
+        with patch('tpu_inference.runner.tpu_runner.to_jax_dtype', return_value='bfloat16'), \
+             patch('tpu_inference.runner.tpu_runner.NamedSharding', return_value='mock_sharding'), \
+             patch('tpu_inference.runner.tpu_runner.PartitionSpec', return_value='mock_spec'), \
+             patch('jax.ShapeDtypeStruct', return_value=mock_spec_instance):
+
+            spec_dict = self.runner.get_intermediate_tensor_spec(mock_output)
+
+            assert "hidden_states" in spec_dict
+            assert "residual" not in spec_dict
+            spec = spec_dict["hidden_states"]
+            assert spec.shape == (16, 4, 128)
+            assert spec.dtype == 'bfloat16'
+            assert spec.sharding == 'mock_sharding'
+
 
 class TestSamplingMetadataPassthrough:
 
