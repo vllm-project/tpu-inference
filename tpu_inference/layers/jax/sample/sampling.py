@@ -511,9 +511,27 @@ def sample(
     # (i.e. Ray based multi-host setup), we won't hit error like
     # RuntimeError: Fetching value for `jax.Array` that spans non-addressable
     # (non process local) devices is not possible.
-    next_tokens = jax.lax.with_sharding_constraint(ret_tokens,
-                                                   NamedSharding(mesh, P()))
+    # SAMPLING_DP_LOCAL_OUTPUT: on a mesh whose devices all belong
+    # to this process the result stays data-sharded, which removes the
+    # per-step replication of the sampled tokens; device_get of a sharded,
+    # fully addressable array is legal. Only when do_sampling (that branch
+    # constrains the logits' batch dim to ATTN_DATA, so it divides).
+    out_spec = P()
+    if (envs.SAMPLING_DP_LOCAL_OUTPUT and tpu_sampling_metadata.do_sampling
+            and _mesh_is_process_local(mesh)):
+        out_spec = P(ShardingAxisName.ATTN_DATA)
+    next_tokens = jax.lax.with_sharding_constraint(
+        ret_tokens, NamedSharding(mesh, out_spec))
     return next_tokens, ret_logits
+
+
+def _mesh_is_process_local(mesh: Mesh) -> bool:
+    """True when every device of `mesh` is addressable by this process."""
+    try:
+        pid = jax.process_index()
+        return all(d.process_index == pid for d in mesh.devices.flat)
+    except Exception:
+        return False
 
 
 def compute_logprobs(logits: jax.Array) -> jax.Array:
