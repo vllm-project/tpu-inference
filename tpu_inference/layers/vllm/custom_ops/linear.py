@@ -38,6 +38,11 @@ class VllmRowParallelLinear(RowParallelLinear):
         super().__init__(*args, **kwargs)
 
         linear_config = getattr(self.quant_method, "linear_config", None)
+        if linear_config is None:
+            # Compressed-tensors keeps the config on the per-layer scheme, as
+            # its quant method is vLLM's CompressedTensorsLinearMethod.
+            linear_config = getattr(getattr(self, "scheme", None),
+                                    "linear_config", None)
         if linear_config is not None:
             linear_config.defer_all_reduce = not self.reduce_results
 
