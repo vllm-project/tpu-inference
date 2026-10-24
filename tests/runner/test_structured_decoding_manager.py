@@ -153,19 +153,20 @@ class TestStructuredDecodingManager:
             self.runner.input_batch.add_request(req3)  # index 2
             num_reqs = 3
 
-            # Mock scheduler output for structured decoding
+            # Mock grammar output for structured decoding
             # req-1 and req-3 require structured decoding
-            mock_scheduler_output = MagicMock()
-            mock_scheduler_output.structured_output_request_ids = {
-                "req-1": 0,  # maps req_id to index in grammar_bitmask
-                "req-3": 1,
-            }
+            mock_grammar_output = MagicMock()
+            mock_grammar_output.structured_output_request_ids = [
+                "req-3", "req-missing", "req-1"
+            ]
             # Bitmask: vocab_size=64, so 2 int32s per request
             # Mask for req-1: allow tokens 0-31
             mask1 = np.array([-1, 0], dtype=np.int32)
             # Mask for req-3: allow tokens 32-63
             mask2 = np.array([0, -1], dtype=np.int32)
-            mock_scheduler_output.grammar_bitmask = np.array([mask1, mask2])
+            mask_missing = np.array([-1, -1], dtype=np.int32)
+            mock_grammar_output.grammar_bitmask = np.array(
+                [mask2, mask_missing, mask1])
 
             # Mock logits
             logits_shape = (num_reqs, self.runner.vocab_size)
@@ -175,7 +176,7 @@ class TestStructuredDecodingManager:
             (
                 require_struct_decoding, grammar_bitmask, arange
             ) = self.runner.structured_decoding_manager.prepare_structured_decoding_input(
-                mock_logits_device, mock_scheduler_output)
+                mock_logits_device, mock_grammar_output)
 
             # Assertions for prepare_structured_decoding_input
             # require_structured_out_cpu should be [True, False, True]
