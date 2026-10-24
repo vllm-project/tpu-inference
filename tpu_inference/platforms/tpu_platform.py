@@ -79,6 +79,7 @@ if hasattr(torch, "accelerator") and hasattr(torch.accelerator, "synchronize"):
             jax.effects_barrier()
 
     torch.accelerator.synchronize = _patched_synchronize
+
 from vllm.platforms.interface import Platform, PlatformEnum
 
 from tpu_inference import envs
@@ -154,6 +155,86 @@ else:
     ProcessorInputs = None
 
 logger = init_logger(__name__)
+
+
+def _install_tpu_kv_cache_utils_hooks() -> None:
+    """Install TPU hybrid KV cache hooks into vllm.v1.core.kv_cache_utils.
+
+    1. `unify_kv_cache_spec_page_size`:
+       `KVCacheManager._create_attention_spec` sets `page_size_padded` on every
+       `AttentionSpec` to the physical TPU page size. Upstream vLLM's
+       `unify_kv_cache_spec_page_size` (`vllm/v1/core/kv_cache_utils.py:1444`)
+       calls `dataclasses.replace(layer_spec, block_size=new_block_size)`
+       without scaling `page_size_padded` (unlike `_ensure_min_page_size` at
+       lines 2305-2308), tripping `assert self.page_size_padded >=
+       self.unpadded_page_size_bytes` on hybrid models with mixed KV geometries.
+       TODO(tpu-inference): Upstream scaling of `page_size_padded` in
+       `unify_kv_cache_spec_page_size` to `vllm-project/vllm` and remove this
+       wrapper once released.
+
+    2. `SlidingWindowSpec.max_admission_blocks_per_request`:
+       Upstream (`vllm-project/vllm#39734`) passes the batch-wide token budget
+       `max_num_batched_tokens` as `max_in_flight_tokens` for every request,
+       charging the entire batch's prefill token limit to each individual
+       request across all sliding-window KV cache groups. Because the scheduler
+       already bounds total in-flight tokens across the whole batch by
+       `max_num_batched_tokens` and each decoding sequence has at most one
+       block of in-flight tokens, clamping per-request `max_in_flight_tokens`
+       to `self.block_size` reflects the true steady-state per-request sliding
+       window footprint (`cdiv(sliding_window, block_size) + 1` blocks).
+       TODO(tpu-inference): Upstream batch-wide vs. per-request in-flight SWA
+       admission accounting to `vllm-project/vllm`.
+    """
+    import dataclasses
+
+    from vllm.v1.core import kv_cache_utils
+    from vllm.v1.kv_cache_interface import AttentionSpec, SlidingWindowSpec
+
+    os.environ.setdefault("TPU_SKIP_MDS_QUERY", "true")
+
+    if getattr(kv_cache_utils, "_tpu_kv_cache_hooks_installed", False):
+        return
+
+    orig_unify = kv_cache_utils.unify_kv_cache_spec_page_size
+    orig_max_admission = SlidingWindowSpec.max_admission_blocks_per_request
+
+    def _tpu_unify_kv_cache_spec_page_size(kv_cache_spec):
+        page_sizes = {
+            layer.page_size_bytes
+            for layer in kv_cache_spec.values()
+        }
+        if len(page_sizes) > 1:
+            max_page_size = max(page_sizes)
+            kv_cache_spec = {
+                name: (dataclasses.replace(
+                    spec,
+                    block_size=spec.block_size *
+                    (max_page_size // spec.page_size_bytes),
+                    page_size_padded=max_page_size,
+                ) if isinstance(spec, AttentionSpec)
+                       and spec.page_size_padded is not None
+                       and spec.page_size_bytes < max_page_size
+                       and max_page_size % spec.page_size_bytes == 0 else spec)
+                for name, spec in kv_cache_spec.items()
+            }
+        return orig_unify(kv_cache_spec)
+
+    def _tpu_sliding_max_admission_blocks_per_request(
+        self: SlidingWindowSpec,
+        max_in_flight_tokens: int,
+        max_model_len: int,
+    ) -> int:
+        return orig_max_admission(
+            self,
+            min(max_in_flight_tokens, self.block_size),
+            max_model_len,
+        )
+
+    SlidingWindowSpec.max_admission_blocks_per_request = (
+        _tpu_sliding_max_admission_blocks_per_request)
+    kv_cache_utils.unify_kv_cache_spec_page_size = (
+        _tpu_unify_kv_cache_spec_page_size)
+    kv_cache_utils._tpu_kv_cache_hooks_installed = True
 
 
 @contextlib.contextmanager
@@ -369,6 +450,7 @@ class TpuPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        _install_tpu_kv_cache_utils_hooks()
 
         cls._resolve_multiprocess_dp(vllm_config)
 

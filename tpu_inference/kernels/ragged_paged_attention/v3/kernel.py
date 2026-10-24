@@ -387,7 +387,7 @@ def _ragged_paged_attention_kernel_loop(
 
     if sliding_window is not None:
         # TODO(jevinjiang): can skip by page_size instead of bkv_sz.
-        cur_seq_start_bkv_idx = jnp.maximum(kv_q_gap - sliding_window,
+        cur_seq_start_bkv_idx = jnp.maximum(kv_q_gap - sliding_window + 1,
                                             0) // bkv_sz
         next_seq_idx = jnp.minimum(seq_idx + 1, end_seq_idx - 1)
         next_q_start = cu_q_lens_ref[next_seq_idx]
@@ -396,7 +396,7 @@ def _ragged_paged_attention_kernel_loop(
         next_kv_len = kv_lens_ref[next_seq_idx]
         next_kv_q_gap = next_kv_len - next_q_len
         next_seq_start_bkv_idx = (
-            jnp.maximum(next_kv_q_gap - sliding_window, 0) // bkv_sz)
+            jnp.maximum(next_kv_q_gap - sliding_window + 1, 0) // bkv_sz)
 
     def debug_print(msg, *args):
         if debug_mode:
@@ -916,7 +916,8 @@ def _ragged_paged_attention_kernel_loop(
             if sliding_window is not None:
                 next_bq_start_bkv_idx = (jnp.maximum(
                     kv_q_gap +
-                    (bq_idx + 1) * actual_bq_sz - sliding_window, 0) // bkv_sz)
+                    (bq_idx + 1) * actual_bq_sz - sliding_window + 1, 0) //
+                                         bkv_sz)
             next_bkv_idx = lax.select(is_last_bkv, next_bq_start_bkv_idx,
                                       next_bkv_idx)
             next_bkv_idx = lax.select(is_last_bq, next_seq_start_bkv_idx,
@@ -939,7 +940,8 @@ def _ragged_paged_attention_kernel_loop(
             if sliding_window is not None:
                 # Recalculate the start_bkv_idx based on the processed_q_len.
                 start_bkv_idx = (
-                    jnp.maximum(processed_q_len - sliding_window, 0) // bkv_sz)
+                    jnp.maximum(processed_q_len - sliding_window + 1, 0) //
+                    bkv_sz)
             if use_causal_mask:
                 effective_kv_len = jnp.minimum(kv_len,
                                                processed_q_len + actual_bq_sz)
@@ -980,13 +982,24 @@ def _ragged_paged_attention_kernel_loop(
                                                    bkv_sem_idx)
 
                 # Start updating bkv to kv cache if applicable.
-                # Only needed in last bq loop.
+                # Only needed in last bq loop that visits this bkv_idx.
                 # KV-share: skip the cache write when update_kv_cache=False
                 # so shared layers don't overwrite the source layer's slot.
                 if update_kv_cache:
+                    if sliding_window is not None:
+                        next_bq_processed_q_len = (kv_q_gap +
+                                                   (bq_idx + 1) * actual_bq_sz)
+                        next_bq_start_bkv_idx = (jnp.maximum(
+                            next_bq_processed_q_len - sliding_window + 1, 0) //
+                                                 bkv_sz)
+                        is_last_bq_for_bkv = jnp.logical_or(
+                            bq_idx == num_bq - 1, bkv_idx
+                            < next_bq_start_bkv_idx)
+                    else:
+                        is_last_bq_for_bkv = bq_idx == num_bq - 1
 
-                    @pl.when(
-                        jnp.logical_and(update_sz > 0, bq_idx == num_bq - 1))
+                    @pl.when(jnp.logical_and(update_sz > 0,
+                                             is_last_bq_for_bkv))
                     def update_cur_bkv_to_cache():
                         start_update_kv_cache(seq_idx, bkv_sem_idx, offset,
                                               update_sz)
@@ -1493,6 +1506,23 @@ def static_validate_inputs(
     del v_scale
 
 
+# Minimum KV tile size aligned to the TPU MXU/lane dimension (128).
+_MIN_KV_TILE_SIZE = 128
+
+
+def _clamp_bkv_for_sliding_window(
+    bkv_sz: int,
+    page_size: int,
+    sliding_window: int | None,
+    case: RpaCase,
+) -> int:
+    if sliding_window is None:
+        return bkv_sz
+    min_tile = (max(page_size, _MIN_KV_TILE_SIZE) if case == RpaCase.DECODE
+                else max(page_size, _MIN_KV_TILE_SIZE, sliding_window))
+    return min(bkv_sz, align_to(min_tile, page_size))
+
+
 def get_default_block_sizes(
     q_dtype,
     kv_dtype,
@@ -1505,6 +1535,7 @@ def get_default_block_sizes(
     pages_per_seq,
     *,
     case: RpaCase = RpaCase.MIXED,
+    sliding_window: int | None = None,
 ):
     """Get (bq, bkv_sz, bq_csz, bkv_csz) by some heuristic formulas.
 
@@ -1515,7 +1546,7 @@ def get_default_block_sizes(
     kv_packing = get_dtype_packing(kv_dtype)
     num_kv_heads_x2 = next_power_of_2(
         align_to(actual_num_kv_heads * 2, kv_packing))
-    head_dim = align_to(head_dim, 128)
+    head_dim = align_to(head_dim, _MIN_KV_TILE_SIZE)
     num_q_heads_per_kv_head = next_power_of_2(actual_num_q_heads //
                                               actual_num_kv_heads)
 
@@ -1529,34 +1560,48 @@ def get_default_block_sizes(
         case 5 | 6:
             if case == RpaCase.DECODE:
                 bq_sz = 1
-                bkv_sz = min(min_bkv_sz_to_peak, max_kv)
+                bkv_sz = _clamp_bkv_for_sliding_window(
+                    min(min_bkv_sz_to_peak, max_kv), page_size, sliding_window,
+                    case)
                 bq_csz = 1
-                bkv_csz = min(min_bkv_sz_to_peak, max_kv)
+                bkv_csz = bkv_sz
             else:
                 bq_sz = min(1024 // num_q_heads_per_kv_head, max_q // 2)
-                bkv_sz = min(1024, max_kv)
+                bkv_sz = _clamp_bkv_for_sliding_window(min(1024,
+                                                           max_kv), page_size,
+                                                       sliding_window, case)
                 bq_csz = min(512 // num_q_heads_per_kv_head, max_q)
                 bkv_csz = min(512, align_to(max_kv // 2, page_size))
         # TODO(amandaliang): Update the default tiling for v8i.
         case 7 | 8:
             if case == RpaCase.DECODE:
                 bq_sz = 1
-                bkv_sz = min(min_bkv_sz_to_peak, max_kv)
+                bkv_sz = _clamp_bkv_for_sliding_window(
+                    min(min_bkv_sz_to_peak, max_kv), page_size, sliding_window,
+                    case)
                 bq_csz = 1
-                bkv_csz = min(min_bkv_sz_to_peak, max_kv)
+                bkv_csz = bkv_sz
             else:
                 bq_sz = min(2048 // num_q_heads_per_kv_head, max_q // 2)
-                bkv_sz = min(2048, max_kv // 2)
+                bkv_sz = _clamp_bkv_for_sliding_window(min(2048, max_kv // 2),
+                                                       page_size,
+                                                       sliding_window, case)
                 bq_csz = min(1024 // num_q_heads_per_kv_head, max_q // 2)
                 bkv_csz = min(512, align_to(max_kv // 2, page_size))
         case _:
             raise NotImplementedError(f"Unsupported {tpu_version=}.")
 
+    bq_sz = max(1, bq_sz)
+    bkv_sz = align_to(bkv_sz, page_size)
+    bq_csz = max(1, min(bq_csz, bq_sz))
+    bkv_csz = align_to(min(bkv_csz, bkv_sz), page_size)
+    bq_sz = max(bq_csz, (bq_sz // bq_csz) * bq_csz)
+    bkv_sz = max(bkv_csz, (bkv_sz // bkv_csz) * bkv_csz)
     return {
-        "bq_sz": max(1, bq_sz),
-        "bkv_sz": align_to(bkv_sz, page_size),
-        "bq_csz": max(1, bq_csz),
-        "bkv_csz": align_to(bkv_csz, page_size),
+        "bq_sz": bq_sz,
+        "bkv_sz": bkv_sz,
+        "bq_csz": bq_csz,
+        "bkv_csz": bkv_csz,
     }
 
 
@@ -1894,6 +1939,7 @@ def ragged_paged_attention(
                 max_num_seqs,
                 pages_per_seq,
                 case=case,
+                sliding_window=sliding_window,
             )
         return {
             "bq_sz": block_sizes[0],

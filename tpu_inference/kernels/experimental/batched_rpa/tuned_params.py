@@ -196,12 +196,21 @@ def calculate_block_sizes(
         # costs. Therefore, we conservatively only use 80% of the VMEM budget.
         capped_vmem_limit_bytes = vmem_limit_bytes * 0.8
 
-        bkv_sz = bkv_stride = mxu_column_size
+        bkv_sz = bkv_stride = utils.align_to(
+            max(mxu_column_size, serve_cfgs.page_size), serve_cfgs.page_size)
         if fixed_bq_sz is None:
             bq_sz = bq_stride = bkv_sz
         else:
             bq_sz = fixed_bq_sz
             bq_stride = 0
+        max_bkv_sz: int | None = None
+        if (sliding_window :=
+                model_cfgs.sliding_window) is not None and sliding_window > 0:
+            if fixed_bq_sz is not None:
+                max_bkv_sz = bkv_stride
+            else:
+                max_bkv_sz = utils.align_to(max(bkv_stride, sliding_window),
+                                            serve_cfgs.page_size)
         batch_size = max_batch_size
         n_buffer = max_n_buffer
 
@@ -216,8 +225,9 @@ def calculate_block_sizes(
             batch_size -= 1
 
         # As a last resort, attempt to decrease number of buffers to avoid OOM.
-        while (calculate_vmem_usage(batch_size, n_buffer, bq_sz, bkv_sz)
-               > capped_vmem_limit_bytes):
+        while (n_buffer > 0
+               and calculate_vmem_usage(batch_size, n_buffer, bq_sz,
+                                        bkv_sz) > capped_vmem_limit_bytes):
             n_buffer -= 1
 
         # Indicates OOM was triggered even when batch_size=1 or n_buffer=1.
@@ -229,7 +239,7 @@ def calculate_block_sizes(
 
         # Step 2: Increase block sizes until the kernel is unable to fit into VMEM.
         while (calculate_vmem_usage(batch_size, n_buffer, bq_sz, bkv_sz)
-               < capped_vmem_limit_bytes):
+               <= capped_vmem_limit_bytes):
             # Unless bq is a fixed value, we want to ensure bq size is the same as bkv
             # size. When using causal masking, if bq size is larger than bkv size,
             # entire kv tile can be masked out for some query tokens. Similarly, if
@@ -237,6 +247,8 @@ def calculate_block_sizes(
             # some kv tokens.
             bkv_sz += bkv_stride
             bq_sz += bq_stride
+            if max_bkv_sz is not None and bkv_sz > max_bkv_sz:
+                break
 
         # Rollback one step since the last attempted value triggered OOM.
         bkv_sz -= bkv_stride
