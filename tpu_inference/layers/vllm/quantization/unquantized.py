@@ -204,7 +204,7 @@ def _load_weight_for_layer(
     # Pathways real-weight path
     dtype = to_jax_dtype(tensor.dtype)
     np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
-    return jax.device_put(np_tensor, sharding).astype(dtype)
+    return general_device_put(np_tensor, sharding).astype(dtype)
 
 
 def _prefix_matches(prefix: str, patterns: Sequence[str]) -> bool:

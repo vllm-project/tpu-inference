@@ -16,6 +16,7 @@ from contextlib import nullcontext
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.experimental.layout import Format, Layout
 from jax.sharding import Mesh, Sharding
 
@@ -139,10 +140,12 @@ def general_device_put(tensor: jax.Array,
 
     def _put(t):
         multihost_backend = envs.TPU_MULTIHOST_BACKEND
+        is_multihost_sharding = (hasattr(sharding, "is_fully_addressable")
+                                 and not sharding.is_fully_addressable)
         # If we are not in multi-host setup, or the tensor is not fully addressable,
         # we can use jax.device_put directly.
-        if multihost_backend != "ray" or (isinstance(t, jax.Array)
-                                          and not t.is_fully_addressable):
+        if (not is_multihost_sharding and multihost_backend != "ray") or (
+                isinstance(t, jax.Array) and not t.is_fully_addressable):
             if layout is not None:
                 return jax.device_put(t, Format(layout, sharding))
             else:
@@ -153,15 +156,39 @@ def general_device_put(tensor: jax.Array,
         # and each process only need to handle the devices accessible to this host.
         ctx = nullcontext() if source_mesh is None else jax.set_mesh(
             source_mesh)
+        sliceable_t = None
+
+        def _slice_fn(index):
+            nonlocal sliceable_t
+            if index == (slice(None), ) * len(t.shape):
+                return t
+            if sliceable_t is None:
+                is_cpu_array = (source_mesh is None
+                                and isinstance(t, jax.Array)
+                                and t.is_fully_addressable
+                                and hasattr(t, "devices") and all(
+                                    getattr(d, "platform", None) == "cpu"
+                                    for d in t.devices()))
+                if is_cpu_array:
+                    try:
+                        sliceable_t = np.asarray(t)
+                    except TypeError:
+                        sliceable_t = t
+                else:
+                    sliceable_t = t
+            return sliceable_t[index]
+
         # `t[i]` needs to be operated in the same mesh as `t`, which is provided as
         # `source_mesh`.
         # Pass dtype explicitly: a host that owns no shard of `t` never calls
         # the callback, so JAX cannot infer the dtype and raises ValueError.
         with ctx:
-            global_array = jax.make_array_from_callback(t.shape,
-                                                        sharding,
-                                                        lambda index: t[index],
-                                                        dtype=t.dtype)
+            global_array = jax.make_array_from_callback(
+                t.shape,
+                sharding,
+                _slice_fn,
+                dtype=getattr(t, "dtype", None),
+            )
         if layout is not None:
             dst_mesh = sharding.mesh
             with jax.set_mesh(dst_mesh):

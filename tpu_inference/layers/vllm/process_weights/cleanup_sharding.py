@@ -108,7 +108,7 @@ def _convert_to_torchax_and_shard(tensor: torch.Tensor,
             dtype = to_jax_dtype(tensor.dtype)
             np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
             return torch_view(
-                jax.device_put(np_tensor, sharding).astype(dtype))
+                general_device_put(np_tensor, sharding).astype(dtype))
     if isinstance(tensor, torchax.tensor.Tensor):
         tensor = jax_view(tensor)
     else:
