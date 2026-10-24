@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import functools
+import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -20,10 +21,155 @@ import jax
 import jax.numpy as jnp
 from vllm.v1.outputs import LogprobsTensors
 
+from tpu_inference import envs
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, GroupedAttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.models.common.compiler_options import (
     get_sampling_compiler_options, get_step_fn_compiler_options)
+
+# ---- Dead-row KV clamp (env CONTINUE_DECODE_DEAD_KV_CLAMP=1, default off) ----
+# In the fused continue-decode loop a row that sampled EOS stays in the batch
+# until the window ends with its seq_lens frozen, so attention keeps reading its
+# whole KV every step for a result that is discarded (post-EOS tokens are
+# padded). ON: each step's attention metadata gets seq_lens=1 for the rows that
+# were already finished when the step starts (and seq_lens > 0), laid out like
+# _update_loop_state's `increment`. The carried seq_lens/positions are
+# untouched, so active rows and the host bookkeeping are unchanged. A finished
+# row's pad KV goes to slot 0 of its own first page (stock: slot seq_len-1 of
+# the same request); with prefix caching off neither is read again, which the
+# runner config gate enforces.
+_DEADKV_ON = bool(envs.CONTINUE_DECODE_DEAD_KV_CLAMP)
+_DEADKV = {
+    "gate": None,
+    "traces": 0,
+    "chunks": 0,
+    "row_steps": 0,
+    "dead": 0,
+    "errors": 0
+}
+
+
+def _dk_log(msg):
+    print("[dead-kv-clamp] " + msg, file=sys.stderr, flush=True)
+
+
+def _deadkv_config_gate(runner):
+    """End of TPUModelRunner.__init__. ON: raise unless the clamp is exact for this config."""
+    if not _DEADKV_ON:
+        return
+    vc = runner.vllm_config
+    pc = getattr(getattr(vc, "cache_config", None), "enable_prefix_caching",
+                 None)
+    spec = getattr(vc, "speculative_config", None)
+    pcp = int(
+        getattr(getattr(vc, "sharding_config", None), "prefill_cp_size", 1)
+        or 1)
+    shape = dict(getattr(getattr(runner, "mesh", None), "shape", None) or {})
+    mpcp, dcp = int(shape.get("pcp", 1)), int(shape.get("dcp", 1))
+    hybrid = bool(
+        getattr(getattr(vc, "model_config", None), "is_hybrid", False))
+    bad = []
+    if pc is not False:
+        bad.append(
+            "enable_prefix_caching=%r (the pad KV of a finished row goes to "
+            "slot 0 of its first page, which prefix caching shares between "
+            "requests)" % (pc, ))
+    if spec is not None:
+        bad.append("speculative_config=%s" % type(spec).__name__)
+    if (pcp, mpcp, dcp) != (1, 1, 1):
+        bad.append("prefill_cp_size=%d mesh pcp=%d dcp=%d (need 1)" %
+                   (pcp, mpcp, dcp))
+    if envs.USE_BATCHED_RPA_KERNEL:
+        bad.append("USE_BATCHED_RPA_KERNEL=1 (audited for the RPA v3 "
+                   "per-sequence kernel only)")
+    if hybrid:
+        bad.append("hybrid (mamba/linear-attention) model: the clamp is "
+                   "audited for attention only")
+    if bad:
+        _DEADKV["gate"] = "refused"
+        msg = ("[dead-kv-clamp] FATAL: refusing the dead-row KV clamp: " +
+               "; ".join(bad))
+        print(msg, file=sys.stderr, flush=True)
+        raise RuntimeError(msg)
+    _DEADKV["gate"] = {"prefix_caching": pc, "dp": int(runner.dp_size)}
+    _dk_log("config gate PASS: prefix_caching=False spec_decode=None pcp=1 "
+            "dcp=1 dp=%d eos=%r pad=%r" %
+            (runner.dp_size, runner.eos_token_id, runner.pad_token_id))
+
+
+def _deadkv_seq_lens(am, sl, dp_size, pad_len, mamba_state_indices):
+    """Trace time, in _run_one_step. OFF: `sl` itself (the stock program).
+
+    ON: seq_lens for the attention metadata only: 1 for every row finished
+    before this step (active_mask False) with sl > 0, laid out exactly as
+    _update_loop_state lays out `increment` (per-DP 2D; pad_len False columns,
+    else the slice).
+    """
+    if not _DEADKV_ON:
+        return sl
+    st = _DEADKV
+    if not isinstance(st["gate"], dict):
+        raise RuntimeError(
+            "[dead-kv-clamp] FATAL: decode loop traced with the clamp ON but the "
+            "runner config gate has not passed (gate=%r)" % (st["gate"], ))
+    if mamba_state_indices is not None:
+        raise RuntimeError(
+            "[dead-kv-clamp] FATAL: mamba_state_indices is set; "
+            "the clamp is audited for attention only")
+    dead_2d = jnp.logical_not(am).reshape(dp_size, -1)
+    sl_2d = sl.reshape(dp_size, -1)
+    if pad_len > 0:
+        dead_2d = jnp.pad(dead_2d, ((0, 0), (0, pad_len)))
+    else:
+        dead_2d = dead_2d[:, :sl_2d.shape[1]]
+    dead = dead_2d.ravel()
+    if dead.shape != sl.shape:
+        raise RuntimeError(
+            "[dead-kv-clamp] FATAL: mask layout %s != seq_lens %s" %
+            (dead.shape, sl.shape))
+    st["traces"] += 1
+    k = st["traces"]
+    if k <= 3 or k % 50 == 0:
+        _dk_log("ON trace#%d bucket=tokens%s seq_lens%s dp=%d pad_len=%d "
+                "prefix_caching=%r" % (k, tuple(am.shape), tuple(
+                    sl.shape), dp_size, pad_len, st["gate"]["prefix_caching"]))
+    return jnp.where(jnp.logical_and(dead, sl > 0), jnp.ones_like(sl), sl)
+
+
+def _deadkv_note(valid_lens, has_eos, num_reqs, actual_steps):
+    """Host, per continue-decode window, from arrays the runner already holds.
+
+    A row whose EOS is its valid_len-th token was clamped on each of the
+    actual_steps - valid_len steps after it.
+    """
+    if not _DEADKV_ON:
+        return
+    st = _DEADKV
+    try:
+        n, a = int(num_reqs), int(actual_steps)
+        fin = has_eos[:n]
+        dead = int(((a - valid_lens[:n]) * fin).sum())
+        st["chunks"] += 1
+        st["row_steps"] += n * a
+        st["dead"] += dead
+        c = st["chunks"]
+        if c == 1 and st["traces"] == 0:
+            _dk_log("INERT: a continue-decode chunk resolved but no decode "
+                    "trace carried the clamp")
+        if c <= 3 or c % 200 == 0:
+            _dk_log(
+                "chunk#%d rows=%d steps=%d dead_row_steps=%d finished=%d "
+                "| cum chunks=%d row_steps=%d dead_row_steps=%d (%.1f%%) "
+                "traces=%d" %
+                (c, n, a, dead, int(fin.sum()), c, st["row_steps"], st["dead"],
+                 100.0 * st["dead"] / max(st["row_steps"], 1), st["traces"]))
+    except Exception as exc:  # logging must never break decoding
+        st["errors"] += 1
+        if st["errors"] <= 3:
+            _dk_log("log error (ignored): %r" % (exc, ))
+
+
+# ---- end dead-row KV clamp ----
 
 
 def _unpack_attn_metadata(
@@ -267,10 +413,13 @@ def _decode_core_impl(
 
     def _run_one_step(step_idx, ct, am, pos, sl, kvc):
         step_rng = step_rngs[step_idx]
+        # Dead-row KV clamp: attention-only seq_lens (off: `sl` itself).
+        attn_sl = _deadkv_seq_lens(am, sl, dp_size, pad_len,
+                                   mamba_state_indices)
         attn_metadata = _build_attn_metadata(
             input_positions=pos,
             block_tables=block_tables,
-            seq_lens=sl,
+            seq_lens=attn_sl,
             query_start_loc=query_start_loc,
             request_distribution=request_distribution,
             mamba_state_indices=mamba_state_indices,
@@ -279,7 +428,7 @@ def _decode_core_impl(
         )
         shared_attn_metadata = SharedAttentionMetadata(
             input_positions=pos,
-            seq_lens=sl,
+            seq_lens=attn_sl,
             query_start_loc=query_start_loc,
             request_distribution=request_distribution,
             mamba_state_indices=mamba_state_indices,
