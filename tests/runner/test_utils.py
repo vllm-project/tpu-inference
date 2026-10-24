@@ -933,6 +933,90 @@ def test_merge_profile_directories_ignores_stale_prior_run_data(tmp_path):
     assert (new_dst / "new.xplane.pb").read_text() == "NEW"
 
 
+def test_host_extract_sampled_tokens_multihost_replicated_shards():
+    """Extracts tokens from local shard when safe_device_get raises on non-addressable array."""
+    from unittest.mock import MagicMock
+    from tpu_inference.runner.utils import host_extract_sampled_tokens
+
+    shard_data = np.array([42, 43], dtype=np.int32)
+    fake_shard = MagicMock()
+    fake_shard.data = shard_data
+    fake_shard.index = (slice(None), )
+
+    fake_arr = MagicMock(spec=jax.Array)
+    fake_arr.shape = (2, )
+    fake_arr.dtype = np.int32
+    fake_arr.is_fully_addressable = False
+    fake_arr.sharding.has_addressable_devices = True
+    fake_arr.addressable_shards = [fake_shard]
+
+    tokens = host_extract_sampled_tokens(
+        runner=MagicMock(),
+        spec_decode_metadata=None,
+        sampled_output=fake_arr,
+        logits_indices_selector=None,
+        discard_sampled_tokens_req_indices=[],
+        num_reqs=2,
+    )
+    assert tokens == [[42], [43]]
+
+
+def test_host_extract_sampled_tokens_multihost_partitioned_shards():
+    """Reconstructs partitioned tokens from addressable_shards via shard.index."""
+    from unittest.mock import MagicMock, patch
+    from tpu_inference.runner.utils import host_extract_sampled_tokens
+
+    shard0 = MagicMock()
+    shard0.data = np.array([10, 11], dtype=np.int32)
+    shard0.index = (slice(0, 2), )
+
+    shard1 = MagicMock()
+    shard1.data = np.array([12, 13], dtype=np.int32)
+    shard1.index = (slice(2, 4), )
+
+    fake_arr = MagicMock(spec=jax.Array)
+    fake_arr.shape = (4, )
+    fake_arr.dtype = np.int32
+    fake_arr.is_fully_addressable = False
+    fake_arr.sharding.has_addressable_devices = True
+    fake_arr.addressable_shards = [shard0, shard1]
+
+    with patch("tpu_inference.runner.utils.common_utils.safe_device_get",
+               side_effect=RuntimeError("Non-addressable array")):
+        tokens = host_extract_sampled_tokens(
+            runner=MagicMock(),
+            spec_decode_metadata=None,
+            sampled_output=fake_arr,
+            logits_indices_selector=None,
+            discard_sampled_tokens_req_indices=[],
+            num_reqs=4,
+        )
+    assert tokens == [[10], [11], [12], [13]]
+
+
+def test_host_extract_sampled_tokens_no_addressable_devices():
+    """Returns zero-initialized tokens when sharding has no addressable devices."""
+    from unittest.mock import MagicMock
+    from tpu_inference.runner.utils import host_extract_sampled_tokens
+
+    fake_arr = MagicMock(spec=jax.Array)
+    fake_arr.shape = (3, )
+    fake_arr.dtype = np.int32
+    fake_arr.is_fully_addressable = False
+    fake_arr.sharding.has_addressable_devices = False
+    fake_arr.addressable_shards = []
+
+    tokens = host_extract_sampled_tokens(
+        runner=MagicMock(),
+        spec_decode_metadata=None,
+        sampled_output=fake_arr,
+        logits_indices_selector=None,
+        discard_sampled_tokens_req_indices=[],
+        num_reqs=3,
+    )
+    assert tokens == [[0], [0], [0]]
+
+
 class TestGetEosTokenId:
     """Tests for get_eos_token_id config extraction, deduplication, and fallbacks."""
 

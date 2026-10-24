@@ -948,7 +948,40 @@ def host_extract_sampled_tokens(
     """host retrieve the sampled tokens for the current step."""
     next_tokens = sampled_output
     if spec_decode_metadata is None:
-        next_tokens = common_utils.safe_device_get(next_tokens)
+        if isinstance(next_tokens, jax.Array):
+            has_addressable = getattr(
+                getattr(next_tokens, "sharding", None),
+                "has_addressable_devices",
+                True,
+            )
+            if not has_addressable:
+                next_tokens = np.zeros(
+                    next_tokens.shape, dtype=next_tokens.dtype
+                )
+            else:
+                try:
+                    next_tokens = common_utils.safe_device_get(next_tokens)
+                except (RuntimeError, ValueError, IndexError):
+                    shards = getattr(next_tokens, "addressable_shards", ())
+                    if not shards:
+                        next_tokens = np.zeros(
+                            next_tokens.shape, dtype=next_tokens.dtype
+                        )
+                    elif shards[0].data.shape == next_tokens.shape:
+                        next_tokens = np.asarray(
+                            jax.device_get(shards[0].data)
+                        )
+                    else:
+                        out = np.zeros(
+                            next_tokens.shape, dtype=next_tokens.dtype
+                        )
+                        for shard in shards:
+                            out[shard.index] = np.asarray(
+                                jax.device_get(shard.data)
+                            )
+                        next_tokens = out
+        else:
+            next_tokens = common_utils.safe_device_get(next_tokens)
         # Map tokens back to the pre-dp shuffling order
         if logits_indices_selector is not None:
             next_tokens = next_tokens[logits_indices_selector]
