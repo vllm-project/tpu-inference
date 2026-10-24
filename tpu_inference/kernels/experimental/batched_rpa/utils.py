@@ -24,6 +24,28 @@ def align_to(a, b):
     return pl.cdiv(a, b) * b
 
 
+def align_span(start, size, align):
+    """Returns (aligned_start, lead, aligned_size) for [start, start + size)."""
+    # Grows the span out to 'align'; an 'align' of 1 is the identity.
+    lead = start % align
+    return start - lead, lead, align_to(lead + size, align)
+
+
+def cp_local_cache_len(global_kv_cache_len, cp_group_size, cp_rank, page_size):
+    """Number of cache tokens owned by this CP rank.
+
+  Currently only support cp_kv_cache_interleave_size = page_size
+  """
+    super_page = cp_group_size * page_size
+    full_tokens = (global_kv_cache_len // super_page) * page_size
+    rem_tokens = jnp.maximum(
+        0,
+        jnp.minimum(page_size,
+                    (global_kv_cache_len % super_page) - cp_rank * page_size),
+    )
+    return full_tokens + rem_tokens
+
+
 def broadcast_minor(src, shape):
     """Broadcasts 'src' to 'shape' in the minor dimension."""
     if src.shape == shape:
@@ -39,6 +61,10 @@ def broadcast_minor(src, shape):
 
 def get_dtype_packing(dtype):
     return 32 // jax.dtypes.itemsize_bits(dtype)
+
+
+def get_dtype_bits(dtype):
+    return jax.dtypes.itemsize_bits(dtype)
 
 
 def strided_load(ref, start_row, num_rows, step, *, dtype=None):
