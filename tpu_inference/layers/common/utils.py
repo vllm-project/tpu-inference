@@ -172,10 +172,19 @@ def general_device_put(tensor: jax.Array,
     return jax.tree_util.tree_map(_put, tensor)
 
 
+def local_cpu_devices(jax_module=jax):
+    """Returns host-local CPU devices, falling back to global CPU devices when mocked."""
+    if hasattr(jax_module.devices, "_mock_name") and not hasattr(
+            jax_module.local_devices, "_mock_name"):
+        return jax_module.devices("cpu")
+    local_devs = jax_module.local_devices(backend="cpu")
+    return local_devs if local_devs else jax_module.devices("cpu")
+
+
 def cpu_mesh() -> Mesh:
     global _cpu_mesh
     if _cpu_mesh is None:
-        _cpu_mesh = Mesh(jax.devices("cpu")[:1], ("cpu", ))
+        _cpu_mesh = Mesh(local_cpu_devices()[:1], ("cpu", ))
     return _cpu_mesh
 
 
