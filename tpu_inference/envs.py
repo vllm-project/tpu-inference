@@ -101,6 +101,8 @@ if TYPE_CHECKING:
     ENABLE_TOPK_PREFILTER: bool = False
     RAIDEN_H2D_SETTLE: bool = True
     SKIP_MAMBA_SCHEDULER_BLOCKS: bool = False
+    # Drop the empty MIXED RPA launch inside continue_decode
+    CONTINUE_DECODE_SKIP_MIXED_RPA: bool = False
 
 
 def env_with_choices(
@@ -644,6 +646,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # See core/runner_slot_mamba.py.
     "SKIP_MAMBA_SCHEDULER_BLOCKS":
     env_bool("SKIP_MAMBA_SCHEDULER_BLOCKS", default=False),
+    # Inside the fused continue-decode loop (decode-only
+    # batches) drop the RPA v3 MIXED launch, which iterates zero sequences
+    # there. Default off = stock DECODE + MIXED launches everywhere.
+    "CONTINUE_DECODE_SKIP_MIXED_RPA":
+    env_bool("CONTINUE_DECODE_SKIP_MIXED_RPA", default=False),
 }
 
 

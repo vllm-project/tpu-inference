@@ -19,6 +19,7 @@ specifications. It supports mixed prefill and decoding, enhancing throughput
 during inference.
 """
 import functools
+import sys
 from enum import Enum
 from typing import Any
 
@@ -28,6 +29,7 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from tpu_inference import envs
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
     align_to, cdiv, get_dtype_packing, get_tpu_version, next_power_of_2)
 
@@ -1581,6 +1583,8 @@ def get_default_block_sizes(
         "debug_mode",
         "disable_bounds_checks",
         "disable_semaphore_checks",
+        # Skip-MIXED RPA: static, so a skip trace is never reused by a non-skip call
+        "skip_mixed",
     ),
     donate_argnames=("queries", "keys", "values", "kv_cache"),
 )
@@ -1624,6 +1628,8 @@ def ragged_paged_attention(
     debug_mode: bool = False,
     disable_bounds_checks: bool = True,
     disable_semaphore_checks: bool = True,
+    # Skip-MIXED RPA: True only inside the fused decode loop (MIXED range empty)
+    skip_mixed: bool = False,
 ):
     """Ragged paged attention that supports mixed prefill and decode.
 
@@ -1919,6 +1925,14 @@ def ragged_paged_attention(
             static_q_len=chunk_prefill_size,
             case=RpaCase.PREFILL,
         )
+    # Skip-MIXED RPA: the MIXED seqs [distribution[1], distribution[2]) are empty here
+    if skip_mixed:
+        _skip_mixed_elided(q, kv_cache)
+        return (
+            prepare_outputs(q, actual_num_q_heads_per_kv_head,
+                            actual_head_dim),
+            kv_cache,
+        )
     # Mixed
     q, kv_cache = run_rpa_kernel(
         q,
@@ -1932,3 +1946,100 @@ def ragged_paged_attention(
         prepare_outputs(q, actual_num_q_heads_per_kv_head, actual_head_dim),
         kv_cache,
     )
+
+
+# ---- Skip-MIXED RPA (env CONTINUE_DECODE_SKIP_MIXED_RPA=1, default off) ----
+# The wrapper always launches DECODE over seqs [0, d[0]) and then MIXED over
+# [d[1], d[2]). The fused continue-decode loop only runs decode-only batches
+# (per DP rank [n, n, n]), so there the MIXED launch iterates zero sequences
+# yet costs one pallas_call per layer per step. ON: `skip_mixed` (static) drops
+# that launch. It is filled by the non-jitted front below from a JAX config
+# state that is part of jax's trace context and jit key, and that only
+# runner/decode_loop.py sets (around model_fn inside the fused loop): the
+# prefill path's model_fn and the loop's model_fn are two jits of one Python
+# function, so a plain module flag could let a prefill call reuse a decode
+# trace with MIXED removed. The tpu_runner host check refuses to dispatch the
+# loop if any DP rank's MIXED range is non-empty.
+_SKIP_MIXED_ON = bool(envs.CONTINUE_DECODE_SKIP_MIXED_RPA)
+_SKIP_MIXED_STATS = {"skip": 0, "keep": 0, "elided": 0}
+_skip_mixed_state = None
+
+
+def _skip_mixed_log(msg):
+    print("[skip-mixed-rpa] " + msg, file=sys.stderr, flush=True)
+
+
+def _skip_mixed_shape(x):
+    return "%s%s" % (getattr(x, "dtype", "?"), tuple(getattr(x, "shape", ())))
+
+
+def _skip_mixed_elided(q, kv_cache):
+    """Trace-time log line from inside the jitted wrapper: this trace emits no MIXED pallas_call."""
+    st = _SKIP_MIXED_STATS
+    st["elided"] += 1
+    if st["elided"] <= 3 or st["elided"] % 100 == 0:
+        _skip_mixed_log(
+            "RPA v3 trace #%d with skip_mixed=True: MIXED launch not "
+            "emitted (q=%s kv_cache=%s)" %
+            (st["elided"], _skip_mixed_shape(q), _skip_mixed_shape(kv_cache)))
+
+
+def _skip_mixed_make_state():
+    """A bool JAX config state IN the trace context and the jit key.
+
+    jax's trace caches (pjit, lu.cache, weakref_lru_cache) key on it, so a
+    trace made inside the decode scope never serves a call made outside it.
+    """
+    from jax._src import config as jcfg
+    name = "tpu_inference_rpa_v3_skip_mixed"
+    st = getattr(jcfg.config, "_value_holders", {}).get(name)
+    if st is None:
+        st = jcfg.bool_state(
+            name,
+            False,
+            help="RPA v3 skip-MIXED trace-time scope (set only by decode_loop)",
+            include_in_jit_key=True,
+            include_in_trace_context=True)
+    if bool(st.value):
+        raise RuntimeError(
+            "[skip-mixed-rpa] %s is True outside any scope (env %s set?)" %
+            (name, name.upper()))
+    off = jcfg.trace_context()
+    with st(True):
+        on, inside = jcfg.trace_context(), bool(st.value)
+    if on == off or not inside or bool(st.value):
+        raise RuntimeError(
+            "[skip-mixed-rpa] %s is not part of jax's trace context (jax %s): "
+            "refusing to run, a decode trace could serve a prefill call" %
+            (name, jax.__version__))
+    return st
+
+
+if _SKIP_MIXED_ON:
+    _skip_mixed_state = _skip_mixed_make_state()
+    _rpa_v3_jitted = ragged_paged_attention
+
+    def ragged_paged_attention(*args, skip_mixed=None, **kwargs):
+        """Skip-MIXED RPA front (not jitted).
+
+        Calls the jitted RPA v3 wrapper with the static skip_mixed read from
+        the trace-time scope that decode_loop opens around model_fn in the
+        fused decode loop (False everywhere else).
+        """
+        if skip_mixed is None:
+            skip_mixed = bool(_skip_mixed_state.value)
+        st = _SKIP_MIXED_STATS
+        key = "skip" if skip_mixed else "keep"
+        st[key] += 1
+        if st[key] <= 3 or st[key] % 100 == 0:
+            _skip_mixed_log("RPA v3 call #%d skip_mixed=%s (%s) q=%s" % (
+                st[key], bool(skip_mixed),
+                "fused decode loop" if skip_mixed else "MIXED kept",
+                _skip_mixed_shape(args[0] if args else kwargs.get("queries"))))
+        return _rpa_v3_jitted(*args, skip_mixed=bool(skip_mixed), **kwargs)
+
+    ragged_paged_attention.__wrapped__ = _rpa_v3_jitted
+    _skip_mixed_log(
+        "kernel import: ON file=%s state=tpu_inference_rpa_v3_skip_mixed in the "
+        "trace context" % __file__)
+# ---- end skip-MIXED RPA ----
