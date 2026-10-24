@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import functools
+import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -20,10 +21,141 @@ import jax
 import jax.numpy as jnp
 from vllm.v1.outputs import LogprobsTensors
 
+from tpu_inference import envs
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, GroupedAttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.models.common.compiler_options import (
     get_sampling_compiler_options, get_step_fn_compiler_options)
+
+# ---- Skip-MIXED RPA (env CONTINUE_DECODE_SKIP_MIXED_RPA=1, default off) ----
+# Traces model_fn inside the fused loop under the RPA v3 kernel's skip scope,
+# so the (empty) MIXED attention launch is not emitted there; see the
+# skip-MIXED block at the end of kernels/ragged_paged_attention/v3/kernel.py.
+_SKIPMIXED_ON = bool(envs.CONTINUE_DECODE_SKIP_MIXED_RPA)
+_SKIPMIXED_DL = {
+    "traces": 0,
+    "cached": 0,
+    "inert": 0,
+    "chunks": 0,
+    "check_errors": 0
+}
+
+
+def _sm_log(msg):
+    print("[skip-mixed-rpa] " + msg, file=sys.stderr, flush=True)
+
+
+def _sm_shape(x):
+    return "%s%s" % (getattr(x, "dtype", "?"), tuple(getattr(x, "shape", ())))
+
+
+def _skipmixed_wrap_model_fn(model_fn, current_tokens, seq_lens, block_tables,
+                             request_distribution):
+    """Called at trace time, once per trace of _decode_core_impl (one decode bucket).
+
+    OFF: returns model_fn itself. ON: returns model_fn wrapped so that its
+    trace runs under the kernel's skip scope, plus a log line.
+    """
+    if not _SKIPMIXED_ON:
+        return model_fn
+    from tpu_inference.kernels.ragged_paged_attention.v3 import kernel as _k
+    state = getattr(_k, "_skip_mixed_state", None)
+    if state is None:
+        raise RuntimeError(
+            "[skip-mixed-rpa] decode_loop is ON but %s has no skip state "
+            "(CONTINUE_DECODE_SKIP_MIXED_RPA differs between imports?)" %
+            _k.__file__)
+    dl = _SKIPMIXED_DL
+    dl["traces"] += 1
+    trace_no = dl["traces"]
+    bucket = "tokens=%s seq_lens=%s block_tables=%s distribution=%s" % (
+        _sm_shape(current_tokens), _sm_shape(seq_lens),
+        _sm_shape(block_tables), _sm_shape(request_distribution))
+
+    def _model_fn_skip_mixed(*args, **kwargs):
+        ks = _k._SKIP_MIXED_STATS
+        s0, k0, e0 = ks["skip"], ks["keep"], ks["elided"]
+        with state(True):
+            out = model_fn(*args, **kwargs)
+        ns, nk, ne = ks["skip"] - s0, ks["keep"] - k0, ks["elided"] - e0
+        if nk or (ns == 0 and ks["skip"] == 0):
+            dl["inert"] += 1
+            _sm_log(
+                "INERT decode trace #%d (%s): model_fn made %d RPA v3 calls "
+                "with skip_mixed=True and %d with skip_mixed=False; the "
+                "MIXED launch is NOT removed" % (trace_no, bucket, ns, nk))
+        elif ns == 0:
+            dl["cached"] += 1
+            _sm_log("decode trace #%d (%s): model_fn served from jax's trace "
+                    "cache under the skip scope key (an earlier skip trace)" %
+                    (trace_no, bucket))
+        else:
+            _sm_log("decode trace #%d (%s): model_fn traced under the skip "
+                    "scope: %d RPA v3 calls with skip_mixed=True (%d new "
+                    "wrapper traces without the MIXED launch), 0 with False" %
+                    (trace_no, bucket, ns, ne))
+        return out
+
+    return _model_fn_skip_mixed
+
+
+def _skipmixed_distribution(dp_size, req_ids_dp, num_scheduled_tokens,
+                            max_decode_tokens):
+    """Per-DP-rank request_distribution exactly as tpu_runner._prepare_inputs builds it: [n_decode, n_decode, n_reqs]."""
+    out = []
+    for r in range(dp_size):
+        ids = req_ids_dp[r]
+        nd = sum(1 for rid in ids
+                 if num_scheduled_tokens[rid] <= max_decode_tokens)
+        out.append((nd, nd, len(ids)))
+    return out
+
+
+def _skipmixed_chunk_check(runner, scheduler_output, req_ids_dp):
+    """Host only, once per continue-decode chunk, before the skip program is dispatched.
+
+    Every rank's MIXED range [d[1], d[2]) must be empty. A non-empty one would
+    silently drop attention work, so raise instead. An error while evaluating
+    the check is re-raised as well, so the program never runs unchecked.
+    """
+    if not _SKIPMIXED_ON:
+        return
+    dl = _SKIPMIXED_DL
+    try:
+        max_decode_tokens = runner.input_batch.max_decode_tokens
+        dist = _skipmixed_distribution(runner.dp_size, req_ids_dp,
+                                       scheduler_output.num_scheduled_tokens,
+                                       max_decode_tokens)
+        pcp = int(
+            getattr(getattr(runner.vllm_config, "sharding_config", None),
+                    "prefill_cp_size", 1) or 1)
+        glob_d = list(runner.input_batch.request_distribution)
+    except Exception as exc:
+        # Fail closed: the decode program was traced without the MIXED
+        # launch, so it must not be dispatched on an unverified batch.
+        dl["check_errors"] += 1
+        _sm_log("chunk check error: %r; refusing to dispatch the decode "
+                "program traced without the MIXED launch" % (exc, ))
+        raise
+    dl["chunks"] += 1
+    bad = [r for r, d in enumerate(dist) if d[2] != d[1]]
+    if bad or pcp > 1:
+        msg = (
+            "[skip-mixed-rpa] FATAL: continue-decode chunk #%d has non-empty "
+            "MIXED work (ranks %s, pcp=%d): per-DP request_distribution=%s; "
+            "the decode program was traced without the MIXED launch" %
+            (dl["chunks"], bad, pcp, dist))
+        print(msg, file=sys.stderr, flush=True)
+        raise RuntimeError(msg)
+    if dl["chunks"] <= 3 or dl["chunks"] % 100 == 0:
+        _sm_log("chunk #%d: continue-decode dispatch with every MIXED range "
+                "empty: per-DP request_distribution=%s global=%s "
+                "max_decode_tokens=%s | decode traces=%d cached=%d inert=%d" %
+                (dl["chunks"], [list(d) for d in dist], glob_d,
+                 max_decode_tokens, dl["traces"], dl["cached"], dl["inert"]))
+
+
+# ---- end skip-MIXED RPA ----
 
 
 def _unpack_attn_metadata(
@@ -264,6 +396,10 @@ def _decode_core_impl(
             has_experts = True
             expert_shape = tuple(expert_struct.shape)
             expert_dtype = expert_struct.dtype
+
+    # Skip-MIXED RPA: trace model_fn under the skip scope (off: unchanged).
+    model_fn = _skipmixed_wrap_model_fn(model_fn, current_tokens, seq_lens,
+                                        block_tables, request_distribution)
 
     def _run_one_step(step_idx, ct, am, pos, sl, kvc):
         step_rng = step_rngs[step_idx]
