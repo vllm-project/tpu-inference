@@ -101,6 +101,8 @@ if TYPE_CHECKING:
     ENABLE_TOPK_PREFILTER: bool = False
     RAIDEN_H2D_SETTLE: bool = True
     SKIP_MAMBA_SCHEDULER_BLOCKS: bool = False
+    # Skip the DPScheduler grammar-bitmask fan-out without grammar requests
+    DP_SCHED_SKIP_GRAMMAR_FANOUT: bool = False
 
 
 def env_with_choices(
@@ -644,6 +646,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # See core/runner_slot_mamba.py.
     "SKIP_MAMBA_SCHEDULER_BLOCKS":
     env_bool("SKIP_MAMBA_SCHEDULER_BLOCKS", default=False),
+    # Return None from DPScheduler.get_grammar_bitmask without the
+    # per-rank IPC fan-out when no rank has structured-output requests (the
+    # value every rank would return). Default off = stock fan-out every step.
+    "DP_SCHED_SKIP_GRAMMAR_FANOUT":
+    env_bool("DP_SCHED_SKIP_GRAMMAR_FANOUT", default=False),
 }
 
 

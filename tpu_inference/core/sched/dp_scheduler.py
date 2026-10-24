@@ -423,6 +423,10 @@ class DPScheduler(SchedulerInterface):
         # Cycle through the ranks with no per-request rank queries.
         ROUND_ROBIN = "round_robin"
 
+    # DP_SCHED_SKIP_GRAMMAR_FANOUT counters: [skipped, fanned_out]
+    # get_grammar_bitmask calls, process-wide.
+    skip_grammar_stats: List[int] = [0, 0]
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -1221,6 +1225,20 @@ class DPScheduler(SchedulerInterface):
         # Use the most recent cached outputs from the schedule() call
         if not self.cached_schedulers_output:
             return None
+
+        if envs.DP_SCHED_SKIP_GRAMMAR_FANOUT:
+            # Every rank's scheduler returns None from
+            # get_grammar_bitmask when its own SchedulerOutput has no
+            # structured-output requests, so when no cached rank output has
+            # any, the combined answer is None: skip the 2 x dp_size IPC
+            # round trips. Otherwise fall through to the stock fan-out.
+            stats = DPScheduler.skip_grammar_stats
+            if not any(
+                    getattr(o, "has_structured_output_requests", False)
+                    for o in self.cached_schedulers_output[-1]):
+                stats[0] += 1
+                return None
+            stats[1] += 1
 
         combined_structured_output_request_ids = []
         combined_bitmasks = []
