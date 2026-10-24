@@ -101,6 +101,9 @@ if TYPE_CHECKING:
     ENABLE_TOPK_PREFILTER: bool = False
     RAIDEN_H2D_SETTLE: bool = True
     SKIP_MAMBA_SCHEDULER_BLOCKS: bool = False
+    # RPA v3 bucketed DECODE attention compute extent
+    RPA_V3_DECODE_COMPUTE_BUCKETS: str = ""
+    RPA_V3_DECODE_COMPUTE_BUCKET_MODE: str = "padsum"
 
 
 def env_with_choices(
@@ -644,6 +647,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # See core/runner_slot_mamba.py.
     "SKIP_MAMBA_SCHEDULER_BLOCKS":
     env_bool("SKIP_MAMBA_SCHEDULER_BLOCKS", default=False),
+    # Comma-separated DECODE compute extents (positive
+    # multiples of 128, e.g. "256,512,1024") for the RPA v3 kernel when a KV
+    # block is one attention-loop iteration; unset = stock full-block extent.
+    # RPA_V3_DECODE_COMPUTE_BUCKET_MODE = padsum (default) | padall | full.
+    "RPA_V3_DECODE_COMPUTE_BUCKETS":
+    lambda: os.getenv("RPA_V3_DECODE_COMPUTE_BUCKETS", ""),
+    "RPA_V3_DECODE_COMPUTE_BUCKET_MODE":
+    lambda: os.getenv("RPA_V3_DECODE_COMPUTE_BUCKET_MODE", "padsum"),
 }
 
 

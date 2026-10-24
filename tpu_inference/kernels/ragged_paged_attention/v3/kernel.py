@@ -19,6 +19,7 @@ specifications. It supports mixed prefill and decoding, enhancing throughput
 during inference.
 """
 import functools
+import sys
 from enum import Enum
 from typing import Any
 
@@ -28,6 +29,7 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from tpu_inference import envs
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
     align_to, cdiv, get_dtype_packing, get_tpu_version, next_power_of_2)
 
@@ -437,8 +439,9 @@ def _ragged_paged_attention_kernel_loop(
         assert q.shape[0] % num_q_heads_per_kv_head == 0
         assert q.shape[1] == head_dim
         actual_bq_csz = q.shape[0] // num_q_heads_per_kv_head
-        assert k.shape == (bkv_csz, head_dim)
-        assert v.shape == (bkv_csz, head_dim)
+        # Decode compute buckets: k/v may be narrower than bkv_csz.
+        assert k.shape[1] == head_dim and 0 < k.shape[0] <= bkv_csz
+        assert v.shape == k.shape
         assert l_ref.shape == (actual_bq_csz * num_q_heads_per_kv_head, 128)
         assert m_ref.shape == (actual_bq_csz * num_q_heads_per_kv_head, 128)
         assert k.dtype == v.dtype
@@ -505,7 +508,18 @@ def _ragged_paged_attention_kernel_loop(
         m_ref[...] = m_curr
         p = jnp.exp(s - broadcast_minor(m_curr, s.shape))
 
-        p_rowsum = jnp.sum(p, axis=1, keepdims=True, dtype=out_dtype)
+        # Decode compute buckets
+        if p.shape[1] < bkv_csz and _decode_bucket_mode() in ("padsum",
+                                                              "padall"):
+            # reduce over the stock bkv_csz-wide shape; the stock kernel's masked columns are exactly +0.0
+            p_rowsum = jnp.sum(jnp.concatenate(
+                [p, jnp.zeros((p.shape[0], bkv_csz - p.shape[1]), p.dtype)],
+                axis=1),
+                               axis=1,
+                               keepdims=True,
+                               dtype=out_dtype)
+        else:
+            p_rowsum = jnp.sum(p, axis=1, keepdims=True, dtype=out_dtype)
         exp_m_diff = jnp.exp(m_prev - m_curr)
         l_prev = l_ref[...]
         l_ref[...] = exp_m_diff * l_prev + p_rowsum
@@ -520,13 +534,21 @@ def _ragged_paged_attention_kernel_loop(
     ):
         assert len(p.shape) == 2
         assert p.shape[0] % num_q_heads_per_kv_head == 0
-        assert p.shape[1] == bkv_csz
+        assert 0 < p.shape[1] <= bkv_csz
         actual_bq_csz = p.shape[0] // num_q_heads_per_kv_head
-        assert v.shape == (bkv_csz, head_dim)
+        assert v.shape == (p.shape[1], head_dim)
         assert exp_m_diff.shape == (actual_bq_csz * num_q_heads_per_kv_head,
                                     128)
         assert o_ref.shape == (actual_bq_csz * num_q_heads_per_kv_head,
                                head_dim)
+        # Decode compute buckets: stock K extent
+        if p.shape[1] < bkv_csz and _decode_bucket_mode() == "padall":
+            p = jnp.concatenate(
+                [p, jnp.zeros((p.shape[0], bkv_csz - p.shape[1]), p.dtype)],
+                axis=1)
+            v = jnp.concatenate(
+                [v, jnp.zeros((bkv_csz - v.shape[0], v.shape[1]), v.dtype)],
+                axis=0)
         pv = jnp.matmul(p, v, preferred_element_type=jnp.float32)
 
         if v_scale is not None:
@@ -1007,13 +1029,13 @@ def _ragged_paged_attention_kernel_loop(
 
                 num_loops = cdiv(effective_bkv_sz, bkv_csz)
 
-                @pl.loop(0, num_loops, unroll=False)
-                def attention_loop(idx):
+                # Decode compute buckets: body of the stock pl.loop, extent csz
+                def attention_loop(idx, csz=bkv_csz):
                     prev_lm_slice = None
                     prev_p = None
                     prev_v = None
                     prev_exp_m_diff = None
-                    bkv_start = idx * bkv_csz
+                    bkv_start = idx * csz
 
                     for bq_start in range(0, actual_bq_sz, actual_bq_csz):
                         for kv_head_idx in range(actual_num_kv_heads):
@@ -1021,7 +1043,7 @@ def _ragged_paged_attention_kernel_loop(
                                 bkv_sem_idx,
                                 kv_head_idx,
                                 bkv_start,
-                                bkv_csz,
+                                csz,
                             )
                             bq_c = load_bq(bq_sem_idx, kv_head_idx, bq_start,
                                            actual_bq_csz)
@@ -1066,6 +1088,21 @@ def _ragged_paged_attention_kernel_loop(
                         prev_exp_m_diff,
                         acc_ref.at[*prev_lm_slice],
                     )
+
+                # Decode compute buckets
+                _bkt_ext = _decode_bucket_extents(case, bkv_sz, bkv_csz)
+                if _bkt_ext:
+                    # one loop iteration per block (bkv_csz == bkv_sz); static extent = smallest bucket >= valid rows
+                    _bkt_lo = 0
+                    for _bkt_e in _bkt_ext:
+                        pl.when(
+                            jnp.logical_and(effective_bkv_sz > _bkt_lo,
+                                            effective_bkv_sz
+                                            <= _bkt_e))(functools.partial(
+                                                attention_loop, 0, _bkt_e))
+                        _bkt_lo = _bkt_e
+                else:
+                    pl.loop(0, num_loops, unroll=False)(attention_loop)
 
             # Load acc and calculate final output.
             acc = acc_ref[...]
@@ -1807,6 +1844,8 @@ def ragged_paged_attention(
         )
 
         scope_name = f"RPA{case.symbol}-p_{page_size}-bq_{bq_sz}_{bq_csz}-bkv_{bkv_sz}_{bkv_csz}"
+        # Decode compute buckets: profile scope suffix
+        scope_name += _decode_bucket_scope(case, bkv_sz, bkv_csz)
         if sliding_window is not None:
             scope_name += f"-sw_{sliding_window}"
         kernel = pl.pallas_call(
@@ -1932,3 +1971,60 @@ def ragged_paged_attention(
         prepare_outputs(q, actual_num_q_heads_per_kv_head, actual_head_dim),
         kv_cache,
     )
+
+
+# ---- Decode compute buckets (env RPA_V3_DECODE_COMPUTE_BUCKETS="256,512,1024", default unset = off) ----
+# Bucketed static compute extent for the DECODE case: when a block is processed
+# by one attention-loop iteration (bkv_csz == bkv_sz), the iteration runs over
+# the smallest listed extent (a positive multiple of 128) that covers the
+# block's valid rows, else the full block. Masking is unchanged.
+# RPA_V3_DECODE_COMPUTE_BUCKET_MODE:
+#   padsum (default): the softmax row-sum is still taken over the stock
+#     bkv_csz-wide shape (the stock kernel's masked columns are exactly +0.0),
+#     so its f32 association is unchanged; PV contracts over the extent.
+#   padall: PV also contracts over the stock width (exact by construction).
+#   full: everything over the extent (not bit-exact).
+_DECODE_BUCKET_SEEN = set()
+
+
+def _decode_bucket_extents(case, bkv_sz, bkv_csz):
+    """Trace time. DECODE with one compute loop per block: ascending static extents ending at bkv_csz; else []."""
+    raw = (envs.RPA_V3_DECODE_COMPUTE_BUCKETS or "").strip()
+    if not raw:
+        return []
+    out = []
+    if case == RpaCase.DECODE and bkv_csz == bkv_sz:
+        es = sorted(set(int(x) for x in raw.split(",") if x.strip()))
+        for e in es:
+            if e % 128 or e <= 0:
+                raise ValueError(
+                    "[rpa-decode-buckets] extent %d is not a positive multiple of 128"
+                    % e)
+        out = [e for e in es if e < bkv_csz] + [bkv_csz]
+    key = (str(case), bkv_sz, bkv_csz, tuple(out))
+    if key not in _DECODE_BUCKET_SEEN:
+        _DECODE_BUCKET_SEEN.add(key)
+        print(
+            "[rpa-decode-buckets] trace case=%s bkv_sz=%d bkv_csz=%d extents=%s "
+            "mode=%s" % (key + (_decode_bucket_mode(), )),
+            file=sys.stderr,
+            flush=True)
+    return out
+
+
+def _decode_bucket_scope(case, bkv_sz, bkv_csz):
+    ext = _decode_bucket_extents(case, bkv_sz, bkv_csz)
+    return (
+        "-bkt%s_%s" %
+        ("_".join(str(e)
+                  for e in ext[:-1]), _decode_bucket_mode())) if ext else ""
+
+
+def _decode_bucket_mode():
+    """full: reduce/contract over the bucket extent; padsum: row-sum over the stock width; padall: also PV."""
+    m = (envs.RPA_V3_DECODE_COMPUTE_BUCKET_MODE or "padsum").strip()
+    if m not in ("full", "padsum", "padall"):
+        raise ValueError(
+            "[rpa-decode-buckets] bad RPA_V3_DECODE_COMPUTE_BUCKET_MODE=%r" %
+            m)
+    return m
