@@ -105,10 +105,11 @@ def _convert_to_torchax_and_shard(tensor: torch.Tensor,
                     weight_dtype=to_jax_dtype(tensor.dtype),
                 ))
         else:
-            dtype = to_jax_dtype(tensor.dtype)
-            np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
-            return torch_view(
-                jax.device_put(np_tensor, sharding).astype(dtype))
+            # unquantized imports this module, so it can only be imported
+            # lazily.
+            from tpu_inference.layers.vllm.quantization.unquantized import \
+                _pathways_device_put
+            return torch_view(_pathways_device_put(tensor, sharding))
     if isinstance(tensor, torchax.tensor.Tensor):
         tensor = jax_view(tensor)
     else:
