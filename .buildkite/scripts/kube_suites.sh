@@ -25,19 +25,21 @@ source "$(dirname "${BASH_SOURCE[0]}")/nightly_suites.sh"
 set_kube_jax_envs() {
     case $1 in
         v6)
+            export TESTS_GROUP_LABEL="[jax] TPU6e Tests Group"
             export TPU_VERSION="tpu6e"
             export KUBE_SHAPE_SINGLE="ct6e-standard-1t/1x1"
             export KUBE_SHAPE_MULTI="ct6e-standard-8t/2x4"
             export TENSOR_PARALLEL_SIZE_SINGLE=1
             ;;
         v7)
+            export TESTS_GROUP_LABEL="[jax] TPU7x Tests Group"
             export TPU_VERSION="tpu7x"
             export KUBE_SHAPE_SINGLE="tpu7x-standard-1t/1x1x1"
             export KUBE_SHAPE_MULTI="tpu7x-standard-4t/2x2x1"
             export TENSOR_PARALLEL_SIZE_SINGLE=2
             ;;
         unset)
-            unset TPU_VERSION KUBE_SHAPE_SINGLE KUBE_SHAPE_MULTI TENSOR_PARALLEL_SIZE_SINGLE
+            unset TESTS_GROUP_LABEL TPU_VERSION KUBE_SHAPE_SINGLE KUBE_SHAPE_MULTI TENSOR_PARALLEL_SIZE_SINGLE
             ;;
     esac
 }
@@ -60,26 +62,63 @@ add_ci_targets() {
     done < <(grep -hE '^[[:space:]]*CI_TARGET:' "$@" | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d "\"'" | sed -E 's/[[:space:]]+$//' || true)
 }
 
-# One kube lane. models and features keep a file per model or feature in
-# .buildkite/<lane>/kube/, beside its bare-metal file, and go up together as
-# one pipeline the way upload_models_and_features.sh sends the bare-metal ones:
-# each file's own steps: line dropped and the rest concatenated. The other
-# lanes are a single file each.
-upload_kube_lane() {
+# Emits the YAML header and group wrapper for a kube suite upload, including
+# the anchors referenced by pipeline_parallelism_kube.yml and
+# pipeline_rl_kube.yml. Steps in KUBE_GROUP_FRAGMENTS must have their top-level
+# 'steps:' line stripped and will be indented under the group's 'steps:'.
+KUBE_GROUP_FRAGMENTS=()
+upload_kube_group() {
+    local group_label="$1"
+    local group_key="$2"
+    [[ "${#KUBE_GROUP_FRAGMENTS[@]}" -gt 0 ]] || return 0
+    echo "--- :pipeline: Uploading group '${group_label}' (${group_key}) with priority ${JOB_PRIORITY:-PRIORITY_DEFAULT}"
+    {
+        cat <<EOF
+priority: ${JOB_PRIORITY:-PRIORITY_DEFAULT}
+x-shape-single: &shape_single "\${KUBE_SHAPE_SINGLE:-ct6e-standard-1t/1x1}"
+x-shape-multi: &shape_multi "\${KUBE_SHAPE_MULTI:-ct6e-standard-8t/2x4}"
+x-kube-plugin: &kube_plugin
+  kubernetes:
+    podTemplate: tpu-launcher
+steps:
+  - group: "${group_label}"
+    key: "${group_key}"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    steps:
+EOF
+        printf '%s\n' "${KUBE_GROUP_FRAGMENTS[@]}" | sed 's/^/      /'
+    } | buildkite-agent pipeline upload
+}
+
+# Appends the step items for one kube lane (without the top-level 'steps:'
+# header or file-level YAML anchors) to KUBE_GROUP_FRAGMENTS and records its
+# CI_TARGETs in the current shell.
+collect_kube_lane() {
     local lane="$1"
     local dir=".buildkite/${lane}/kube"
     if [[ ! -d "${dir}" ]]; then
         add_ci_targets "${lane}" ".buildkite/pipeline_${lane}_kube.yml"
-        upload_with_priority ".buildkite/pipeline_${lane}_kube.yml" "$JOB_PRIORITY"
+        KUBE_GROUP_FRAGMENTS+=("$(sed '1,/^steps:/d' ".buildkite/pipeline_${lane}_kube.yml")")
         return
     fi
     add_ci_targets "${lane}" "${dir}"/*.yml
-    echo "--- :pipeline: Uploading ${dir}/*.yml with priority ${JOB_PRIORITY:-PRIORITY_DEFAULT}"
-    {
-        echo "priority: ${JOB_PRIORITY:-PRIORITY_DEFAULT}"
-        echo "steps:"
-        grep -hv '^steps:' "${dir}"/*.yml
-    } | buildkite-agent pipeline upload
+    KUBE_GROUP_FRAGMENTS+=("$(grep -hv '^steps:' "${dir}"/*.yml)")
+}
+
+# One kube lane. models and features keep a file per model or feature in
+# .buildkite/<lane>/kube/, beside its bare-metal file, and go up together as
+# one pipeline group the way upload_models_and_features.sh sends the bare-metal
+# ones: each file's own steps: line dropped and the rest concatenated. The
+# other lanes are a single file each.
+upload_kube_lane() {
+    local lane="$1"
+    local tpu_ver="${TPU_VERSION:-tpu6e}"
+    local gen_short="v${tpu_ver#tpu}"
+    KUBE_GROUP_FRAGMENTS=()
+    collect_kube_lane "${lane}"
+    upload_kube_group \
+        "TPU ${gen_short} nightly Tests (${MODEL_IMPL_TYPE:-auto})" \
+        "${gen_short}-${lane}-group"
 }
 
 # A suite's bare-metal files whose steps all run on the cpu queue. They are
@@ -88,7 +127,7 @@ upload_kube_lane() {
 # and a kube nightly uploads them as they are. A file with TPU steps that has
 # no kube version beside it goes in KUBE_MISSING, for the build annotation.
 KUBE_MISSING=()
-upload_cpu_only_files() {
+collect_cpu_only_files() {
     local suite="$1" f queues
     local -a files=()
     for f in ".buildkite/${suite}"/*.yml ".buildkite/${suite}"/*/*.yml; do
@@ -102,31 +141,34 @@ upload_cpu_only_files() {
     done
     [[ "${#files[@]}" -gt 0 ]] || return 0
     add_ci_targets "${suite}" "${files[@]}"
-    echo "--- :pipeline: Uploading ${#files[@]} cpu-only file(s) from .buildkite/${suite} with priority ${JOB_PRIORITY:-PRIORITY_DEFAULT}"
-    {
-        echo "priority: ${JOB_PRIORITY:-PRIORITY_DEFAULT}"
-        echo "steps:"
-        grep -hv '^steps:' "${files[@]}"
-    } | buildkite-agent pipeline upload
+    KUBE_GROUP_FRAGMENTS+=("$(grep -hv '^steps:' "${files[@]}")")
 }
 
 # What "Upload Tests" (nightly_verify.yml) sends up in a kube build: the
-# suites nightly_suites names, for both generations, and the meta-data the
-# support matrices read, as upload_models_and_features.sh does on bare metal.
-# Their step keys carry TPU_VERSION, so each file uploads once per generation in
-# the same build.
+# suites nightly_suites names, for both generations, wrapped in v6e-group and
+# v7x-group, and the meta-data the support matrices read, as
+# upload_models_and_features.sh does on bare metal.
 upload_kube_nightly_suites() {
-    local gen suite
+    local gen gen_short suite
     for gen in v6 v7; do
         set_kube_jax_envs "${gen}"
+        gen_short="v${TPU_VERSION#tpu}"
+        KUBE_GROUP_FRAGMENTS=()
         for suite in $(nightly_suites); do
             case "${suite}" in
-                models|features|parallelism|rl) upload_kube_lane "${suite}" ;;
+                models|features|parallelism|rl)
+                    collect_kube_lane "${suite}"
+                    ;;
             esac
-            upload_cpu_only_files "${suite}"
+            collect_cpu_only_files "${suite}"
         done
+        if [[ "${#KUBE_GROUP_FRAGMENTS[@]}" -gt 0 ]]; then
+            upload_kube_group \
+                "TPU ${gen_short} nightly Tests (${MODEL_IMPL_TYPE:-auto})" \
+                "${gen_short}-group"
+            buildkite-agent meta-data set "run_${gen}_matrix" "true"
+        fi
         set_kube_jax_envs unset
-        buildkite-agent meta-data set "run_${gen}_matrix" "true"
     done
     if [[ "${#KUBE_MODEL_LIST[@]}" -gt 0 ]]; then
         printf '%s\n' "${KUBE_MODEL_LIST[@]}" | sort -u | buildkite-agent meta-data set "model-list"
