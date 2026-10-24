@@ -101,6 +101,8 @@ if TYPE_CHECKING:
     ENABLE_TOPK_PREFILTER: bool = False
     RAIDEN_H2D_SETTLE: bool = True
     SKIP_MAMBA_SCHEDULER_BLOCKS: bool = False
+    # Clamp attention reads of finished rows in continue_decode
+    CONTINUE_DECODE_DEAD_KV_CLAMP: bool = False
 
 
 def env_with_choices(
@@ -644,6 +646,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # See core/runner_slot_mamba.py.
     "SKIP_MAMBA_SCHEDULER_BLOCKS":
     env_bool("SKIP_MAMBA_SCHEDULER_BLOCKS", default=False),
+    # Inside the fused continue-decode loop, give rows that
+    # already sampled EOS seq_lens=1 in the attention metadata so attention
+    # stops reading their KV. Requires enable_prefix_caching=False (checked at
+    # runner init). Default off = stock seq_lens.
+    "CONTINUE_DECODE_DEAD_KV_CLAMP":
+    env_bool("CONTINUE_DECODE_DEAD_KV_CLAMP", default=False),
 }
 
 
