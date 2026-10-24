@@ -927,3 +927,100 @@ class TestEnvOverrideSamplingParamsCircularImport:
         # Should not raise AttributeError when SamplingParams is not yet
         # defined on vllm.sampling_params.
         importlib.reload(env_override)
+
+
+class TestGqaHeadPadding:
+    """Tests for opt-in GQA query-head padding (TPU_PAD_GQA_HEADS)."""
+
+    def test_additional_env_vars_covers_tpu_pad_gqa_heads(self):
+        assert "TPU_PAD_GQA_HEADS" in TpuPlatform.additional_env_vars
+        assert "TPU_PAD_GQA_HEADS" in envs.environment_variables
+
+    def test_gqa_head_padding_disabled_by_default(self, monkeypatch):
+        from types import SimpleNamespace
+        monkeypatch.setenv("TPU_PAD_GQA_HEADS", "0")
+        hf_text_config = SimpleNamespace(
+            num_attention_heads=14,
+            num_key_value_heads=2,
+            hidden_size=896,
+        )
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=hf_text_config,
+                                         hf_config=hf_text_config),
+            parallel_config=SimpleNamespace(tensor_parallel_size=8),
+        )
+        TpuPlatform._maybe_pad_gqa_attention_heads(vllm_config)
+        assert hf_text_config.num_attention_heads == 14
+        assert not hasattr(hf_text_config, "_unpadded_num_attention_heads")
+
+    def test_gqa_head_padding_enabled_pads_to_lcm(self, monkeypatch):
+        import pickle
+        from types import SimpleNamespace
+        monkeypatch.setenv("TPU_PAD_GQA_HEADS", "1")
+        hf_text_config = SimpleNamespace(
+            num_attention_heads=14,
+            num_key_value_heads=2,
+            hidden_size=896,
+        )
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=hf_text_config,
+                                         hf_config=hf_text_config),
+            parallel_config=SimpleNamespace(tensor_parallel_size=8),
+        )
+        TpuPlatform._maybe_pad_gqa_attention_heads(vllm_config)
+        assert hf_text_config.num_attention_heads == 16
+        assert hf_text_config._unpadded_num_attention_heads == 14
+        assert hf_text_config.head_dim == 64
+        assert int(hf_text_config.hidden_size) == 896
+        assert hf_text_config.hidden_size // 16 == 64
+        assert hf_text_config.hidden_size // 8 == 112
+
+        # Verify pickle roundtrip of _PaddedHiddenSize
+        roundtripped = pickle.loads(pickle.dumps(hf_text_config.hidden_size))
+        assert int(roundtripped) == 896
+        assert roundtripped // 16 == 64
+
+        # Verify idempotency on repeated invocation
+        TpuPlatform._maybe_pad_gqa_attention_heads(vllm_config)
+        assert hf_text_config.num_attention_heads == 16
+        assert hf_text_config._unpadded_num_attention_heads == 14
+
+    def test_gqa_head_padding_qkv_and_row_weight_loaders(self):
+        from types import SimpleNamespace
+        from tpu_inference.models.vllm import vllm_model_wrapper
+
+        fake_qkv_layer = SimpleNamespace(
+            total_num_heads=16,
+            total_num_kv_heads=2,
+            head_size=4,
+        )
+        orig_q_weight = torch.ones((14 * 4, 8))
+        padded_q_weight = vllm_model_wrapper._pad_qkv_loaded_weight(
+            fake_qkv_layer, orig_q_weight, loaded_shard_id="q")
+        assert tuple(padded_q_weight.shape) == (16 * 4, 8)
+        grouped_q = padded_q_weight.reshape(2, 8, 4, 8)
+        assert torch.all(grouped_q[:, :7] == 1.0)
+        assert torch.all(grouped_q[:, 7:] == 0.0)
+
+        orig_q_bias = torch.ones((14 * 4, ))
+        padded_q_bias = vllm_model_wrapper._pad_qkv_loaded_weight(
+            fake_qkv_layer, orig_q_bias, loaded_shard_id="q")
+        assert tuple(padded_q_bias.shape) == (16 * 4, )
+        grouped_q_bias = padded_q_bias.reshape(2, 8, 4)
+        assert torch.all(grouped_q_bias[:, :7] == 1.0)
+        assert torch.all(grouped_q_bias[:, 7:] == 0.0)
+
+        fake_row_param = torch.zeros((8, 16 * 4))
+        orig_row_weight = torch.ones((8, 14 * 4))
+        row_cfg = SimpleNamespace(
+            _unpadded_num_attention_heads=14,
+            num_attention_heads=16,
+            num_key_value_heads=2,
+            head_dim=4,
+        )
+        padded_row_weight = vllm_model_wrapper._pad_row_loaded_weight(
+            fake_row_param, orig_row_weight, hf_text_cfg=row_cfg)
+        assert tuple(padded_row_weight.shape) == (8, 16 * 4)
+        grouped_row = padded_row_weight.reshape(8, 2, 8, 4)
+        assert torch.all(grouped_row[:, :, :7] == 1.0)
+        assert torch.all(grouped_row[:, :, 7:] == 0.0)

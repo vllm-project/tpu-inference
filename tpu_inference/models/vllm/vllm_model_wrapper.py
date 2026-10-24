@@ -31,7 +31,8 @@ from jax.experimental.layout import Format, Layout
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import TORCH_DTYPE_TO_JAX, t2j
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import (VllmConfig, get_current_vllm_config,
+                         set_current_vllm_config)
 from vllm.forward_context import set_forward_context
 from vllm.ir import enable_torch_wrap
 from vllm.lora.layers import BaseLayerWithLoRA
@@ -73,6 +74,145 @@ from tpu_inference.runner.mm_encoder_jit_manager import (
     MMEncoderJITManager, maybe_create_mm_encoder_jit_manager)
 
 logger = init_logger(__name__)
+
+
+def _pad_qkv_loaded_weight(layer, loaded_weight, loaded_shard_id=None):
+    """Zero-pads query heads per KV group in QKVParallelLinear when GQA heads are padded."""
+    if loaded_shard_id == "q":
+        total_heads = getattr(layer, "total_num_heads", None)
+        if total_heads is None:
+            total_heads = getattr(layer, "num_heads", 0)
+        total_kv_heads = getattr(layer, "total_num_kv_heads", None)
+        if total_kv_heads is None:
+            total_kv_heads = getattr(layer, "num_kv_heads", 0)
+        expected_q_size = total_heads * layer.head_size
+        if (loaded_weight.shape[0] < expected_q_size and total_kv_heads > 0
+                and loaded_weight.shape[0] %
+            (total_kv_heads * layer.head_size) == 0):
+            orig_q_per_kv = loaded_weight.shape[0] // (total_kv_heads *
+                                                       layer.head_size)
+            padded_q_per_kv = total_heads // total_kv_heads
+            if loaded_weight.ndim == 2:
+                grouped = loaded_weight.reshape(
+                    total_kv_heads,
+                    orig_q_per_kv,
+                    layer.head_size,
+                    loaded_weight.shape[1],
+                )
+                pad = torch.zeros(
+                    (
+                        total_kv_heads,
+                        padded_q_per_kv - orig_q_per_kv,
+                        layer.head_size,
+                        loaded_weight.shape[1],
+                    ),
+                    dtype=loaded_weight.dtype,
+                    device=loaded_weight.device,
+                )
+                loaded_weight = torch.cat([grouped, pad], dim=1).reshape(
+                    expected_q_size, loaded_weight.shape[1])
+            elif loaded_weight.ndim == 1:
+                grouped = loaded_weight.reshape(total_kv_heads, orig_q_per_kv,
+                                                layer.head_size)
+                pad = torch.zeros(
+                    (
+                        total_kv_heads,
+                        padded_q_per_kv - orig_q_per_kv,
+                        layer.head_size,
+                    ),
+                    dtype=loaded_weight.dtype,
+                    device=loaded_weight.device,
+                )
+                loaded_weight = torch.cat([grouped, pad],
+                                          dim=1).reshape(expected_q_size)
+    return loaded_weight
+
+
+def _pad_row_loaded_weight(param, loaded_weight, hf_text_cfg=None):
+    """Zero-pads input query heads per KV group in RowParallelLinear when GQA heads are padded."""
+    if param.ndim == 2 and loaded_weight.shape[1] < param.shape[1]:
+        try:
+            if hf_text_cfg is None:
+                vllm_cfg = get_current_vllm_config()
+                hf_text_cfg = getattr(vllm_cfg.model_config, "hf_text_config",
+                                      None)
+            orig_heads = getattr(hf_text_cfg, "_unpadded_num_attention_heads",
+                                 None)
+            padded_heads = getattr(hf_text_cfg, "num_attention_heads", None)
+            num_kv_heads = getattr(hf_text_cfg, "num_key_value_heads", None)
+            head_dim = getattr(hf_text_cfg, "head_dim", None)
+            if (isinstance(orig_heads, int) and isinstance(padded_heads, int)
+                    and isinstance(num_kv_heads, int)
+                    and isinstance(head_dim, int)
+                    and loaded_weight.shape[1] == orig_heads * head_dim
+                    and param.shape[1] == padded_heads * head_dim):
+                orig_q_per_kv = orig_heads // num_kv_heads
+                padded_q_per_kv = padded_heads // num_kv_heads
+                grouped = loaded_weight.reshape(
+                    loaded_weight.shape[0],
+                    num_kv_heads,
+                    orig_q_per_kv,
+                    head_dim,
+                )
+                pad = torch.zeros(
+                    (
+                        loaded_weight.shape[0],
+                        num_kv_heads,
+                        padded_q_per_kv - orig_q_per_kv,
+                        head_dim,
+                    ),
+                    dtype=loaded_weight.dtype,
+                    device=loaded_weight.device,
+                )
+                loaded_weight = torch.cat([grouped, pad], dim=2).reshape(
+                    loaded_weight.shape[0], param.shape[1])
+        except Exception as e:
+            logger.debug("Skipping GQA row weight padding: %s", e)
+    return loaded_weight
+
+
+def _ensure_gqa_head_padding_weight_loaders() -> None:
+    """Wraps vLLM QKV/RowParallelLinear weight loaders to zero-pad GQA query heads."""
+    from vllm.model_executor.layers import linear as vllm_linear
+
+    if getattr(vllm_linear, "_tpu_gqa_head_padding_installed", False):
+        return
+    orig_qkv_loader = vllm_linear.QKVParallelLinear.weight_loader
+    orig_qkv_loader_v2 = vllm_linear.QKVParallelLinear.weight_loader_v2
+    orig_row_loader = vllm_linear.RowParallelLinear.weight_loader
+    orig_row_loader_v2 = vllm_linear.RowParallelLinear.weight_loader_v2
+
+    def _padded_qkv_weight_loader(self,
+                                  param,
+                                  loaded_weight,
+                                  loaded_shard_id=None):
+        loaded_weight = _pad_qkv_loaded_weight(self, loaded_weight,
+                                               loaded_shard_id)
+        return orig_qkv_loader(self, param, loaded_weight, loaded_shard_id)
+
+    def _padded_qkv_weight_loader_v2(self,
+                                     param,
+                                     loaded_weight,
+                                     loaded_shard_id=None):
+        loaded_weight = _pad_qkv_loaded_weight(self, loaded_weight,
+                                               loaded_shard_id)
+        return orig_qkv_loader_v2(self, param, loaded_weight, loaded_shard_id)
+
+    def _padded_row_weight_loader(self, param, loaded_weight):
+        loaded_weight = _pad_row_loaded_weight(param, loaded_weight)
+        return orig_row_loader(self, param, loaded_weight)
+
+    def _padded_row_weight_loader_v2(self, param, loaded_weight):
+        loaded_weight = _pad_row_loaded_weight(param, loaded_weight)
+        return orig_row_loader_v2(self, param, loaded_weight)
+
+    vllm_linear.QKVParallelLinear.weight_loader = _padded_qkv_weight_loader
+    vllm_linear.QKVParallelLinear.weight_loader_v2 = (
+        _padded_qkv_weight_loader_v2)
+    vllm_linear.RowParallelLinear.weight_loader = _padded_row_weight_loader
+    vllm_linear.RowParallelLinear.weight_loader_v2 = (
+        _padded_row_weight_loader_v2)
+    vllm_linear._tpu_gqa_head_padding_installed = True
 
 
 def _to_row_major(arr: jax.Array, key: str) -> jax.Array:
@@ -152,6 +292,11 @@ class VllmModelWrapper:
         self.vllm_config.quant_config = get_tpu_quantization_config(
             self.vllm_config, self.mesh)
         self._apply_pp_patch()
+
+    def modules(self):
+        if hasattr(self, "model") and self.model is not None:
+            return self.model.modules()
+        return []
 
     def _apply_pp_patch(self):
         # patch `get_pp_group` in vLLM to jax's get_pp_group.
@@ -240,6 +385,13 @@ class VllmModelWrapper:
 
         with load_context, jax_context, set_current_vllm_config(
                 self.vllm_config):
+            if (envs.TPU_PAD_GQA_HEADS or getattr(
+                    getattr(self.vllm_config.model_config, "hf_text_config",
+                            None),
+                    "_unpadded_num_attention_heads",
+                    None,
+            ) is not None):
+                _ensure_gqa_head_padding_weight_loaders()
             model_config_for_load = vllm_config_for_load.speculative_config.draft_model_config if self.is_draft_model else vllm_config_for_load.model_config
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load,
                                         model_config=model_config_for_load)

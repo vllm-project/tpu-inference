@@ -101,6 +101,7 @@ if TYPE_CHECKING:
     ENABLE_TOPK_PREFILTER: bool = False
     RAIDEN_H2D_SETTLE: bool = True
     SKIP_MAMBA_SCHEDULER_BLOCKS: bool = False
+    TPU_PAD_GQA_HEADS: bool = False
 
 
 def env_with_choices(
@@ -644,6 +645,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # See core/runner_slot_mamba.py.
     "SKIP_MAMBA_SCHEDULER_BLOCKS":
     env_bool("SKIP_MAMBA_SCHEDULER_BLOCKS", default=False),
+    # Pads Grouped-Query Attention (GQA) query heads up to the nearest multiple
+    # of lcm(num_key_value_heads, tensor_parallel_size) when total query heads
+    # are not divisible by tensor_parallel_size (e.g., Qwen2.5-0.5B with 14
+    # query heads on a 2x4 TPU mesh with tensor_parallel_size=8).
+    "TPU_PAD_GQA_HEADS":
+    env_bool("TPU_PAD_GQA_HEADS", default=False),
 }
 
 
