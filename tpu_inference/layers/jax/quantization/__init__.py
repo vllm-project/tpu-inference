@@ -21,7 +21,8 @@ from vllm.config import VllmConfig
 from tpu_inference.layers.jax import JaxModule
 
 
-def get_tpu_quantization_config(vllm_config: VllmConfig):
+def get_tpu_quantization_config(vllm_config: VllmConfig,
+                                is_draft_model: bool = False):
     from tpu_inference.layers.common.quant_methods import (COMPRESSED_TENSORS,
                                                            FP8, MXFP4)
     from tpu_inference.layers.jax.quantization.compressed_tensors import \
@@ -31,7 +32,9 @@ def get_tpu_quantization_config(vllm_config: VllmConfig):
     from tpu_inference.layers.jax.quantization.unquantized import \
         UnquantizedConfig
 
-    model_config = copy.deepcopy(vllm_config.model_config)
+    model_config = copy.deepcopy(
+        vllm_config.speculative_config.
+        draft_model_config if is_draft_model else vllm_config.model_config)
     method_to_config: dict[str | None, type] = {
         None: UnquantizedConfig,
         FP8: Fp8Config,

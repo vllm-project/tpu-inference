@@ -32,6 +32,10 @@ from vllm.model_executor.models.registry import ModelRegistry
 
 from tpu_inference.distributed.jax_parallel_state import \
     init_pp_distributed_environment
+from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
+from tpu_inference.layers.jax.quantization.compressed_tensors import \
+    CompressedTensorsConfig
+from tpu_inference.layers.jax.quantization.unquantized import UnquantizedConfig
 from tpu_inference.models.common import model_loader
 from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
 
@@ -669,3 +673,68 @@ class TestGetModel:
         mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh, False,
                                               None)
         assert result == "vllm_model_sentinel"
+
+
+def _configure_w4a16_target_and_bf16_draft(vllm_config):
+    vllm_config.model_config.quantization = "compressed-tensors"
+    vllm_config.model_config.hf_config.quantization_config = {
+        "quant_method": "compressed-tensors",
+        "format": "pack-quantized",
+        "config_groups": {
+            "group_0": {
+                "format": "pack-quantized",
+                "targets": ["Linear"],
+                "weights": {
+                    "num_bits": 4,
+                    "type": "int",
+                    "symmetric": True,
+                    "strategy": "group",
+                    "group_size": 32,
+                    "dynamic": False,
+                    "actorder": None,
+                },
+                "input_activations": None,
+                "output_activations": None,
+            }
+        },
+        "ignore": [],
+    }
+    vllm_config.speculative_config = MagicMock()
+    vllm_config.speculative_config.draft_model_config = MagicMock()
+    vllm_config.speculative_config.draft_model_config.quantization = None
+    vllm_config.speculative_config.draft_model_config.hf_config = (
+        PretrainedConfig(architectures=["Qwen3ForCausalLM"]))
+
+
+def test_get_tpu_quantization_config_uses_draft_model_config(vllm_config):
+    _configure_w4a16_target_and_bf16_draft(vllm_config)
+
+    target_cfg = get_tpu_quantization_config(vllm_config, is_draft_model=False)
+    draft_cfg = get_tpu_quantization_config(vllm_config, is_draft_model=True)
+
+    assert isinstance(target_cfg, CompressedTensorsConfig)
+    assert isinstance(draft_cfg, UnquantizedConfig)
+
+
+def test_get_flax_model_draft_restores_target_quant_config(
+        vllm_config, mesh, rng):
+    _configure_w4a16_target_and_bf16_draft(vllm_config)
+    target_quant = get_tpu_quantization_config(vllm_config,
+                                               is_draft_model=False)
+    vllm_config.quant_config = target_quant
+    observed_quant_configs = []
+
+    def mock_get_nnx(*args, **kwargs):
+        observed_quant_configs.append(vllm_config.quant_config)
+        return MagicMock()
+
+    with patch("tpu_inference.models.common.model_loader._get_nnx_model",
+               side_effect=mock_get_nnx):
+        model_loader.get_flax_model(vllm_config,
+                                    rng,
+                                    mesh,
+                                    is_draft_model=True)
+
+    assert len(observed_quant_configs) == 1
+    assert isinstance(observed_quant_configs[0], UnquantizedConfig)
+    assert vllm_config.quant_config is target_quant
