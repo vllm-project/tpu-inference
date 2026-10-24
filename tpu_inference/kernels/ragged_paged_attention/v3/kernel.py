@@ -19,6 +19,7 @@ specifications. It supports mixed prefill and decoding, enhancing throughput
 during inference.
 """
 import functools
+import sys
 from enum import Enum
 from typing import Any
 
@@ -28,6 +29,7 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from tpu_inference import envs
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
     align_to, cdiv, get_dtype_packing, get_tpu_version, next_power_of_2)
 
@@ -1841,7 +1843,7 @@ def ragged_paged_attention(
                 # TODO(jevinjiang): since each sequence depends on the previous
                 # one, we need some extra work to support Megacore mode.
                 dimension_semantics=("arbitrary", ),
-                vmem_limit_bytes=vmem_limit_bytes,
+                vmem_limit_bytes=_decode_vmem_limit(vmem_limit_bytes, case),
                 # Paged attention invokes multiple small DMAs for each pages
                 # instead of a single large DMA. Therefore, the overhead of bounds
                 # checking becomes too significant so we disable it.
@@ -1932,3 +1934,31 @@ def ragged_paged_attention(
         prepare_outputs(q, actual_num_q_heads_per_kv_head, actual_head_dim),
         kv_cache,
     )
+
+
+# ---- DECODE VMEM cap (env RPA_V3_DECODE_VMEM_LIMIT_MIB=<MiB>, default 0 = off) ----
+# The wrapper passes vmem_limit_bytes = the whole VMEM capacity to every RPA
+# pallas_call, which leaves nothing for XLA to keep resident across the call:
+# in the fused decode loop none of the next matmuls' weights can be prefetched
+# into VMEM while attention runs. ON caps the scoped-VMEM limit at n MiB for
+# the DECODE case only (PREFILL/MIXED keep the full capacity); a value below
+# what the DECODE tiles need fails to compile. Arithmetic unchanged.
+_DECODE_VMEM_SEEN = set()
+
+
+def _decode_vmem_limit(vmem_limit_bytes, case):
+    """DECODE: min(requested, RPA_V3_DECODE_VMEM_LIMIT_MIB MiB); other cases unchanged. Trace-time log line."""
+    mib = int(envs.RPA_V3_DECODE_VMEM_LIMIT_MIB or 0)
+    if mib <= 0:
+        return vmem_limit_bytes
+    out = vmem_limit_bytes
+    if case == RpaCase.DECODE:
+        out = min(int(vmem_limit_bytes), mib * 1024 * 1024)
+    key = (str(case), int(vmem_limit_bytes), int(out))
+    if key not in _DECODE_VMEM_SEEN:
+        _DECODE_VMEM_SEEN.add(key)
+        print("[rpa-decode-vmem] trace case=%s vmem_limit_bytes %d -> %d" %
+              key,
+              file=sys.stderr,
+              flush=True)
+    return out
