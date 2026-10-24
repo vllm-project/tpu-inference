@@ -101,6 +101,10 @@ if TYPE_CHECKING:
     ENABLE_TOPK_PREFILTER: bool = False
     RAIDEN_H2D_SETTLE: bool = True
     SKIP_MAMBA_SCHEDULER_BLOCKS: bool = False
+    TPU_MOE_SINGLE_SORT: bool = False
+    TPU_MOE_ROUTER_TOPK: str = "sort"
+    TPU_MOE_LOWTOK: bool = False
+    TPU_MOE_LOWTOK_MAX_TOKENS: int = 128
 
 
 def env_with_choices(
@@ -644,6 +648,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # See core/runner_slot_mamba.py.
     "SKIP_MAMBA_SCHEDULER_BLOCKS":
     env_bool("SKIP_MAMBA_SCHEDULER_BLOCKS", default=False),
+    # Build the MoE permutation, its inverse, and the sorted token ids from
+    # one packed sort instead of three.
+    "TPU_MOE_SINGLE_SORT":
+    env_bool("TPU_MOE_SINGLE_SORT", default=False),
+    # MoE router top-k implementation: "rowmax" is the sort-free k-pass
+    # selection, "sort" is jax.lax.top_k.
+    "TPU_MOE_ROUTER_TOPK":
+    env_with_choices("TPU_MOE_ROUTER_TOPK", "sort", ["sort", "rowmax"]),
+    # Experimental small-batch MoE (kernels/experimental/moe_lowtok) for EP
+    # calls of at most TPU_MOE_LOWTOK_MAX_TOKENS rows.
+    "TPU_MOE_LOWTOK":
+    env_bool("TPU_MOE_LOWTOK", default=False),
+    "TPU_MOE_LOWTOK_MAX_TOKENS":
+    lambda: int(os.getenv("TPU_MOE_LOWTOK_MAX_TOKENS", "128")),
 }
 
 
