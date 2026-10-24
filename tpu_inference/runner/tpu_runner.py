@@ -71,6 +71,7 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import get_model
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
+from tpu_inference.runner import host_input_fast_path
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.compilation_manager import CompilationManager
 from tpu_inference.runner.decode_loop import TpuSamplingState, continue_decode
@@ -873,6 +874,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             "max_decode_steps", DEFAULT_MAX_DECODE_STEPS)
         self.eos_token_id = runner_utils.get_eos_token_id(self.model_config)
         self.pad_token_id = runner_utils.get_pad_token_id(self.model_config)
+        # HOST_INPUT_FAST_PATH: resolve the fast-path parts for this runner;
+        # no-op when the flag is off.
+        host_input_fast_path.gate(self)
 
     def _init_random(self):
         if self.model_config.seed is None:
@@ -1952,7 +1956,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         max_decode_steps = min(self.static_max_decode_steps, min_remaining)
         if max_decode_steps <= 0:
             max_decode_steps = 1
-        max_decode_steps_arr = jnp.array(max_decode_steps, dtype=jnp.int32)
+        # HOST_INPUT_FAST_PATH `mds`: cached scalar (off: the same jnp.array).
+        max_decode_steps_arr = host_input_fast_path.mds(max_decode_steps)
+        host_input_fast_path.note_chunk()
 
         lora_metadata = self.lora_utils.extract_lora_metadata()
 
@@ -3065,13 +3071,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logits_indices_view[:] = spec_decode_metadata.final_logits_indices
 
         # Put to device
-        sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
-            self.mesh,
-            self.input_batch,
-            padded_num_reqs,
-            sharding=data_parallel_attn_sharding,
-            req_indices_dp=req_indices_dp,
-        )
+        # HOST_INPUT_FAST_PATH `pack`: when True, the sampling
+        # metadata, positions, request_distribution and metadata blob go to
+        # the device in ONE packed device_put below.
+        chp_pack = host_input_fast_path.prep(self)
+        sampling_metadata = None if chp_pack else (
+            TPUSupportedSamplingMetadata.from_input_batch(
+                self.mesh,
+                self.input_batch,
+                padded_num_reqs,
+                sharding=data_parallel_attn_sharding,
+                req_indices_dp=req_indices_dp,
+            ))
 
         if self.uses_mrope:
             # M-RoPE positions are of the shape (3, max_num_tokens).
@@ -3082,7 +3093,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             positions = device_array(self.mesh,
                                      mrope_positions,
                                      sharding=mrope_sharding)
-        else:
+        elif not chp_pack:
             positions = device_array(self.mesh,
                                      positions,
                                      sharding=data_parallel_attn_sharding)
@@ -3180,9 +3191,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                  sharding=metadata_attn_sharding)
         else:
             mamba_state_indices = None
-            (request_distribution, dev_arrays_payload) = device_array(
-                self.mesh, (request_distribution, metadata_blob),
-                sharding=metadata_attn_sharding)
+            if chp_pack:
+                (sampling_metadata, positions, request_distribution,
+                 dev_arrays_payload) = host_input_fast_path.put(
+                     self, padded_num_reqs, req_indices_dp,
+                     data_parallel_attn_sharding, positions,
+                     request_distribution, metadata_blob,
+                     metadata_attn_sharding)
+            else:
+                (request_distribution, dev_arrays_payload) = device_array(
+                    self.mesh, (request_distribution, metadata_blob),
+                    sharding=metadata_attn_sharding)
 
         metadata = common_utils.DeviceBuffer.unpack_arrays(
             dev_arrays_payload, metadata_layout)
