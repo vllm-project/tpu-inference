@@ -495,6 +495,22 @@ class CompressStoreTest(jtu.JaxTestCase):
                 prefill_len=16,
             ),
         ),
+        (
+            # Token 0 targets a later physical row, while tokens 1..3 (n=1 > 0)
+            # share the same packed physical KV row, exercising merge_slot_updates
+            # starting at i=n..tile_n-1.
+            "csa_decode_same_row_merge_mid_tile",
+            dict(
+                num_tokens=4,
+                head_dim=512,
+                rope_head_dim=64,
+                compress_ratio=4,
+                overlap=True,
+                physical_page_size=256,
+                positions=np.array([19, 3, 7, 11], dtype=np.int32),
+                prefill_len=32,
+            ),
+        ),
     )
     def test_compress_store(self, cfg):
         # csa_decode_batch_large failed on v6e but passed on v7x,
