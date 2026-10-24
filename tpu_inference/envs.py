@@ -101,6 +101,8 @@ if TYPE_CHECKING:
     ENABLE_TOPK_PREFILTER: bool = False
     RAIDEN_H2D_SETTLE: bool = True
     SKIP_MAMBA_SCHEDULER_BLOCKS: bool = False
+    # Keep sampled tokens data-sharded on a process-local mesh
+    SAMPLING_DP_LOCAL_OUTPUT: bool = False
 
 
 def env_with_choices(
@@ -644,6 +646,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # See core/runner_slot_mamba.py.
     "SKIP_MAMBA_SCHEDULER_BLOCKS":
     env_bool("SKIP_MAMBA_SCHEDULER_BLOCKS", default=False),
+    # Keep the sampled tokens on the ATTN_DATA
+    # sharding instead of replicating them every step, when sampling and the
+    # mesh is local to this process. Default off = stock replicated P().
+    "SAMPLING_DP_LOCAL_OUTPUT":
+    env_bool("SAMPLING_DP_LOCAL_OUTPUT", default=False),
 }
 
 
