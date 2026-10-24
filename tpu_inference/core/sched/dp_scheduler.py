@@ -1693,3 +1693,14 @@ def update_vllm_config_for_dp_scheduler(vllm_config: Any) -> None:
             vllm_config.scheduler_config._original_scheduler_cls = Scheduler
 
         vllm_config.scheduler_config.scheduler_cls = DPScheduler
+
+
+# DP_SCHED_ROUTE_MIRROR (default off): wrap the DPScheduler methods with the
+# IPC-free routing mirror, deferred ADD acks and local unfinished-request count
+# from dp_route_mirror.py. Installing raises RuntimeError when a source anchor
+# in this file or in the installed vLLM Scheduler does not match.
+if envs.DP_SCHED_ROUTE_MIRROR:
+    import sys as _sys
+
+    from tpu_inference.core.sched import dp_route_mirror as _dp_route_mirror
+    _dp_route_mirror.install(logger, module=_sys.modules[__name__])

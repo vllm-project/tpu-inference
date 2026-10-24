@@ -101,6 +101,14 @@ if TYPE_CHECKING:
     ENABLE_TOPK_PREFILTER: bool = False
     RAIDEN_H2D_SETTLE: bool = True
     SKIP_MAMBA_SCHEDULER_BLOCKS: bool = False
+    # DPScheduler routing mirror + deferred ADD acks
+    DP_SCHED_ROUTE_MIRROR: bool = False
+    DP_SCHED_ROUTE_MIRROR_CHECK: int = 3
+    DP_SCHED_ROUTE_MIRROR_ROUTE: int = 1
+    DP_SCHED_ROUTE_MIRROR_COUNT: int = 1
+    DP_SCHED_ROUTE_MIRROR_WINDOW: int = 64
+    DP_SCHED_ROUTE_MIRROR_LOG_EVERY: int = 1
+    DP_SCHED_ROUTE_MIRROR_FAULT_INJECT: str = ""
 
 
 def env_with_choices(
@@ -644,6 +652,26 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # See core/runner_slot_mamba.py.
     "SKIP_MAMBA_SCHEDULER_BLOCKS":
     env_bool("SKIP_MAMBA_SCHEDULER_BLOCKS", default=False),
+    # DPScheduler: route requests without per-request IPC (a local mirror of
+    # the stock least_loaded picker), defer ADD_REQUEST acks and keep a local
+    # unfinished-request count, verified against the stock IPC for the first
+    # DP_SCHED_ROUTE_MIRROR_CHECK bursts (any mismatch turns it off). Only acts
+    # on engines with a DPScheduler (data_parallel_size > 1). Default off.
+    "DP_SCHED_ROUTE_MIRROR":
+    env_bool("DP_SCHED_ROUTE_MIRROR", default=False),
+    "DP_SCHED_ROUTE_MIRROR_CHECK":
+    lambda: int(os.getenv("DP_SCHED_ROUTE_MIRROR_CHECK") or "3"),
+    "DP_SCHED_ROUTE_MIRROR_ROUTE":
+    lambda: int(os.getenv("DP_SCHED_ROUTE_MIRROR_ROUTE") or "1"),
+    "DP_SCHED_ROUTE_MIRROR_COUNT":
+    lambda: int(os.getenv("DP_SCHED_ROUTE_MIRROR_COUNT") or "1"),
+    "DP_SCHED_ROUTE_MIRROR_WINDOW":
+    lambda: int(os.getenv("DP_SCHED_ROUTE_MIRROR_WINDOW") or "64"),
+    "DP_SCHED_ROUTE_MIRROR_LOG_EVERY":
+    lambda: int(os.getenv("DP_SCHED_ROUTE_MIRROR_LOG_EVERY") or "1"),
+    # Test-only positive control for the CHECK bursts; leave unset.
+    "DP_SCHED_ROUTE_MIRROR_FAULT_INJECT":
+    lambda: os.getenv("DP_SCHED_ROUTE_MIRROR_FAULT_INJECT", ""),
 }
 
 
