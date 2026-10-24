@@ -101,6 +101,13 @@ if TYPE_CHECKING:
     ENABLE_TOPK_PREFILTER: bool = False
     RAIDEN_H2D_SETTLE: bool = True
     SKIP_MAMBA_SCHEDULER_BLOCKS: bool = False
+    # Skip the DPScheduler grammar-bitmask fan-out without grammar requests
+    DP_SCHED_SKIP_GRAMMAR_FANOUT: bool = False
+    # Packed per-step host-to-device inputs
+    HOST_INPUT_FAST_PATH: bool = False
+    HOST_INPUT_FAST_PATH_PARTS: str = "default"
+    HOST_INPUT_FAST_PATH_CHECK: int = 3
+    HOST_INPUT_FAST_PATH_LOG_EVERY: int = 100
 
 
 def env_with_choices(
@@ -644,6 +651,23 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # See core/runner_slot_mamba.py.
     "SKIP_MAMBA_SCHEDULER_BLOCKS":
     env_bool("SKIP_MAMBA_SCHEDULER_BLOCKS", default=False),
+    # Return None from DPScheduler.get_grammar_bitmask without the
+    # per-rank IPC fan-out when no rank has structured-output requests (the
+    # value every rank would return). Default off = stock fan-out every step.
+    "DP_SCHED_SKIP_GRAMMAR_FANOUT":
+    env_bool("DP_SCHED_SKIP_GRAMMAR_FANOUT", default=False),
+    # One packed device_put per step for the sampling metadata / positions /
+    # request_distribution / metadata blob (pack) and a cached continue-decode
+    # max_decode_steps scalar (mds); see runner/host_input_fast_path.py.
+    # Default off = stock puts.
+    "HOST_INPUT_FAST_PATH":
+    env_bool("HOST_INPUT_FAST_PATH", default=False),
+    "HOST_INPUT_FAST_PATH_PARTS":
+    lambda: os.getenv("HOST_INPUT_FAST_PATH_PARTS", "default"),
+    "HOST_INPUT_FAST_PATH_CHECK":
+    lambda: int(os.getenv("HOST_INPUT_FAST_PATH_CHECK") or "3"),
+    "HOST_INPUT_FAST_PATH_LOG_EVERY":
+    lambda: int(os.getenv("HOST_INPUT_FAST_PATH_LOG_EVERY") or "100"),
 }
 
 
