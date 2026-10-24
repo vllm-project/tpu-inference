@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import functools
+import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -20,10 +21,106 @@ import jax
 import jax.numpy as jnp
 from vllm.v1.outputs import LogprobsTensors
 
+from tpu_inference import envs
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, GroupedAttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.models.common.compiler_options import (
     get_sampling_compiler_options, get_step_fn_compiler_options)
+
+
+# ---- All-done exit (env CONTINUE_DECODE_ALL_DONE_EXIT=1, default off) ----
+# With CONTINUE_DECODE_EOS_CHECK_INTERVAL<=0 the fused while_loop runs the
+# whole max_decode_steps window even after every row has hit EOS. ON: every
+# CONTINUE_DECODE_ALL_DONE_EVERY steps (default 8) the loop computes
+# ~any(active_mask) on device, under a lax.cond whose predicate is the
+# replicated loop counter (no host sync, no data-dependent branch around the
+# reduction), carries it in the EOS-flag slot and cond_fn stops the loop.
+# Tokens are unchanged: the skipped iterations would only record padding.
+# Acts only in the interval<=0 branch; interval>0 keeps the stock any-EOS exit.
+def _alldone_every():
+    """0 = OFF (stock trace). N >= 1 = test "no row active" after steps N-1, 2N-1, ... of every window."""
+    if not envs.CONTINUE_DECODE_ALL_DONE_EXIT:
+        return 0
+    n = int(envs.CONTINUE_DECODE_ALL_DONE_EVERY)
+    if n < 1:
+        raise ValueError(
+            "CONTINUE_DECODE_ALL_DONE_EVERY=%r: need an integer >= 1" % n)
+    return n
+
+
+_ALLDONE_EVERY = _alldone_every()
+_ALLDONE_STATS = {
+    "traced": 0,
+    "chunks": 0,
+    "exits": 0,
+    "run": 0,
+    "skipped": 0,
+    "inert": 0
+}
+
+
+def _ad_log(msg):
+    print("[all-done-exit] " + msg, file=sys.stderr, flush=True)
+
+
+if _ALLDONE_EVERY:
+    _ad_log("decode_loop import: ON every=%d (the exit exists only with "
+            "CONTINUE_DECODE_EOS_CHECK_INTERVAL<=0; now %r)" %
+            (_ALLDONE_EVERY, envs.CONTINUE_DECODE_EOS_CHECK_INTERVAL))
+
+
+def _alldone_flag(i, new_mask):
+    """On-device bool scalar: no row is active after step i (evaluated when (i + 1) % N == 0, else False)."""
+    n = _ALLDONE_EVERY
+    _ALLDONE_STATS["traced"] += 1
+    k = _ALLDONE_STATS["traced"]
+    if k <= 3 or k % 50 == 0:
+        _ad_log("traced all-done check #%d: every=%d mask=%s%s" %
+                (k, n, new_mask.dtype, tuple(new_mask.shape)))
+    if n == 1:
+        return jnp.logical_not(jnp.any(new_mask))
+    return jax.lax.cond((i + 1) % n == 0,
+                        lambda m: jnp.logical_not(jnp.any(m)),
+                        lambda m: jnp.zeros((), dtype=jnp.bool_), new_mask)
+
+
+def _alldone_note(actual_steps, max_decode_steps, num_reqs):
+    """Per-window host log line, called from tpu_runner._log_continue_decode_summary with host ints."""
+    if _ALLDONE_EVERY <= 0:
+        return
+    try:
+        st = _ALLDONE_STATS
+        a, m = int(actual_steps), int(max_decode_steps)
+        if st["traced"] == 0:
+            st["inert"] += 1
+            if st["inert"] == 1:
+                _ad_log(
+                    "INERT: continue_decode window resolved (%d/%d steps) "
+                    "but the all-done check was never traced "
+                    "(CONTINUE_DECODE_EOS_CHECK_INTERVAL>0 takes the stock "
+                    "any-EOS branch)" % (a, m))
+            return
+        st["chunks"] += 1
+        st["run"] += a
+        if 0 < a < m:
+            st["exits"] += 1
+            st["skipped"] += m - a
+            _ad_log(
+                "exit #%d: all %d reqs done, loop stopped at step %d of %d "
+                "-> skipped %d iterations (every=%d) | cum chunks=%d "
+                "exits=%d steps_run=%d skipped=%d" %
+                (st["exits"], int(num_reqs), a, m, m - a, _ALLDONE_EVERY,
+                 st["chunks"], st["exits"], st["run"], st["skipped"]))
+        elif st["chunks"] <= 3 or st["chunks"] % 200 == 0:
+            _ad_log("chunk #%d: ran %d/%d steps, no exit (reqs=%d) | cum "
+                    "chunks=%d exits=%d steps_run=%d skipped=%d" %
+                    (st["chunks"], a, m, int(num_reqs), st["chunks"],
+                     st["exits"], st["run"], st["skipped"]))
+    except Exception as exc:  # logging must never break decoding
+        _ad_log("log error (ignored): %r" % (exc, ))
+
+
+# ---- end all-done exit ----
 
 
 def _unpack_attn_metadata(
@@ -394,6 +491,9 @@ def _decode_core_impl(
         eos_flag = carry[-1]
         not_done = i < max_decode_steps
         if continue_decode_eos_check_interval <= 0:
+            if _ALLDONE_EVERY > 0:
+                # All-done exit: eos_flag carries "every row done" here.
+                return jnp.logical_and(not_done, jnp.logical_not(eos_flag))
             return not_done
         should_check_eos = (i % continue_decode_eos_check_interval == 0)
         return jnp.logical_and(
@@ -420,6 +520,9 @@ def _decode_core_impl(
             # reduction, which is a cross-DP all-reduce over every device
             # on each decode iteration.
             new_eos_flag = eos_flag
+            if _ALLDONE_EVERY > 0:
+                # All-done exit: set on device at checkpoints, read by cond_fn.
+                new_eos_flag = _alldone_flag(i, new_mask)
         else:
             new_eos_flag = jnp.logical_or(eos_flag, hit)
         return _pack(i + 1, next_ct, new_mask, new_pos, new_sl, kvc, tb, eb,

@@ -101,6 +101,9 @@ if TYPE_CHECKING:
     ENABLE_TOPK_PREFILTER: bool = False
     RAIDEN_H2D_SETTLE: bool = True
     SKIP_MAMBA_SCHEDULER_BLOCKS: bool = False
+    # Early-exit the continue_decode window when every row is done
+    CONTINUE_DECODE_ALL_DONE_EXIT: bool = False
+    CONTINUE_DECODE_ALL_DONE_EVERY: int = 8
 
 
 def env_with_choices(
@@ -644,6 +647,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # See core/runner_slot_mamba.py.
     "SKIP_MAMBA_SCHEDULER_BLOCKS":
     env_bool("SKIP_MAMBA_SCHEDULER_BLOCKS", default=False),
+    # With CONTINUE_DECODE_EOS_CHECK_INTERVAL<=0, stop the fused
+    # continue-decode window once every row has hit EOS, tested on device
+    # every CONTINUE_DECODE_ALL_DONE_EVERY (default 8) steps. Default off =
+    # stock full-window run.
+    "CONTINUE_DECODE_ALL_DONE_EXIT":
+    env_bool("CONTINUE_DECODE_ALL_DONE_EXIT", default=False),
+    "CONTINUE_DECODE_ALL_DONE_EVERY":
+    lambda: int(os.getenv("CONTINUE_DECODE_ALL_DONE_EVERY") or "8"),
 }
 
 
