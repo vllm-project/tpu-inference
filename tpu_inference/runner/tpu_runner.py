@@ -212,6 +212,40 @@ def _log_continue_decode_summary(
         num_eos_hits)
 
 
+def _check_gang_symmetric_decode_window(
+    *,
+    safe_steps: int,
+    static_max_decode_steps: int,
+    has_mamba_layers: bool,
+    mamba_cache_mode: str,
+) -> None:
+    """Fail closed where gang-symmetric continue_decode cannot stay exact.
+
+    Under GANG_SYMMETRIC_DISPATCH the fused decode loop always runs
+    static_max_decode_steps iterations and masks the ones past the safe window
+    (`safe_steps`, bounded by max_model_len and, in Mamba align mode, by Mamba
+    block boundaries). Masked iterations keep attention KV intact, but they
+    still run the model on each row's current token, which would advance the
+    recurrent state of requests that continue in the next window. Reject
+    models with Mamba layers whenever masking can be needed: always in align
+    mode (every block boundary shortens the window), otherwise whenever the
+    safe window is shorter than static_max_decode_steps.
+    """
+    if not has_mamba_layers:
+        return
+    if mamba_cache_mode == "align" or safe_steps < static_max_decode_steps:
+        raise RuntimeError(
+            "GANG_SYMMETRIC_DISPATCH does not support models with Mamba "
+            "layers when the decode window can be shorter than "
+            f"max_decode_steps (mamba_cache_mode={mamba_cache_mode!r}, safe "
+            f"window {safe_steps} step(s), max_decode_steps "
+            f"{static_max_decode_steps}): the masked iterations that keep the "
+            "trip count gang-symmetric would advance the recurrent state of "
+            "continuing requests. Disable GANG_SYMMETRIC_DISPATCH, or use a "
+            "mamba_cache_mode other than 'align' with max_model_len >= "
+            "longest prompt + generated tokens + max_decode_steps.")
+
+
 def _process_continue_decode_outputs(
     generated_tokens: jax.Array,
     actual_steps: Union[jax.Array, int],
@@ -1950,15 +1984,22 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Limit max_decode_steps to not cross block boundaries
         max_decode_steps = min(self.static_max_decode_steps, min_remaining)
-        if envs.GANG_SYMMETRIC_DISPATCH:
-            # Gang-symmetric dispatch: pin the per-step decode count so every
-            # process runs the same number of decode Executes (min_remaining is
-            # data-dependent and would desync the gang). The caller must ensure
-            # max_model_len >= max_prompt + static_max_decode_steps so this does
-            # not overrun a KV block boundary.
-            max_decode_steps = self.static_max_decode_steps
         if max_decode_steps <= 0:
             max_decode_steps = 1
+        # Gang-symmetric dispatch: min_remaining is data-dependent, so a
+        # per-process trip count would desync the gang. max_decode_steps stays
+        # the safe number of steps that may advance a request; only the loop's
+        # trip count is pinned to static_max_decode_steps, with the iterations
+        # past max_decode_steps masked (see continue_decode).
+        fixed_trip_count = envs.GANG_SYMMETRIC_DISPATCH
+        if fixed_trip_count:
+            _check_gang_symmetric_decode_window(
+                safe_steps=max_decode_steps,
+                static_max_decode_steps=self.static_max_decode_steps,
+                has_mamba_layers=self.kv_cache_config.has_mamba_layers,
+                mamba_cache_mode=getattr(self.cache_config, "mamba_cache_mode",
+                                         "none"),
+            )
         max_decode_steps_arr = jnp.array(max_decode_steps, dtype=jnp.int32)
 
         lora_metadata = self.lora_utils.extract_lora_metadata()
@@ -2001,6 +2042,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                  logprobs_mode=self.model_config.logprobs_mode,
                  continue_decode_eos_check_interval=self.
                  continue_decode_eos_check_interval,
+                 fixed_trip_count=fixed_trip_count,
              )
 
         if self.scheduler_config.async_scheduling:

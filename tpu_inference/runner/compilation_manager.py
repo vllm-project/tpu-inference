@@ -2151,6 +2151,7 @@ class CompilationManager:
                      logprobs_mode=self.runner.model_config.logprobs_mode,
                      continue_decode_eos_check_interval=
                      continue_decode_eos_check_interval,
+                     fixed_trip_count=envs.GANG_SYMMETRIC_DISPATCH,
                  )
                 self.runner.kv_caches = final_kv_caches
                 return generated_tokens

@@ -180,6 +180,7 @@ def _decode_core_impl(
     continue_decode_eos_check_interval: int = 1,
     padded_num_reqs: int = -1,
     layer_names_per_group: tuple[tuple[str, ...], ...] | None = None,
+    fixed_trip_count: bool = False,
 ):
     has_logprobs = False if sampling_metadata is None else sampling_metadata.logprobs
     from tpu_inference.layers.jax.sample.sampling import \
@@ -389,10 +390,14 @@ def _decode_core_impl(
         eos = carry[idx]
         return i, ct, am, pos, sl, kvc, tb, eb, lp_ids, lp_val, lp_ranks, eos
 
+    # See fixed_trip_count below: the trip count is then static.
+    loop_bound = (static_max_decode_steps
+                  if fixed_trip_count else max_decode_steps)
+
     def cond_fn(carry):
         i = carry[0]
         eos_flag = carry[-1]
-        not_done = i < max_decode_steps
+        not_done = i < loop_bound
         if continue_decode_eos_check_interval <= 0:
             return not_done
         should_check_eos = (i % continue_decode_eos_check_interval == 0)
@@ -439,10 +444,46 @@ def _decode_core_impl(
         selected_token_ranks_buffer,
         jnp.array(False),
     )
-    final_carry = jax.lax.while_loop(cond_fn, body_fn, init_carry)
+    if fixed_trip_count:
+        # Data-independent trip count: always run static_max_decode_steps
+        # iterations. Only the first max_decode_steps may sample or advance a
+        # request. Every later iteration re-runs the inputs of the last such
+        # step with all rows inactive (nothing recorded, no EOS hit, nothing
+        # advanced), so it rewrites the same KV values into the same slots
+        # and never touches a position beyond the stock loop's window (e.g.
+        # past max_model_len). The loop state is kept as of the end of the
+        # window.
+        def fixed_cond_fn(carry):
+            return cond_fn(carry[0])
+
+        def fixed_body_fn(carry):
+            inner, replay = carry
+            i, ct, am, pos, sl = inner[:5]
+            in_window = i < max_decode_steps
+
+            def pick(on, off):
+                return jax.tree.map(lambda a, b: jnp.where(in_window, a, b),
+                                    on, off)
+
+            step_ct, step_pos, step_sl = pick((ct, pos, sl), replay)
+            step_am = jnp.logical_and(am, in_window)
+            new_inner = body_fn((i, step_ct, step_am, step_pos, step_sl) +
+                                tuple(inner[5:]))
+            kept = pick(tuple(new_inner[1:5]), (ct, am, pos, sl))
+            new_inner = (new_inner[0], ) + kept + tuple(new_inner[5:])
+            return new_inner, pick((ct, pos, sl), replay)
+
+        final_carry, _ = jax.lax.while_loop(
+            fixed_cond_fn, fixed_body_fn,
+            (init_carry, (current_tokens, input_positions, seq_lens)))
+    else:
+        final_carry = jax.lax.while_loop(cond_fn, body_fn, init_carry)
     (step_idx_final, current_tokens, active_mask, positions, seq_lens,
      kv_caches, token_buffer, expert_buffer, lp_ids_buffer, lp_val_buffer,
      lp_ranks_buffer, _) = _unpack(final_carry)
+    if fixed_trip_count:
+        # Report only the steps that could produce tokens.
+        step_idx_final = jnp.minimum(step_idx_final, max_decode_steps)
 
     return (step_idx_final, current_tokens, active_mask, positions, seq_lens,
             kv_caches, token_buffer, expert_buffer, lp_ids_buffer,
@@ -487,6 +528,7 @@ def _get_decode_core():
             "continue_decode_eos_check_interval",
             "padded_num_reqs",
             "layer_names_per_group",
+            "fixed_trip_count",
         ),
         donate_argnames=("kv_caches", ),
         compiler_options={
@@ -522,6 +564,7 @@ def continue_decode(
     max_logprobs: int = 0,
     logprobs_mode: str = "raw",
     continue_decode_eos_check_interval: int = 1,
+    fixed_trip_count: bool = False,
 ) -> tuple[jax.Array, Any, TpuSamplingState, jax.Array, jax.Array | None,
            Optional["LogprobsTensors"]]:
     """Run the TPU decode loop as one fused, kv-cache-donating program.
@@ -560,6 +603,17 @@ def continue_decode(
       logprobs_mode: Logprobs mode from model config. The processed modes
         (see PROCESSED_LOGPROBS_MODES) read sample()'s transformed logits;
         the raw modes read compute_logits' output.
+      fixed_trip_count: If True, the loop always runs static_max_decode_steps
+        iterations regardless of max_decode_steps and of the per-request
+        data, but only the first max_decode_steps of them may sample or
+        advance a request. Each later iteration re-runs the model on exactly
+        the inputs of the last such step, so it writes the same KV values to
+        the same slots and touches no position the stock loop would not.
+        generated_tokens, the final state and step_counter equal those of a
+        fixed_trip_count=False run (rows past step_counter in the other
+        per-step buffers stay don't-care). Recurrent per-request state (e.g.
+        Mamba) is not preserved by the re-runs, so this must not be combined
+        with such models when max_decode_steps < static_max_decode_steps.
 
     Returns:
       Tuple of (generated_tokens, final_kv_caches, final_state, final_rng,
@@ -619,6 +673,7 @@ def continue_decode(
          continue_decode_eos_check_interval=continue_decode_eos_check_interval,
          padded_num_reqs=first_attn.padded_num_reqs,
          layer_names_per_group=layer_names_per_group,
+         fixed_trip_count=fixed_trip_count,
      )
 
     final_state = TpuSamplingState(

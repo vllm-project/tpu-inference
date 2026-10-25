@@ -376,12 +376,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # coordinator domain, e.g. per-process-local rollout engines in an RL loop).
     # When true, every runner emits a data-INDEPENDENT device-Execute sequence:
     # the token/req padding buckets collapse to a single max bucket and the
-    # per-step decode count is pinned to static_max_decode_steps. This keeps the
-    # HLO identical across processes at every dispatch ordinal so the gang never
-    # desyncs into an ICI-collective hang. Costs compilation flexibility (one
-    # shape) and forgoes the block-boundary decode clamp, so the caller must
-    # guarantee max_model_len >= max_prompt + static_max_decode_steps. Default
-    # false = stock per-process data-dependent dispatch.
+    # continue_decode loop always runs static_max_decode_steps iterations. This
+    # keeps the HLO and trip count identical across processes at every dispatch
+    # ordinal so the gang never desyncs into an ICI-collective hang. The
+    # per-request safety window (max_model_len and Mamba block boundaries) is
+    # still honoured: iterations past it are masked and only repeat the last
+    # in-window step. Models with Mamba layers are rejected with an error when
+    # such masking could be needed. Costs compilation flexibility (one shape).
+    # Default false = stock per-process data-dependent dispatch.
     "GANG_SYMMETRIC_DISPATCH":
     env_bool("GANG_SYMMETRIC_DISPATCH"),
     # dictates whether to layout q-proj as NDH (q-heads, model dim, head dim)
