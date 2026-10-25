@@ -13,13 +13,37 @@
 # limitations under the License.
 
 DEFAULT_MAX_DECODE_STEPS = 10
+MULTI_TOKEN_LOOKAHEAD_CONFIG = "multi_token_decode_lookahead"
 
 
-def patch_vllm_scheduler_for_continue_decode():
-    """Monkeypatches vLLM's Scheduler and AsyncScheduler for Continue Decode.
+def _get_multi_token_lookahead(vllm_config) -> int:
+    additional_config = getattr(vllm_config, "additional_config", {}) or {}
+    if MULTI_TOKEN_LOOKAHEAD_CONFIG in additional_config:
+        lookahead = int(additional_config[MULTI_TOKEN_LOOKAHEAD_CONFIG])
+        if lookahead < 0:
+            raise ValueError(
+                f"{MULTI_TOKEN_LOOKAHEAD_CONFIG} must be non-negative")
+        return lookahead
+    if additional_config.get("enable_continue_decode", False):
+        max_decode_steps = int(
+            additional_config.get("max_decode_steps",
+                                  DEFAULT_MAX_DECODE_STEPS))
+        return max(0, max_decode_steps - 1)
+    return 0
 
-    In Continue Decode, the host schedules 1 step while the TPU runner executes
-    up to max_decode_steps (N) decode iterations on-device in a single step.
+
+def _is_multi_token_decode_enabled(vllm_config) -> bool:
+    additional_config = getattr(vllm_config, "additional_config", {}) or {}
+    return (MULTI_TOKEN_LOOKAHEAD_CONFIG in additional_config
+            or bool(additional_config.get("enable_continue_decode", False)))
+
+
+def patch_vllm_scheduler_for_multi_token_decode() -> None:
+    """Patch vLLM scheduler accounting for multi-token model outputs.
+
+    The host schedules one decode position while the model runner may return N
+    tokens. The patch reserves a configured lookahead and reconciles the N - 1
+    additional tokens after stop-token processing.
 
     This function applies three patches:
     1. patched_init: Forces KVCacheManager to reserve enough KV cache blocks for
@@ -27,14 +51,12 @@ def patch_vllm_scheduler_for_continue_decode():
        or 2 * (max_decode_steps - 1) under async_scheduling).
     2. patched_update_base: Reconciles request.num_computed_tokens on host by
        adding the extra (N - 1) tokens generated on-device once model output returns.
-    3. patched_async_update_request_with_output: Pre-compensates in-flight
-       num_output_placeholders in AsyncScheduler by adding (N - 1) before
-       subtracting N, preventing placeholder underflow in async mode.
+    3. patched_async_update_request_with_output: Marks async updates so the base
+       patch reconciles in-flight placeholders against retained tokens.
     """
     from vllm.v1.core.sched.scheduler import Scheduler
 
-    # Avoid patching multiple times
-    if not getattr(Scheduler, "_continue_decode_patched", False):
+    if not getattr(Scheduler, "_multi_token_decode_patched", False):
         original_update_base = Scheduler._update_request_with_output
 
         def patched_update_base(scheduler_self,
@@ -69,16 +91,30 @@ def patch_vllm_scheduler_for_continue_decode():
 
             return res_token_ids, stopped
 
-        Scheduler._update_request_with_output = patched_update_base
+        def update_base_if_enabled(scheduler_self,
+                                   request,
+                                   new_token_ids,
+                                   is_stale=False,
+                                   **kwargs):
+            update = (patched_update_base if getattr(
+                scheduler_self, "_multi_token_decode_enabled", False) else
+                      original_update_base)
+            return update(scheduler_self,
+                          request,
+                          new_token_ids,
+                          is_stale=is_stale,
+                          **kwargs)
+
+        Scheduler._update_request_with_output = update_base_if_enabled
 
         original_init = Scheduler.__init__
 
         def patched_init(scheduler_self, vllm_config, *args, **kwargs):
             original_init(scheduler_self, vllm_config, *args, **kwargs)
 
-            additional_config = getattr(vllm_config, "additional_config", {})
-            max_decode_steps = additional_config.get("max_decode_steps",
-                                                     DEFAULT_MAX_DECODE_STEPS)
+            scheduler_self._multi_token_decode_enabled = \
+                _is_multi_token_decode_enabled(vllm_config)
+            max_decode_steps = _get_multi_token_lookahead(vllm_config) + 1
             # Reserve max_decode_steps - 1 lookahead tokens so KVCacheManager allocates
             # sufficient blocks for up to max_decode_steps tokens before execution on TPU.
             # Under async_scheduling, step T+1 is scheduled while step T's burst is still
@@ -97,7 +133,7 @@ def patch_vllm_scheduler_for_continue_decode():
 
     from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 
-    if not getattr(AsyncScheduler, "_continue_decode_patched", False):
+    if not getattr(AsyncScheduler, "_multi_token_decode_patched", False):
         original_async_update_req = AsyncScheduler._update_request_with_output
 
         def patched_async_update_request_with_output(scheduler_self,
@@ -121,6 +157,13 @@ def patch_vllm_scheduler_for_continue_decode():
                 scheduler_self._cd_stale_in_flight = False
 
         AsyncScheduler._update_request_with_output = patched_async_update_request_with_output
+        AsyncScheduler._multi_token_decode_patched = True
         AsyncScheduler._continue_decode_patched = True
 
+    Scheduler._multi_token_decode_patched = True
     Scheduler._continue_decode_patched = True
+
+
+def patch_vllm_scheduler_for_continue_decode() -> None:
+    """Compatibility alias for existing continue-decode callers."""
+    patch_vllm_scheduler_for_multi_token_decode()
