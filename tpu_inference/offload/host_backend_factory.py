@@ -66,8 +66,8 @@ def _build_store(backend: str, model_name: str = "") -> Any:
         # Real LMCache StorageManager (disk/remote/P2P/cross-instance). Lazy
         # import so lmcache is only required when this backend is selected.
         try:
-            from lmcache.integration.tpu.lmcache_storage_kv_store import (
-                LMCacheStorageKVStore)
+            from lmcache.integration.tpu.lmcache_storage_kv_store import \
+                LMCacheStorageKVStore
         except Exception as e:  # pragma: no cover - optional dependency
             raise RuntimeError(
                 "TPU_OFFLOAD_LMCACHE_BACKEND=lmcache requires the lmcache fork "

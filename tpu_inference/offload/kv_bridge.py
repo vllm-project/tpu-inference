@@ -1,8 +1,10 @@
 # Copyright 2026
 # LMCache-on-TPU value bridge: jax.Array (host) <-> flat bytes buffer.
 from __future__ import annotations
+
 import dataclasses
 from typing import Any
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -26,7 +28,8 @@ def jax_block_to_bytes(arr: Any):
     """Serialize a host jax.Array KV block to raw bytes + reconstruct spec.
     Raw byte view -> bfloat16/float16/int8/fp8 all roundtrip bit-exactly."""
     host = np.asarray(jax.device_get(arr))
-    spec = KVBlockSpec(shape=tuple(host.shape), dtype_str=jnp.dtype(arr.dtype).name)
+    spec = KVBlockSpec(shape=tuple(host.shape),
+                       dtype_str=jnp.dtype(arr.dtype).name)
     raw = host.tobytes()
     return raw, spec
 

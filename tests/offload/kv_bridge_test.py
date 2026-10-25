@@ -23,14 +23,16 @@ import pytest
 from tpu_inference.offload.kv_bridge import (bytes_to_jax_block,
                                              jax_block_to_bytes)
 
-KV_SHAPE = (1, 4, 16, 8, 2, 32)  # (1, num_layers, block, num_head, 2, head_dim)
+# (1, num_layers, block, num_head, 2, head_dim)
+KV_SHAPE = (1, 4, 16, 8, 2, 32)
 
 
 def _bytes(x):
     return np.asarray(jax.device_get(x)).tobytes()
 
 
-@pytest.mark.parametrize("dtype", ["float32", "float16", "bfloat16", "int8", "int32"])
+@pytest.mark.parametrize("dtype",
+                         ["float32", "float16", "bfloat16", "int8", "int32"])
 def test_roundtrip_bit_exact(dtype):
     jdt = jnp.dtype(dtype)
     key = jax.random.PRNGKey(0)
@@ -46,11 +48,13 @@ def test_roundtrip_bit_exact(dtype):
 
 
 def test_bfloat16_edge_values():
+    inf = float("inf")
     vals = jnp.array(
-        [0.0, -0.0, 1.0, -1.0, float("inf"), float("-inf"), 3.14159, 0.333333],
+        [0.0, -0.0, 1.0, -1.0, inf, -inf, 3.14159, 0.333333],
         dtype=jnp.bfloat16,
     )
-    x = jnp.broadcast_to(vals.reshape(1, 1, 4, 1, 2, 1), (1, 2, 4, 2, 2, 8)).astype(jnp.bfloat16)
+    x = jnp.broadcast_to(vals.reshape(1, 1, 4, 1, 2, 1),
+                         (1, 2, 4, 2, 2, 8)).astype(jnp.bfloat16)
     raw, spec = jax_block_to_bytes(x)
     y = bytes_to_jax_block(raw, spec)
     assert _bytes(y) == _bytes(x)

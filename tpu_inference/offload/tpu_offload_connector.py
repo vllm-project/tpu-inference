@@ -132,7 +132,6 @@ from vllm.platforms import current_platform
 
 from tpu_inference import envs
 from tpu_inference.logger import init_logger
-from tpu_inference.offload.cpu_backend import LocalCPUBackend
 from tpu_inference.offload.host_backend_factory import build_host_backend
 from tpu_inference.offload.offload_manager import (LRUCacheManager,
                                                    StagingBufferManager)

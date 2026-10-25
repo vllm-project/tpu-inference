@@ -16,7 +16,6 @@
 Runs on jax[cpu]; no TPU required. Uses the reference File/Memory KV stores so
 no LMCache install is needed to run these.
 """
-import tempfile
 
 import jax
 import jax.numpy as jnp
@@ -24,8 +23,7 @@ import numpy as np
 import pytest
 
 from tpu_inference.offload.lmcache_host_backend import LMCacheHostBackend
-from tpu_inference.offload.lmcache_kv_store import (FileKVStore,
-                                                    InMemoryKVStore)
+from tpu_inference.offload.lmcache_kv_store import FileKVStore, InMemoryKVStore
 
 KV_SHAPE = (1, 4, 16, 8, 2, 32)
 
@@ -35,7 +33,8 @@ def _blk(seed, dtype=jnp.bfloat16, shape=KV_SHAPE):
 
 
 def _eq(a, b):
-    return np.asarray(jax.device_get(a)).tobytes() == np.asarray(jax.device_get(b)).tobytes()
+    return np.asarray(jax.device_get(a)).tobytes() == np.asarray(
+        jax.device_get(b)).tobytes()
 
 
 def test_parity_no_store():
@@ -60,7 +59,9 @@ def test_invalid_chunk_id():
 
 def test_disk_spill_bit_exact(tmp_path):
     store = FileKVStore(str(tmp_path))
-    be = LMCacheHostBackend(num_cpu_chunks=64, lmcache_store=store, hot_capacity=2)
+    be = LMCacheHostBackend(num_cpu_chunks=64,
+                            lmcache_store=store,
+                            hot_capacity=2)
     blocks = {i: _blk(100 + i) for i in range(6)}
     for i, b in blocks.items():
         be.add(i, b)
@@ -72,9 +73,12 @@ def test_disk_spill_bit_exact(tmp_path):
 
 def test_list_of_layers_spill():
     store = InMemoryKVStore()
-    be = LMCacheHostBackend(num_cpu_chunks=64, lmcache_store=store, hot_capacity=1)
+    be = LMCacheHostBackend(num_cpu_chunks=64,
+                            lmcache_store=store,
+                            hot_capacity=1)
     layers_by_chunk = {
-        i: [_blk(200 + i * 10 + L, shape=(1, 1, 16, 8, 2, 32)) for L in range(4)]
+        i:
+        [_blk(200 + i * 10 + L, shape=(1, 1, 16, 8, 2, 32)) for L in range(4)]
         for i in range(3)
     }
     for i, layers in layers_by_chunk.items():
@@ -102,7 +106,9 @@ def test_reclaim_unoccupied():
 
 def test_content_hash_hint(tmp_path):
     store = FileKVStore(str(tmp_path))
-    be = LMCacheHostBackend(num_cpu_chunks=64, lmcache_store=store, hot_capacity=1)
+    be = LMCacheHostBackend(num_cpu_chunks=64,
+                            lmcache_store=store,
+                            hot_capacity=1)
     b = _blk(400)
     be.set_chunk_hash_hint(0, "deadbeefhash")
     be.add(0, b)
