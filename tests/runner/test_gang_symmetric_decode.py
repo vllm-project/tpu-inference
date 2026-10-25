@@ -13,14 +13,22 @@
 # limitations under the License.
 """Gang-symmetric continue_decode keeps the stock per-request safety window.
 
-GANG_SYMMETRIC_DISPATCH pins the fused decode loop's trip count to
-max_decode_steps so every process of a gang runs the same number of loop
-iterations. A request may still only advance within the stock window, which
-is bounded by max_model_len and, in Mamba align mode, by Mamba block
-boundaries. These tests run the real runner + decode loop with a small
-stand-in model on CPU and check that the gang path never writes past those
-bounds, produces the same tokens, positions and KV as the stock path, and
-fails closed where it cannot.
+GANG_SYMMETRIC_DISPATCH bounds the fused decode loop by
+static_max_decode_steps instead of the per-process safe window. With the EOS
+early exit off (CONTINUE_DECODE_EOS_CHECK_INTERVAL <= 0) that bound is the
+trip count, so every process of a gang runs the same number of loop
+iterations; with an EOS check the loop still stops after any row hits EOS and
+the trip count follows the data, so the runner refuses that combination at
+init. A request may still only advance within the stock window, which is
+bounded by max_model_len and, in Mamba align mode, by Mamba block boundaries.
+These tests run the real runner + decode loop with a small stand-in model on
+CPU and check that the gang path never writes past those bounds, produces the
+same tokens, positions and KV as the stock path, and fails closed where it
+cannot: at runner or KV cache init for static configs, and per window (on
+the process concerned) for the data-dependent Mamba case. The window tests
+call _execute_continue_decode directly, without runner init, so some of them
+also run the gang path with an EOS check to show the loop still matches the
+stock path there.
 """
 
 from dataclasses import dataclass
@@ -287,7 +295,8 @@ def test_gang_decode_stops_at_max_model_len(monkeypatch):
         " >= max_model_len 512")
     _assert_same_as_stock(gang, stock)
     assert gang.num_tokens == [512]
-    # The trip count is still the data-independent max_decode_steps.
+    # The trip count is still static_max_decode_steps: no row hits EOS, so
+    # the EOS check never ends the loop early.
     assert gang.calls == 32
 
 
@@ -295,7 +304,10 @@ def test_gang_decode_mamba_align_boundary_fails_closed(monkeypatch):
     """Mamba align mode, block boundary 128, seq len 126, max_decode_steps
     16: the safe window is 2 steps. Masked extra iterations would advance the
     recurrent state past the boundary, so the gang path must refuse before
-    any device step instead of running 16 steps."""
+    any device step instead of running 16 steps. KV cache init already
+    rejects align mode under the flag (see
+    test_gang_kv_cache_init_rejects_mamba_align); this is the per-window
+    backstop."""
     reqs = [Req(num_tokens=126, row=0)]
     config = dict(max_model_len=1024,
                   static_steps=16,
@@ -376,8 +388,8 @@ def test_gang_decode_mixed_lengths_across_dp_ranks(monkeypatch):
 
 def test_gang_decode_trip_count_is_data_independent(monkeypatch):
     """Gang members whose batches allow different windows (12 vs 32 steps)
-    run the same number of loop iterations, and each still matches its own
-    stock output."""
+    run the same number of loop iterations (no row hits EOS here), and each
+    still matches its own stock output."""
     config = dict(max_model_len=512, static_steps=32)
     calls = []
     for reqs in ([Req(num_tokens=500, row=0)], [Req(num_tokens=100, row=0)]):
@@ -393,7 +405,10 @@ def test_gang_decode_trip_count_is_data_independent(monkeypatch):
 def test_gang_decode_eos_inside_window(monkeypatch, eos_check_interval):
     """A request hitting EOS inside the window stops there (its tokens end
     with EOS and its position stays frozen) exactly as in the stock path,
-    while the window-limiting request still stops at max_model_len."""
+    while the window-limiting request still stops at max_model_len. With an
+    EOS check (interval 1) both loops exit early, so the gang trip count
+    follows the data; runner init rejects that combination under
+    GANG_SYMMETRIC_DISPATCH (test_gang_runner_init_requires_no_eos_exit)."""
     reqs = [
         Req(num_tokens=500, row=0),
         # Processes positions 199, 200, ...; emits EOS at position 203.
@@ -645,3 +660,144 @@ def test_precompile_uses_the_runtime_trip_count_mode(monkeypatch, gang):
         c.kwargs.get("fixed_trip_count", False)
         for c in spy.call_args_list
     } == {gang}
+
+
+def test_gang_decode_mamba_window_check_is_per_process(monkeypatch):
+    """Outside align mode the Mamba check depends on the batch: it raises on
+    the gang member whose request shortens the window and not on a member
+    whose window is full, which keeps decoding."""
+    config = dict(max_model_len=512,
+                  static_steps=32,
+                  has_mamba=True,
+                  mamba_cache_mode="none")
+    short = _run_window(monkeypatch,
+                        True, [Req(num_tokens=500, row=0)],
+                        catch=True,
+                        **config)
+    full = _run_window(monkeypatch,
+                       True, [Req(num_tokens=100, row=0)],
+                       catch=True,
+                       **config)
+    assert isinstance(short.error, RuntimeError)
+    assert short.calls == 0
+    assert full.error is None
+    assert full.calls == 32
+
+
+def _real_runner(monkeypatch, *, gang, enable_continue_decode,
+                 eos_check_interval):
+    """A real TPUModelRunner, with model loading and the device mesh stubbed
+    the way tests/runner/test_tpu_runner.py does it."""
+    from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
+                             SchedulerConfig, VllmConfig)
+
+    if gang:
+        monkeypatch.setenv(GANG_ENV, "1")
+    else:
+        monkeypatch.delenv(GANG_ENV, raising=False)
+    monkeypatch.setenv("CONTINUE_DECODE_EOS_CHECK_INTERVAL",
+                       str(eos_check_interval))
+    devices = [MagicMock(coords=0)]
+    device_array = np.array(jax.devices()[:1]).reshape(1, 1, 1, -1)
+    mesh = jax.make_mesh(device_array.shape,
+                         ("data", "attn_dp", "expert", "model"))
+    with patch("jax.devices", return_value=devices), \
+         patch("jax.make_mesh", return_value=mesh), \
+         patch("jax.random.key", return_value=MagicMock()), \
+         patch("tpu_inference.runner.tpu_runner.get_model",
+               return_value=MagicMock()), \
+         patch("tpu_inference.runner.tpu_runner.make_optimized_mesh",
+               return_value=mesh):
+        vllm_config = VllmConfig(
+            model_config=ModelConfig(tokenizer_mode="auto",
+                                     trust_remote_code=False,
+                                     seed=0,
+                                     dtype="bfloat16"),
+            cache_config=CacheConfig(block_size=16,
+                                     gpu_memory_utilization=0.9,
+                                     cache_dtype="auto"),
+            scheduler_config=SchedulerConfig(max_num_seqs=16,
+                                             max_model_len=1024,
+                                             is_encoder_decoder=False),
+            parallel_config=ParallelConfig(pipeline_parallel_size=1,
+                                           tensor_parallel_size=1),
+            observability_config={},
+            additional_config={
+                "enable_continue_decode": enable_continue_decode
+            },
+        )
+        return TPUModelRunner(vllm_config, devices=devices)
+
+
+@pytest.mark.parametrize(
+    "gang, enable_continue_decode, eos_check_interval, rejected",
+    [
+        # The EOS early exit makes the trip count follow each process's data.
+        (True, True, 1, True),
+        (True, True, 4, True),
+        # No EOS early exit: the trip count is static_max_decode_steps.
+        (True, True, 0, False),
+        (True, True, -1, False),
+        # Without continue_decode the fused loop never runs.
+        (True, False, 1, False),
+        # Flag unset: unchanged.
+        (False, True, 1, False),
+    ])
+def test_gang_runner_init_requires_no_eos_exit(monkeypatch, gang,
+                                               enable_continue_decode,
+                                               eos_check_interval, rejected):
+    """Runner init fails closed when GANG_SYMMETRIC_DISPATCH and
+    continue_decode are combined with the EOS early exit, before any
+    request, so every gang member fails alike."""
+    kwargs = dict(gang=gang,
+                  enable_continue_decode=enable_continue_decode,
+                  eos_check_interval=eos_check_interval)
+    if rejected:
+        with pytest.raises(ValueError,
+                           match="CONTINUE_DECODE_EOS_CHECK_INTERVAL <= 0"):
+            _real_runner(monkeypatch, **kwargs)
+    else:
+        runner = _real_runner(monkeypatch, **kwargs)
+        assert (
+            runner.continue_decode_eos_check_interval == eos_check_interval)
+
+
+class _KVCacheInitReached(Exception):
+    pass
+
+
+@pytest.mark.parametrize(
+    "gang, enable_continue_decode, has_mamba, mamba_cache_mode, rejected",
+    [
+        (True, True, True, "align", True),
+        # Other Mamba modes are checked per window instead.
+        (True, True, True, "none", False),
+        (True, True, False, "align", False),
+        (True, False, True, "align", False),
+        # Flag unset: unchanged.
+        (False, True, True, "align", False),
+    ])
+def test_gang_kv_cache_init_rejects_mamba_align(monkeypatch, gang,
+                                                enable_continue_decode,
+                                                has_mamba, mamba_cache_mode,
+                                                rejected):
+    """Mamba align mode is a static config, so KV cache init rejects it under
+    GANG_SYMMETRIC_DISPATCH with continue_decode, before allocating the KV
+    cache, instead of the first continue_decode window."""
+    runner = _real_runner(monkeypatch,
+                          gang=gang,
+                          enable_continue_decode=enable_continue_decode,
+                          eos_check_interval=0)
+    runner.cache_config.mamba_cache_mode = mamba_cache_mode
+    runner.kv_cache_manager = MagicMock()
+    runner.kv_cache_manager.initialize_kv_cache.side_effect = (
+        _KVCacheInitReached)
+    kv_cache_config = SimpleNamespace(has_mamba_layers=has_mamba,
+                                      kv_cache_groups=[])
+    if rejected:
+        with pytest.raises(ValueError, match="mamba_cache_mode='align'"):
+            runner.initialize_kv_cache(kv_cache_config)
+        runner.kv_cache_manager.initialize_kv_cache.assert_not_called()
+    else:
+        with pytest.raises(_KVCacheInitReached):
+            runner.initialize_kv_cache(kv_cache_config)

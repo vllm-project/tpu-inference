@@ -375,15 +375,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # split across many independent runner processes that share a single libtpu
     # coordinator domain, e.g. per-process-local rollout engines in an RL loop).
     # When true, every runner emits a data-INDEPENDENT device-Execute sequence:
-    # the token/req padding buckets collapse to a single max bucket and the
-    # continue_decode loop always runs static_max_decode_steps iterations. This
-    # keeps the HLO and trip count identical across processes at every dispatch
-    # ordinal so the gang never desyncs into an ICI-collective hang. The
-    # per-request safety window (max_model_len and Mamba block boundaries) is
-    # still honoured: iterations past it are masked and only repeat the last
-    # in-window step. Models with Mamba layers are rejected with an error when
-    # such masking could be needed. Costs compilation flexibility (one shape).
-    # Default false = stock per-process data-dependent dispatch.
+    # the token/req padding buckets collapse to a single max bucket, so the HLO
+    # is identical across processes at every dispatch ordinal, and the
+    # continue_decode loop is bounded by static_max_decode_steps instead of the
+    # per-process safe window. That bound is the loop's trip count only without
+    # the EOS early exit, so with enable_continue_decode the runner refuses to
+    # start unless CONTINUE_DECODE_EOS_CHECK_INTERVAL <= 0 (requests still stop
+    # at their own EOS). The per-request safety window (max_model_len and Mamba
+    # block boundaries) is still honoured: iterations past it are masked and
+    # only repeat the last in-window step. With enable_continue_decode, Mamba
+    # models are rejected at KV cache init in mamba_cache_mode 'align'; in
+    # other modes the first window that needs masking raises, but only on the
+    # process whose batch shortened the window. Costs compilation flexibility
+    # (one shape). Default false = stock per-process data-dependent dispatch.
     "GANG_SYMMETRIC_DISPATCH":
     env_bool("GANG_SYMMETRIC_DISPATCH"),
     # dictates whether to layout q-proj as NDH (q-heads, model dim, head dim)

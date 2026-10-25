@@ -221,8 +221,8 @@ def _check_gang_symmetric_decode_window(
 ) -> None:
     """Fail closed where gang-symmetric continue_decode cannot stay exact.
 
-    Under GANG_SYMMETRIC_DISPATCH the fused decode loop always runs
-    static_max_decode_steps iterations and masks the ones past the safe window
+    Under GANG_SYMMETRIC_DISPATCH the fused decode loop is bounded by
+    static_max_decode_steps and masks the iterations past the safe window
     (`safe_steps`, bounded by max_model_len and, in Mamba align mode, by Mamba
     block boundaries). Masked iterations keep attention KV intact, but they
     still run the model on each row's current token, which would advance the
@@ -230,6 +230,13 @@ def _check_gang_symmetric_decode_window(
     models with Mamba layers whenever masking can be needed: always in align
     mode (every block boundary shortens the window), otherwise whenever the
     safe window is shorter than static_max_decode_steps.
+
+    Align mode is static config: _check_gang_symmetric_mamba_cache_mode
+    already rejects it at KV cache init, on every process alike, and it is
+    checked here again only as a backstop. The safe-window check depends on
+    this process's batch, so it runs per window and raises only on the
+    process whose requests shortened the window; the other processes of the
+    gang do not raise with it.
     """
     if not has_mamba_layers:
         return
@@ -244,6 +251,49 @@ def _check_gang_symmetric_decode_window(
             "continuing requests. Disable GANG_SYMMETRIC_DISPATCH, or use a "
             "mamba_cache_mode other than 'align' with max_model_len >= "
             "longest prompt + generated tokens + max_decode_steps.")
+
+
+def _check_gang_symmetric_eos_check_interval(eos_check_interval: int) -> None:
+    """Fail closed at runner init where the gang's trip count would differ.
+
+    Under GANG_SYMMETRIC_DISPATCH the fused continue_decode loop is bounded by
+    static_max_decode_steps, but with an EOS check
+    (CONTINUE_DECODE_EOS_CHECK_INTERVAL > 0) it still stops at the first check
+    after any row of this process hit EOS, so processes with different data
+    would run different trip counts. Only an interval <= 0 (no EOS early
+    exit) keeps the trip count at static_max_decode_steps on every process.
+    """
+    if eos_check_interval > 0:
+        raise ValueError(
+            "GANG_SYMMETRIC_DISPATCH with enable_continue_decode requires "
+            "CONTINUE_DECODE_EOS_CHECK_INTERVAL <= 0, got "
+            f"{eos_check_interval}: the EOS early exit stops the fused decode "
+            "loop once any request of a process hits EOS, so the loop's trip "
+            "count would differ across the gang. Set "
+            "CONTINUE_DECODE_EOS_CHECK_INTERVAL=0 (requests still stop at "
+            "their own EOS), disable enable_continue_decode, or unset "
+            "GANG_SYMMETRIC_DISPATCH.")
+
+
+def _check_gang_symmetric_mamba_cache_mode(*, has_mamba_layers: bool,
+                                           mamba_cache_mode: str) -> None:
+    """Fail closed at KV cache init for Mamba models in mamba align mode.
+
+    In align mode every Mamba block boundary shortens the continue_decode
+    window, so the gang-symmetric loop keeps needing masked iterations, which
+    advance the recurrent state (see _check_gang_symmetric_decode_window).
+    The config alone decides this, so it is rejected before serving, on every
+    process of the gang alike, instead of at the first window.
+    """
+    if has_mamba_layers and mamba_cache_mode == "align":
+        raise ValueError(
+            "GANG_SYMMETRIC_DISPATCH with enable_continue_decode does not "
+            "support models with Mamba layers in mamba_cache_mode='align': "
+            "every Mamba block boundary shortens the decode window, and the "
+            "masked iterations that keep the trip count gang-symmetric would "
+            "advance the recurrent state of continuing requests. Disable "
+            "prefix caching (mamba_cache_mode='none'), disable "
+            "enable_continue_decode, or unset GANG_SYMMETRIC_DISPATCH.")
 
 
 def _process_continue_decode_outputs(
@@ -903,6 +953,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # every-step check.
         self.continue_decode_eos_check_interval = (
             envs.CONTINUE_DECODE_EOS_CHECK_INTERVAL)
+        if (envs.GANG_SYMMETRIC_DISPATCH
+                and self.enable_continue_decode is True):
+            _check_gang_symmetric_eos_check_interval(
+                self.continue_decode_eos_check_interval)
         self.static_max_decode_steps = self.vllm_config.additional_config.get(
             "max_decode_steps", DEFAULT_MAX_DECODE_STEPS)
         self.eos_token_id = runner_utils.get_eos_token_id(self.model_config)
@@ -1405,6 +1459,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def initialize_kv_cache(self,
                             kv_cache_config: KVCacheConfig,
                             topology_order_id: int = 0) -> None:
+        if (envs.GANG_SYMMETRIC_DISPATCH
+                and self.enable_continue_decode is True):
+            _check_gang_symmetric_mamba_cache_mode(
+                has_mamba_layers=kv_cache_config.has_mamba_layers,
+                mamba_cache_mode=getattr(self.cache_config, "mamba_cache_mode",
+                                         "none"))
         self.topology_order_id = topology_order_id
         self.kv_cache_config = kv_cache_config
         self.use_hybrid_kvcache = len(kv_cache_config.kv_cache_groups) > 1
@@ -1989,8 +2049,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Gang-symmetric dispatch: min_remaining is data-dependent, so a
         # per-process trip count would desync the gang. max_decode_steps stays
         # the safe number of steps that may advance a request; only the loop's
-        # trip count is pinned to static_max_decode_steps, with the iterations
-        # past max_decode_steps masked (see continue_decode).
+        # bound is pinned to static_max_decode_steps, with the iterations past
+        # max_decode_steps masked (see continue_decode). That bound is the
+        # trip count because __init__ requires the EOS early exit to be off
+        # under this flag.
         fixed_trip_count = envs.GANG_SYMMETRIC_DISPATCH
         if fixed_trip_count:
             _check_gang_symmetric_decode_window(

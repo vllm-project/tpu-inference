@@ -390,7 +390,8 @@ def _decode_core_impl(
         eos = carry[idx]
         return i, ct, am, pos, sl, kvc, tb, eb, lp_ids, lp_val, lp_ranks, eos
 
-    # See fixed_trip_count below: the trip count is then static.
+    # See fixed_trip_count below: the bound is then static, and it is the trip
+    # count when the EOS early exit is off.
     loop_bound = (static_max_decode_steps
                   if fixed_trip_count else max_decode_steps)
 
@@ -445,14 +446,15 @@ def _decode_core_impl(
         jnp.array(False),
     )
     if fixed_trip_count:
-        # Data-independent trip count: always run static_max_decode_steps
-        # iterations. Only the first max_decode_steps may sample or advance a
-        # request. Every later iteration re-runs the inputs of the last such
-        # step with all rows inactive (nothing recorded, no EOS hit, nothing
-        # advanced), so it rewrites the same KV values into the same slots
-        # and never touches a position beyond the stock loop's window (e.g.
-        # past max_model_len). The loop state is kept as of the end of the
-        # window.
+        # Data-independent loop bound: run up to static_max_decode_steps
+        # iterations, exactly that many when continue_decode_eos_check_interval
+        # <= 0 (an EOS check still stops the loop early, as in the stock loop).
+        # Only the first max_decode_steps may sample or advance a request.
+        # Every later iteration re-runs the inputs of the last such step with
+        # all rows inactive (nothing recorded, no EOS hit, nothing advanced),
+        # so it rewrites the same KV values into the same slots and never
+        # touches a position beyond the stock loop's window (e.g. past
+        # max_model_len). The loop state is kept as of the end of the window.
         def fixed_cond_fn(carry):
             return cond_fn(carry[0])
 
@@ -580,8 +582,12 @@ def continue_decode(
         `sampling_metadata`.
       init_state: Initial TpuSamplingState.
       kv_caches: KV caches. Donated into the fused loop and returned updated.
-      max_decode_steps: Max steps to run (static loop bound).
-      static_max_decode_steps: Static maximum steps for RNG splitting.
+      max_decode_steps: Number of steps that may sample and advance requests
+        (the safe window). Traced, so one executable serves every window. It
+        bounds the loop unless fixed_trip_count is set.
+      static_max_decode_steps: Static maximum number of steps. Sizes the
+        per-step buffers and the RNG split, and bounds the loop when
+        fixed_trip_count is set.
       eos_token_id: EOS token ID(s).
       padding_token_id: Padding token ID.
       rng: RNG key.
@@ -603,10 +609,13 @@ def continue_decode(
       logprobs_mode: Logprobs mode from model config. The processed modes
         (see PROCESSED_LOGPROBS_MODES) read sample()'s transformed logits;
         the raw modes read compute_logits' output.
-      fixed_trip_count: If True, the loop always runs static_max_decode_steps
-        iterations regardless of max_decode_steps and of the per-request
-        data, but only the first max_decode_steps of them may sample or
-        advance a request. Each later iteration re-runs the model on exactly
+      fixed_trip_count: If True, the loop is bounded by
+        static_max_decode_steps instead of max_decode_steps, but only the
+        first max_decode_steps iterations may sample or advance a request.
+        The trip count is data-independent (always static_max_decode_steps)
+        only with continue_decode_eos_check_interval <= 0: an EOS check still
+        stops the loop at the next check after any row hits EOS, as in the
+        stock loop. Each later iteration re-runs the model on exactly
         the inputs of the last such step, so it writes the same KV values to
         the same slots and touches no position the stock loop would not.
         generated_tokens, the final state and step_counter equal those of a
@@ -618,9 +627,10 @@ def continue_decode(
     Returns:
       Tuple of (generated_tokens, final_kv_caches, final_state, final_rng,
       all_expert_indices, logprobs_tensors). generated_tokens is a fixed-size
-      (max_decode_steps, batch_size) array and all_expert_indices, when not
-      None, is (max_decode_steps, ...); rows beyond final_state.step_counter
-      are padding (early EOS exit may stop before max_decode_steps), so the
+      (static_max_decode_steps, batch_size) array and all_expert_indices, when
+      not None, is (static_max_decode_steps, ...); rows beyond
+      final_state.step_counter are padding (step_counter is at most
+      max_decode_steps, and an early EOS exit may stop before that), so the
       caller must trim with final_state.step_counter.
     """
     from tpu_inference.layers.jax.sample.sampling import sample
