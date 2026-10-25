@@ -35,11 +35,14 @@ import pytest
 _NPROC = 2
 _LOCAL_DEVICES = 2
 _TIMEOUT_S = 300
+# Attempts to form the domain; another process can take the coordinator port.
+_ATTEMPTS = 3
 
 
 def _free_port() -> int:
+    # The coordinator listens on the wildcard address, so probe that.
     with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
+        s.bind(("", 0))
         return s.getsockname()[1]
 
 
@@ -67,6 +70,7 @@ def _worker(args) -> dict:
                                    initialization_timeout=60)
     except Exception as e:  # pylint: disable=broad-except
         res["init_error"] = f"{type(e).__name__}: {e}"
+        print(f"jax.distributed.initialize failed: {res['init_error']}")
         return res
     open(os.path.join(args.out, f"p{args.pid}.up"), "w").close()
 
@@ -123,6 +127,41 @@ def _worker(args) -> dict:
     return res
 
 
+def _start_and_wait(out_dir, env) -> None:
+    port = _free_port()
+    procs = []
+    try:
+        try:
+            for pid in range(_NPROC):
+                cmd = [sys.executable, os.path.abspath(__file__)]
+                cmd += ["--pid", str(pid), "--nproc", str(_NPROC)]
+                cmd += ["--port", str(port), "--out", str(out_dir)]
+                with open(out_dir / f"p{pid}.log", "w") as log:
+                    procs.append(
+                        subprocess.Popen(cmd,
+                                         env=env,
+                                         cwd=out_dir,
+                                         stdout=log,
+                                         stderr=subprocess.STDOUT))
+        except OSError as e:
+            pytest.skip(f"cannot start {_NPROC} worker processes: {e}")
+        deadline = time.monotonic() + _TIMEOUT_S
+        while time.monotonic() < deadline:
+            codes = [p.poll() for p in procs]
+            if all(c is not None for c in codes):
+                break
+            # A worker that exited without joining leaves the others waiting.
+            if any(c is not None and not (out_dir / f"p{i}.up").exists()
+                   for i, c in enumerate(codes)):
+                break
+            time.sleep(0.2)
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
+                p.wait()
+
+
 def _run_workers(tmp_path) -> list[dict]:
     spec = importlib.util.find_spec("tpu_inference")
     pkg_root = os.path.dirname(os.path.dirname(spec.origin))
@@ -137,48 +176,27 @@ def _run_workers(tmp_path) -> list[dict]:
         XLA_FLAGS=f"--xla_force_host_platform_device_count={_LOCAL_DEVICES}",
         PYTHONPATH=os.pathsep.join(p for p in (pkg_root, env.get("PYTHONPATH"))
                                    if p))
-    port = _free_port()
-    procs = []
-    try:
-        try:
-            for pid in range(_NPROC):
-                cmd = [sys.executable, os.path.abspath(__file__)]
-                cmd += ["--pid", str(pid), "--nproc", str(_NPROC)]
-                cmd += ["--port", str(port), "--out", str(tmp_path)]
-                with open(tmp_path / f"p{pid}.log", "w") as log:
-                    procs.append(
-                        subprocess.Popen(cmd,
-                                         env=env,
-                                         cwd=tmp_path,
-                                         stdout=log,
-                                         stderr=subprocess.STDOUT))
-        except OSError as e:
-            pytest.skip(f"cannot start {_NPROC} worker processes: {e}")
-        deadline = time.monotonic() + _TIMEOUT_S
-        for p in procs:
-            try:
-                p.wait(timeout=max(1, deadline - time.monotonic()))
-            except subprocess.TimeoutExpired:
-                break
-    finally:
-        for p in procs:
-            if p.poll() is None:
-                p.kill()
-                p.wait()
+    for attempt in range(_ATTEMPTS):
+        out_dir = tmp_path / f"attempt{attempt}"
+        out_dir.mkdir()
+        _start_and_wait(out_dir, env)
+        logs = {
+            pid: (out_dir / f"p{pid}.log").read_text()[-3000:]
+            for pid in range(_NPROC)
+        }
+        if all((out_dir / f"p{pid}.up").exists() for pid in range(_NPROC)):
+            break
+    else:
+        pytest.skip(f"{_NPROC} processes could not form a jax.distributed "
+                    f"domain in {_ATTEMPTS} attempts:\n" +
+                    "\n".join(logs.values()))
 
     results = []
     for pid in range(_NPROC):
-        path = tmp_path / f"p{pid}.json"
-        log = (tmp_path / f"p{pid}.log").read_text()[-3000:]
+        path = out_dir / f"p{pid}.json"
         if not path.exists():
-            if not (tmp_path / f"p{pid}.up").exists():
-                pytest.skip(f"process {pid} did not join the jax.distributed "
-                            f"domain:\n{log}")
-            pytest.fail(f"process {pid} wrote no result:\n{log}")
+            pytest.fail(f"process {pid} wrote no result:\n{logs[pid]}")
         r = json.loads(path.read_text())
-        if "init_error" in r:
-            pytest.skip(f"jax.distributed.initialize failed on process {pid}: "
-                        f"{r['init_error']}")
         if r["process_count"] != _NPROC:
             pytest.skip(f"expected {_NPROC} processes in the domain, got "
                         f"{r['process_count']}")
