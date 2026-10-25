@@ -376,18 +376,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # coordinator domain, e.g. per-process-local rollout engines in an RL loop).
     # When true, every runner emits a data-INDEPENDENT device-Execute sequence:
     # the token/req padding buckets collapse to a single max bucket, so the HLO
-    # is identical across processes at every dispatch ordinal, and the
-    # continue_decode loop is bounded by static_max_decode_steps instead of the
-    # per-process safe window. That bound is the loop's trip count only without
-    # the EOS early exit, so with enable_continue_decode the runner refuses to
-    # start unless CONTINUE_DECODE_EOS_CHECK_INTERVAL <= 0 (requests still stop
-    # at their own EOS). The per-request safety window (max_model_len and Mamba
-    # block boundaries) is still honoured: iterations past it are masked and
-    # only repeat the last in-window step. With enable_continue_decode, Mamba
-    # models are rejected at KV cache init in mamba_cache_mode 'align'; in
-    # other modes the first window that needs masking raises, but only on the
-    # process whose batch shortened the window. Costs compilation flexibility
-    # (one shape). Default false = stock per-process data-dependent dispatch.
+    # is identical across processes at every dispatch ordinal, and every
+    # continue_decode call gets the window static_max_decode_steps instead of
+    # the per-process safe window (the shortest request's), and runs that many
+    # loop iterations. That is the loop's trip count only without the EOS early
+    # exit, so with enable_continue_decode the runner refuses to start unless
+    # CONTINUE_DECODE_EOS_CHECK_INTERVAL <= 0 (requests still stop at their own
+    # EOS). Each request still decodes only within its own window (bounded by
+    # max_model_len and its max_tokens): past it, it is masked and only repeats
+    # its last in-window step, while the other requests keep decoding. So the
+    # number of calls follows the longest request, not the shortest. With
+    # enable_continue_decode, Mamba models are rejected at KV cache init in
+    # mamba_cache_mode 'align'; in other modes a window that max_model_len
+    # shortens raises, but only on the process whose batch holds the request.
+    # Costs compilation flexibility (one shape). Default false = stock
+    # per-process data-dependent dispatch.
     "GANG_SYMMETRIC_DISPATCH":
     env_bool("GANG_SYMMETRIC_DISPATCH"),
     # dictates whether to layout q-proj as NDH (q-heads, model dim, head dim)

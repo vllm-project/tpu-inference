@@ -2125,6 +2125,7 @@ class CompilationManager:
                 dp_size,
                 collect_expert_indices,
                 continue_decode_eos_check_interval,
+                row_decode_steps,
             ):
                 (generated_tokens, final_kv_caches, final_state, final_rng,
                  all_expert_indices, logprobs_tensors) = continue_decode(
@@ -2152,9 +2153,17 @@ class CompilationManager:
                      continue_decode_eos_check_interval=
                      continue_decode_eos_check_interval,
                      fixed_trip_count=envs.GANG_SYMMETRIC_DISPATCH,
+                     row_decode_steps=row_decode_steps,
                  )
                 self.runner.kv_caches = final_kv_caches
                 return generated_tokens
+
+            # The runner passes per-request windows under
+            # GANG_SYMMETRIC_DISPATCH (see _execute_continue_decode).
+            row_decode_steps = None
+            if envs.GANG_SYMMETRIC_DISPATCH:
+                row_decode_steps = self._create_dummy_tensor(
+                    (num_reqs, ), jnp.int32, dp_sharding)
 
             def continue_decode_warmup(_fn, _args, _call_kwargs):
                 new_args = list(_args)
@@ -2212,6 +2221,7 @@ class CompilationManager:
                         self.runner.vllm_config.aux_output_config.
                         enable_return_routed_experts,
                         self.runner.continue_decode_eos_check_interval,
+                        row_decode_steps,
                         warmup_handler=continue_decode_warmup,
                         attn_padded_num_reqs=attn_padded_num_reqs,
                         do_sampling=do_sampling,
