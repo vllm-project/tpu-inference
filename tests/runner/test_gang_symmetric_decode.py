@@ -78,15 +78,19 @@ def _fake_model(batch_size, dp_size, eos_pos):
     """Stand-in for model_fn / compute_logits_fn / sample over paged KV.
 
     kv_caches is [slots, max_pos, calls, folded]:
-      slots[r, p]  token whose KV row r wrote at position p (-1: never),
+      slots[r, p]  KV value row r wrote at position p (-1: never),
       max_pos[r]   highest position row r ever wrote,
       calls        number of model invocations,
       folded[r]    tokens folded into row r's recurrent (Mamba-like) state.
-    The next token depends on the current token, its position and the KV
-    context before it, so a corrupted KV slot changes later tokens. Like
-    ragged paged attention, a row writes its KV at position seq_len - 1, so
-    the attention seq_lens a step is given decide where its KV lands. Row r
-    emits EOS when it processes position eos_pos[r].
+    Like ragged paged attention, a row writes its KV at position seq_len - 1,
+    so the attention seq_lens a step is given decide where its KV lands, and
+    it attends to the KV before that slot. As past the first layer of a real
+    model, the KV value it writes depends on its token, its position and
+    that context (weighted by position, so order matters too): a step re-run
+    at another position or over another context writes a different value.
+    The next token depends on that value and the position, so a corrupted KV
+    slot changes later tokens. Row r emits EOS when it processes position
+    eos_pos[r].
     """
     eos_pos = jnp.asarray(eos_pos, dtype=jnp.int32)
     rows_per_dp = batch_size // dp_size
@@ -99,14 +103,16 @@ def _fake_model(batch_size, dp_size, eos_pos):
         real = seq_lens > 0
         rows = jnp.arange(batch_size)
         width = slots.shape[1]
-        before = jnp.arange(width)[None, :] < pos[:, None]
-        context = jnp.sum(jnp.where(before, slots, 0), axis=1)
-        next_tokens = (input_ids * 7 + pos * 13 + context) % (VOCAB - 2) + 2
-        next_tokens = jnp.where(pos == eos_pos, EOS, next_tokens)
         write_pos = seq_lens - 1
+        cols = jnp.arange(width)[None, :]
+        before = cols < write_pos[:, None]
+        context = jnp.sum(jnp.where(before, slots * (cols % 7 + 1), 0), axis=1)
+        kv_value = (input_ids * 131 + pos * 17 + context) % 9973 + 2
+        next_tokens = (kv_value * 7 + pos * 13) % (VOCAB - 2) + 2
+        next_tokens = jnp.where(pos == eos_pos, EOS, next_tokens)
         col = jnp.clip(write_pos, 0, width - 1)
         slots = slots.at[rows,
-                         col].set(jnp.where(real, input_ids, slots[rows, col]))
+                         col].set(jnp.where(real, kv_value, slots[rows, col]))
         max_pos = jnp.where(real, jnp.maximum(max_pos, write_pos), max_pos)
         folded = folded + real.astype(jnp.int32)
         return ([slots, max_pos, calls + 1,
