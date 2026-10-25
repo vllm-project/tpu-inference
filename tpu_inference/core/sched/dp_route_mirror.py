@@ -7,11 +7,14 @@ DPScheduler class methods listed below; nothing changes when the flag is off). T
 processes are NOT touched: they run `_scheduler_worker_process` unchanged and see the same command stream, minus
 read-only queries. Only engines with a DPScheduler (data_parallel_size > 1) are affected.
 
-The install checks source anchors in dp_scheduler.py and in the installed vLLM Scheduler and refuses to install
-on a mismatch; the CHECK bursts below then compare the mirror with the stock code at runtime. HAS_REQUEST is
-treated as a read-only query when present. Under DP_SCHED_ROUTING=round_robin the routing part stays off by
-design (the stock round-robin picker needs no IPC), and so does the ack deferral: every add takes the stock
-path (ADD_REQUEST, then a blocking wait for its ack). Only the unfinished count (3. below) still applies.
+The install checks source anchors in dp_scheduler.py, and runs the installed vLLM Scheduler.add_request and
+get_num_unfinished_requests on probe requests (VLLM SCHEDULER MODEL below); it refuses to install on any mismatch.
+The CHECK bursts below then compare the mirror with the stock code at runtime. HAS_REQUEST is treated as a
+read-only query when present. Under DP_SCHED_ROUTING=round_robin the routing part stays off by design (the stock
+round-robin picker needs no IPC), and so does the ack deferral: every add takes the stock path (ADD_REQUEST, then
+a blocking wait for its ack). Only the unfinished count (3. below) still applies. Routing also stays on the stock
+path with prefix caching, batched prefill, a KV transfer config (the connector's add hook is not modelled), or a
+worker scheduler class that overrides a modelled Scheduler method; the per-engine log line names the reason.
 
 What it replaces (tpu_inference/core/sched/dp_scheduler.py):
   * _find_best_rank_for_request: for EVERY added request, 3 queries x dp_size ranks over the pipes
@@ -20,25 +23,35 @@ What it replaces (tpu_inference/core/sched/dp_scheduler.py):
   * _route_and_forward_request: ADD_REQUEST, then a blocking wait for its ack.
   * get_num_unfinished_requests: dp_size round trips on every EngineCore.step (has_requests()).
 
+VLLM SCHEDULER MODEL (verified against the vLLM commit in .buildkite/vllm_lkg.version, ef5bcaa3876):
+  Scheduler.add_request (new, non-resumable request) -> Scheduler._enqueue_waiting_request:
+    - request holding KV blocks (num_computed_tokens > 0 or WAITING_FOR_REMOTE_KVS) -> `kv_holding_waiting`
+    - every other request -> `waiting`, including the blocked statuses (grammar, remote KV, streaming input),
+      which are only additionally recorded in the `deferred_waiting` set
+  Scheduler.get_num_unfinished_requests (UNPAUSED) counts every such request once.
+  The DP worker's GET_PENDING_PREFILL_TOKENS and GET_REQUEST_COUNTS read `running` and `waiting` only.
+  Any other behaviour of the installed vLLM is an unsupported shape: install raises RuntimeError and names it.
+
 The mirror (value-exact: same rank for every request, same count for every query):
   1. ROUTING. A burst is a run of ADD_REQUESTs with no state-changing command in between. At the first add
      of a burst every rank is queried once, with the stock commands in the stock order. After that, the
-     mirror applies to the three queried quantities exactly what the worker's vLLM Scheduler.add_request does
-     (Scheduler.add_request -> Scheduler._enqueue_waiting_request):
-       - status not blocked -> request appended to `waiting`: pending += num_prompt_tokens, inflight += 1
-       - blocked status (grammar / remote KV / streaming) -> `skipped_waiting`: the DP worker's
-         GET_PENDING_PREFILL_TOKENS and GET_REQUEST_COUNTS read `waiting` only, so nothing changes
+     mirror applies to the three queried quantities exactly what the worker's Scheduler.add_request does:
+       - request lands in `waiting` -> pending += num_prompt_tokens, inflight += 1
+       - request lands in `kv_holding_waiting` -> nothing changes (the DP worker does not read it)
        - GET_MIN_REMAINING_OUTPUT reads `running` only, so it never changes during a burst.
      The argmin expression is the stock one verbatim (min(range(dp), key=(load, inflight, min_rem))).
      Any command other than ADD_REQUEST and the read-only queries ends the burst and drops the snapshot.
-  2. ACKS. The ADD acks (cloudpickle(None), 8 bytes with the length header) stay in each rank's output pipe
-     and are drained, oldest first, by the wrapped _get_result before ANY other read from that rank, or as soon
-     as a rank has W outstanding (DP_SCHED_ROUTE_MIRROR_WINDOW, default 64 -> at most 512 bytes queued per rank,
-     far below the minimum socket buffer, so a worker can never block on its ack write while we block on a send).
+  2. ACKS. The ADD acks (cloudpickle(None), one small message each) stay in each rank's output pipe and are
+     drained, oldest first, by the wrapped _get_result before ANY other read from that rank, or as soon as a
+     rank has W outstanding (DP_SCHED_ROUTE_MIRROR_WINDOW, default and maximum 64, which stays well inside a
+     default socket send buffer, so a worker never blocks on its ack write while we block on a send). A worker
+     error in place of an ack is raised by that drain, with a note naming the request.
   3. UNFINISHED COUNT. A dict of live request ids: + on every ADD_REQUEST, - on every EngineCoreOutput with a
      finish_reason (and every id in EngineCoreOutputs.finished_requests) returned by update_from_output, and
      on every FinishedRequestInfo returned by finish_requests. A local 0 is always confirmed with the stock IPC
-     (so a stale-low count can never stop the engine early). Paused scheduler or a resumable request -> stock.
+     (so a stale-low count can never stop the engine early), and so is the count after a step that scheduled
+     no token (so a stale-high count cannot keep an idle engine stepping). Paused scheduler or a resumable
+     request -> stock.
 
 CHECK (DP_SCHED_ROUTE_MIRROR_CHECK=N, default 3): during the first N bursts every add ALSO runs the stock picker
 (`_pick_rank_for_request`, i.e. the full stock IPC query) plus a fresh state query of every rank, and every
@@ -53,9 +66,10 @@ DP_SCHED_ROUTE_MIRROR_FAULT_INJECT=route|state|count is TEST-ONLY (a positive co
 
 Log lines: `[dp-route-mirror] ON: installed ...` (anchors), `[dp-route-mirror] engine dp=... route=ON count=ON ...`
 (per DPScheduler instance), then one `[dp-route-mirror] burst=K n=... mode=mirror dist=[...] ... check=PASS(...)`
-line per burst. Install raises RuntimeError when an anchor does not match, so an unverified setup never runs.
+line per burst. Install raises RuntimeError when a check does not pass, so an unverified setup never runs.
 """
 
+import collections
 import functools
 import hashlib
 import inspect
@@ -106,19 +120,115 @@ _ANCHORS_DP = {
         "result = scheduler.get_num_unfinished_requests()",
     ),
 }
-_ANCHORS_VLLM = {
-    "Scheduler.add_request": ("self._enqueue_waiting_request(request)", ),
-    "Scheduler._enqueue_waiting_request": (
-        "if self._is_blocked_waiting_status(request.status):",
-        "self.skipped_waiting.add_request(request)",
-        "self.waiting.add_request(request)",
-    ),
-    "Scheduler.get_num_unfinished_requests": (
-        "if self._pause_state == PauseState.PAUSED_ALL:",
-        "- self.num_waiting_for_streaming_input",
-        "return num_waiting + len(self.running)",
-    ),
-}
+# Largest accepted DP_SCHED_ROUTE_MIRROR_WINDOW: deferred acks are small messages queued in the worker's output
+# socket, and 64 of them stay well inside a default AF_UNIX send buffer, so the worker never blocks on an ack write.
+_MAX_WINDOW = 64
+
+# vLLM Scheduler methods whose behaviour the mirror models (see VLLM SCHEDULER MODEL). A worker scheduler class that
+# overrides one of them is not covered by the install probe, so that engine keeps the stock DPScheduler code.
+_MODELLED_SCHEDULER_METHODS = (
+    "add_request",
+    "_enqueue_waiting_request",
+    "_holds_kv_blocks",
+    "get_request_counts",
+    "get_num_unfinished_requests",
+)
+_PROBE_STATUSES = (
+    "WAITING",
+    "WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR",
+    "WAITING_FOR_REMOTE_KVS",
+    "WAITING_FOR_STREAMING_REQ",
+    "PREEMPTED",
+)
+_SUPPORTED_VLLM = (
+    "add_request -> _enqueue_waiting_request: KV-holding requests (computed tokens or WAITING_FOR_REMOTE_KVS) "
+    "to kv_holding_waiting, all others (blocked statuses included) to waiting; get_num_unfinished_requests "
+    "counts each such request once (vLLM ef5bcaa3876, .buildkite/vllm_lkg.version)"
+)
+
+
+def _counted_in_waiting(request, remote_kvs_status):
+    """Whether the worker's vLLM Scheduler.add_request puts this new request in `waiting`.
+
+    `waiting` (with `running`) is all the DP worker's GET_PENDING_PREFILL_TOKENS and GET_REQUEST_COUNTS read.
+    A request holding KV blocks goes to `kv_holding_waiting` instead; a blocked status alone does not move it.
+    install() checks this against the installed vLLM (_verify_vllm_scheduler).
+    """
+    return request.num_computed_tokens <= 0 and request.status != remote_kvs_status
+
+
+def _verify_vllm_scheduler(VS):
+    """Run the installed Scheduler.add_request / get_num_unfinished_requests on probe requests.
+
+    Returns the list of mismatches with VLLM SCHEDULER MODEL (empty when the installed vLLM matches it). The probe
+    scheduler has only the attributes the modelled shape uses, so a vLLM whose add_request reads or writes other
+    state is reported as unsupported instead of being guessed at.
+    """
+    try:
+        from vllm.sampling_params import SamplingParams
+        from vllm.v1.core.sched.interface import PauseState
+        from vllm.v1.core.sched.request_queue import (SchedulingPolicy,
+                                                      create_request_queue)
+        from vllm.v1.request import Request, RequestStatus
+    except ImportError as exc:
+        return ["probe imports failed: %r" % (exc, )]
+
+    missing = [
+        n for n in _MODELLED_SCHEDULER_METHODS
+        if not callable(getattr(VS, n, None))
+    ]
+    missing += [
+        "RequestStatus." + n for n in _PROBE_STATUSES
+        if not hasattr(RequestStatus, n)
+    ]
+    if missing:
+        return ["vLLM Scheduler lacks %s" % ", ".join(missing)]
+    probe = object.__new__(VS)
+    vars(probe).update(
+        requests={},
+        waiting=create_request_queue(SchedulingPolicy.FCFS),
+        kv_holding_waiting=create_request_queue(SchedulingPolicy.FCFS),
+        deferred_waiting=set(),
+        running=[],
+        num_waiting_for_streaming_input=0,
+        _pause_state=PauseState.UNPAUSED,
+        connector=None,
+        log_stats=False,
+        spec_decode_metrics_level="none",
+        num_spec_tokens=0,
+    )
+    attrs = set(vars(probe))
+    remote_kvs = RequestStatus.WAITING_FOR_REMOTE_KVS
+    bad = []
+    added = 0
+    for status in _PROBE_STATUSES:
+        for computed in (0, 16):
+            case = "status=%s num_computed_tokens=%d" % (status, computed)
+            req = Request("dp-route-mirror-probe-%d" % added, [0] * 32,
+                          SamplingParams(max_tokens=1), None)
+            req.status = getattr(RequestStatus, status)
+            req.num_computed_tokens = computed
+            try:
+                VS.add_request(probe, req)
+                unfinished = VS.get_num_unfinished_requests(probe)
+            except Exception as exc:  # noqa: BLE001 - reported as unsupported
+                return bad + ["add_request(%s) raised %r" % (case, exc)]
+            added += 1
+            in_waiting = any(r is req for r in probe.waiting)
+            if in_waiting != _counted_in_waiting(req, remote_kvs):
+                bad.append("add_request(%s): in waiting=%s, modelled %s" %
+                           (case, in_waiting, not in_waiting))
+            if probe.running:
+                bad.append("add_request(%s) put a request in running" % case)
+            if unfinished != added:
+                bad.append(
+                    "get_num_unfinished_requests=%d after %d adds (%s)" %
+                    (unfinished, added, case))
+    if set(vars(probe)) != attrs:
+        bad.append("add_request set unmodelled scheduler state %s" %
+                   sorted(set(vars(probe)) - attrs))
+    return bad
+
 
 _G = {"on": False, "log": None}
 # what the DP worker's GET_MIN_REMAINING_OUTPUT returns for an empty `running`
@@ -149,7 +259,10 @@ class _St:
         self.count_reason = ""
         self.failed = ""
         self.paused = False
-        self.outstanding = [0] * dp
+        # per rank: ids of the requests whose ADD ack is still in the pipe, oldest first
+        self.outstanding = [collections.deque() for _ in range(dp)]
+        # the last update_from_output was for a step that scheduled no token
+        self.idle_step = False
         self.snap = (
             # [pending[], inflight[], minrem[]] while a mirror burst is open
             None)
@@ -185,34 +298,45 @@ class _St:
 
 
 def install(log, module=None):
-    """Install the mirror on tpu_inference's DPScheduler. Raises when a source anchor does not match.
+    """Install the mirror on tpu_inference's DPScheduler.
 
+    Raises RuntimeError when a dp_scheduler.py source anchor does not match, when the installed vLLM Scheduler
+    does not behave as VLLM SCHEDULER MODEL describes, or when DP_SCHED_ROUTE_MIRROR_WINDOW is out of range.
     `module` is the dp_scheduler module object (dp_scheduler.py passes itself while it is being imported).
     """
-    if _G["on"]:
-        log.info("[dp-route-mirror] ON: already installed")
-        return
     if module is None:
         from tpu_inference.core.sched import dp_scheduler as module
     M = module
     from vllm.v1.core.sched import scheduler as VSM
+    from vllm.v1.request import RequestStatus
 
     DP, SC, VS = M.DPScheduler, M.SchedulerCommand, VSM.Scheduler
+    if getattr(DP, "_route_mirror_installed", False):
+        log.info("[dp-route-mirror] ON: already installed on %s.DPScheduler",
+                 M.__name__)
+        return
     f_dp, f_vs = inspect.getsourcefile(M), inspect.getsourcefile(VSM)
     bad = []
     s_dp = _sha(f_dp) if f_dp else "?"
     s_vs = _sha(f_vs) if f_vs else "?"
-    for root, table in ((M, _ANCHORS_DP), (VSM, _ANCHORS_VLLM)):
-        for name, needles in table.items():
-            try:
-                src = inspect.getsource(_resolve(root, name))
-            except (AttributeError, OSError, TypeError) as exc:
-                bad.append("source unavailable: %s (%r)" % (name, exc))
-                continue
-            for needle in needles:
-                if needle not in src:
-                    bad.append("anchor missing in %s: %r" %
-                               (name, needle.split("\n")[0]))
+    for name, needles in _ANCHORS_DP.items():
+        try:
+            src = inspect.getsource(_resolve(M, name))
+        except (AttributeError, OSError, TypeError) as exc:
+            bad.append("source unavailable: %s (%r)" % (name, exc))
+            continue
+        for needle in needles:
+            if needle not in src:
+                bad.append("anchor missing in %s: %r" %
+                           (name, needle.split("\n")[0]))
+    vllm_bad = _verify_vllm_scheduler(VS)
+    if vllm_bad:
+        bad.append(
+            "installed vLLM Scheduler (%s) does not match the modelled shape [%s]: %s"
+            % (f_vs, _SUPPORTED_VLLM, "; ".join(vllm_bad)))
+    if envs.DP_SCHED_ROUTE_MIRROR_WINDOW > _MAX_WINDOW:
+        bad.append("DP_SCHED_ROUTE_MIRROR_WINDOW=%d is above the maximum %d" %
+                   (envs.DP_SCHED_ROUTE_MIRROR_WINDOW, _MAX_WINDOW))
     # The three methods this module REPLACES must be the module's own code, not an earlier wrapper.
     for name in (
             "_route_and_forward_request",
@@ -233,11 +357,10 @@ def install(log, module=None):
     for n in _READ_ONLY_OPTIONAL_NAMES:
         if hasattr(SC, n):
             ro.append(getattr(SC, n))
-    if getattr(DP, "_route_mirror_installed", False):
-        bad.append("DPScheduler already carries a route mirror")
     if bad:
-        raise RuntimeError("[dp-route-mirror] FATAL: %s; refusing to install" %
-                           "; ".join(bad))
+        raise RuntimeError(
+            "[dp-route-mirror] FATAL: %s; refusing to install (unset DP_SCHED_ROUTE_MIRROR for the stock "
+            "DPScheduler)" % "; ".join(bad))
 
     cfg = dict(
         check=max(0, envs.DP_SCHED_ROUTE_MIRROR_CHECK),
@@ -256,7 +379,7 @@ def install(log, module=None):
     )
     LEAST_LOADED = DP.RoutingPolicy.LEAST_LOADED
     UNPAUSED = M.PauseState.UNPAUSED
-    is_blocked = VS._is_blocked_waiting_status
+    REMOTE_KVS = RequestStatus.WAITING_FOR_REMOTE_KVS
 
     o_init = DP.__init__
     o_send = DP._send_command
@@ -278,6 +401,19 @@ def install(log, module=None):
             return "prefix_caching=on"
         if self._batch_prefills:
             return "batch_prefill=on"
+        if getattr(self.vllm_config, "kv_transfer_config", None) is not None:
+            return "kv_transfer_config set"
+        return ""
+
+    def _model_reason(self):
+        """Why the workers' scheduler class is not the one install() verified ("" when it is)."""
+        cls = getattr(self.vllm_config.scheduler_config,
+                      "_original_scheduler_cls", None)
+        if not (isinstance(cls, type) and issubclass(cls, VS)):
+            return "scheduler class %r is not a vLLM Scheduler" % (cls, )
+        for name in _MODELLED_SCHEDULER_METHODS:
+            if getattr(cls, name) is not getattr(VS, name):
+                return "%s overrides Scheduler.%s" % (cls.__name__, name)
         return ""
 
     def _fail(self, st, what):
@@ -293,10 +429,19 @@ def install(log, module=None):
         )
 
     def _drain(self, st, rank):
-        while st.outstanding[rank] > 0:
-            st.outstanding[
-                rank] -= 1  # the message is consumed even if it carries a worker error
-            o_get(self, rank, ADD)
+        pending = st.outstanding[rank]
+        while pending:
+            # the message is consumed even if it carries a worker error
+            rid = pending.popleft()
+            try:
+                o_get(self, rank, ADD)
+            except Exception as exc:
+                if hasattr(exc, "add_note"):
+                    exc.add_note(
+                        "[dp-route-mirror] raised by the deferred ADD_REQUEST ack of request %r on rank %d "
+                        "(%d later acks still queued on that rank)" %
+                        (rid, rank, len(pending)))
+                raise
 
     def _query(self):
         """The stock least_loaded query (prefix caching off): same commands, same order."""
@@ -370,12 +515,13 @@ def install(log, module=None):
         self._route_mirror = None
         try:
             st = _St(int(self.dp_size), cfg)
-            reason = _route_static_reason(self)
+            model_reason = _model_reason(self)
+            reason = model_reason or _route_static_reason(self)
             st.route_on = not reason
             st.route_reason = reason
-            st.count_on = cfg["count"]
-            st.count_reason = "" if cfg[
-                "count"] else "DP_SCHED_ROUTE_MIRROR_COUNT=0"
+            st.count_on = cfg["count"] and not model_reason
+            st.count_reason = ("DP_SCHED_ROUTE_MIRROR_COUNT=0"
+                               if not cfg["count"] else model_reason)
             self._route_mirror = st
             sc = self.vllm_config.scheduler_config
             log.info(
@@ -460,6 +606,7 @@ def install(log, module=None):
                     st.busy_bursts += 1
             dp = self.dp_size
             rank = _decide(dp, st.snap, request)
+            counted = _counted_in_waiting(request, REMOTE_KVS)
             if cfg["fault"] == "route" and st.b_n == 5:
                 rank = (rank + 1) % dp  # TEST-ONLY positive control for CHECK
             if st.checking():
@@ -498,16 +645,15 @@ def install(log, module=None):
             finally:
                 st.mirror_send = False
             if cfg["window"]:
-                st.outstanding[rank] += 1
+                st.outstanding[rank].append(request.request_id)
                 st.b_deferred += 1
-                if st.outstanding[rank] >= cfg["window"]:
+                if len(st.outstanding[rank]) >= cfg["window"]:
                     _drain(self, st, rank)
             else:
                 self._get_result(rank, ADD)
             # Mirror of the worker's scheduler.add_request on the three queried quantities.
             # (fault=state, TEST-ONLY positive control: forget the 8th add of every burst.)
-            if not is_blocked(request.status) and not (cfg["fault"] == "state"
-                                                       and st.b_n == 7):
+            if counted and not (cfg["fault"] == "state" and st.b_n == 7):
                 st.snap[0][rank] += request.num_prompt_tokens
                 st.snap[1][rank] += 1
             st.b_dist[rank] += 1
@@ -527,7 +673,7 @@ def install(log, module=None):
         if cfg["fault"] == "count" and st.u_local + st.u_ck == 3:
             local += 1  # TEST-ONLY positive control for CHECK
         checking = st.checking()
-        if checking or local == 0:
+        if checking or local == 0 or st.idle_step:
             stock = o_gnur(self)
             st.u_stock += 1
             if stock != local:
@@ -550,6 +696,10 @@ def install(log, module=None):
     def update_from_output(self, scheduler_output, model_runner_output):
         out = o_ufo(self, scheduler_output, model_runner_output)
         st = getattr(self, "_route_mirror", None)
+        if st is not None:
+            # unknown -> treated as idle: the next count is confirmed with the stock IPC
+            st.idle_step = getattr(scheduler_output,
+                                   "total_num_scheduled_tokens", 0) == 0
         if st is not None and st.live:
             live = st.live
             for eco in out.values():
@@ -591,12 +741,13 @@ def install(log, module=None):
     _G["log"] = log
     log.info(
         "[dp-route-mirror] ON: installed on %s.DPScheduler | dp_scheduler.py sha=%s | vllm scheduler.py "
-        "sha=%s | anchors=%d ok | check_bursts=%d route=%d count=%d window=%d log_every=%d%s",
+        "sha=%s | anchors=%d ok | vllm scheduler probe ok (%d cases) | check_bursts=%d route=%d count=%d "
+        "window=%d log_every=%d%s",
         M.__name__,
         s_dp[:12],
         s_vs[:12],
-        sum(len(v) for v in _ANCHORS_DP.values()) +
-        sum(len(v) for v in _ANCHORS_VLLM.values()),
+        sum(len(v) for v in _ANCHORS_DP.values()),
+        2 * len(_PROBE_STATUSES),
         cfg["check"],
         cfg["route"],
         cfg["count"],

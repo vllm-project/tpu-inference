@@ -657,6 +657,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # unfinished-request count, verified against the stock IPC for the first
     # DP_SCHED_ROUTE_MIRROR_CHECK bursts (any mismatch turns it off). Only acts
     # on engines with a DPScheduler (data_parallel_size > 1). Default off.
+    # DP_SCHED_ROUTE_MIRROR_WINDOW above 64 is rejected at install.
     "DP_SCHED_ROUTE_MIRROR":
     env_bool("DP_SCHED_ROUTE_MIRROR", default=False),
     "DP_SCHED_ROUTE_MIRROR_CHECK":
