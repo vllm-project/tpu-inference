@@ -314,7 +314,7 @@ class GptOss(nnx.Module):
                 for loaded_name, loaded_weight in names_and_weights_generator
             })
 
-        with jax.default_device(jax.devices("cpu")[0]):
+        with jax.default_device(jax.local_devices(backend="cpu")[0]):
             for loaded_name, loaded_weight in pool.items():
                 hf_pattern = re.sub(r"layers\.(\d+)", "layers.*", loaded_name)
                 if hf_pattern not in mappings:

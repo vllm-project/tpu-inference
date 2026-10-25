@@ -178,9 +178,17 @@ def general_device_put(tensor: jax.Array,
 
 
 def cpu_mesh() -> Mesh:
+    """A one-device mesh on this process's first CPU device.
+
+    Weights are staged here before being placed on the accelerator mesh, so
+    the device must be addressable by this process. Under a multi-process
+    jax.distributed domain jax.devices("cpu") lists the CPU devices of every
+    process, and its first entry belongs to process 0; use this process's
+    local CPU devices instead. With a single process both lists are the same.
+    """
     global _cpu_mesh
     if _cpu_mesh is None:
-        _cpu_mesh = Mesh(jax.devices("cpu")[:1], ("cpu", ))
+        _cpu_mesh = Mesh(jax.local_devices(backend="cpu")[:1], ("cpu", ))
     return _cpu_mesh
 
 
