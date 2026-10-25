@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 
 from tpu_inference.layers.jax.sample.rejection_sampler import (
-    PLACEHOLDER_TOKEN_ID, RejectionSampler)
+    PLACEHOLDER_TOKEN_ID, RejectionSampler, _compute_probs)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 
@@ -1582,6 +1582,34 @@ class TestTopKTopPSampling:
             allowed_tokens_per_pos=top_p_indices,
             sampling_metadata=sampling_metadata,
         )
+
+    @pytest.mark.parametrize("temperature,kept_token_ids", [
+        pytest.param(0.5, [0], id="low-temperature-keeps-only-token-0"),
+        pytest.param(2.0, [0, 1, 2], id="high-temperature-keeps-all-tokens"),
+    ])
+    def test_temperature_before_top_p(self, test_helper, temperature,
+                                      kept_token_ids):
+        # Apply temperature before top-p filtering.
+        # At top_p=0.85, token 0 alone is enough at temperature=0.5
+        # while all three tokens are needed at temperature=2.0
+        metadata = test_helper.create_sampling_metadata(
+            all_greedy=False, temperature=temperature, top_p=0.85)
+        logits = jnp.array([[2., 1., 0.]], dtype=jnp.float32)
+
+        actual = jax.jit(_compute_probs)(logits, jnp.array([1]), metadata)
+
+        np.testing.assert_array_equal(np.flatnonzero(actual[0]),
+                                      kept_token_ids)
+
+        scaled_logits = np.asarray(logits[0], dtype=np.float64) / temperature
+        weights = np.exp(scaled_logits[kept_token_ids])
+        expected_probs = np.zeros(3)
+        expected_probs[kept_token_ids] = weights / weights.sum()
+
+        np.testing.assert_allclose(actual[0],
+                                   expected_probs,
+                                   rtol=2e-6,
+                                   atol=2e-7)
 
     def test_top_k_and_top_p_combined(self, rejection_sampler, test_helper):
         """Test rejection sampling with both top-k and top-p applied.
