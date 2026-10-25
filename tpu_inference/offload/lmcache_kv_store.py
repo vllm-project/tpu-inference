@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import os
 import threading
+import urllib.parse
+import uuid
 from typing import Optional, Protocol, runtime_checkable
 
 
@@ -85,16 +87,24 @@ class FileKVStore:
         self._lock = threading.Lock()
 
     def _path(self, key: str) -> str:
-        safe = key.replace("/", "-").replace(":", "_").replace("#", "__")
+        # Percent-encoding is injective, so distinct keys never share a file.
+        safe = urllib.parse.quote(key, safe="")
         return os.path.join(self._root, safe + ".kvb")
 
     def put(self, key: str, data: bytes) -> None:
         path = self._path(key)
-        tmp = path + ".tmp"
+        # Unique temp name: writers in other processes sharing this root never
+        # write into the same temp file.
+        tmp = f"{path}.{uuid.uuid4().hex}.tmp"
         with self._lock:
-            with open(tmp, "wb") as f:
-                f.write(data)
-            os.replace(tmp, path)  # atomic
+            try:
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                os.replace(tmp, path)  # atomic
+            except BaseException:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+                raise
 
     def get(self, key: str) -> Optional[bytes]:
         path = self._path(key)

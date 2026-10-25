@@ -72,13 +72,28 @@ LMCache fork with the TPU integration (`lmcache.integration.tpu`).
 - `LMCacheHostBackend` preserves `LocalCPUBackend`'s `add`/`get`/
   `reclaim_unoccupied_chunks`/`num_saved_cpu_chunks` contract, including the
   invalid-`chunk_id` `ValueError`.
+- Session isolation: `chunk_id`-keyed entries are written under a namespace
+  that is unique per backend instance, so several engines can share one
+  `TPU_OFFLOAD_LMCACHE_PATH` (or one remote store) without reading, overwriting
+  or reclaiming each other's blocks, and a restarted engine never reads a
+  previous session's files.
+- Generation-aware validity: every `add` writes a new generation of the chunk
+  and `get` only reads the generation recorded by the last successful write.
+  A failed, dropped or partially written overwrite can never surface an older
+  generation as current data. If a write fails, the chunk stays resident in the
+  hot tier (bounded by the `chunk_id` space, i.e. never more than the stock
+  `LocalCPUBackend` holds) instead of being evicted without a copy.
+- Cleanup: `close()`, garbage collection of the backend, or interpreter exit
+  removes the instance's own `chunk_id`-keyed entries. Files left behind by a
+  process that was killed are never read by later sessions and can be deleted
+  once no engine uses that root.
 - Tests (`tests/offload/kv_bridge_test.py`,
   `tests/offload/lmcache_host_backend_test.py`) run on `jax[cpu]` — no TPU.
 
 ## Roadmap
 
-- **Depth 1 (this change):** persistent disk spill keyed by `chunk_id`. KV
-  survives beyond hot-tier RAM.
+- **Depth 1 (this change):** persistent disk spill keyed by
+  (session, `chunk_id`, generation). KV survives beyond hot-tier RAM.
 - **Depth 2:** thread the scheduler's `BlockHash` to the worker
   (`set_chunk_hash_hint` is the hook) → content-addressed `CacheEngineKey` →
   cross-replica prefix sharing (e.g. a DP rollout fleet), remote backends
