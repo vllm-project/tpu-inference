@@ -24,6 +24,7 @@ import types
 
 import pytest
 import torch
+import vllm
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VllmConfig)
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
@@ -475,12 +476,22 @@ def _assert_mirror_ran(mirror, expect_stock_picks=0):
     assert mirror.stock_picks == expect_stock_picks
 
 
+class _DeadlineExceeded(BaseException):
+    """Raised by _deadline.
+
+    Not an Exception (TimeoutError would be an OSError), so neither a
+    pytest.raises for the error a test expects nor an `except Exception` in
+    the code under test (DPScheduler._get_result wraps those into a
+    RuntimeError) can turn a hang into a pass.
+    """
+
+
 @contextlib.contextmanager
 def _deadline(seconds):
     """Fail instead of hanging (a deferred-ack deadlock would hang)."""
 
     def on_alarm(signum, frame):
-        raise TimeoutError("no progress within %ss" % seconds)
+        raise _DeadlineExceeded("no progress within %ss" % seconds)
 
     old = signal.signal(signal.SIGALRM, on_alarm)
     signal.setitimer(signal.ITIMER_REAL, seconds)
@@ -504,6 +515,7 @@ def test_install_succeeds_on_installed_vllm(monkeypatch):
             "get_num_unfinished_requests",
             "_get_result",
             "_send_command",
+            "shutdown",
     ):
         assert hasattr(getattr(module.DPScheduler, name), "__wrapped__")
 
@@ -573,6 +585,7 @@ def test_install_rejects_unsupported_vllm_scheduler(monkeypatch, method,
         _mirrored_module(monkeypatch)
     msg = str(err.value)
     assert "does not match the modelled shape" in msg
+    assert "installed vLLM %s Scheduler" % vllm.__version__ in msg
     assert expect in msg
     assert "unset DP_SCHED_ROUTE_MIRROR" in msg
 
@@ -880,17 +893,106 @@ def test_worker_death_with_deferred_acks_is_raised(monkeypatch, real_configs,
                                                    engines):
     module = _mirrored_module(monkeypatch, DP_SCHED_ROUTE_MIRROR_CHECK=0)
     cls = _rank_scheduler_cls(real_configs)
+    stock = engines(stock_dp.DPScheduler, 2, cls)
     mirror = engines(module.DPScheduler, 2, cls)
-    for i in range(6):
-        mirror.add(_request(("k%d" % i, 20, 2, "plain")))
-    assert mirror.mirror.outstanding[0]
-    proc = mirror.sched.processes[0]
-    os.kill(proc.pid, signal.SIGKILL)
-    proc.join(timeout=10)
-    with _deadline(60), pytest.raises((RuntimeError, OSError)):
-        # The local count needs no IPC; the next schedule() must raise.
-        mirror.count()
-        mirror.step()
+    for engine in (stock, mirror):
+        for i in range(6):
+            engine.add(_request(("k%d" % i, 20, 2, "plain")))
+    st = mirror.mirror
+    assert list(st.outstanding[0]) == ["k0", "k2", "k4"]
+    for engine in (stock, mirror):
+        proc = engine.sched.processes[0]
+        os.kill(proc.pid, signal.SIGKILL)
+        proc.join(timeout=10)
+        assert proc.exitcode == -signal.SIGKILL
+    with _deadline(60):
+        # The local count needs no IPC.
+        assert mirror.count() == 6
+        # schedule() fails on the dead rank the same way as the stock one.
+        for engine in (stock, mirror):
+            with pytest.raises(BrokenPipeError):
+                engine.step()
+        # Reading from the dead rank (what every DPScheduler query does
+        # after its send) goes through its deferred acks and raises the
+        # stock pipe error naming the dead worker.
+        with pytest.raises(
+                RuntimeError,
+                match=(r"Pipe error for rank 0: Worker process \(PID=%d\) "
+                       r"terminated with exit code -9" %
+                       mirror.sched.processes[0].pid),
+        ):
+            mirror.sched._get_result(0)
+    assert not st.outstanding[0]
+    assert list(st.outstanding[1]) == ["k1", "k3", "k5"]
+
+
+def _failing_request(rid):
+    req = _request((rid, 16, 2, "plain"))
+    req.trace_headers = {"x": _FailsInWorker(os.getpid())}
+    return req
+
+
+def _assert_shut_down(sched, ranks):
+    """The stock shutdown ran to its end for these ranks."""
+    for rank in ranks:
+        proc = sched.processes[rank]
+        # exited on its SHUTDOWN command (exit 0), not killed by the join
+        assert not proc.is_alive() and proc.exitcode == 0, proc.exitcode
+    assert all(conn.closed for conn in sched.input_conns + sched.output_conns)
+
+
+def test_shutdown_raises_deferred_ack_error_after_shutting_down_all_ranks(
+        monkeypatch, real_configs, engines):
+    module = _mirrored_module(monkeypatch, DP_SCHED_ROUTE_MIRROR_CHECK=0)
+    cls = _rank_scheduler_cls(real_configs)
+    mirror = engines(module.DPScheduler, 3, cls)
+    st = mirror.mirror
+    with _deadline(60):
+        assert mirror.add(_failing_request("bad")) == 0
+        for i in range(5):
+            mirror.add(_request(("s%d" % i, 16, 2, "plain")))
+        queued = [list(q) for q in st.outstanding]
+        assert queued == [["bad", "s2"], ["s0", "s3"], ["s1", "s4"]]
+        # The worker error is first read by shutdown().
+        with pytest.raises(module.SchedulerWorkerError,
+                           match="injected worker-side ADD failure") as err:
+            mirror.shutdown()
+    notes = " ".join(getattr(err.value, "__notes__", []))
+    assert "'bad' on rank 0" in notes and "shutdown()" in notes
+    assert not any(st.outstanding)
+    _assert_shut_down(mirror.sched, range(3))
+
+
+@pytest.mark.parametrize("worker_error", [True, False],
+                         ids=["worker-error", "no-error"])
+def test_shutdown_reads_deferred_acks_of_dead_rank(monkeypatch, real_configs,
+                                                   engines, worker_error):
+    module = _mirrored_module(monkeypatch, DP_SCHED_ROUTE_MIRROR_CHECK=0)
+    cls = _rank_scheduler_cls(real_configs)
+    mirror = engines(module.DPScheduler, 2, cls)
+    sched, st = mirror.sched, mirror.mirror
+    first = (_failing_request("bad") if worker_error else _request(
+        ("bad", 16, 2, "plain")))
+    with _deadline(60):
+        assert mirror.add(first) == 0
+        assert mirror.add(_request(("d1", 16, 2, "plain"))) == 1
+        assert mirror.add(_request(("d2", 16, 2, "plain"))) == 0
+        assert list(st.outstanding[0]) == ["bad", "d2"]
+        # Rank 0 answers its first ADD, then its worker dies before
+        # shutdown(), which skips dead ranks in the stock code.
+        assert sched.output_conns[0].poll(30)
+        proc = sched.processes[0]
+        os.kill(proc.pid, signal.SIGKILL)
+        proc.join(timeout=10)
+        if worker_error:
+            # Not lost with the dead worker: raised after the shutdown.
+            with pytest.raises(module.SchedulerWorkerError,
+                               match="injected worker-side ADD failure"):
+                mirror.shutdown()
+        else:
+            # As in the stock code, a dead rank alone does not raise.
+            mirror.shutdown()
+    _assert_shut_down(sched, [1])
 
 
 # --------------------------------------------------------------------------

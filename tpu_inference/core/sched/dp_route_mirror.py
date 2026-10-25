@@ -23,14 +23,15 @@ What it replaces (tpu_inference/core/sched/dp_scheduler.py):
   * _route_and_forward_request: ADD_REQUEST, then a blocking wait for its ack.
   * get_num_unfinished_requests: dp_size round trips on every EngineCore.step (has_requests()).
 
-VLLM SCHEDULER MODEL (verified against the vLLM commit in .buildkite/vllm_lkg.version, ef5bcaa3876):
+VLLM SCHEDULER MODEL (the shape of the vLLM commit in .buildkite/vllm_lkg.version, ef5bcaa3876):
   Scheduler.add_request (new, non-resumable request) -> Scheduler._enqueue_waiting_request:
     - request holding KV blocks (num_computed_tokens > 0 or WAITING_FOR_REMOTE_KVS) -> `kv_holding_waiting`
     - every other request -> `waiting`, including the blocked statuses (grammar, remote KV, streaming input),
       which are only additionally recorded in the `deferred_waiting` set
   Scheduler.get_num_unfinished_requests (UNPAUSED) counts every such request once.
   The DP worker's GET_PENDING_PREFILL_TOKENS and GET_REQUEST_COUNTS read `running` and `waiting` only.
-  Any other behaviour of the installed vLLM is an unsupported shape: install raises RuntimeError and names it.
+  Any other behaviour of the installed vLLM is an unsupported shape: install raises RuntimeError naming the
+  installed vLLM version, its scheduler.py and every probe case that did not match.
 
 The mirror (value-exact: same rank for every request, same count for every query):
   1. ROUTING. A burst is a run of ADD_REQUESTs with no state-changing command in between. At the first add
@@ -45,7 +46,9 @@ The mirror (value-exact: same rank for every request, same count for every query
      drained, oldest first, by the wrapped _get_result before ANY other read from that rank, or as soon as a
      rank has W outstanding (DP_SCHED_ROUTE_MIRROR_WINDOW, default and maximum 64, which stays well inside a
      default socket send buffer, so a worker never blocks on its ack write while we block on a send). A worker
-     error in place of an ack is raised by that drain, with a note naming the request.
+     error in place of an ack is raised by that drain, with a note naming the request. shutdown() first reads
+     the outstanding acks of every rank (also of a rank whose worker already exited; the stock shutdown skips
+     those), then runs the stock shutdown, and only then raises the first worker error found in them.
   3. UNFINISHED COUNT. A dict of live request ids: + on every ADD_REQUEST, - on every EngineCoreOutput with a
      finish_reason (and every id in EngineCoreOutputs.finished_requests) returned by update_from_output, and
      on every FinishedRequestInfo returned by finish_requests. A local 0 is always confirmed with the stock IPC
@@ -307,6 +310,7 @@ def install(log, module=None):
     if module is None:
         from tpu_inference.core.sched import dp_scheduler as module
     M = module
+    import vllm
     from vllm.v1.core.sched import scheduler as VSM
     from vllm.v1.request import RequestStatus
 
@@ -319,6 +323,7 @@ def install(log, module=None):
     bad = []
     s_dp = _sha(f_dp) if f_dp else "?"
     s_vs = _sha(f_vs) if f_vs else "?"
+    vllm_version = getattr(vllm, "__version__", "?")
     for name, needles in _ANCHORS_DP.items():
         try:
             src = inspect.getsource(_resolve(M, name))
@@ -332,8 +337,9 @@ def install(log, module=None):
     vllm_bad = _verify_vllm_scheduler(VS)
     if vllm_bad:
         bad.append(
-            "installed vLLM Scheduler (%s) does not match the modelled shape [%s]: %s"
-            % (f_vs, _SUPPORTED_VLLM, "; ".join(vllm_bad)))
+            "installed vLLM %s Scheduler (%s, sha256 %s) does not match the modelled shape [%s]: %s"
+            % (vllm_version, f_vs, s_vs[:12], _SUPPORTED_VLLM,
+               "; ".join(vllm_bad)))
     if envs.DP_SCHED_ROUTE_MIRROR_WINDOW > _MAX_WINDOW:
         bad.append("DP_SCHED_ROUTE_MIRROR_WINDOW=%d is above the maximum %d" %
                    (envs.DP_SCHED_ROUTE_MIRROR_WINDOW, _MAX_WINDOW))
@@ -357,6 +363,10 @@ def install(log, module=None):
     for n in _READ_ONLY_OPTIONAL_NAMES:
         if hasattr(SC, n):
             ro.append(getattr(SC, n))
+    WORKER_ERROR = getattr(M, "SchedulerWorkerError", None)
+    if not (isinstance(WORKER_ERROR, type)
+            and issubclass(WORKER_ERROR, Exception)):
+        bad.append("SchedulerWorkerError missing")
     if bad:
         raise RuntimeError(
             "[dp-route-mirror] FATAL: %s; refusing to install (unset DP_SCHED_ROUTE_MIRROR for the stock "
@@ -389,6 +399,7 @@ def install(log, module=None):
     o_ufo = DP.update_from_output
     o_fin = DP.finish_requests
     o_sps = DP.set_pause_state
+    o_shut = DP.shutdown
 
     # ------------------------------------------------------------------ helpers
     def _route_static_reason(self):
@@ -428,7 +439,12 @@ def install(log, module=None):
             what,
         )
 
-    def _drain(self, st, rank):
+    def _drain(self, st, rank, errors=None):
+        """Read the deferred ADD acks of `rank`, oldest first.
+
+        A worker error in place of an ack is raised with a note naming the request. With `errors` (shutdown) a
+        worker error is appended to it instead and the later acks are still read; pipe errors are raised.
+        """
         pending = st.outstanding[rank]
         while pending:
             # the message is consumed even if it carries a worker error
@@ -436,12 +452,20 @@ def install(log, module=None):
             try:
                 o_get(self, rank, ADD)
             except Exception as exc:
+                keep_reading = errors is not None and isinstance(
+                    exc, WORKER_ERROR)
+                if keep_reading:
+                    where = "read by shutdown(), raised once every rank was shut down"
+                else:
+                    where = "%d later acks still queued on that rank" % len(
+                        pending)
                 if hasattr(exc, "add_note"):
                     exc.add_note(
-                        "[dp-route-mirror] raised by the deferred ADD_REQUEST ack of request %r on rank %d "
-                        "(%d later acks still queued on that rank)" %
-                        (rid, rank, len(pending)))
-                raise
+                        "[dp-route-mirror] raised by the deferred ADD_REQUEST ack of request %r on rank %d (%s)"
+                        % (rid, rank, where))
+                if not keep_reading:
+                    raise
+                errors.append(exc)
 
     def _query(self):
         """The stock least_loaded query (prefix caching off): same commands, same order."""
@@ -728,6 +752,32 @@ def install(log, module=None):
         if st is not None:
             st.paused = pause_state != UNPAUSED
 
+    @functools.wraps(o_shut)
+    def shutdown(self):
+        st = getattr(self, "_route_mirror", None)
+        if st is None or not any(st.outstanding):
+            return o_shut(self)
+        # Read every rank's outstanding acks before the stock shutdown, including those of a rank whose worker
+        # already exited (they stay readable in the pipe; the stock shutdown skips dead ranks). A worker error found
+        # there must not stop the stock shutdown half-way (SHUTDOWN acks unread, processes not joined, pipes left
+        # open), so it is raised after the stock shutdown has run.
+        errors = []
+        for rank in range(len(st.outstanding)):
+            try:
+                _drain(self, st, rank, errors)
+            except (RuntimeError, OSError) as exc:
+                # a pipe error, handled like the stock shutdown handles one on a SHUTDOWN ack
+                st.outstanding[rank].clear()
+                log.warning(
+                    "[dp-route-mirror] rank %d: deferred ADD_REQUEST acks not read at shutdown: %s",
+                    rank, exc)
+        for exc in errors:
+            log.error("[dp-route-mirror] shutdown: %s | %s", exc,
+                      " ".join(getattr(exc, "__notes__", ())))
+        o_shut(self)
+        if errors:
+            raise errors[0]
+
     DP.__init__ = __init__
     DP._send_command = _send_command
     DP._get_result = _get_result
@@ -736,15 +786,17 @@ def install(log, module=None):
     DP.update_from_output = update_from_output
     DP.finish_requests = finish_requests
     DP.set_pause_state = set_pause_state
+    DP.shutdown = shutdown
     DP._route_mirror_installed = True
     _G["on"] = True
     _G["log"] = log
     log.info(
-        "[dp-route-mirror] ON: installed on %s.DPScheduler | dp_scheduler.py sha=%s | vllm scheduler.py "
+        "[dp-route-mirror] ON: installed on %s.DPScheduler | dp_scheduler.py sha=%s | vllm %s scheduler.py "
         "sha=%s | anchors=%d ok | vllm scheduler probe ok (%d cases) | check_bursts=%d route=%d count=%d "
         "window=%d log_every=%d%s",
         M.__name__,
         s_dp[:12],
+        vllm_version,
         s_vs[:12],
         sum(len(v) for v in _ANCHORS_DP.values()),
         2 * len(_PROBE_STATUSES),
