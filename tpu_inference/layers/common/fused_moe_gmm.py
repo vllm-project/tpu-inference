@@ -39,6 +39,7 @@ from tpu_inference.kernels.sparse_core.ragged_gather_v2 import \
 from tpu_inference.layers.common.linear import _safe_calculate_tiling
 from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.utils import as_axes
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import align_to, get_mesh_shape_product
 
@@ -1068,7 +1069,7 @@ def _one_step_all_gather_as_bits(arrays, mesh: Mesh, unit: jnp.dtype) -> tuple:
     every other axis.
     """
     axes = _attn_only_axes(mesh)
-    mlp = _as_axes(ShardingAxisName.MLP_DATA)
+    mlp = as_axes(ShardingAxisName.MLP_DATA)
 
     def _gather(*local):
         row = jax.lax.all_gather(_concat_bits(local, unit),
@@ -1157,17 +1158,11 @@ def _apply_one_step_dispatch_gather(hidden_states: jax.Array,
 _HIERARCHICAL_HIDDEN_ALIGN = 2 * 128
 
 
-def _as_axes(spec) -> tuple[str, ...]:
-    if spec is None:
-        return ()
-    return (spec, ) if isinstance(spec, str) else tuple(spec)
-
-
 def _attn_only_axes(mesh: Mesh) -> tuple[str, ...]:
     """The sharded attention-data axes that are not MLP-data axes: the axes
     the MoE dispatch gathers token rows over."""
-    mlp = set(_as_axes(ShardingAxisName.MLP_DATA))
-    return tuple(a for a in _as_axes(ShardingAxisName.ATTN_DATA)
+    mlp = set(as_axes(ShardingAxisName.MLP_DATA))
+    return tuple(a for a in as_axes(ShardingAxisName.ATTN_DATA)
                  if a not in mlp and mesh.shape.get(a, 1) > 1)
 
 
@@ -1182,8 +1177,8 @@ def _hierarchical_dispatch_plan(mesh: Mesh):
     assumed.
     """
     # Step 1 axes: attention-data axes that are not in MLP-data.
-    mlp = set(_as_axes(ShardingAxisName.MLP_DATA))
-    attn = [a for a in _as_axes(ShardingAxisName.ATTN_DATA) if a not in mlp]
+    mlp = set(as_axes(ShardingAxisName.MLP_DATA))
+    attn = [a for a in as_axes(ShardingAxisName.ATTN_DATA) if a not in mlp]
     step1 = tuple(a for a in attn if mesh.shape.get(a, 1) > 1)
     # Step 2 needs exactly one remaining axis (the one the hidden states are
     # replicated across), of even size.
@@ -1334,7 +1329,7 @@ def _apply_hierarchical_dispatch_gather(hidden_states: jax.Array,
         return (out, *routing) if routing else out
 
     args = (hidden_states, *routing)
-    in_spec, out_spec = P(tuple(_as_axes(mlp)) + step1, None), P(mlp, None)
+    in_spec, out_spec = P(tuple(as_axes(mlp)) + step1, None), P(mlp, None)
     return jax.shard_map(
         _gather_fp8 if fp8 else _gather,
         mesh=mesh,

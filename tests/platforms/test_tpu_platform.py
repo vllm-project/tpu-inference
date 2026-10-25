@@ -127,6 +127,16 @@ class TestTpuPlatform:
         assert name in TpuPlatform.additional_env_vars
         assert name in envs.environment_variables
 
+    @pytest.mark.parametrize("name", [
+        "USE_FUSED_EP_MOE_V2", "FUSED_EP_MOE_V2_CAPACITY",
+        "FUSED_EP_MOE_V2_SHARDED_PLAN"
+    ])
+    def test_additional_env_vars_covers_fused_ep_moe_v2(self, name):
+        """Workers pick the MoE backend and trace the kernel, so they need
+        its env vars."""
+        assert name in TpuPlatform.additional_env_vars
+        assert name in envs.environment_variables
+
     def test_get_device_total_memory(self):
         with pytest.raises(NotImplementedError):
             TpuPlatform.get_device_total_memory()

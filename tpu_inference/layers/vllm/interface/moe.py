@@ -54,10 +54,23 @@ def select_moe_backend_from_fused_moe_config(
 
     if envs.USE_MOE_EP_KERNEL:
         if moe.use_ep:
+            if envs.USE_FUSED_EP_MOE_V2:
+                logger.warning_once(
+                    "USE_MOE_EP_KERNEL and USE_FUSED_EP_MOE_V2 are both set; "
+                    "USE_MOE_EP_KERNEL takes priority, so fused_ep_moe_v2 is "
+                    "not used.")
             logger.info_once("[MoE]: Using fused MoE EP kernel")
             return MoEBackend.FUSED_MOE
         logger.warning_once(
             "USE_MOE_EP_KERNEL=1 but expert parallelism is not "
+            "enabled. Falling back to gmm implementation.")
+
+    if envs.USE_FUSED_EP_MOE_V2:
+        if moe.use_ep:
+            logger.info_once("[MoE]: Using fused_ep_moe_v2 (tokamax) kernel")
+            return MoEBackend.FUSED_EP_MOE_V2
+        logger.warning_once(
+            "USE_FUSED_EP_MOE_V2=1 but expert parallelism is not "
             "enabled. Falling back to gmm implementation.")
 
     if moe.use_ep:
