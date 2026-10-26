@@ -127,7 +127,12 @@ class DeepseekV4MoE(nn.Module):
 
         self.gate.e_score_correction_bias = None
         self.gate.tid2eid = None
-        is_hash_moe = extract_layer_index(prefix) < config.num_hash_layers
+        # transformers' native DeepseekV4Config folds the legacy
+        # `num_hash_layers` kwarg into `mlp_layer_types`; fall back to it.
+        num_hash_layers = getattr(config, "num_hash_layers", None)
+        if num_hash_layers is None:
+            num_hash_layers = config.mlp_layer_types.count("hash_moe")
+        is_hash_moe = extract_layer_index(prefix) < num_hash_layers
         self.hash_indices_dtype = torch.int32
         if is_hash_moe:
             # hash MoE doesn't use e_score_correction_bias
