@@ -178,3 +178,62 @@ class TestMultiHostLockstep:
                 "sync_global_devices") as mock_sync:
             manager._flush_compilations()
         mock_sync.assert_not_called()
+
+
+class TestCreateDummyIntermediateTensors:
+    """Verify `_create_dummy_intermediate_tensors` uses `make_empty_intermediate_tensors`
+    when available on `runner.model.model.vllm_model` and falls back to 2D tensors otherwise."""
+
+    def _make_manager(self, vllm_model=None, hc_mult=None):
+        devices = np.array(jax.devices()[:1]).reshape(
+            (1, ) * len(MESH_AXIS_NAMES))
+        mesh = Mesh(devices, MESH_AXIS_NAMES)
+        hf_config = SimpleNamespace(hc_mult=hc_mult)
+        runner = SimpleNamespace(
+            mesh=mesh,
+            model=SimpleNamespace(model=SimpleNamespace(vllm_model=vllm_model))
+            if vllm_model is not None else None,
+            vllm_config=SimpleNamespace(
+                model_config=SimpleNamespace(hf_config=hf_config),
+                parallel_config=SimpleNamespace(tensor_parallel_size=1),
+            ),
+        )
+        manager = CompilationManager.__new__(CompilationManager)
+        manager.runner = runner
+        return manager
+
+    def test_uses_make_empty_intermediate_tensors_for_3d_mhc(self):
+        import torch
+        from vllm.sequence import IntermediateTensors
+
+        called_with = {}
+
+        def make_empty(batch_size, dtype, device):
+            called_with["batch_size"] = batch_size
+            return IntermediateTensors({
+                "hidden_states":
+                torch.empty((batch_size, 4, 128), dtype=dtype, device=device),
+            })
+
+        vllm_model = SimpleNamespace(
+            make_empty_intermediate_tensors=make_empty)
+        manager = self._make_manager(vllm_model=vllm_model)
+
+        it = manager._create_dummy_intermediate_tensors(num_tokens=16,
+                                                        hidden_size=128)
+        assert called_with["batch_size"] == 16
+        assert set(it.keys()) == {"hidden_states"}
+        assert it["hidden_states"].shape == (16, 4, 128)
+        assert it["hidden_states"].sharding.spec == PartitionSpec(
+            ShardingAxisName.ATTN_DATA, None, None)
+
+    def test_falls_back_to_2d_hidden_states_and_residual(self):
+        manager = self._make_manager(vllm_model=None, hc_mult=None)
+
+        it = manager._create_dummy_intermediate_tensors(num_tokens=16,
+                                                        hidden_size=128)
+        assert set(it.keys()) == {"hidden_states", "residual"}
+        for key in ("hidden_states", "residual"):
+            assert it[key].shape == (16, 128)
+            assert it[key].sharding.spec == PartitionSpec(
+                ShardingAxisName.ATTN_DATA, None)

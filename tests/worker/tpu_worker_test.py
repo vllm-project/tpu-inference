@@ -384,7 +384,7 @@ class TestTPUWorker:
     @patch('tpu_inference.worker.tpu_worker.TPUModelRunner')
     def test_execute_model_non_driver_returns_none(self, mock_runner_cls,
                                                    mock_vllm_config):
-        """Tests that a non-driver worker executes the model but returns None."""
+        """Tests that a non-driver, non-last-rank worker executes the model but returns None."""
         worker = TPUWorker(
             vllm_config=mock_vllm_config,
             local_rank=0,
@@ -392,12 +392,45 @@ class TestTPUWorker:
             distributed_init_method="test",
             is_driver_worker=False  # Not a driver
         )
+        worker.is_last_rank = False
         worker.model_runner = mock_runner_cls.return_value
         mock_scheduler_input = MagicMock()
 
         result = worker.execute_model(mock_scheduler_input)
 
         assert result is None
+
+    @patch('tpu_inference.worker.tpu_worker.get_pp_group')
+    @patch('tpu_inference.worker.tpu_worker.TPUModelRunner')
+    def test_execute_model_pp_last_rank_non_driver_returns_output(
+            self, mock_runner_cls, mock_pp_group, mock_vllm_config):
+        """Tests that on the last PP rank, even a non-driver worker returns ModelRunnerOutput."""
+        mock_vllm_config.parallel_config.pipeline_parallel_size = 2
+        with patch('tpu_inference.tpu_info.get_num_cores_per_chip',
+                   return_value=1):
+            worker = TPUWorker(
+                vllm_config=mock_vllm_config,
+                local_rank=0,
+                rank=1,
+                distributed_init_method="test",
+                is_driver_worker=False,
+            )
+        worker.is_first_rank = False
+        worker.is_last_rank = True
+        worker.model_runner = mock_runner_cls.return_value
+        worker.model_runner.get_uuid_for_jax_transfer.return_value = "uuid-0"
+        worker.model_runner.get_intermediate_tensor_spec.return_value = {}
+        mock_pp_group.return_value.recv_tensor_dict.return_value = {
+            "hidden_states": MagicMock()
+        }
+        mock_model_output = "last_pp_rank_output"
+        worker.model_runner.execute_model.return_value = mock_model_output
+        mock_scheduler_input = MagicMock()
+
+        result = worker.execute_model(mock_scheduler_input)
+
+        assert result == mock_model_output
+        assert worker.step_counter == 1
 
     def test_take_draft_token_ids(self, mock_vllm_config):
         """Tests that take_draft_token_ids correctly passes through from the runner."""

@@ -1306,7 +1306,9 @@ class TestTPUJaxRunnerPadding:
         self.runner.num_tokens_paddings_per_dp = [8, 16, 32]
         self.runner.dtype = "bfloat16"
         self.runner.mesh = MagicMock()
+        self.runner.model = None
         self.runner.model_config = MagicMock()
+        self.runner.model_config.hf_config.hc_mult = None
         self.runner.model_config.get_hidden_size.return_value = 128
 
         # Bind the actual methods to our mock
@@ -1354,30 +1356,69 @@ class TestTPUJaxRunnerPadding:
         assert padded == 32
 
     def test_get_intermediate_tensor_spec(self):
-        """Test that get_intermediate_tensor_spec returns correct shape."""
+        """Test that get_intermediate_tensor_spec returns correct 2D shape when hc_mult is not set."""
+        from types import SimpleNamespace
+
         mock_output = MagicMock()
         mock_output.total_num_scheduled_tokens = 12
         mock_output.max_num_scheduled_tokens_per_dp_rank = 6
 
-        # Create a mock for ShapeDtypeStruct to avoid JAX validation
-        mock_spec_instance = MagicMock()
-        mock_spec_instance.shape = (16, 128)
-        mock_spec_instance.dtype = 'float32'
-        mock_spec_instance.sharding = 'mock_sharding'
-
         with patch('tpu_inference.runner.tpu_runner.to_jax_dtype',
                    return_value='float32'), \
              patch('tpu_inference.runner.tpu_runner.NamedSharding', return_value='mock_sharding'), \
-             patch('tpu_inference.runner.tpu_runner.PartitionSpec', return_value='mock_spec'), \
-             patch('jax.ShapeDtypeStruct', return_value=mock_spec_instance):
+             patch('tpu_inference.runner.tpu_runner.PartitionSpec', return_value='mock_spec') as mock_pspec, \
+             patch('jax.ShapeDtypeStruct',
+                   side_effect=lambda shape, dtype, sharding: SimpleNamespace(
+                       shape=shape, dtype=dtype, sharding=sharding)):
 
             spec_dict = self.runner.get_intermediate_tensor_spec(mock_output)
 
-            assert "hidden_states" in spec_dict
+            assert set(spec_dict.keys()) == {"hidden_states", "residual"}
+            for key in ("hidden_states", "residual"):
+                spec = spec_dict[key]
+                assert spec.shape == (16, 128)
+                assert spec.dtype == 'float32'
+                assert spec.sharding == 'mock_sharding'
+            mock_pspec.assert_called_with(ShardingAxisName.ATTN_DATA, None)
+
+    def test_get_intermediate_tensor_spec_deepseek_v4_hc_mult(self):
+        """Test that get_intermediate_tensor_spec returns 3D shape (tokens, hc_mult, hidden_size) via vllm_model.make_empty_intermediate_tensors."""
+        from types import SimpleNamespace
+
+        import torch
+        from vllm.sequence import IntermediateTensors
+
+        mock_output = MagicMock()
+        mock_output.total_num_scheduled_tokens = 12
+        mock_output.max_num_scheduled_tokens_per_dp_rank = 6
+
+        mock_vllm_model = MagicMock()
+        mock_vllm_model.make_empty_intermediate_tensors.side_effect = (
+            lambda batch_size, dtype, device: IntermediateTensors({
+                "hidden_states":
+                torch.zeros((batch_size, 4, 128), dtype=dtype),
+            }))
+        self.runner.model = SimpleNamespace(
+            model=SimpleNamespace(vllm_model=mock_vllm_model))
+
+        with patch('tpu_inference.runner.tpu_runner.to_jax_dtype', return_value='bfloat16'), \
+             patch('tpu_inference.runner.tpu_runner.NamedSharding', return_value='mock_sharding'), \
+             patch('tpu_inference.runner.tpu_runner.PartitionSpec', return_value='mock_spec') as mock_pspec, \
+             patch('jax.ShapeDtypeStruct',
+                   side_effect=lambda shape, dtype, sharding: SimpleNamespace(
+                       shape=shape, dtype=dtype, sharding=sharding)):
+
+            spec_dict = self.runner.get_intermediate_tensor_spec(mock_output)
+
+            mock_vllm_model.make_empty_intermediate_tensors.assert_called_once(
+            )
+            assert set(spec_dict.keys()) == {"hidden_states"}
             spec = spec_dict["hidden_states"]
-            assert spec.shape == (16, 128)
-            assert spec.dtype == 'float32'
+            assert spec.shape == (16, 4, 128)
+            assert spec.dtype == 'bfloat16'
             assert spec.sharding == 'mock_sharding'
+            mock_pspec.assert_called_once_with(ShardingAxisName.ATTN_DATA,
+                                               None, None)
 
 
 class TestSamplingMetadataPassthrough:
