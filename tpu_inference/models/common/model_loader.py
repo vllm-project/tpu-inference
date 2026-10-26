@@ -320,10 +320,12 @@ def get_flax_model(
     mesh: Mesh,
     is_draft_model: bool = False,
 ) -> ModelInterface:
+    target_quant_config = vllm_config.quant_config
     original_dtype = vllm_config.model_config.dtype
     model_dtype = to_jax_dtype(original_dtype)
     vllm_config.model_config.dtype = model_dtype
-    vllm_config.quant_config = get_tpu_quantization_config(vllm_config)
+    vllm_config.quant_config = get_tpu_quantization_config(
+        vllm_config, is_draft_model=is_draft_model)
 
     # Only perform qwix quantization if it is jax model.
     if vllm_config.model_config:
@@ -353,6 +355,8 @@ def get_flax_model(
                                pooler=pooler,
                                is_draft_model=is_draft_model)
     vllm_config.model_config.dtype = original_dtype
+    if is_draft_model:
+        vllm_config.quant_config = target_quant_config
     hidden_states_sharding = NamedSharding(mesh,
                                            PartitionSpec(
                                                ShardingAxisName.ATTN_DATA,
