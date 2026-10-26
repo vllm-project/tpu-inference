@@ -59,6 +59,11 @@ def select_moe_backend_from_fused_moe_config(
                     "USE_MOE_EP_KERNEL and USE_FUSED_EP_MOE_V2 are both set; "
                     "USE_MOE_EP_KERNEL takes priority, so fused_ep_moe_v2 is "
                     "not used.")
+            if envs.USE_ROUTING_MOE:
+                logger.warning_once(
+                    "USE_MOE_EP_KERNEL and USE_ROUTING_MOE are both set; "
+                    "USE_MOE_EP_KERNEL takes priority, so routing_moe is not "
+                    "used.")
             logger.info_once("[MoE]: Using fused MoE EP kernel")
             return MoEBackend.FUSED_MOE
         logger.warning_once(
@@ -67,11 +72,23 @@ def select_moe_backend_from_fused_moe_config(
 
     if envs.USE_FUSED_EP_MOE_V2:
         if moe.use_ep:
+            if envs.USE_ROUTING_MOE:
+                logger.warning_once(
+                    "USE_FUSED_EP_MOE_V2 and USE_ROUTING_MOE are both set; "
+                    "USE_FUSED_EP_MOE_V2 takes priority, so routing_moe is "
+                    "not used.")
             logger.info_once("[MoE]: Using fused_ep_moe_v2 (tokamax) kernel")
             return MoEBackend.FUSED_EP_MOE_V2
         logger.warning_once(
             "USE_FUSED_EP_MOE_V2=1 but expert parallelism is not "
             "enabled. Falling back to gmm implementation.")
+
+    if envs.USE_ROUTING_MOE:
+        if moe.use_ep:
+            logger.info_once("[MoE]: Using routing_moe (tokamax) kernel")
+            return MoEBackend.ROUTING_MOE
+        logger.warning_once("USE_ROUTING_MOE=1 but expert parallelism is not "
+                            "enabled. Falling back to gmm implementation.")
 
     if moe.use_ep:
         logger.info_once("[MoE]: Using GMM EP kernel")

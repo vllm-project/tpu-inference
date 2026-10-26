@@ -137,6 +137,11 @@ class TestTpuPlatform:
         assert name in TpuPlatform.additional_env_vars
         assert name in envs.environment_variables
 
+    def test_additional_env_vars_covers_routing_moe(self):
+        """Workers pick the MoE backend, so they need its env var."""
+        assert "USE_ROUTING_MOE" in TpuPlatform.additional_env_vars
+        assert "USE_ROUTING_MOE" in envs.environment_variables
+
     def test_get_device_total_memory(self):
         with pytest.raises(NotImplementedError):
             TpuPlatform.get_device_total_memory()

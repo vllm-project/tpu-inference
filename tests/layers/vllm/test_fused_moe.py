@@ -75,7 +75,8 @@ class TestFusedOutputIsReduced:
             assert runner._fused_output_is_reduced is True
 
     @pytest.mark.parametrize("backend", [
-        MoEBackend.FUSED_MOE, MoEBackend.DENSE_MAT, MoEBackend.FUSED_EP_MOE_V2
+        MoEBackend.FUSED_MOE, MoEBackend.DENSE_MAT, MoEBackend.FUSED_EP_MOE_V2,
+        MoEBackend.ROUTING_MOE
     ])
     def test_true_for_non_gmm_backends(self, backend):
         # Only GMM_EP / GMM_TP defer the all-reduce; others always reduce.

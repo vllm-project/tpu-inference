@@ -94,6 +94,7 @@ if TYPE_CHECKING:
     USE_FUSED_EP_MOE_V2: bool = False
     FUSED_EP_MOE_V2_CAPACITY: int = 128
     FUSED_EP_MOE_V2_SHARDED_PLAN: bool = True
+    USE_ROUTING_MOE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
@@ -607,6 +608,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # instead of all of them. Faster at every size measured on Qwen3.8-2.4T.
     "FUSED_EP_MOE_V2_SHARDED_PLAN":
     env_bool("FUSED_EP_MOE_V2_SHARDED_PLAN", default=True),
+    # Run EP MoE layers with tokamax's routing_moe kernel
+    # (MoEBackend.ROUTING_MOE) instead of the GMM path. Supports fp8 weights
+    # with per-channel scales and bf16 weights; any other layer raises an error.
+    # Only vLLM-path models read this flag; USE_MOE_EP_KERNEL and
+    # USE_FUSED_EP_MOE_V2 take priority. See layers/common/routing_moe.py.
+    "USE_ROUTING_MOE":
+    env_bool("USE_ROUTING_MOE", default=False),
     # Gap between token-bucket padding sizes for TPU precompilation. When 0,
     # buckets grow as powers of two; otherwise buckets increase by this gap
     # once past the power-of-two ramp. Previously provided by vllm.envs, which

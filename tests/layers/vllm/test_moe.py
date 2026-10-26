@@ -57,7 +57,9 @@ def test_select_moe_backend_logic(monkeypatch, mock_moe_config,
     """
     # Use patch as a context manager to limit the scope of the change to this block.
     # This avoids using monkeypatch and ensures the mock is cleaned up immediately.
-    with patch("tpu_inference.envs.USE_MOE_EP_KERNEL", env_use_ep_kernel):
+    with (patch("tpu_inference.envs.USE_MOE_EP_KERNEL", env_use_ep_kernel),
+          patch("tpu_inference.envs.USE_FUSED_EP_MOE_V2",
+                False), patch("tpu_inference.envs.USE_ROUTING_MOE", False)):
         mock_moe_config.use_ep = config_use_ep
 
         result = select_moe_backend_from_fused_moe_config(mock_moe_config)
@@ -89,8 +91,54 @@ def test_select_warns_when_both_kernels_set(mock_moe_config):
     mock_moe_config.use_ep = True
     with (patch("tpu_inference.envs.USE_FUSED_EP_MOE_V2",
                 True), patch("tpu_inference.envs.USE_MOE_EP_KERNEL", True),
-          patch("tpu_inference.layers.vllm.interface.moe.logger") as logger):
+          patch("tpu_inference.envs.USE_ROUTING_MOE",
+                False), patch("tpu_inference.layers.vllm.interface.moe.logger")
+          as logger):
         result = select_moe_backend_from_fused_moe_config(mock_moe_config)
     assert result == MoEBackend.FUSED_MOE
     logger.warning_once.assert_called_once()
     assert "USE_FUSED_EP_MOE_V2" in logger.warning_once.call_args.args[0]
+
+
+@pytest.mark.parametrize(
+    "env_use_routing, env_use_v2, env_use_ep_kernel, config_use_ep, "
+    "expected_backend",
+    [
+        # USE_ROUTING_MOE with EP -> ROUTING_MOE
+        (True, False, False, True, MoEBackend.ROUTING_MOE),
+        # Without EP it falls back to GMM_TP
+        (True, False, False, False, MoEBackend.GMM_TP),
+        # USE_FUSED_EP_MOE_V2 and USE_MOE_EP_KERNEL take precedence
+        (True, True, False, True, MoEBackend.FUSED_EP_MOE_V2),
+        (True, False, True, True, MoEBackend.FUSED_MOE),
+    ])
+def test_select_routing_moe(mock_moe_config, env_use_routing, env_use_v2,
+                            env_use_ep_kernel, config_use_ep,
+                            expected_backend):
+    with (patch("tpu_inference.envs.USE_ROUTING_MOE", env_use_routing),
+          patch("tpu_inference.envs.USE_FUSED_EP_MOE_V2", env_use_v2),
+          patch("tpu_inference.envs.USE_MOE_EP_KERNEL", env_use_ep_kernel)):
+        mock_moe_config.use_ep = config_use_ep
+        result = select_moe_backend_from_fused_moe_config(mock_moe_config)
+    assert result == expected_backend
+
+
+@pytest.mark.parametrize("env_use_v2, env_use_ep_kernel, expected_backend", [
+    (True, False, MoEBackend.FUSED_EP_MOE_V2),
+    (False, True, MoEBackend.FUSED_MOE),
+])
+def test_select_warns_when_routing_moe_is_overridden(mock_moe_config,
+                                                     env_use_v2,
+                                                     env_use_ep_kernel,
+                                                     expected_backend):
+    """With USE_ROUTING_MOE and a higher-priority kernel flag set, the other
+    kernel runs and a warning names USE_ROUTING_MOE."""
+    mock_moe_config.use_ep = True
+    with (patch("tpu_inference.envs.USE_ROUTING_MOE", True),
+          patch("tpu_inference.envs.USE_FUSED_EP_MOE_V2", env_use_v2),
+          patch("tpu_inference.envs.USE_MOE_EP_KERNEL", env_use_ep_kernel),
+          patch("tpu_inference.layers.vllm.interface.moe.logger") as logger):
+        result = select_moe_backend_from_fused_moe_config(mock_moe_config)
+    assert result == expected_backend
+    logger.warning_once.assert_called_once()
+    assert "USE_ROUTING_MOE" in logger.warning_once.call_args.args[0]

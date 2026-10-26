@@ -214,6 +214,7 @@ class TpuPlatform(Platform):
         "USE_FUSED_EP_MOE_V2",
         "FUSED_EP_MOE_V2_CAPACITY",
         "FUSED_EP_MOE_V2_SHARDED_PLAN",
+        "USE_ROUTING_MOE",
         "TPU_CHIPS_PER_HOST_BOUNDS",
         "TPU_HOST_BOUNDS",
         "TPU_MULTIHOST_BACKEND",
