@@ -517,6 +517,11 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
 
         return self._model_runner_output
 
+    def get_kv_connector_output(self) -> Optional[KVConnectorOutput]:
+        """Get the KV connector output for this async output.
+        """
+        return self._model_runner_output.kv_connector_output
+
 
 @dataclass
 class AsyncPreResults:
