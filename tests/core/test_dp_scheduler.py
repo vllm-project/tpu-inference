@@ -58,6 +58,10 @@ class TestDPScheduler:
         config.cache_config.enable_prefix_caching = False
         config.cache_config.prefix_caching_hash_algo = "sha256"
         config.cache_config.mamba_num_blocks = None
+        config.compilation_config = MagicMock()
+        config.compilation_config.static_forward_context = {}
+        config.compilation_config.static_all_moe_layers = []
+        config.device_config = MagicMock(slice=None)
         return config
 
     @pytest.fixture
