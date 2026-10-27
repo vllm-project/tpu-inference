@@ -197,6 +197,11 @@ upload_kube_pipeline() {
         for lane in ${CI_LANES}; do
             case "${lane}" in
                 jax)
+                    if [[ "${TPU_VERSION:-tpu6e}" == "tpu7x" ]]; then
+                        export TESTS_GROUP_LABEL="${TESTS_GROUP_LABEL:-[jax] TPU7x Tests Group}"
+                    else
+                        export TESTS_GROUP_LABEL="${TESTS_GROUP_LABEL:-[jax] TPU6e Tests Group}"
+                    fi
                     upload_with_priority .buildkite/pipeline_jax_kube.yml "$JOB_PRIORITY"
                     if [[ "${TPU_VERSION:-tpu6e}" == "tpu6e" ]]; then
                         upload_with_priority .buildkite/pipeline_pypi_kube.yml "$JOB_PRIORITY"
