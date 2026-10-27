@@ -34,7 +34,7 @@ steps:
     depends_on: preflight
     if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
     agents: *queue
-    timeout_in_minutes: 180
+    timeout_in_minutes: 60
     commands:
       - bash .buildkite/release/build_images.sh
 
