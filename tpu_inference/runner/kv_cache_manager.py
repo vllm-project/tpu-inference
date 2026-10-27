@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, List
 
 import jax
 import jax.numpy as jnp
+import torch
 import vllm.envs as envs
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import t2j_dtype
@@ -48,11 +49,9 @@ from tpu_inference.models.common.kv_share import compute_kv_share_map
 from tpu_inference.offload.utils import get_kv_connector_cache_layout
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
-from tpu_inference.runner.kv_cache import (KVCacheMetadata,
-                                           create_kv_cache_of_shape,
-                                           create_kv_caches,
-                                           create_mamba_cache,
-                                           get_attention_page_size_bytes)
+from tpu_inference.runner.kv_cache import (
+    DEFAULT_KV_CACHE_DTYPE, KVCacheMetadata, create_kv_cache_of_shape,
+    create_kv_caches, create_mamba_cache, get_attention_page_size_bytes)
 
 if TYPE_CHECKING:
     from vllm.v1.request import Request
@@ -106,6 +105,49 @@ class KVCacheManager:
         self._mamba_num_blocks: int | None = None
         self.actual_mamba_num_blocks: int | None = None
 
+    def _check_quantized_kv_cache_packing(self, block_size: int,
+                                          num_kv_heads: int, head_size: int,
+                                          page_size_bytes: int) -> None:
+        jax_dtype = common_utils.to_jax_dtype(self.runner.kv_cache_dtype)
+        if common_utils.get_dtype_packing(
+                jax_dtype) > common_utils.get_dtype_packing(
+                    DEFAULT_KV_CACHE_DTYPE):
+            bf16_page_size_bytes = get_attention_page_size_bytes(
+                self.runner.mesh,
+                block_size,
+                num_kv_heads,
+                head_size,
+                torch.bfloat16,
+                self.use_mla,
+                self.runner.attention_backend,
+            )
+            if page_size_bytes >= bf16_page_size_bytes:
+                kv_head_shards = common_utils.get_mesh_shape_product(
+                    self.runner.mesh, ShardingAxisName.KV_HEAD)
+                packing = common_utils.get_dtype_packing(jax_dtype)
+                bf16_packing = common_utils.get_dtype_packing(
+                    DEFAULT_KV_CACHE_DTYPE)
+                logger.warning_once(
+                    "Quantized KV cache dtype %s was requested and is allocated "
+                    "as %s (not bfloat16). However, due to 32-bit VMEM sublane packing "
+                    "(packing=%d vs %d for bfloat16), per-shard KV heads "
+                    "(num_kv_heads=%d, kv_head_shards=%d, head_size=%d) are padded "
+                    "such that each page requires %d bytes, yielding 0%% memory savings "
+                    "compared to bfloat16 (%d bytes). To avoid quantization overhead and "
+                    "potential accuracy loss with zero memory reduction, consider using "
+                    "--kv-cache-dtype auto, reducing tensor parallel size below num_kv_heads, "
+                    "or enabling enable_dp_attention.",
+                    self.runner.kv_cache_dtype,
+                    jax_dtype,
+                    packing,
+                    bf16_packing,
+                    num_kv_heads,
+                    kv_head_shards,
+                    head_size,
+                    page_size_bytes,
+                    bf16_page_size_bytes,
+                )
+
     def _create_attention_spec(
             self,
             block_size: int,
@@ -120,7 +162,7 @@ class KVCacheManager:
             page_size_padded = (self._hybrid_uniform_page_size_bytes
                                 if self._hybrid_uniform_page_size_bytes
                                 is not None else int(page_size_bytes))
-            return MLAAttentionSpec(block_size=block_size,
+            spec = MLAAttentionSpec(block_size=block_size,
                                     num_kv_heads=1,
                                     head_size=head_size,
                                     dtype=self.runner.kv_cache_dtype,
@@ -136,18 +178,26 @@ class KVCacheManager:
                                 if self._hybrid_uniform_page_size_bytes
                                 is not None else int(page_size_bytes))
             if sliding_window is not None:
-                return SlidingWindowSpec(block_size=block_size,
+                spec = SlidingWindowSpec(block_size=block_size,
                                          num_kv_heads=num_kv_heads,
                                          head_size=head_size,
                                          dtype=self.runner.kv_cache_dtype,
                                          sliding_window=sliding_window,
                                          page_size_padded=page_size_padded)
             else:
-                return FullAttentionSpec(block_size=block_size,
+                spec = FullAttentionSpec(block_size=block_size,
                                          num_kv_heads=num_kv_heads,
                                          head_size=head_size,
                                          dtype=self.runner.kv_cache_dtype,
                                          page_size_padded=page_size_padded)
+
+        self._check_quantized_kv_cache_packing(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            page_size_bytes=int(page_size_bytes),
+        )
+        return spec
 
     def update_mamba_page_size_padded(
             self, layers: dict[str, AttentionLayerBase]) -> None:
@@ -975,8 +1025,15 @@ class KVCacheManager:
                             None, *([None] * (len(cache_shape) - 1)))
 
                     sharding = NamedSharding(self.runner.mesh, spec)
-                    mamba_states.append(
-                        create_mamba_cache(cache_shape, jax_dtype, sharding))
+                    state = create_mamba_cache(cache_shape, jax_dtype,
+                                               sharding)
+                    expected_mamba_dtype = common_utils.to_jax_dtype(dtype)
+                    if state.dtype != expected_mamba_dtype:
+                        raise ValueError(
+                            f"Allocated Mamba state dtype {state.dtype} does not match "
+                            f"expected dtype {expected_mamba_dtype} for layer {first_layer_name} "
+                            f"(state index {state_index}).")
+                    mamba_states.append(state)
 
                 metadata["mamba"].count += 1
                 if metadata["mamba"].shape is None:
@@ -1003,6 +1060,13 @@ class KVCacheManager:
                     use_mla=self.use_mla,
                     attention_backend=self.runner.attention_backend,
                 )[0]
+                expected_attn_dtype = common_utils.to_jax_dtype(
+                    layer_spec.dtype)
+                if kv_cache.dtype != expected_attn_dtype:
+                    raise ValueError(
+                        f"Allocated KV cache dtype {kv_cache.dtype} does not match "
+                        f"expected dtype {expected_attn_dtype} for layer {first_layer_name} "
+                        f"(requested layer spec dtype: {layer_spec.dtype}).")
                 kv_caches.append(kv_cache)
 
                 metadata["regular_attn"].count += 1
