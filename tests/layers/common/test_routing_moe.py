@@ -22,6 +22,7 @@ from unittest import mock
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from jax.sharding import Mesh
 
@@ -33,6 +34,7 @@ from tests.layers.common.test_fused_ep_moe_v2 import (HIDDEN, INTER,
 from tests.layers.common.test_moe_hierarchical_dispatch import (_make_mesh,
                                                                 _mesh_id)
 from tpu_inference.layers.common import moe, routing_moe
+from tpu_inference.layers.common.fused_moe_gmm import select_experts
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, _get_moe_weight_shardings)
@@ -68,10 +70,10 @@ def tokamax_kernel():
     """Skip tests that run the kernel if the installed tokamax doesn't have
     it."""
     pytest.importorskip(
-        "tokamax._src.ops.experimental.routing_moe.layer.monolithic")
+        "tokamax._src.ops.experimental.routing_moe.layer.modular")
 
 
-def _run_kernel(mesh: Mesh, x, gating, w1, w2, s1, s2):
+def _run_kernel(mesh: Mesh, x, gating, w1, w2, s1, s2, **routing):
     with jax.set_mesh(mesh):
         f = jax.jit(
             lambda *a: routing_moe.routing_moe_func(*a,
@@ -79,7 +81,8 @@ def _run_kernel(mesh: Mesh, x, gating, w1, w2, s1, s2):
                                                     renormalize=True,
                                                     mesh=mesh,
                                                     activation="silu",
-                                                    scoring_fn="softmax"))
+                                                    scoring_fn="softmax",
+                                                    **routing))
         return jax.block_until_ready(f(x, w1, w2, s1, s2, gating))
 
 
@@ -162,12 +165,10 @@ def test_rows_not_divisible_by_replicas():
     ("inter_128", "intermediate sizes"),
     ("experts", "split evenly"),
     ("data_axis", "expert axes"),
-    ("hash_topk", "by hash"),
-    ("score_bias", "score correction bias"),
-    ("random_routing", "FORCE_MOE_RANDOM_ROUTING"),
+    ("hash_topk", "hash routing"),
     ("approx_topk", "MOE_APPROX_TOPK"),
+    ("random_routing", "FORCE_MOE_RANDOM_ROUTING"),
     ("activation", "only silu"),
-    ("scoring_fn", "doesn't score"),
 ])
 def test_unsupported_reason(case, want):
     """Each check refuses its case with its reason; one device is enough for
@@ -207,9 +208,7 @@ def test_unsupported_reason(case, want):
             w2, s1, s2,
             jnp.zeros((NUM_EXPERTS, 1, 2 * INTER)) if case == "bias" else None,
             None, "swigluoai" if case == "activation" else "silu",
-            "noaux_tc" if case == "scoring_fn" else "softmax",
-            jnp.zeros((8, TOPK), jnp.int32) if case == "hash_topk" else None,
-            jnp.zeros((NUM_EXPERTS, )) if case == "score_bias" else None)
+            jnp.zeros((8, TOPK), jnp.int32) if case == "hash_topk" else None)
     if want is None:
         assert reason is None, reason
     else:
@@ -223,28 +222,29 @@ def test_moe_apply_dispatch():
     x, gating = _inputs(mesh, 512)
     w1, w2, s1, s2 = _weights(mesh, True)
     weights = FusedMoEWeights(w1, s1, None, w2, s2, None)
+    extra = dict(e_score_correction_bias=jnp.zeros((NUM_EXPERTS, )))
     with (mock.patch.object(routing_moe,
                             "routing_moe_func",
                             autospec=True,
                             return_value="kernel") as
           kernel, mock.patch.object(moe, "fused_moe_func") as gmm):
         out = moe_apply(_layer(), x, gating, weights, MoEBackend.ROUTING_MOE,
-                        mesh, {})
+                        mesh, extra)
     assert out == "kernel" and not gmm.called
     kwargs = kernel.call_args.kwargs
     assert kwargs["w1"] is w1 and kwargs["w2_scale"] is s2
-    assert kwargs["topk"] == TOPK and kwargs["activation"] == "silu"
-    assert kwargs["mesh"] is mesh and kwargs["scoring_fn"] == "softmax"
+    assert kwargs["gating_output"] is gating and kwargs["topk"] == TOPK
+    assert kwargs["mesh"] is mesh and kwargs["activation"] == "silu"
+    assert kwargs["scoring_fn"] == "softmax"
+    assert (kwargs["expert_score_correction_bias"]
+            is extra["e_score_correction_bias"])
 
 
 @pytest.mark.parametrize("extra, want", [
     ({}, "per output channel"),
     ({
         "hash_based_topk_indices": jnp.zeros((8, TOPK), jnp.int32)
-    }, "by hash"),
-    ({
-        "e_score_correction_bias": jnp.zeros((NUM_EXPERTS, ))
-    }, "score correction bias"),
+    }, "hash routing"),
 ])
 def test_moe_apply_refuses_an_unsupported_layer(extra, want):
     """A layer the kernel can't run raises, naming the reason, rather than
@@ -258,3 +258,39 @@ def test_moe_apply_refuses_an_unsupported_layer(extra, want):
         moe_apply(_layer(), x, gating, weights, MoEBackend.ROUTING_MOE, mesh,
                   extra)
     assert not gmm.called
+
+
+def _fake_kernel(x, topk_weights, topk_indices, *args, **kwargs):
+    """Stands in for tokamax's routing_moe: writes each row's routing into its
+    output row, so the test can see which routing reached which token."""
+    del args, kwargs
+    out = jnp.zeros(x.shape, jnp.float32)
+    out = out.at[:, :TOPK].set(topk_indices.astype(jnp.float32))
+    return out.at[:, TOPK:2 * TOPK].set(topk_weights.astype(jnp.float32))
+
+
+@requires_4_devices
+@pytest.mark.usefixtures("tokamax_kernel")
+@pytest.mark.parametrize("sizes", _SUPPORTED_MESHES, ids=_mesh_id)
+@pytest.mark.parametrize("score_bias", [False, True])
+def test_each_token_keeps_its_routing(sizes, score_bias):
+    """Routing after the split gives each token the experts and weights
+    select_experts picks for it on the unsplit rows."""
+    from tokamax._src.ops.experimental.routing_moe.layer import modular
+    mesh = _make_mesh(**sizes)
+    # Rows that don't divide evenly among the replicas, where the mesh allows.
+    num_tokens = 152 if sizes.get("attn_dp", 1) == 4 else 150
+    x, gating = _inputs(mesh, num_tokens)
+    # f32 logits, so the weights can be compared without bf16 rounding.
+    gating = gating.astype(jnp.float32)
+    w1, w2, s1, s2 = _weights(mesh, True)
+    kwargs = {}
+    if score_bias:
+        kwargs["expert_score_correction_bias"] = jax.random.normal(
+            jax.random.key(2), (NUM_EXPERTS, ))
+    with mock.patch.object(modular, "routing_moe", _fake_kernel):
+        out = _run_kernel(mesh, x, gating, w1, w2, s1, s2, **kwargs)
+    want_weights, want_indices = select_experts(gating, TOPK, True, "softmax",
+                                                **kwargs)
+    np.testing.assert_array_equal(out[:, :TOPK], want_indices)
+    np.testing.assert_allclose(out[:, TOPK:2 * TOPK], want_weights, rtol=1e-6)

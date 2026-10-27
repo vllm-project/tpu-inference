@@ -87,8 +87,11 @@ def select_moe_backend_from_fused_moe_config(
         if moe.use_ep:
             logger.info_once("[MoE]: Using routing_moe (tokamax) kernel")
             return MoEBackend.ROUTING_MOE
-        logger.warning_once("USE_ROUTING_MOE=1 but expert parallelism is not "
-                            "enabled. Falling back to gmm implementation.")
+        # TODO: TP support; only routing_moe's EP path is wired up for now.
+        logger.warning_once(
+            "USE_ROUTING_MOE=1 but expert parallelism is not enabled, and "
+            "only routing_moe's EP path is wired up for now. Falling back to "
+            "gmm implementation.")
 
     if moe.use_ep:
         logger.info_once("[MoE]: Using GMM EP kernel")

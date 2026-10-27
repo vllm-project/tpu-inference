@@ -612,7 +612,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (MoEBackend.ROUTING_MOE) instead of the GMM path. Supports fp8 weights
     # with per-channel scales and bf16 weights; any other layer raises an error.
     # Only vLLM-path models read this flag; USE_MOE_EP_KERNEL and
-    # USE_FUSED_EP_MOE_V2 take priority. See layers/common/routing_moe.py.
+    # USE_FUSED_EP_MOE_V2 take priority. Only the EP path is wired up and
+    # tested for now; TP support is a TODO. See layers/common/routing_moe.py.
     "USE_ROUTING_MOE":
     env_bool("USE_ROUTING_MOE", default=False),
     # Gap between token-bucket padding sizes for TPU precompilation. When 0,

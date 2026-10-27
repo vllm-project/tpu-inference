@@ -13,18 +13,22 @@
 # limitations under the License.
 """MoEBackend.ROUTING_MOE: runs EP MoE layers with tokamax's routing_moe.
 
+Only the EP path is wired up and tested for now; TP support (the kernel's
+tp_axis) is a TODO.
+
 tokamax's routing_moe (tokamax/_src/ops/experimental/routing_moe) all-gathers
 the tokens over the EP axis; each device then gathers its experts' token rows
 by index, runs gate/up and down, and sends each result row straight to the
-device that owns the token, which adds up its top-k rows. Unlike the GMM
-path, no device builds a full [tokens, hidden] partial sum and there is no
-reduce-scatter.
+device that owns the token, which sums the token's top-k rows weighted by the
+routing weights. Unlike the GMM path, no device builds a full [tokens, hidden]
+partial sum and there is no reduce-scatter.
 
 The kernel expects a 1-D mesh, so it gets one built from the same devices in
 the same order; the weights stay where they are, in the GMM_EP layout
 (w13 = [gate | up], sharded over the expert axes). Devices with the same
 attention-data coordinates hold the same token rows; each of them passes the
-kernel its own share of those rows, so every token is routed once.
+kernel its own share of those rows, so every token is routed once. The
+experts are picked by the GMM path's routing, fused_moe_gmm.select_experts.
 """
 
 import jax
@@ -33,6 +37,7 @@ from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
 import tpu_inference.envs as envs
+from tpu_inference.layers.common.fused_moe_gmm import select_experts
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import as_axes
 from tpu_inference.logger import init_logger
@@ -80,8 +85,7 @@ def unsupported_reason(
         mesh: Mesh, dtype: jnp.dtype, w1: jax.Array, w2: jax.Array,
         w1_scale: jax.Array | None, w2_scale: jax.Array | None,
         w1_bias: jax.Array | None, w2_bias: jax.Array | None, activation: str,
-        scoring_fn: str, hash_based_topk_indices: jax.Array | None,
-        e_score_correction_bias: jax.Array | None) -> str | None:
+        hash_based_topk_indices: jax.Array | None) -> str | None:
     """Why the kernel can't run this layer, or None if it can.
 
     dtype is the dtype of the layer's hidden states.
@@ -114,18 +118,12 @@ def unsupported_reason(
                 f"{mesh.devices.size} devices")
     if activation != "silu":
         return f"only silu is wired up here, not {activation}"
-    if scoring_fn not in ("softmax", "sigmoid"):
-        return f"it doesn't score with {scoring_fn}"
-    if e_score_correction_bias is not None:
-        return "it doesn't take a score correction bias"
     if hash_based_topk_indices is not None:
-        return "it routes by top-k only, not by hash"
-    if envs.FORCE_MOE_RANDOM_ROUTING:
-        return ("it routes by its own top-k, so it can't honor "
-                "FORCE_MOE_RANDOM_ROUTING")
+        return "hash routing isn't wired up here"
     if envs.MOE_APPROX_TOPK:
-        return ("it always takes the exact top-k, so it can't honor "
-                "MOE_APPROX_TOPK")
+        return "MOE_APPROX_TOPK isn't wired up here"
+    if envs.FORCE_MOE_RANDOM_ROUTING:
+        return "FORCE_MOE_RANDOM_ROUTING is implemented on the GMM path only"
     _, _, reason = ep_layout(mesh)
     return reason
 
@@ -179,21 +177,31 @@ def _from_ep_rows(out: jax.Array, mesh: Mesh, replica: tuple[str, ...],
                          check_vma=False)(out)
 
 
-def routing_moe_func(hidden_states: jax.Array, w1: jax.Array, w2: jax.Array,
-                     w1_scale: jax.Array | None, w2_scale: jax.Array | None,
-                     gating_output: jax.Array, *, topk: int, renormalize: bool,
-                     mesh: Mesh, activation: str,
-                     scoring_fn: str) -> jax.Array:
+def routing_moe_func(
+        hidden_states: jax.Array,
+        w1: jax.Array,
+        w2: jax.Array,
+        w1_scale: jax.Array | None,
+        w2_scale: jax.Array | None,
+        gating_output: jax.Array,
+        *,
+        topk: int,
+        renormalize: bool,
+        mesh: Mesh,
+        activation: str,
+        scoring_fn: str,
+        expert_score_correction_bias: jax.Array | None = None) -> jax.Array:
     """Run one MoE layer with tokamax's routing_moe.
 
     hidden_states [num_tokens, hidden] and gating_output [num_tokens, experts]
     are sharded over the attention-data axes. w1 [E, H, 2I], w2 [E, I, H] and,
     for fp8, their per-channel scales [E, 1, 1, N] are sharded over the expert
-    axes. Returns [num_tokens, hidden], sharded like hidden_states. Assumes
+    axes. The routing arguments are as for select_experts. Returns
+    [num_tokens, hidden], sharded like hidden_states. Assumes
     unsupported_reason() returned None for this layer.
     """
     from tokamax._src.ops.experimental.routing_moe.layer import \
-        monolithic as tk_monolithic
+        modular as tk_modular
     from tokamax._src.ops.experimental.routing_moe.layer import plan as tk_plan
 
     mesh_1d, replica, _ = ep_layout(mesh)
@@ -213,24 +221,29 @@ def routing_moe_func(hidden_states: jax.Array, w1: jax.Array, w2: jax.Array,
     num_replicas = get_mesh_shape_product(mesh, list(replica))
     num_local_rows = num_tokens * num_replicas // mesh.devices.size
     x = _to_ep_rows(hidden_states, mesh, replica)
-    gating = _to_ep_rows(gating_output, mesh, replica)
+    # Route after the split, so that each device routes only its own share.
+    topk_weights, topk_indices = select_experts(
+        _to_ep_rows(gating_output, mesh, replica),
+        topk,
+        renormalize,
+        scoring_fn,
+        expert_score_correction_bias=expert_score_correction_bias)
     # tokamax's shard_map runs over the 1-D mesh, so make it the current mesh
     # while tracing.
     with jax.sharding.use_abstract_mesh(mesh_1d.abstract_mesh):
-        out = tk_monolithic.gated_routing_moe(
+        out = tk_modular.routing_moe(
             x,
-            gating,
+            topk_weights,
+            topk_indices,
             w1,
             w2,
             w1_scale,
             w2_scale,
             None,
             None,
-            topk=topk,
-            renormalize=renormalize,
             mesh=mesh_1d,
             activation=activation,
-            scoring_fn=scoring_fn,
+            # TODO: TP support; only the EP path is tested for now.
             tp_axis=None,
             ep_axis=_EP_AXIS,
             use_sp=True,

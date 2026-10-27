@@ -240,9 +240,7 @@ def moe_apply(
                     mesh, x.dtype, weights.w13_weight, weights.w2_weight,
                     weights.w13_weight_scale, weights.w2_weight_scale,
                     weights.w13_bias, weights.w2_bias, activation,
-                    layer.scoring_func,
-                    extra_backend_kwargs.get("hash_based_topk_indices", None),
-                    extra_backend_kwargs.get("e_score_correction_bias", None))
+                    extra_backend_kwargs.get("hash_based_topk_indices", None))
                 if reason is not None:
                     raise ValueError(
                         f"routing_moe can't run this MoE layer: {reason}. "
@@ -269,6 +267,8 @@ def moe_apply(
                     mesh=mesh,
                     activation=activation,
                     scoring_fn=layer.scoring_func,
+                    expert_score_correction_bias=extra_backend_kwargs.get(
+                        "e_score_correction_bias", None),
                 )
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance
