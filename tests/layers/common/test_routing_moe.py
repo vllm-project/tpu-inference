@@ -169,6 +169,7 @@ def test_rows_not_divisible_by_replicas():
     ("approx_topk", "MOE_APPROX_TOPK"),
     ("random_routing", "FORCE_MOE_RANDOM_ROUTING"),
     ("activation", "only silu"),
+    ("scoring_fn", "doesn't score"),
 ])
 def test_unsupported_reason(case, want):
     """Each check refuses its case with its reason; one device is enough for
@@ -208,6 +209,7 @@ def test_unsupported_reason(case, want):
             w2, s1, s2,
             jnp.zeros((NUM_EXPERTS, 1, 2 * INTER)) if case == "bias" else None,
             None, "swigluoai" if case == "activation" else "silu",
+            "noaux_tc" if case == "scoring_fn" else "softmax",
             jnp.zeros((8, TOPK), jnp.int32) if case == "hash_topk" else None)
     if want is None:
         assert reason is None, reason

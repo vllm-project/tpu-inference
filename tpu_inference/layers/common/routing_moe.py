@@ -85,6 +85,7 @@ def unsupported_reason(
         mesh: Mesh, dtype: jnp.dtype, w1: jax.Array, w2: jax.Array,
         w1_scale: jax.Array | None, w2_scale: jax.Array | None,
         w1_bias: jax.Array | None, w2_bias: jax.Array | None, activation: str,
+        scoring_fn: str,
         hash_based_topk_indices: jax.Array | None) -> str | None:
     """Why the kernel can't run this layer, or None if it can.
 
@@ -118,6 +119,8 @@ def unsupported_reason(
                 f"{mesh.devices.size} devices")
     if activation != "silu":
         return f"only silu is wired up here, not {activation}"
+    if scoring_fn not in ("softmax", "sigmoid", "sqrtsoftplus"):
+        return f"select_experts doesn't score with {scoring_fn}"
     if hash_based_topk_indices is not None:
         return "hash routing isn't wired up here"
     if envs.MOE_APPROX_TOPK:
@@ -145,8 +148,9 @@ def _to_ep_rows(x: jax.Array, mesh: Mesh, replica: tuple[str,
         if num_replicas == 1:
             return local
         pad = -local.shape[0] % num_replicas
-        local = jnp.pad(local, ((0, pad), ) + ((0, 0), ) * (x.ndim - 1),
-                        mode="edge")
+        if pad:
+            local = jnp.pad(local, ((0, pad), ) + ((0, 0), ) * (x.ndim - 1),
+                            mode="edge")
         size = local.shape[0] // num_replicas
         return jax.lax.dynamic_slice_in_dim(local,
                                             jax.lax.axis_index(replica) * size,

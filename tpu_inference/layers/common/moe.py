@@ -240,6 +240,7 @@ def moe_apply(
                     mesh, x.dtype, weights.w13_weight, weights.w2_weight,
                     weights.w13_weight_scale, weights.w2_weight_scale,
                     weights.w13_bias, weights.w2_bias, activation,
+                    layer.scoring_func,
                     extra_backend_kwargs.get("hash_based_topk_indices", None))
                 if reason is not None:
                     raise ValueError(
