@@ -13,37 +13,44 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Settle the release version and refuse a release that isn't ready, before
-# anything is built.
+# Resolve the release version and check it can be published, before anything
+# is built.
 #
 #   version   RELEASE_VERSION (a pre-release, e.g. v0.32.0rc1) if set, else the
-#             branch: releases/v0.32.0 -> 0.32.0. RELEASE_VERSION must be a
-#             version of the branch's X.Y.Z. Every later step reads it from the
-#             meta-data set here.
-#   CI        not checked here yet: the approver checks tpu-inference-ci.
+#             branch: releases/v0.32.0 -> 0.32.0 (lib.sh resolve_release_version).
+#             Saved as meta-data with whether it is a pre-release; every later
+#             step reads both from there.
+#   Docker    warns if v<version> is already on Docker Hub; the approver
+#             decides whether to overwrite it.
+#   CI        not checked here; the approver confirms tpu-inference-ci passed on
+#             this commit (linked in the annotation).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/lib.sh"
 
 echo "--- :label: Release version"
-[[ "${BUILDKITE_BRANCH}" =~ ^releases/v([0-9]+\.[0-9]+\.[0-9]+)$ ]] \
-  || die "not a release branch: '${BUILDKITE_BRANCH}'."
-BRANCH_VERSION="${BASH_REMATCH[1]}"
-VERSION="${RELEASE_VERSION:-${BRANCH_VERSION}}"
-VERSION="${VERSION#v}"
-[[ "${VERSION}" =~ ^[0-9]+(\.[0-9]+)*((a|b|rc)[0-9]+)?(\.post[0-9]+)?(\.dev[0-9]+)?$ ]] \
-  || die "version '${VERSION}' is not a public PEP 440 version."
-[[ "${VERSION}" =~ ^([0-9]+\.[0-9]+\.[0-9]+) && "${BASH_REMATCH[1]}" == "${BRANCH_VERSION}" ]] \
-  || die "version '${VERSION}' is not a version of ${BUILDKITE_BRANCH}."
+VERSION="$(resolve_release_version)"
 echo "tpu-inference ${VERSION} from ${BUILDKITE_BRANCH} at ${BUILDKITE_COMMIT}"
+
+echo "--- :docker: ${RELEASE_DOCKERHUB_REPO}:v${VERSION} on Docker Hub"
+EXISTING="$(dockerhub_digest "v${VERSION}")"
+if [[ -n "${EXISTING}" ]]; then
+  DOCKERHUB_LINE="**already exists** (\`${EXISTING}\`): publishing replaces it only if the approver chooses to overwrite"
+  buildkite-agent annotate --style warning --context release-dockerhub-exists \
+    "\`${RELEASE_DOCKERHUB_REPO}:v${VERSION}\` is already on Docker Hub."
+else
+  DOCKERHUB_LINE="\`v${VERSION}\` is not on Docker Hub"
+fi
+echo "${DOCKERHUB_LINE}"
 
 buildkite-agent meta-data set release-version "${VERSION}"
 PRE="no"
 is_prerelease "${VERSION}" && PRE="yes"
+buildkite-agent meta-data set release-prerelease "${PRE}"
 buildkite-agent annotate --style info --context release-plan <<EOF
 **tpu-inference ${VERSION}** from \`${BUILDKITE_BRANCH}\` at \`${BUILDKITE_COMMIT:0:12}\` (pre-release: ${PRE})
 
-- CI: not checked automatically yet. Before approving, check that tpu-inference-ci passed on this commit: https://buildkite.com/vllm/tpu-inference-ci/builds?branch=${BUILDKITE_BRANCH}
-- Docker image and PyPI: not handled by this pipeline yet.
+- CI: confirm tpu-inference-ci passed on this commit before approving: https://buildkite.com/vllm/tpu-inference-ci/builds?branch=${BUILDKITE_BRANCH}
+- Docker Hub: ${DOCKERHUB_LINE}
 EOF

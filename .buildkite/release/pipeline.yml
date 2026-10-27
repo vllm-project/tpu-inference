@@ -12,19 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# tpu-inference-release: a release of tpu-inference, built once, approved, then
-# published as those same bytes.
+# tpu-inference-release: builds the vllm/vllm-tpu image of a release once,
+# waits for approval, then publishes that same image to Docker Hub.
 #
-# The pipeline's settings upload this file from the build's own checkout, for
-# builds of releases/v* only (`buildkite-agent pipeline upload
-# .buildkite/release/pipeline.yml`, branch filter "releases/v*"), so a release
-# branch runs the release tooling it was cut with.
-#
-#   releases/vX.Y.Z   settle the version, build, wait for approval, then
-#                     publish (plan_publish.py)
+# The pipeline settings upload this file from the build's own checkout, for
+# releases/v* branches only, so a release branch runs the release tooling it
+# was cut with. plan_publish.py adds the approval and publish steps. README.md
+# has the how-to.
 
 steps:
-  - label: ":clipboard: Preflight: version"
+  - label: ":clipboard: Preflight"
     key: preflight
     if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
     agents: &queue
@@ -32,27 +29,18 @@ steps:
     commands:
       - bash .buildkite/release/preflight.sh
 
-  # Placeholder: building and staging the release image comes in a follow-up.
-  - label: ":docker: Build and stage the image (placeholder)"
+  - label: ":docker: Build and stage the image"
     key: build_images
     depends_on: preflight
     if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
     agents: *queue
-    command: 'echo "Docker image: not handled by this pipeline yet."'
-
-  # Placeholder: PyPI is published by .github/workflows/release.yml today.
-  - label: ":package: Build the wheels (placeholder)"
-    key: build_wheels
-    depends_on: preflight
-    if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
-    agents: *queue
-    command: 'echo "PyPI: not handled by this pipeline yet."'
+    timeout_in_minutes: 180
+    commands:
+      - bash .buildkite/release/build_images.sh
 
   - label: ":pipeline: Plan the approval and publish"
     key: plan_publish
-    depends_on:
-      - build_images
-      - build_wheels
+    depends_on: build_images
     if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
     agents: *queue
     commands:

@@ -11,20 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Print the second half of a release build as a Buildkite pipeline (JSON).
+"""Print the approval and publish steps of a release build as a Buildkite
+pipeline (JSON).
 
     plan_publish.py | buildkite-agent pipeline upload --no-interpolation
 
-Runs once everything is built: the approval block, the publishes, and the
-check that what users get is what was built. Uploaded rather than written into
-pipeline.yml so the approval prompt can name the exact version, and so the team
-restriction is added only when it is set. --no-interpolation: nothing in it is
-for Buildkite to interpolate.
+Runs after the image is staged. The steps are generated rather than static so
+the approval prompt names the version and the staged image digest, and so
+allowed_teams is set only when RELEASE_APPROVER_TEAMS is. --no-interpolation:
+the output holds nothing for Buildkite to interpolate.
 
 Optional build env:
   RELEASE_APPROVER_TEAMS=a,b   Buildkite team slugs allowed to approve
-  RELEASE_QUEUE=<queue>        agent queue (default: release-tpu-inference, as
-                               in pipeline.yml)
+  RELEASE_QUEUE=<queue>        agent queue (default: release-tpu-inference)
 """
 
 import json
@@ -44,29 +43,78 @@ def meta(key):
 QUEUE = {"queue": os.environ.get("RELEASE_QUEUE", "release-tpu-inference")}
 
 
-def placeholder_step(label, key, depends_on, what):
-    return {
-        "label": f"{label} (placeholder)",
+def command_step(label, key, depends_on, commands, **extra):
+    step = {
+        "label": label,
         "key": key,
         "depends_on": depends_on,
         "agents": QUEUE,
-        "command": f'echo "{what}: not handled by this pipeline yet."',
+        "commands": commands,
     }
+    step.update(extra)
+    return step
 
 
 def main():
     version = meta("release-version")
+    staged = meta("release-image")
+    prerelease = meta("release-prerelease") == "yes"
     branch = os.environ["BUILDKITE_BRANCH"]
+    dockerhub_repo = os.environ.get("RELEASE_DOCKERHUB_REPO", "vllm/vllm-tpu")
     steps = []
 
+    latest_options = [{"label": "No", "value": "no"}]
+    if not prerelease:
+        latest_options.insert(0, {"label": "Yes", "value": "yes"})
     block = {
         "block":
         f":rocket: Publish tpu-inference {version}?",
         "key":
         "approve_publish",
         "depends_on": ["plan_publish"],
-        "prompt": (f"Publish tpu-inference {version} from {branch}. "
-                   "Check that tpu-inference-ci passed on this commit first."),
+        "prompt":
+        (f"Publish tpu-inference {version} from {branch}: the staged image "
+         f"{staged} to Docker Hub as {dockerhub_repo}:v{version}. "
+         "Check that tpu-inference-ci passed on this commit first."),
+        "fields": [
+            {
+                # No default: the approver has to choose.
+                "select":
+                "Move latest on Docker Hub to this version?",
+                "key":
+                "dockerhub_move_latest",
+                "required":
+                True,
+                "options":
+                latest_options,
+                "hint":
+                "No for a patch to an older line. "
+                "A pre-release never moves latest.",
+            },
+            {
+                "select":
+                f"Overwrite v{version} if it is already on Docker Hub?",
+                "key":
+                "dockerhub_overwrite",
+                "required":
+                True,
+                "default":
+                "no",
+                "options": [
+                    {
+                        "label": "No",
+                        "value": "no"
+                    },
+                    {
+                        "label": "Yes",
+                        "value": "yes"
+                    },
+                ],
+                "hint":
+                "Released tags should not change; "
+                "Yes only to replace a broken image.",
+            },
+        ],
     }
     teams = [
         t for t in os.environ.get("RELEASE_APPROVER_TEAMS", "").split(",") if t
@@ -75,19 +123,23 @@ def main():
         block["allowed_teams"] = teams
     steps.append(block)
 
-    # Placeholders: the Docker image and PyPI publishes come in follow-ups.
     steps.append(
-        placeholder_step(":docker: Publish the image to Docker Hub",
-                         "publish_images", ["approve_publish"],
-                         "Docker image"))
+        command_step(
+            ":docker: Publish the image to Docker Hub",
+            "publish_images",
+            ["approve_publish"],
+            ["bash .buildkite/release/publish_images.sh"],
+            secrets=["DOCKERHUB_TOKEN"],
+            concurrency=1,
+            concurrency_group="tpu-inference-dockerhub-publish",
+        ))
     steps.append(
-        placeholder_step(":package: Publish to PyPI", "publish_pypi",
-                         ["approve_publish"], "PyPI"))
-    steps.append(
-        placeholder_step(":white_check_mark: Check what users get",
-                         "verify_published",
-                         ["publish_images", "publish_pypi"],
-                         "Docker image and PyPI"))
+        command_step(
+            ":white_check_mark: Check the published image",
+            "verify_published",
+            ["publish_images"],
+            ["bash .buildkite/release/verify_published.sh"],
+        ))
 
     print(json.dumps({"steps": steps}, indent=2))
 
