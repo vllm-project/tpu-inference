@@ -724,10 +724,17 @@ class VllmModelWrapper:
                     torch.tensor(seq_lens),
                     device=torch_states.device,
                 )
-                outputs: list[torch.Tensor] = self._pooler(
+                outputs: torch.Tensor | list[torch.Tensor] = self._pooler(
                     torch_states,
                     pooling_metadata,
                 )
+
+                # DispatchPooler returns a dense [num_reqs, hidden] tensor
+                # when all requests share a task (vllm-project/vllm#62940),
+                # but ModelRunnerOutput.pooler_output must be a per-request
+                # list: the scheduler does `if pooler_outputs` on it.
+                if isinstance(outputs, torch.Tensor):
+                    outputs = list(outputs.unbind(0))
 
                 return outputs
 
