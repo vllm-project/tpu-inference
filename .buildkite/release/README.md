@@ -1,15 +1,13 @@
 # tpu-inference-release
 
 One Buildkite pipeline for each tpu-inference release: it settles the version,
-builds what the release ships, waits for approval, then publishes it. This is
-the pipeline's skeleton: the Docker image and PyPI steps are placeholders, to be
-filled in by follow-ups (PyPI is still published by
-`.github/workflows/release.yml`).
+builds what the release ships, waits for approval, then publishes it. The Docker
+image and PyPI steps are placeholders for now; follow-ups fill them in.
 
-The pipeline's settings upload [`pipeline.yml`](pipeline.yml) **from main**,
-whatever branch a build is on, and every step runs main's tooling (this
-directory) against the build's checkout. A release branch supplies only the
-code being released.
+The pipeline's settings upload [`pipeline.yml`](pipeline.yml) from the build's
+own checkout, and only for builds of `releases/v*`. A release branch runs the
+release tooling (this directory) it was cut with; a tooling fix a release needs
+goes to main and is cherry-picked to the branch.
 
 ## Cut a release
 
@@ -42,23 +40,17 @@ Build env knobs:
 
   ```yaml
   steps:
-    - label: ":pipeline: Upload the release pipeline from main"
+    - label: ":pipeline: Upload the release pipeline"
+      branches: "releases/v*"
       agents:
         queue: release-tpu-inference
-      command: |
-        git fetch -q origin main
-        tools="$$(git rev-parse FETCH_HEAD)"
-        buildkite-agent meta-data set release-tools-commit "$$tools"
-        git show "$$tools:.buildkite/release/pipeline.yml" | buildkite-agent pipeline upload
+      command: buildkite-agent pipeline upload .buildkite/release/pipeline.yml
   ```
 
 ## Try the pipeline
 
 While the build and publish steps are placeholders, a build builds and
-publishes nothing, even when approved, so it is safe to run on any release
-branch, e.g. `releases/v0.31.0`: check that preflight settles the version and
-that the approval block and the placeholder steps appear.
-
-Before this directory is on main, point the settings step at the branch under
-review instead (`git fetch -q origin <branch>`), and set it back to `main`
-afterwards.
+publishes nothing, even when approved. Run it on a release branch that has this
+directory (cut after it reached main, or with it cherry-picked) and check that
+preflight settles the version and that the approval block and the placeholder
+steps appear.

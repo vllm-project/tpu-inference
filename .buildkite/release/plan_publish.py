@@ -18,8 +18,8 @@
 Runs once everything is built: the approval block, the publishes, and the
 check that what users get is what was built. Uploaded rather than written into
 pipeline.yml so the approval prompt can name the exact version, and so the team
-restriction is added only when it is set. --no-interpolation keeps the $VAR
-references in the commands for the shell that runs them.
+restriction is added only when it is set. --no-interpolation: nothing in it is
+for Buildkite to interpolate.
 
 Optional build env:
   RELEASE_APPROVER_TEAMS=a,b   Buildkite team slugs allowed to approve
