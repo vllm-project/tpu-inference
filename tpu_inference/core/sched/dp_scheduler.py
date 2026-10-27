@@ -497,9 +497,6 @@ class DPScheduler(SchedulerInterface):
         cached_static_forward_context = (
             compilation_config.static_forward_context.copy())
         compilation_config.static_forward_context.clear()
-        cached_static_all_moe_layers = (
-            compilation_config.static_all_moe_layers.copy())
-        compilation_config.static_all_moe_layers.clear()
         # `slice` is not declared on DeviceConfig; core_tpu.py attaches it
         # dynamically via setattr (holding jax.devices()) only in disagg mode.
         device_config = self.vllm_config.device_config
@@ -548,8 +545,6 @@ class DPScheduler(SchedulerInterface):
         finally:
             compilation_config.static_forward_context.update(
                 cached_static_forward_context)
-            compilation_config.static_all_moe_layers.extend(
-                cached_static_all_moe_layers)
             if cached_slice is not None:
                 device_config.slice = cached_slice
             if gc_was_enabled:

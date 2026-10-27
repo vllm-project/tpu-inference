@@ -60,7 +60,6 @@ class TestDPScheduler:
         config.cache_config.mamba_num_blocks = None
         config.compilation_config = MagicMock()
         config.compilation_config.static_forward_context = {}
-        config.compilation_config.static_all_moe_layers = []
         config.device_config = MagicMock(slice=None)
         return config
 
@@ -1383,8 +1382,8 @@ class TestDPScheduler:
         import types
 
         unpicklable_attn = threading.Lock()
-        unpicklable_moe = threading.Lock()
         unpicklable_slice = threading.Lock()
+        moe_layer_names = ["model.layers.0.mlp.experts"]
 
         vllm_config = types.SimpleNamespace(
             sharding_config=types.SimpleNamespace(total_dp_size=2),
@@ -1401,7 +1400,7 @@ class TestDPScheduler:
             ),
             compilation_config=types.SimpleNamespace(
                 static_forward_context={"layer_0": unpicklable_attn},
-                static_all_moe_layers=[unpicklable_moe],
+                static_all_moe_layers=list(moe_layer_names),
             ),
             device_config=types.SimpleNamespace(slice=unpicklable_slice),
         )
@@ -1413,7 +1412,8 @@ class TestDPScheduler:
 
         def inspect_process(*args, **kwargs):
             spawn_vllm_config = kwargs["args"][3]
-            # The full vllm_config payload must be picklable while detached during worker spawn.
+            # The full vllm_config payload must be picklable while detached during worker spawn,
+            # with static_all_moe_layers (list[str]) kept intact.
             pickle.dumps(spawn_vllm_config)
             observed_during_spawn.append((
                 dict(spawn_vllm_config.compilation_config.
@@ -1442,13 +1442,15 @@ class TestDPScheduler:
                     log_stats=False,
                 )
 
-        assert observed_during_spawn == [({}, [], None), ({}, [], None)]
+        assert observed_during_spawn == [
+            ({}, moe_layer_names, None),
+            ({}, moe_layer_names, None),
+        ]
         assert vllm_config.compilation_config.static_forward_context == {
             "layer_0": unpicklable_attn
         }
-        assert vllm_config.compilation_config.static_all_moe_layers == [
-            unpicklable_moe
-        ]
+        assert (vllm_config.compilation_config.static_all_moe_layers ==
+                moe_layer_names)
         assert vllm_config.device_config.slice is unpicklable_slice
         with pytest.raises(TypeError):
             pickle.dumps(vllm_config)
@@ -1465,16 +1467,12 @@ class TestDPScheduler:
         import threading
 
         unpicklable_attn = threading.Lock()
-        unpicklable_moe = threading.Lock()
         unpicklable_slice = threading.Lock()
 
         mock_vllm_config.compilation_config = MagicMock()
         mock_vllm_config.compilation_config.static_forward_context = {
             "layer_0": unpicklable_attn
         }
-        mock_vllm_config.compilation_config.static_all_moe_layers = [
-            unpicklable_moe
-        ]
         mock_vllm_config.device_config = MagicMock()
         mock_vllm_config.device_config.slice = unpicklable_slice
 
@@ -1499,9 +1497,6 @@ class TestDPScheduler:
         assert mock_vllm_config.compilation_config.static_forward_context == {
             "layer_0": unpicklable_attn
         }
-        assert mock_vllm_config.compilation_config.static_all_moe_layers == [
-            unpicklable_moe
-        ]
         assert mock_vllm_config.device_config.slice is unpicklable_slice
         assert gc.isenabled()
 
