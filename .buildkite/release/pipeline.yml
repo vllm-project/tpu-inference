@@ -16,8 +16,9 @@
 # published as those same bytes.
 #
 # The pipeline's settings upload this file from the build's own checkout, for
-# builds of releases/v* only, so a release branch runs the release tooling it
-# was cut with. README.md has the how-to.
+# builds of releases/v* only (`buildkite-agent pipeline upload
+# .buildkite/release/pipeline.yml`, branch filter "releases/v*"), so a release
+# branch runs the release tooling it was cut with.
 #
 #   releases/vX.Y.Z   settle the version, build, wait for approval, then
 #                     publish (plan_publish.py)
