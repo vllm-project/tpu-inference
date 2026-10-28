@@ -510,6 +510,7 @@ class Gemma4DecoderLayer(JaxModule):
                  kv_cache_dtype: str,
                  quant_config: VllmQuantConfig,
                  decode_query_size: int = 1,
+                 enable_return_routed_experts: bool = False,
                  prefix: str = ""):
         text_config: Gemma4TextConfig = config.hf_config.text_config
         rms_norm_eps = text_config.rms_norm_eps
@@ -645,14 +646,14 @@ class Gemma4DecoderLayer(JaxModule):
                 quant_config=quant_config,
                 prefix=prefix + ".router",
             )
-            self.experts = Gemma4MoE(config=text_config,
-                                     dtype=dtype,
-                                     mesh=mesh,
-                                     rngs=rng,
-                                     quant_config=quant_config,
-                                     enable_return_routed_experts=config.
-                                     enable_return_routed_experts,
-                                     prefix=prefix + ".experts")
+            self.experts = Gemma4MoE(
+                config=text_config,
+                dtype=dtype,
+                mesh=mesh,
+                rngs=rng,
+                quant_config=quant_config,
+                enable_return_routed_experts=enable_return_routed_experts,
+                prefix=prefix + ".experts")
             self.post_feedforward_layernorm_1 = JaxRmsNorm(
                 text_config.hidden_size,
                 epsilon=text_config.rms_norm_eps,
@@ -869,6 +870,8 @@ class Gemma4Model(JaxModule):
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
                 quant_config=vllm_config.quant_config,
                 decode_query_size=decode_query_size,
+                enable_return_routed_experts=vllm_config.aux_output_config.
+                enable_return_routed_experts,
                 prefix=f"{prefix}.layers.{layer_index}",
             ))
 

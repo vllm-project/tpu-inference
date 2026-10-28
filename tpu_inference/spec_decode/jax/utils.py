@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Any, Optional
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -101,6 +103,36 @@ def concat_last_sampled_tokens_and_draft_tokens(last_sampled_tokens,
                                                 draft_tokens):
     return jnp.concat([last_sampled_tokens[:, None], draft_tokens],
                       axis=1).reshape(-1)
+
+
+def get_draft_block_tables(
+    runner: Any,
+    req_indices_dp: Optional[dict[int, list[int]]] = None,
+) -> Any:
+    """Build flattened draft block tables reordered per DP rank."""
+    num_kv_cache_groups = len(runner.kv_cache_config.kv_cache_groups)
+    draft_kv_cache_group_id = num_kv_cache_groups - 1
+    cpu_tensor = runner.input_batch.block_table[
+        draft_kv_cache_group_id].get_cpu_tensor()
+    dp_size = getattr(runner, "dp_size", 1)
+    max_num_reqs = getattr(runner, "max_num_reqs", None)
+    if (req_indices_dp is not None and isinstance(dp_size, int)
+            and isinstance(max_num_reqs, int)
+            and cpu_tensor.shape[0] == max_num_reqs):
+        max_num_reqs_per_dp_rank = max_num_reqs // dp_size
+        cpu_tensor_np = np.asarray(cpu_tensor)
+        block_tables = np.zeros(cpu_tensor_np.shape, dtype=cpu_tensor_np.dtype)
+        for dp_rank in range(dp_size):
+            req_indices = req_indices_dp.get(dp_rank, [])
+            if not req_indices:
+                continue
+            req_offset = dp_rank * max_num_reqs_per_dp_rank
+            np.take(cpu_tensor_np,
+                    req_indices,
+                    axis=0,
+                    out=block_tables[req_offset:req_offset + len(req_indices)])
+        return block_tables.reshape(-1)
+    return cpu_tensor.reshape(-1)
 
 
 def filter_speculative_logprobs(

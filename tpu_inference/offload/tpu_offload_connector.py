@@ -338,7 +338,7 @@ class KVOffloadConnectorStats(KVConnectorStats):
     def process_index(self) -> int:
         if getattr(self, "_process_index", None) is None:
             # Under JAX's multi-process SPMD model, each host node runs its own Python process.
-            # Since Ray launches exactly one worker process (RayWorkerWrapper) per node,
+            # Since Ray launches exactly one worker process (RayWorkerProc) per node,
             # jax.process_index() acts as a unique ID mapping 1:1 to each Ray worker actor.
             self._process_index = jax.process_index()
         return self._process_index
@@ -684,7 +684,7 @@ class TPUOffloadConnectorScheduler():
 
         Terminology & Architecture Notes:
         1. Ray Actor (Worker Actor): In vLLM, distributed workers are instantiated
-           as remote Ray Actors (processes running `RayWorkerWrapper`).
+           as remote Ray Actors (processes running `RayWorkerProc`).
         2. TPU Worker: In a multi-host TPU environment executing in SPMD mode, there is
            exactly one worker actor process (Ray Actor) per host node. Thus, the total
            number of worker actors in the cluster equals `num_nodes`.

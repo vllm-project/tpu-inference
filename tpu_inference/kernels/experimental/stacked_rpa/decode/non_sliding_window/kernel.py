@@ -131,7 +131,7 @@ def _normalize_and_store(l_value, acc_value, o_vref, *, cfgs) -> None:
             or cfgs.serve.dtype_out == batch_l.dtype == jnp.bfloat16):
         result = lax.div(acc_value, batch_l)
     else:
-        result = acc_value.astype(jnp.float32) * pl.reciprocal(
+        result = acc_value.astype(jnp.float32) * pltpu.reciprocal(
             batch_l.astype(jnp.float32), approx=True)
     out = result.astype(cfgs.serve.dtype_out)
     if cfgs.aligned_q_head_dim != cfgs.aligned_kv_head_dim:

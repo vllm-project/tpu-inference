@@ -18,7 +18,9 @@ set -e
 # --- Configuration ---
 TARGET_BRANCH="main"
 
-COMMIT_MESSAGE="Update verified commit hashes"
+# The commit only appends a row to a CSV; without [skip ci] it starts a full
+# post-merge build of main.
+COMMIT_MESSAGE="[skip ci] Update verified commit hashes"
 
 echo "--- Configuring Git user details"
 git config user.name "vllm-ci-bot[bot]"

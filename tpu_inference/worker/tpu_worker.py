@@ -295,7 +295,7 @@ class TPUWorker(WorkerBase):
 
         visible_chips = ",".join(str(c) for c in range(start_chip, end_chip))
         # Unique libtpu port per rank so the runtimes can coexist on a host.
-        tpu_port = jax_parallel_state.BASE_JAX_PORT + dp_rank
+        tpu_port = jax_parallel_state.BASE_TPU_PROCESS_PORT + dp_rank
 
         os.environ["TPU_VISIBLE_CHIPS"] = visible_chips
         os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] = f"1,{chips_per_rank},1"
@@ -344,7 +344,7 @@ class TPUWorker(WorkerBase):
             else:
                 # Single host PP logic
                 tpu_ports = [
-                    jax_parallel_state.BASE_JAX_PORT + i
+                    jax_parallel_state.BASE_TPU_PROCESS_PORT + i
                     for i in range(self.pp_config.pp_world_size)
                 ]
                 os.environ["TPU_PROCESS_ADDRESSES"] = ",".join(
@@ -814,26 +814,30 @@ class TPUWorker(WorkerBase):
     def bind_raiden_sync(self,
                          worker_index: int = 0,
                          parallelism: int = 4,
-                         job_name: str = "rollout") -> dict:
+                         job_name: str = "rollout",
+                         auto_h2d: Optional[bool] = None) -> dict:
         """Binds this worker's live weights to Raiden and returns wire-safe
         registration metadata (never the arrays)."""
         from tpu_inference.rl import \
             raiden_worker_sync  # pylint: disable=g-import-not-at-top
 
         state = self.get_weights_state()
+        worker_idx = worker_index if worker_index != 0 else getattr(
+            self, "rank", 0)
         if self._raiden_rl_weight_sync is None:
             self._raiden_rl_weight_sync = raiden_worker_sync.RaidenWorkerSync(
                 job_name=job_name,
-                worker_index=worker_index,
+                worker_index=worker_idx,
                 parallelism=parallelism,
+                auto_h2d=auto_h2d,
             )
         else:
             # Re-bind: the transport is reused, but the caller may have moved
             # this worker to a different Raiden job (per-replica job names), and
             # metadata_dict() would otherwise re-register under the stale one.
             self._raiden_rl_weight_sync.job_name = job_name
-            self._raiden_rl_weight_sync.worker_index = worker_index
-        self._raiden_rl_weight_sync.bind(state)
+            self._raiden_rl_weight_sync.worker_index = worker_idx
+        self._raiden_rl_weight_sync.bind(state, auto_h2d=auto_h2d)
         return self._raiden_rl_weight_sync.metadata_dict()
 
     def refresh_model_state_leaves(self) -> None:

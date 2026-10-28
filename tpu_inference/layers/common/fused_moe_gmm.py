@@ -13,28 +13,224 @@
 # limitations under the License.
 
 import functools
+import math
 from typing import Literal
 
 import jax
+import numpy as np
 from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from tokamax._src.ops.experimental.gmm_v2.gmm_v2 import gmm_v2
+from tokamax._src.ops.gmm_v2.gmm_v2 import gmm_v2
 
 import tpu_inference.envs as envs
 from tpu_inference.kernels.collectives.hierrs_sc import wrapper as hier_rs_sc
+from tpu_inference.kernels.experimental.moe_lowtok import (can_use_moe_lowtok,
+                                                           moe_lowtok)
+from tpu_inference.kernels.experimental.moe_lowtok import \
+    routing_table as moe_lowtok_routing_table
+from tpu_inference.kernels.router_topk import router_topk
 from tpu_inference.kernels.sparse_core.dense_gather_reduce import \
     dense_gather_reduce
 from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v2 import \
     ragged_gather_reduce
 from tpu_inference.kernels.sparse_core.ragged_gather_v2 import \
     ragged_gather_v2 as ragged_gather
+from tpu_inference.layers.common.linear import _safe_calculate_tiling
 from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.utils import as_axes
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_mesh_shape_product
+from tpu_inference.utils import align_to, get_mesh_shape_product
 
 logger = init_logger(__name__)
+
+# Above 2,048 routed rows, the inverse-permutation scatter costs more than
+# the two sorts it replaces.
+_SINGLE_SORT_MAX_ROWS = 2048
+
+
+def _single_sort_permutation(
+        sort_keys: jax.Array, topk: int,
+        flat_bits: int) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Returns the stable argsort of `sort_keys`, its inverse, and token ids.
+
+    Packing (key, flat position) into one int32 makes a single unstable sort
+    order entries like a stable argsort. The inverse is a scatter, and flat
+    position p belongs to token p // topk.
+    """
+    pos = jnp.arange(sort_keys.shape[0], dtype=jnp.int32)
+    packed = jax.lax.sort(jnp.left_shift(sort_keys, flat_bits) | pos,
+                          is_stable=False)
+    sorted_indices = jnp.bitwise_and(packed, (1 << flat_bits) - 1)
+    revert = jnp.zeros_like(pos).at[sorted_indices].set(pos,
+                                                        unique_indices=True)
+    return sorted_indices, revert, sorted_indices // topk
+
+
+def _split_reduce_scatter_axes(reduction_axis) -> tuple[tuple, tuple]:
+    """Splits `reduction_axis` for scatter_results: the axes to psum over and
+    the attention-DP axes to psum_scatter the tokens back over."""
+    dp_axes = ShardingAxisName.ATTN_DATA
+    if not isinstance(dp_axes, tuple):
+        dp_axes = (dp_axes, )
+    if isinstance(reduction_axis, tuple):
+        reduce_axes = tuple(a for a in reduction_axis if a not in dp_axes)
+        scatter_axes = tuple(a for a in reduction_axis if a in dp_axes)
+    else:
+        reduce_axes = () if reduction_axis in dp_axes else (reduction_axis, )
+        scatter_axes = (reduction_axis, ) if reduction_axis in dp_axes else ()
+    return reduce_axes, scatter_axes
+
+
+def _reduce_local_moe_output(local_out: jax.Array, reduction_axis, *,
+                             scatter_results: bool, defer_all_reduce: bool,
+                             dtype: jnp.dtype) -> jax.Array:
+    """The collective that follows one shard's routed-MoE partial sum.
+
+    Inside shard_map. With scatter_results the partial sums are reduced over
+    `reduction_axis` and the tokens scattered back over the attention-DP
+    axes; with defer_all_reduce the partial sum is returned as is, because
+    the caller folds this all-reduce into the one it runs over the shared
+    expert (VllmMoERunner._fused_output_is_reduced); otherwise psum.
+    """
+    if scatter_results:
+        reduce_axes, scatter_axes = _split_reduce_scatter_axes(reduction_axis)
+        if reduce_axes:
+            local_out = jax.lax.psum(local_out, axis_name=reduce_axes)
+        if scatter_axes:
+            local_out = jax.lax.psum_scatter(local_out,
+                                             axis_name=scatter_axes,
+                                             scatter_dimension=0,
+                                             tiled=True)
+    elif not defer_all_reduce:
+        local_out = jax.lax.psum(local_out, axis_name=reduction_axis)
+    return local_out.astype(dtype)
+
+
+def _ep_kernel_local(
+    hidden_local,
+    w1_local,
+    w2_local,
+    s1_local,
+    s2_local,
+    topk_weights_local,
+    topk_ids_local,
+    *,
+    kernel_mode: str,
+    local_num_experts: int,
+    scatter_results: bool,
+    defer_all_reduce: bool,
+):
+    """One EP shard's MoE through moe_lowtok.
+
+    Inside shard_map. The kernels take this shard's experts as local ids
+    0..local_num_experts-1 with -1 for an expert held elsewhere, and return
+    the shard's partial sum over its experts; the same collective as the GMM
+    path then combines the shards.
+    """
+    shard_idx = jax.lax.axis_index(ShardingAxisName.EXPERT)
+    experts_start = shard_idx * local_num_experts
+    local_ids = topk_ids_local - experts_start
+    valid = (local_ids >= 0) & (local_ids < local_num_experts)
+    local_weights = jnp.where(valid, topk_weights_local, 0.0)
+    local_ids = jnp.where(valid, local_ids, -1)
+
+    assert kernel_mode == "lowtok"
+    route = moe_lowtok_routing_table(local_ids, local_weights,
+                                     local_num_experts)
+    local_out = moe_lowtok(hidden_local, route, w1_local, s1_local, w2_local,
+                           s2_local)
+
+    return _reduce_local_moe_output(local_out,
+                                    ShardingAxisName.EXPERT,
+                                    scatter_results=scatter_results,
+                                    defer_all_reduce=defer_all_reduce,
+                                    dtype=hidden_local.dtype)
+
+
+def _select_ep_kernel(hidden_states, w1, w2, w1_scale, w2_scale, w1_bias,
+                      w2_bias, *, activation: str,
+                      local_num_experts: int) -> str | None:
+    """Which experimental EP decode kernel, if any, this call should take.
+
+    Each is opt-in by its env var and limited to a token count; the
+    kernels' own eligibility checks run against the per-shard expert count,
+    with the weights still in their global [num_experts, ...] shapes.
+    """
+    num_tokens = hidden_states.shape[0]
+    if (envs.TPU_MOE_LOWTOK
+            and 0 < num_tokens <= envs.TPU_MOE_LOWTOK_MAX_TOKENS
+            and can_use_moe_lowtok(hidden_states,
+                                   w1,
+                                   w2,
+                                   w1_scale,
+                                   w2_scale,
+                                   w1_bias,
+                                   w2_bias,
+                                   activation=activation,
+                                   rhs_quant_dtype=None,
+                                   num_experts=local_num_experts)):
+        logger.info_once(
+            "Selected experimental small-batch MoE (max tokens %d)",
+            envs.TPU_MOE_LOWTOK_MAX_TOKENS)
+        return "lowtok"
+    return None
+
+
+def _ep_dispatch_kernel(
+    hidden_states,
+    w1,
+    w2,
+    w1_scale,
+    w2_scale,
+    topk_weights,
+    topk_indices,
+    *,
+    mesh: Mesh,
+    kernel_mode: str,
+    local_num_experts: int,
+    scatter_results: bool,
+    defer_all_reduce: bool,
+):
+    ep_p_spec = P(ShardingAxisName.EXPERT)
+    data_p_spec = P(ShardingAxisName.MLP_DATA)
+    attn_data_p_spec = P(ShardingAxisName.ATTN_DATA)
+    w1_scale_spec = None if w1_scale is None else ep_p_spec
+    w2_scale_spec = None if w2_scale is None else ep_p_spec
+
+    final_out_specs = attn_data_p_spec if scatter_results else data_p_spec
+
+    return jax.shard_map(
+        functools.partial(
+            _ep_kernel_local,
+            kernel_mode=kernel_mode,
+            local_num_experts=local_num_experts,
+            scatter_results=scatter_results,
+            defer_all_reduce=defer_all_reduce,
+        ),
+        mesh=mesh,
+        in_specs=(
+            data_p_spec,
+            ep_p_spec,
+            ep_p_spec,
+            w1_scale_spec,
+            w2_scale_spec,
+            data_p_spec,
+            data_p_spec,
+        ),
+        out_specs=final_out_specs,
+        check_vma=False,
+    )(
+        hidden_states,
+        w1,
+        w2,
+        w1_scale,
+        w2_scale,
+        topk_weights,
+        topk_indices,
+    )
+
 
 # Target chunk size of 2048 slots was found empirically to be optimal
 # for MoE workloads (e.g., Qwen) to hide ICI/DMA latency during AllReduce.
@@ -115,6 +311,7 @@ def gmm_wrapper(lhs,
         rhs_bias=rhs_bias,
         group_sizes=group_sizes,
         group_offset=group_offset[0],
+        tile_info=_safe_calculate_tiling,
         zero_initialize=False,
         fuse_act=fuse_act,
         preferred_element_type=preferred_element_type,
@@ -159,6 +356,282 @@ def _permute_tokens_for_chunked_rs(x: jax.Array, dp_size: int,
     return x_transposed.reshape(x.shape)
 
 
+def _hierarchical_collect(hidden: jax.Array, pair_axis: str, perm: list,
+                          reduce_axes: tuple,
+                          scatter_axes: tuple) -> jax.Array:
+    """The reverse of _apply_hierarchical_dispatch_gather. Together the two axis
+    groups cover all EP devices: scatter_axes is attention DP, and
+    reduce_axes is TP (pair_axis; its other axes have size 1). Indices 2k and
+    2k+1 on pair_axis are the two cores of one chip.
+      1. On-chip: the two cores swap and add column halves; core 0 keeps the
+         left half, core 1 the right.
+      2. Cross-chip: reduce-scatter the rows over scatter_axes, at half width.
+      3. Each core puts its half into zeros at full width; the psum over
+         reduce_axes adds the other chips of the TP group and joins halves.
+    Same sum, different order: not bitwise identical to the one-step path.
+    """
+    half = hidden.shape[1] // 2
+    core = jax.lax.axis_index(pair_axis) % 2
+    mine = jax.lax.dynamic_slice_in_dim(hidden, core * half, half, axis=1)
+    theirs = jax.lax.dynamic_slice_in_dim(hidden, (1 - core) * half,
+                                          half,
+                                          axis=1)
+    mine = mine + jax.lax.ppermute(theirs, pair_axis, perm)
+    mine = jax.lax.psum_scatter(mine,
+                                axis_name=scatter_axes,
+                                scatter_dimension=0,
+                                tiled=True)
+    # We could theoretically remove the 0-fill, but it doesn't move extra data
+    # when there is a TP-sharded shared expert as it can ride along its all-reduce.
+    # Profile shows that removing the 0-fill is slower: it adds collectives while
+    # the shared expert's all-reduce still moves the same data.
+    out = jnp.zeros((mine.shape[0], 2 * half), mine.dtype)
+    out = jax.lax.dynamic_update_slice_in_dim(out, mine, core * half, axis=1)
+    return jax.lax.psum(out, axis_name=reduce_axes)
+
+
+def _hierarchical_collect_plan(mesh: Mesh, hidden: int) -> tuple | None:
+    """Return (pair_axis, perm) for _hierarchical_collect, or None if the mesh
+    or hidden size doesn't fit (same conditions as hierarchical dispatch)."""
+    plan = _hierarchical_dispatch_plan(mesh)
+    if plan is None:
+        logger.warning_once(
+            "MOE_HIERARCHICAL_COLLECT is set but does not apply to this "
+            "mesh (%s): keeping the one-step collect.", str(dict(mesh.shape)))
+        return None
+    if hidden % _HIERARCHICAL_HIDDEN_ALIGN:
+        logger.warning_once(
+            "MOE_HIERARCHICAL_COLLECT is set but hidden=%d is not a "
+            "multiple of %d: keeping the one-step collect.", hidden,
+            _HIERARCHICAL_HIDDEN_ALIGN)
+        return None
+    _, pair_axis, perm = plan
+    logger.info_once(
+        "MOE_HIERARCHICAL_COLLECT: each chip's two cores add column "
+        "halves on-chip along '%s', then reduce-scatter half the "
+        "columns over the attention-data axes.", pair_axis)
+    return pair_axis, perm
+
+
+# MOE_TC_PERMUTE thresholds, found by sweeping Qwen3.8-2.4T with random 8k
+# input / 1k output requests. The best values depend on the model and on how
+# evenly tokens spread over the experts.
+#
+# Up to this many tokens, the gather is a one-hot matmul, which beats a plain
+# gather on small batches. Its cost grows with the square of the token count,
+# so larger batches use a plain gather.
+_TC_PERMUTE_ONEHOT_GATHER_MAX_TOKENS = 1024
+# From this many tokens, the combine uses _tc_banded_combine instead of one
+# one-hot matmul, whose cost grows with the square of the token count. On one
+# v7x device the banded combine is slower at 2,048 tokens (125 vs 84 us) and
+# faster at 4,096 (195 vs 269 us).
+_TC_PERMUTE_BANDED_COMBINE_MIN_TOKENS = 4096
+# Tokens per block in _tc_banded_combine.
+_TC_PERMUTE_COMBINE_BLOCK_TOKENS = 512
+
+
+def tc_permute_capacity(num_rows: int, num_ep_shards: int) -> int:
+    """Rows in each EP shard's compact buffer.
+
+    The capacity factor times the shard's average share of num_rows (one data
+    shard's tokens * topk), rounded up to a multiple of 128. At least 512, and
+    never more than num_rows.
+    """
+    factor = envs.MOE_TC_PERMUTE_CAPACITY_FACTOR
+    if factor <= 0:
+        raise ValueError(
+            f"MOE_TC_PERMUTE_CAPACITY_FACTOR must be positive, got {factor}")
+    # round, not ceil: 1.1 * 1280 is 1408.0000000000002 in float.
+    capacity = align_to(round(factor * num_rows / num_ep_shards), 128)
+    return min(num_rows, max(512, capacity))
+
+
+def _tc_banded_blocks(num_tokens: int) -> tuple[int, int]:
+    """How _tc_banded_combine splits the tokens: (blocks, tokens per block)."""
+    block = min(_TC_PERMUTE_COMBINE_BLOCK_TOKENS, num_tokens)
+    return math.ceil(num_tokens / block), block
+
+
+def _tc_banded_combine(rows: jax.Array,
+                       row_tokens: jax.Array,
+                       row_weights: jax.Array,
+                       row_valid: jax.Array,
+                       num_tokens: int,
+                       acc: jax.Array | None = None) -> jax.Array:
+    """Adds each valid row, times its weight, into its token's output.
+
+    Does the same as one one-hot matmul over all the rows, but cheaper when
+    there are many tokens. The rows are sorted by token and the tokens split
+    into blocks of 512, so each block's rows sit next to each other. Each block
+    multiplies only with its own rows, W at a time, where W is the block's
+    average share of the rows rounded up to 128. A block with more rows takes
+    more of these windows; every block runs as many as the fullest one.
+
+    All rows must be finite, invalid ones too: a window can read rows past its
+    block's (with weight 0), and 0 * NaN is NaN.
+
+    Returns [blocks, tokens per block, hidden] in rows.dtype (see
+    _tc_banded_blocks); reshaped to [-1, hidden], row t is token t, and rows
+    past num_tokens are padding. If acc is given (same shape and dtype), the
+    result is added into it, so a loop over chunks needs just one accumulator.
+    Each matmul adds in float32 inside the MXU; only adding windows or chunks
+    together rounds to rows.dtype.
+    """
+    num_rows, hidden = rows.shape
+    num_blocks, block = _tc_banded_blocks(num_tokens)
+    window = min(
+        num_rows,
+        align_to((num_rows * block + num_tokens - 1) // num_tokens, 128))
+    block_starts = jnp.arange(num_blocks + 1, dtype=row_tokens.dtype) * block
+    # Invalid rows sort past the last block.
+    row_tokens = jnp.where(row_valid, row_tokens, block_starts[-1])
+    order = jnp.argsort(row_tokens, stable=True)
+    sorted_tokens = row_tokens[order]
+    sorted_weights = row_weights[order].astype(rows.dtype)
+    # Block b's rows are [bounds[b], bounds[b + 1]) of the token-sorted order.
+    bounds = (row_tokens[None, :] < block_starts[:, None]).sum(axis=1)
+    num_windows = ((bounds[1:] - bounds[:-1]).max() + window - 1) // window
+
+    def window_sum(m: jax.Array) -> jax.Array:
+        # [blocks, W]: window m of each block, in the token-sorted order.
+        pos = bounds[:-1, None] + m * window + jnp.arange(window)
+        in_block = pos < bounds[1:, None]
+        pos = jnp.minimum(pos, num_rows - 1)
+        local_token = sorted_tokens[pos] - block_starts[:-1, None]
+        weight = jnp.where(in_block, sorted_weights[pos], 0)
+        is_token = local_token[:, None, :] == jnp.arange(block)[:, None]
+        sel = jnp.where(is_token, weight[:, None, :], 0)  # [blocks, B, W]
+        return jnp.einsum("btw,bwh->bth",
+                          sel,
+                          rows[order[pos]],
+                          preferred_element_type=rows.dtype)
+
+    if acc is None:
+        acc, first = window_sum(0), 1
+    else:
+        first = 0
+    return jax.lax.fori_loop(first, num_windows,
+                             lambda m, a: a + window_sum(m), acc)
+
+
+def _tc_local_moe(tokens: jax.Array, topk_argsort_indices: jax.Array,
+                  w1: jax.Array, w1_scale: jax.Array | None,
+                  w1_bias: jax.Array | None, w2: jax.Array,
+                  w2_scale: jax.Array | None, w2_bias: jax.Array | None,
+                  group_sizes: jax.Array, group_offset: jax.Array,
+                  topk_argsort_revert_indices: jax.Array,
+                  topk_weights: jax.Array, *, activation: str, topk: int,
+                  capacity: int) -> jax.Array:
+    """Runs this shard's experts, gathering and combining on the TensorCore.
+
+    1. Gather: copy the shard's rows (its slice of the expert-sorted order)
+       into a compact buffer of `capacity` rows.
+    2. Experts: run both GMMs on the buffer. gmm_v2 reads group g from row
+       sum(group_sizes[:g]), so passing each group's row count within the
+       buffer (0 for other shards' experts) makes it start at row 0.
+    3. Combine: add each row's result, times its top-k weight, into its
+       token. A one-hot matmul does this; from
+       _TC_PERMUTE_BANDED_COMBINE_MIN_TOKENS tokens, _tc_banded_combine does
+       it more cheaply.
+
+    A shard with more rows than `capacity` repeats these steps one
+    buffer-full at a time and adds the results into one running total, so
+    the buffer never grows. Results and the total are in the activations'
+    dtype, like the expert GMMs' outputs.
+
+    topk_argsort_indices maps each expert-sorted row to its position in the
+    flattened [token, k] array.
+
+    Returns the shard's partial sums, [num_tokens, hidden]; adding them up
+    over the EP shards gives the layer's output.
+    """
+    num_rows = topk_argsort_indices.shape[0]
+    num_tokens = tokens.shape[0]
+    capacity = min(capacity, num_rows)
+    group_start = group_offset[0]
+    group_offsets = jnp.cumulative_sum(group_sizes, include_initial=True)
+    start = group_offsets[group_start]
+    end = group_offsets[group_start + w1.shape[0]]
+    # Each group's rows relative to the shard's first row; other groups empty.
+    groups = jnp.arange(group_sizes.size)
+    local = (groups >= group_start) & (groups < group_start + w1.shape[0])
+    group_lo = jnp.where(local, group_offsets[:-1] - start, 0)
+    group_hi = jnp.where(local, group_offsets[1:] - start, 0)
+    padded_indices = jnp.pad(topk_argsort_indices, (0, capacity))
+    revert = topk_argsort_revert_indices.reshape(num_tokens, topk) - start
+    weights = topk_weights.reshape(num_tokens, topk).astype(tokens.dtype)
+    banded = num_tokens >= _TC_PERMUTE_BANDED_COMBINE_MIN_TOKENS
+
+    def chunk(k: jax.Array, acc: jax.Array | None = None) -> jax.Array:
+        """Steps 1-3 for the shard's k-th buffer-full of rows.
+
+        One-hot combine: returns [num_tokens, hidden]. Banded:
+        adds into acc (in _tc_banded_combine's layout) and returns it.
+        """
+        lo = k * capacity
+        flat_idx = jax.lax.dynamic_slice(padded_indices, (start + lo, ),
+                                         (capacity, ))
+        idx = flat_idx // topk
+        if num_tokens <= _TC_PERMUTE_ONEHOT_GATHER_MAX_TOKENS:
+            # Exact for bf16 activations with finite rows: each output row is
+            # one input row times 1, plus the other rows times 0.
+            x = jnp.dot(jax.nn.one_hot(idx, num_tokens, dtype=tokens.dtype),
+                        tokens,
+                        preferred_element_type=tokens.dtype)
+        else:
+            x = tokens[idx]
+        chunk_group_sizes = (jnp.clip(group_hi - lo, 0, capacity) -
+                             jnp.clip(group_lo - lo, 0, capacity))
+        gmm1_res = gmm_wrapper(x,
+                               w1,
+                               w1_scale,
+                               w1_bias,
+                               chunk_group_sizes,
+                               group_offset,
+                               fuse_act=activation,
+                               preferred_element_type=x.dtype)
+        gmm1_res = gmm1_res[:, :w2.shape[1]]
+        gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias,
+                               chunk_group_sizes, group_offset)
+        # gmm_v2 runs with zero_initialize=False: rows past the chunk's are
+        # stale HBM, and 0 * NaN in the matmul below would spread.
+        valid = jnp.arange(capacity) < end - start - lo
+        gmm2_res = jnp.where(valid[:, None], gmm2_res, 0)
+        if banded:
+            return _tc_banded_combine(gmm2_res, idx,
+                                      topk_weights.reshape(-1)[flat_idx],
+                                      valid, num_tokens, acc)
+        rel = jnp.where((revert >= lo) & (revert < lo + capacity), revert - lo,
+                        -1)
+        sel = (jax.nn.one_hot(rel, capacity, dtype=tokens.dtype) *
+               weights[..., None]).sum(axis=1)
+        return jnp.dot(sel, gmm2_res, preferred_element_type=tokens.dtype)
+
+    num_chunks = (end - start + capacity - 1) // capacity
+
+    def all_chunks() -> jax.Array:
+        if banded:
+            # One accumulator for every chunk and window: a result per chunk on
+            # top of it cost ~1 GiB of temporaries at 16,384 tokens.
+            return jax.lax.fori_loop(
+                0, num_chunks, chunk,
+                jnp.zeros(
+                    _tc_banded_blocks(num_tokens) + (w2.shape[2], ),
+                    tokens.dtype))
+        return jax.lax.fori_loop(
+            0, num_chunks, lambda k, acc: acc + chunk(k),
+            jnp.zeros((num_tokens, w2.shape[2]), tokens.dtype))
+
+    if capacity == num_rows:
+        out = chunk(0)
+    else:
+        out = jax.lax.cond(end - start <= capacity, lambda: chunk(0),
+                           all_chunks)
+    if banded:
+        out = out.reshape(-1, out.shape[-1])[:num_tokens]
+    return out.astype(tokens.dtype)
+
+
 def moe_gmm_local(x: jax.Array,
                   w1: jax.Array,
                   w1_scale: jax.Array | None,
@@ -170,6 +643,7 @@ def moe_gmm_local(x: jax.Array,
                   group_offset: jax.Array,
                   topk_argsort_revert_indices: jax.Array,
                   topk_weights: jax.Array,
+                  topk_argsort_indices: jax.Array | None = None,
                   *,
                   activation: str,
                   topk: int,
@@ -178,16 +652,24 @@ def moe_gmm_local(x: jax.Array,
                   onehot_moe_permute_threshold: int = 0,
                   scatter_results: bool = False,
                   moe_chunk_size: int = 0,
-                  defer_all_reduce: bool = False) -> jax.Array:
+                  defer_all_reduce: bool = False,
+                  hierarchical_collect: tuple | None = None,
+                  tc_capacity: int = 0) -> jax.Array:
     """Main MoE logic on a local shard can run in TP or EP mode.
 
     Set parallelism for "tp" or "ep"
+
+    With MOE_TC_PERMUTE (EP only), topk_argsort_indices is given and x holds
+    the tokens before the permute, [tokens, hidden]; _tc_local_moe then does
+    the gather, the GMMs and the combine.
     """
 
     assert parallelism in ["tp", "ep"]
+    use_tc_permute = topk_argsort_indices is not None
+    assert not use_tc_permute or (parallelism == "ep" and tc_capacity > 0)
 
     # GMM1 computes x @ (W_up | W_gate) together and activation, output is [tokens,padded_intermediate_size]
-    gmm1_res = gmm_wrapper(
+    gmm1_res = None if use_tc_permute else gmm_wrapper(
         x,
         w1,
         w1_scale,
@@ -204,11 +686,14 @@ def moe_gmm_local(x: jax.Array,
     if parallelism == "tp" and w2_bias is not None:
         shard_id = jax.lax.axis_index(ShardingAxisName.MLP_TENSOR).sum()
         w2_bias = jnp.where(shard_id == 0, w2_bias, 0)
-    gmm1_res = gmm1_res[:, :w2.shape[1]]  # trim to hidden size if padded
-    gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
-                           group_offset)
+    if not use_tc_permute:
+        gmm1_res = gmm1_res[:, :w2.shape[1]]  # trim to hidden size if padded
+        gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
+                               group_offset)
 
-    batch_size = gmm2_res.shape[0]
+    # Not gmm2_res.shape[0]: x may carry padding rows past the last group
+    # (RAGGED_GATHER_TRIM_ROWS=False).
+    batch_size = topk_argsort_revert_indices.shape[0]
     local_group_size = w1.shape[0]
 
     reduction_axis = (ShardingAxisName.MLP_TENSOR
@@ -224,17 +709,7 @@ def moe_gmm_local(x: jax.Array,
         for axis in reduction_axes:
             scatter_axis_size *= jax.lax.axis_size(axis)
     elif scatter_results:
-        dp_axes = ShardingAxisName.ATTN_DATA
-        if not isinstance(dp_axes, tuple):
-            dp_axes = (dp_axes, )
-        if isinstance(reduction_axis, tuple):
-            reduce_axes = tuple(a for a in reduction_axis if a not in dp_axes)
-            scatter_axes = tuple(a for a in reduction_axis if a in dp_axes)
-        else:
-            reduce_axes = () if reduction_axis in dp_axes else (
-                reduction_axis, )
-            scatter_axes = (
-                reduction_axis, ) if reduction_axis in dp_axes else ()
+        reduce_axes, scatter_axes = _split_reduce_scatter_axes(reduction_axis)
         for a in scatter_axes:
             scatter_axis_size *= jax.lax.axis_size(a)
 
@@ -243,7 +718,8 @@ def moe_gmm_local(x: jax.Array,
     is_onehot = (local_group_size < group_sizes.size) and (
         onehot_moe_permute_threshold > 0
         and batch_size <= onehot_moe_permute_threshold)
-    if moe_chunk_size > 0 and num_tokens > moe_chunk_size * scatter_axis_size and not is_onehot:
+    if (moe_chunk_size > 0 and num_tokens > moe_chunk_size * scatter_axis_size
+            and not is_onehot and not use_tc_permute):
         actual_chunk_size = moe_chunk_size * scatter_axis_size
     else:
         actual_chunk_size = num_tokens
@@ -261,13 +737,22 @@ def moe_gmm_local(x: jax.Array,
             revert_indices_2d, scatter_axis_size, num_chunks)
         topk_argsort_revert_indices = revert_indices_2d.flatten()
 
-    if local_group_size < group_sizes.size:
-        mask = valid_rows_mask(
+    if use_tc_permute:
+        mask = None
+    elif local_group_size < group_sizes.size:
+        row_mask = valid_rows_mask(
             gmm1_res.shape[0],
             group_sizes,
             group_offset,
             group_offset + local_group_size,
-        )[topk_argsort_revert_indices].reshape(-1, topk, 1)
+        )
+        if is_onehot:
+            # gmm_v2 runs with zero_initialize=False, leaving rows outside this
+            # EP shard's [token_start, token_end) range uninitialized in HBM.
+            # Zero them out before `combine @ gmm2_res` so IEEE-754 `0.0 * NaN`
+            # (or `0.0 * Inf`) from stale HBM bits cannot corrupt valid rows.
+            gmm2_res = jnp.where(row_mask[:, None], gmm2_res, 0)
+        mask = row_mask[topk_argsort_revert_indices].reshape(-1, topk, 1)
     else:
         mask = jnp.full((batch_size, ), True).reshape(-1, topk, 1)
 
@@ -281,13 +766,29 @@ def moe_gmm_local(x: jax.Array,
 
         cur_indices = topk_argsort_revert_indices[start_idx:end_idx]
         cur_weights = topk_weights[start_tok:end_tok]
-        cur_mask = mask[start_tok:end_tok]
 
-        if local_group_size < group_sizes.size:
+        if use_tc_permute:
+            chunk_hidden = _tc_local_moe(x,
+                                         topk_argsort_indices,
+                                         w1,
+                                         w1_scale,
+                                         w1_bias,
+                                         w2,
+                                         w2_scale,
+                                         w2_bias,
+                                         group_sizes,
+                                         group_offset,
+                                         topk_argsort_revert_indices,
+                                         topk_weights,
+                                         activation=activation,
+                                         topk=topk,
+                                         capacity=tc_capacity)
+        elif local_group_size < group_sizes.size:
+            cur_mask = mask[start_tok:end_tok]
             if onehot_moe_permute_threshold > 0 and batch_size <= onehot_moe_permute_threshold:
                 revert_indices = cur_indices.reshape(-1, topk)
                 onehot = jax.nn.one_hot(revert_indices,
-                                        batch_size,
+                                        gmm2_res.shape[0],
                                         dtype=gmm2_res.dtype)
                 combine = (onehot * cur_weights[..., None] *
                            cur_mask).sum(axis=1)
@@ -309,23 +810,17 @@ def moe_gmm_local(x: jax.Array,
                 num_devices=scatter_axis_size,
                 axis_name=reduction_axis)
             out = rs_out.astype(x.dtype)
-        elif scatter_results:
-            if reduce_axes:
-                chunk_hidden = jax.lax.psum(chunk_hidden,
-                                            axis_name=reduce_axes)
-            if scatter_axes:
-                out = jax.lax.psum_scatter(chunk_hidden,
-                                           axis_name=scatter_axes,
-                                           scatter_dimension=0,
-                                           tiled=True).astype(x.dtype)
-            else:
-                out = chunk_hidden.astype(x.dtype)
+        elif (scatter_results and hierarchical_collect is not None
+              and scatter_axes and hierarchical_collect[0] in reduce_axes):
+            out = _hierarchical_collect(chunk_hidden, *hierarchical_collect,
+                                        reduce_axes,
+                                        scatter_axes).astype(x.dtype)
         else:
-            if not defer_all_reduce:
-                out = jax.lax.psum(chunk_hidden,
-                                   axis_name=reduction_axis).astype(x.dtype)
-            else:
-                out = chunk_hidden.astype(x.dtype)
+            out = _reduce_local_moe_output(chunk_hidden,
+                                           reduction_axis,
+                                           scatter_results=scatter_results,
+                                           defer_all_reduce=defer_all_reduce,
+                                           dtype=x.dtype)
         out_list.append(out)
 
     return jnp.concatenate(out_list,
@@ -438,7 +933,13 @@ def expert_parallel_gmm(
     moe_chunk_size: int = 0,
     scatter_results: bool = False,
     defer_all_reduce: bool = False,
+    topk_argsort_indices: jax.Array | None = None,
 ) -> jax.Array:
+    """Runs the MoE experts with expert parallelism (see moe_gmm_local).
+
+    topk_argsort_indices is given only with MOE_TC_PERMUTE; x then holds the
+    tokens before the permute.
+    """
     ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
     ep_p_spec = P(ShardingAxisName.EXPERT)
     data_p_spec = P(ShardingAxisName.MLP_DATA)
@@ -453,6 +954,11 @@ def expert_parallel_gmm(
     w2_scale_spec = None if w2_scale is None else ep_p_spec
     w2_bias_spec = None if w2_bias is None else ep_p_spec
 
+    hierarchical_collect = None
+    if (scatter_results and not enable_rs_kernel
+            and envs.MOE_HIERARCHICAL_COLLECT):
+        hierarchical_collect = _hierarchical_collect_plan(mesh, x.shape[-1])
+
     if scatter_results:
         final_out_specs = attn_data_p_spec
     elif enable_rs_kernel:
@@ -460,17 +966,37 @@ def expert_parallel_gmm(
     else:
         final_out_specs = data_p_spec
 
+    tc_capacity = 0
+    if topk_argsort_indices is not None:
+        # The rows of every data shard, concatenated; each device has one data
+        # shard's rows, split over the EP shards by expert.
+        local_rows = topk_argsort_indices.shape[0] // get_mesh_shape_product(
+            mesh, ShardingAxisName.MLP_DATA)
+        tc_capacity = tc_permute_capacity(local_rows, ep_size)
+        logger.info_once(
+            "MOE_TC_PERMUTE: EP permute and combine on the TensorCore, "
+            "compact buffer of %d rows (of %d) per shard", tc_capacity,
+            local_rows)
+        if moe_chunk_size > 0:
+            logger.warning_once(
+                "MOE_TC_PERMUTE: moe_chunk_size=%d is ignored. The TensorCore "
+                "path gathers, runs the experts and combines all tokens in "
+                "one pass, so its combine and reduce aren't split into token "
+                "chunks.", moe_chunk_size)
+
     return jax.shard_map(
         functools.partial(
             moe_gmm_local,
             activation=activation,
             topk=topk,
             parallelism="ep",
+            tc_capacity=tc_capacity,
             onehot_moe_permute_threshold=onehot_moe_permute_threshold,
             enable_rs_kernel=enable_rs_kernel,
             scatter_results=scatter_results,
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
+            hierarchical_collect=hierarchical_collect,
         ),
         mesh=mesh,
         in_specs=(
@@ -485,6 +1011,7 @@ def expert_parallel_gmm(
             ep_p_spec,
             data_p_spec,
             data_p_spec,
+            None if topk_argsort_indices is None else data_p_spec,
         ),
         out_specs=(final_out_specs),
         check_vma=False,
@@ -500,11 +1027,81 @@ def expert_parallel_gmm(
         group_offset,
         topk_argsort_revert_indices,
         topk_weights,
+        topk_argsort_indices,
     )
 
 
-def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
-                          dtype: jnp.dtype) -> jax.Array:
+def _concat_bits(arrays, unit: jnp.dtype) -> jax.Array:
+    """Concatenate [n, m_i] arrays as their raw bits, in `unit` columns.
+
+    Bit-cast scales and ids can spell float NaNs, which float ops may not
+    preserve bit for bit; integer columns keep every bit.
+    """
+    return jnp.concatenate([
+        jax.lax.bitcast_convert_type(a, unit).reshape(a.shape[0], -1)
+        for a in arrays
+    ],
+                           axis=1)
+
+
+def _split_bits(row: jax.Array, like) -> list[jax.Array]:
+    """Inverse of _concat_bits: split `row` into arrays with the dtypes and
+    widths of `like`."""
+    out, start = [], 0
+    for a in like:
+        words = a.dtype.itemsize // row.dtype.itemsize
+        width = a.shape[1] * words
+        b = row[:, start:start + width]
+        start += width
+        if words > 1:
+            b = b.reshape(b.shape[0], -1, words)
+        out.append(jax.lax.bitcast_convert_type(b, a.dtype))
+    return out
+
+
+def _one_step_all_gather_as_bits(arrays, mesh: Mesh, unit: jnp.dtype) -> tuple:
+    """All-gather `arrays` in one collective.
+
+    The arrays come row-sharded over MLP-data and the attention-only axes. Each
+    row's values are concatenated as raw `unit` bits, so one all-gather over the
+    attention-only axes moves them all, bitwise unchanged. Returns the arrays
+    with rows split only over MLP-data (the model replicas) and replicated over
+    every other axis.
+    """
+    axes = _attn_only_axes(mesh)
+    mlp = as_axes(ShardingAxisName.MLP_DATA)
+
+    def _gather(*local):
+        row = jax.lax.all_gather(_concat_bits(local, unit),
+                                 axes,
+                                 axis=0,
+                                 tiled=True)
+        return tuple(_split_bits(row, local))
+
+    return jax.shard_map(
+        _gather,
+        mesh=mesh,
+        in_specs=(P(mlp + axes, None), ) * len(arrays),
+        out_specs=(P(ShardingAxisName.MLP_DATA, None), ) * len(arrays),
+        check_vma=False,
+    )(*arrays)
+
+
+def _dequantize_fp8(q: jax.Array, scale: jax.Array,
+                    dtype: jnp.dtype) -> jax.Array:
+    """fp8 values times their scale, computed in f32 and cast to dtype."""
+    return (q.astype(jnp.float32) * scale).astype(dtype)
+
+
+def _apply_all_gather_fp8(hidden_states: jax.Array,
+                          mesh: Mesh,
+                          routing: tuple = ()):
+    """One-step fp8 all-gather of the tokens.
+
+    Returns the gathered hidden_states. With routing=(int32 ids, f32 weights),
+    the routing rides in the same all-gather and it returns
+    (hidden_states, ids, weights).
+    """
     logger.info("Apply FP8 all-gather on input of MOE")
     hidden_states_q, scale = quantize_tensor(
         jnp.float8_e4m3fn,
@@ -514,9 +1111,18 @@ def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
     # quantize_tensor squeezes the scale if axis is int. We need to expand it back.
     scale = jnp.expand_dims(scale, -1)
 
+    if routing:
+        # Keeps q and scale bitwise identical to the no-routing path below.
+        hidden_states_q, scale = jax.lax.optimization_barrier(
+            (hidden_states_q, scale))
+        hidden_states_q, scale, *routing = _one_step_all_gather_as_bits(
+            (hidden_states_q, scale, *routing), mesh, jnp.uint8)
+        return (_dequantize_fp8(hidden_states_q, scale,
+                                hidden_states.dtype), *routing)
+
     # Dequantize if needed
     return jax.shard_map(
-        lambda x, s: (x.astype(jnp.float32) * s).astype(dtype),
+        lambda x, s: _dequantize_fp8(x, s, hidden_states.dtype),
         mesh=mesh,
         in_specs=(
             P(ShardingAxisName.MLP_DATA, None),
@@ -524,6 +1130,213 @@ def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
         ),
         out_specs=P(ShardingAxisName.MLP_DATA, None),
     )(hidden_states_q, scale)
+
+
+def _apply_one_step_dispatch_gather(hidden_states: jax.Array,
+                                    mesh: Mesh,
+                                    fp8: bool,
+                                    routing: tuple = ()):
+    """Hidden states for the one-step dispatch.
+
+    Without routing: with fp8=True the output of _apply_all_gather_fp8,
+    otherwise the input unchanged, and any all-gather the mesh needs is the one
+    XLA inserts for the caller's next shard_map. With routing=(int32 ids, f32
+    weights), fp8 or not, gathers the tokens explicitly in one all-gather with
+    the routing and returns (hidden_states, ids, weights).
+    """
+    if fp8:
+        return _apply_all_gather_fp8(hidden_states, mesh, routing)
+    if routing:
+        return _one_step_all_gather_as_bits((hidden_states, *routing), mesh,
+                                            jnp.uint16)
+    return hidden_states
+
+
+# The hierarchical gather splits the hidden columns in half; each half must be
+# whole 128-lane tiles, or the slice, gather and concatenate need relayout
+# copies.
+_HIERARCHICAL_HIDDEN_ALIGN = 2 * 128
+
+
+def _attn_only_axes(mesh: Mesh) -> tuple[str, ...]:
+    """The sharded attention-data axes that are not MLP-data axes: the axes
+    the MoE dispatch gathers token rows over."""
+    mlp = set(as_axes(ShardingAxisName.MLP_DATA))
+    return tuple(a for a in as_axes(ShardingAxisName.ATTN_DATA)
+                 if a not in mlp and mesh.shape.get(a, 1) > 1)
+
+
+def _hierarchical_dispatch_plan(mesh: Mesh):
+    """Return (step1_axes, pair_axis, perm) for hierarchical dispatch, or None.
+
+    Step 1 gathers over the attention-data axes (excluding MLP-data). Step 2
+    swaps halves between the two cores of each chip along `pair_axis`, the one
+    remaining axis the hidden states are replicated across. Applies only if
+    `pair_axis` indices 2k, 2k+1 are the two cores of one chip in every rank;
+    checked from each device's coords, core_on_chip and slice_index, not
+    assumed.
+    """
+    # Step 1 axes: attention-data axes that are not in MLP-data.
+    mlp = set(as_axes(ShardingAxisName.MLP_DATA))
+    attn = [a for a in as_axes(ShardingAxisName.ATTN_DATA) if a not in mlp]
+    step1 = tuple(a for a in attn if mesh.shape.get(a, 1) > 1)
+    # Step 2 needs exactly one remaining axis (the one the hidden states are
+    # replicated across), of even size.
+    rest = [
+        a for a in mesh.axis_names
+        if a not in mlp and a not in attn and mesh.shape[a] > 1
+    ]
+    if not step1 or len(rest) != 1:
+        return None
+    pair_axis = rest[0]
+    size = mesh.shape[pair_axis]
+    if size % 2:
+        return None
+    # Rearrange mesh.devices into a 2D table: columns run along pair_axis,
+    # rows are combination of the other axes (attn_dp on our mesh).
+    devs = np.moveaxis(np.asarray(mesh.devices),
+                       mesh.axis_names.index(pair_axis), -1).reshape(-1, size)
+    # In every row, each adjacent pair (2k, 2k+1) must be the two cores of
+    # one chip. Coords are only unique within a slice, so the slices must
+    # match too.
+    for row in devs:
+        for k in range(0, size, 2):
+            a, b = row[k], row[k + 1]
+            ca, cb = getattr(a, "coords", None), getattr(b, "coords", None)
+            sa = getattr(a, "slice_index", None)
+            sb = getattr(b, "slice_index", None)
+            if (ca is None or cb is None or list(ca) != list(cb) or sa != sb
+                    or getattr(a, "core_on_chip", None) == getattr(
+                        b, "core_on_chip", None)):
+                return None
+    # (src, dest) positions along pair_axis for the step-2 ppermute: each core
+    # swaps with the other core of its chip. Every position appears once as a
+    # source and once as a destination.
+    perm = [(k + d, k + 1 - d) for k in range(0, size, 2) for d in (0, 1)]
+    return step1, pair_axis, perm
+
+
+def _apply_hierarchical_dispatch_gather(hidden_states: jax.Array,
+                                        mesh: Mesh,
+                                        fp8: bool = False,
+                                        routing: tuple = ()):
+    """Replicate attention-data-sharded hidden states in a hierarchical gather.
+
+    Replaces the one all-gather XLA would insert, which every model shard of a
+    rank runs on identical rows over cross-chip links. Instead, each core of a
+    chip gathers half the hidden columns over the attention-data axes, then the
+    two cores swap halves on-chip. Cross-chip traffic halves. Both column halves
+    keep the one-step row order, and the result is bitwise identical.
+
+    With fp8=True each core first quantizes its rows as _apply_all_gather_fp8
+    does (one scale per row, over the full row), so both steps move fp8 bytes,
+    and each row's scale rides as 4 extra byte columns of the step-1 payload
+    instead of a separate collective. XLA may compile the two quantizations
+    differently, so some values can land one fp8 step away from
+    _apply_all_gather_fp8's.
+
+    If the mesh doesn't fit (see _hierarchical_dispatch_plan) or the hidden
+    size is not a multiple of 256, falls back to _apply_one_step_dispatch_gather.
+
+    routing=(int32 ids, f32 weights) rides as extra integer columns of the
+    step-1 payload (after the scale with fp8), instead of a separate
+    all_gather_topk_indices_and_weights: step 1 gathers rows over the same
+    axes. Then returns (hidden_states, ids, weights).
+    """
+    plan = _hierarchical_dispatch_plan(mesh)
+    hidden = hidden_states.shape[-1]
+
+    if plan is None:
+        logger.warning_once(
+            "MOE_HIERARCHICAL_DISPATCH is set but does not apply to this mesh "
+            "(%s): keeping the one-step dispatch all-gather. It needs a single "
+            "model axis whose adjacent indices are the two cores of one chip "
+            "in every attention-data rank.",
+            str(dict(mesh.shape)))  # *_once caches on args: hashable
+        return _apply_one_step_dispatch_gather(hidden_states, mesh, fp8,
+                                               routing)
+    if hidden % _HIERARCHICAL_HIDDEN_ALIGN:
+        logger.warning_once(
+            "MOE_HIERARCHICAL_DISPATCH is set but hidden=%d is not a "
+            "multiple of %d, so its halves would not be whole 128-lane "
+            "tiles: keeping the one-step dispatch all-gather.", hidden,
+            _HIERARCHICAL_HIDDEN_ALIGN)
+        return _apply_one_step_dispatch_gather(hidden_states, mesh, fp8,
+                                               routing)
+    step1, pair_axis, perm = plan
+    dtype = hidden_states.dtype
+    logger.info_once(
+        "MOE_HIERARCHICAL_DISPATCH: each chip's two cores gather half of the "
+        "%d hidden columns over %s, then swap halves on-chip along '%s' "
+        "(pairs %s), in %s.", hidden, str(step1), pair_axis, str(perm),
+        "fp8" if fp8 else str(dtype))
+    half = hidden // 2
+    mlp = ShardingAxisName.MLP_DATA
+
+    def _gather(x, *routing):
+        # All gather across step 1 axes.
+        core = jax.lax.axis_index(pair_axis) % 2
+        mine = jax.lax.dynamic_slice_in_dim(x, core * half, half, axis=1)
+        if routing:
+            # The routing rides as extra columns; all move as raw bits.
+            row = jax.lax.all_gather(_concat_bits((mine, *routing),
+                                                  jnp.uint16),
+                                     step1,
+                                     axis=0,
+                                     tiled=True)
+            mine, *routing = _split_bits(row, (mine, *routing))
+        else:
+            mine = jax.lax.all_gather(mine, step1, axis=0, tiled=True)
+        # Exchange the halves between two cores on the same chip.
+        theirs = jax.lax.ppermute(mine, pair_axis, perm)
+        first = core == 0
+        out = jnp.concatenate([
+            jnp.where(first, mine, theirs),
+            jnp.where(first, theirs, mine),
+        ],
+                              axis=1)
+        return (out, *routing) if routing else out
+
+    def _gather_fp8(x, *routing):
+        q, scale = quantize_tensor(jnp.float8_e4m3fn, x, axis=-1)
+        # Move the bytes as uint8: the scale's bytes can be fp8 NaNs, which
+        # fp8 ops may not preserve bit for bit.
+        q = jax.lax.bitcast_convert_type(q, jnp.uint8)
+        # The scale's 4 bytes ride as 4 extra columns, then the routing's.
+        tail = _concat_bits((scale[:, None], *routing), jnp.uint8)
+        # All gather across step 1 axes, with the scale tail.
+        core = jax.lax.axis_index(pair_axis) % 2
+        mine = jax.lax.dynamic_slice_in_dim(q, core * half, half, axis=1)
+        # jnp.concatenate results in an in-memory copy (so does the after-AG
+        # slice), but the cost is small compared to a separate AG for the scale.
+        mine = jax.lax.all_gather(jnp.concatenate([mine, tail], axis=1),
+                                  step1,
+                                  axis=0,
+                                  tiled=True)
+        scale, *routing = _split_bits(mine[:, half:],
+                                      (scale[:, None], *routing))
+        mine = mine[:, :half]
+        # Exchange the halves between two cores on the same chip.
+        theirs = jax.lax.ppermute(mine, pair_axis, perm)
+        first = core == 0
+        q = jnp.concatenate([
+            jnp.where(first, mine, theirs),
+            jnp.where(first, theirs, mine),
+        ],
+                            axis=1)
+        q = jax.lax.bitcast_convert_type(q, jnp.float8_e4m3fn)
+        out = _dequantize_fp8(q, scale, dtype)
+        return (out, *routing) if routing else out
+
+    args = (hidden_states, *routing)
+    in_spec, out_spec = P(tuple(as_axes(mlp)) + step1, None), P(mlp, None)
+    return jax.shard_map(
+        _gather_fp8 if fp8 else _gather,
+        mesh=mesh,
+        in_specs=(in_spec, ) * len(args),
+        out_specs=(out_spec, ) * len(args) if routing else out_spec,
+        check_vma=False,
+    )(*args)
 
 
 @jax.jit(static_argnames=(
@@ -591,6 +1404,21 @@ def fused_moe_func(
         Output of moe operation [num_tokens, hidden_size]
     """
 
+    if envs.MOE_HIERARCHICAL_DISPATCH and (not use_ep
+                                           or use_gmm_fused_rs_kernel):
+        logger.warning_once(
+            "MOE_HIERARCHICAL_DISPATCH is set but ignored: it only applies to "
+            "the expert-parallel GMM path without the fused reduce-scatter "
+            "kernel (use_ep=%s, use_gmm_fused_rs_kernel=%s).", use_ep,
+            use_gmm_fused_rs_kernel)
+
+    if envs.MOE_TC_PERMUTE and (not use_ep or use_gmm_fused_rs_kernel):
+        logger.warning_once(
+            "MOE_TC_PERMUTE is set but ignored: it only applies to the "
+            "expert-parallel GMM path without the fused reduce-scatter kernel "
+            "(use_ep=%s, use_gmm_fused_rs_kernel=%s).", use_ep,
+            use_gmm_fused_rs_kernel)
+
     if use_ep and use_gmm_fused_rs_kernel:
         from tpu_inference.kernels.experimental.fused_moe.fused_moe_rs import \
             fused_moe_func_rs
@@ -614,10 +1442,6 @@ def fused_moe_func(
     global_num_experts, padded_hidden_size, _ = w1.shape
     dtype = hidden_states.dtype
 
-    assert (num_tokens * topk) % 16 == 0, (
-        "The kernel requires num_tokens * topk to be a multiple of "
-        f"16 but got {num_tokens}*{topk}={num_tokens*topk}")
-
     assert gating_output.shape == (num_tokens, global_num_experts)
 
     topk_weights = apply_scoring_fn(scoring_fn, gating_output)
@@ -630,14 +1454,18 @@ def fused_moe_func(
             k=topk,
             recall_target=envs.MOE_APPROX_TOPK_RECALL_TARGET)
     else:
+        # TPU_MOE_ROUTER_TOPK=rowmax: k row-max passes instead of a sort.
+        select_topk = (functools.partial(router_topk, k=topk)
+                       if envs.TPU_MOE_ROUTER_TOPK == "rowmax" else
+                       functools.partial(jax.lax.top_k, k=topk))
         if expert_score_correction_bias is not None:
-            _, topk_indices = jax.lax.top_k(
-                topk_weights + expert_score_correction_bias[None, :], k=topk)
+            _, topk_indices = select_topk(
+                topk_weights + expert_score_correction_bias[None, :])
             topk_weights = jnp.take_along_axis(topk_weights,
                                                topk_indices,
                                                axis=-1)
         else:
-            topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
+            topk_weights, topk_indices = select_topk(topk_weights)
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
     # Route padding tokens to expert 0 instead of picking a selected expert. This
@@ -649,12 +1477,67 @@ def fused_moe_func(
         topk_indices = jnp.where(token_valid, topk_indices, 0)
         topk_weights = jnp.where(token_valid, topk_weights, 0.0)
     # All gathering topk_indices and topk_weights if attention dp is used.
-    if get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA) > 1:
+    # MOE_FOLD_ROUTING_INTO_DISPATCH gathers them in the token all-gather.
+    hierarchical = use_ep and envs.MOE_HIERARCHICAL_DISPATCH
+    dispatch_gather = (_apply_hierarchical_dispatch_gather
+                       if hierarchical else _apply_one_step_dispatch_gather)
+    fold_routing = (envs.MOE_FOLD_ROUTING_INTO_DISPATCH
+                    and bool(_attn_only_axes(mesh)))
+    if fold_routing:
+        logger.info_once(
+            "MOE_FOLD_ROUTING_INTO_DISPATCH: the top-k ids and weights ride "
+            "in the %s dispatch all-gather of the tokens.",
+            "hierarchical" if hierarchical else "one-step")
+        # The same dtypes all_gather_topk_indices_and_weights gathers in.
+        routing = (topk_indices.astype(jnp.int32),
+                   topk_weights.astype(jnp.float32))
+        hidden_states, topk_indices, topk_weights = dispatch_gather(
+            hidden_states, mesh, fp8=all_gather_fp8, routing=routing)
+    elif get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA) > 1:
         topk_indices, topk_weights = all_gather_topk_indices_and_weights(
             topk_indices, topk_weights, dtype, mesh)
     topk_weights = topk_weights.astype(dtype)
     topk_weights = jax.lax.with_sharding_constraint(
         topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
+
+    if not fold_routing:
+        hidden_states = dispatch_gather(hidden_states,
+                                        mesh,
+                                        fp8=all_gather_fp8)
+
+    # TPU_MOE_LOWTOK: small decode batches under EP run one Pallas kernel per
+    # shard instead of permute + GMM.
+    if use_ep:
+        local_num_experts = global_num_experts // get_mesh_shape_product(
+            mesh, ShardingAxisName.EXPERT)
+        ep_kernel = _select_ep_kernel(hidden_states,
+                                      w1,
+                                      w2,
+                                      w1_scale,
+                                      w2_scale,
+                                      w1_bias,
+                                      w2_bias,
+                                      activation=activation,
+                                      local_num_experts=local_num_experts)
+        if ep_kernel is not None:
+            return _ep_dispatch_kernel(
+                hidden_states,
+                w1,
+                w2,
+                w1_scale,
+                w2_scale,
+                topk_weights,
+                topk_indices,
+                mesh=mesh,
+                kernel_mode=ep_kernel,
+                local_num_experts=local_num_experts,
+                scatter_results=scatter_results,
+                defer_all_reduce=defer_all_reduce,
+            )
+
+    assert (num_tokens * topk) % 16 == 0, (
+        "The kernel requires num_tokens * topk to be a multiple of "
+        f"16 but got {num_tokens}*{topk}={num_tokens*topk}")
 
     # Only enable Reduce-Scatter if flag is on and Attention is pure DP
     total_num_devices = mesh.devices.size
@@ -671,19 +1554,45 @@ def fused_moe_func(
         topk_indices = _override_token_indices_for_random_routing(
             topk_indices, global_num_experts)
 
+    # MOE_TC_PERMUTE: the permute moves into moe_gmm_local (_tc_local_moe), so
+    # the tokens and the expert sort's permutation are passed on as they are.
+    use_tc_permute = use_ep and envs.MOE_TC_PERMUTE
+    if use_tc_permute and num_valid_tokens is not None:
+        logger.warning_once(
+            "MOE_TC_PERMUTE with padding routed to expert 0 "
+            "(MOE_ROUTE_PADDING_TO_EXPERT0): every padding row goes to the EP "
+            "shard holding expert 0, which can overflow its compact buffer "
+            "and loop over many buffer-fulls while the other shards wait.")
+
     def _process_tokens_locally(hidden_states_local, topk_indices_local):
         num_tokens_local = hidden_states_local.shape[0]
         topk_indices_flat = topk_indices_local.flatten()
-        topk_argsort_indices = jnp.argsort(topk_indices_flat)
-        token_indices = jnp.arange(num_tokens_local,
-                                   dtype=jnp.int32).repeat(topk)
-        token_indices_sorted = token_indices[topk_argsort_indices]
+
+        flat_bits = max(1, (topk_indices_flat.shape[0] - 1).bit_length())
+        single_sort = (envs.TPU_MOE_SINGLE_SORT
+                       and topk_indices_flat.shape[0] <= _SINGLE_SORT_MAX_ROWS
+                       and
+                       (global_num_experts + 1).bit_length() + flat_bits < 31)
+        if single_sort:
+            logger.info_once("MoE permutation runs as one packed sort.")
+            topk_argsort_indices, topk_argsort_revert_indices, token_indices_sorted = (
+                _single_sort_permutation(topk_indices_flat, topk, flat_bits))
+        else:
+            topk_argsort_indices = jnp.argsort(topk_indices_flat)
+            token_indices = jnp.arange(num_tokens_local,
+                                       dtype=jnp.int32).repeat(topk)
+            token_indices_sorted = token_indices[topk_argsort_indices]
+            topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
+
         # Below one_hot is equivalent to jnp.bincount(topk_indices_flat,
         # length=global_num_experts) but is more performant.
         group_sizes_local = jax.nn.one_hot(topk_indices_flat,
                                            global_num_experts,
                                            dtype=jnp.int32).sum(axis=0)
-        topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
+        if use_tc_permute:
+            # _tc_local_moe gathers each shard's rows itself.
+            return (hidden_states_local, group_sizes_local,
+                    topk_argsort_revert_indices, topk_argsort_indices)
 
         if use_ep:
             num_ep_shard = get_mesh_shape_product(mesh,
@@ -711,29 +1620,27 @@ def fused_moe_func(
                     token_indices_sorted,
                     shard_output_start,
                     shard_output_end,
+                    max_row_subchunks=envs.RAGGED_GATHER_MAX_ROW_SUBCHUNKS,
+                    trim_rows=envs.RAGGED_GATHER_TRIM_ROWS,
                 )
         else:
             x = hidden_states_local[token_indices_sorted]
 
         return x, group_sizes_local, topk_argsort_revert_indices
 
-    if all_gather_fp8:
-        hidden_states = _apply_all_gather_fp8(hidden_states, mesh, dtype)
-
-    x, group_sizes, topk_argsort_revert_indices = jax.shard_map(
+    outs = jax.shard_map(
         _process_tokens_locally,
         mesh=mesh,
         in_specs=(
             P(ShardingAxisName.MLP_DATA, None),
             P(ShardingAxisName.MLP_DATA, None),
         ),
-        out_specs=(
-            P(ShardingAxisName.MLP_DATA),
-            P(ShardingAxisName.MLP_DATA),
-            P(ShardingAxisName.MLP_DATA),
-        ),
+        out_specs=(P(ShardingAxisName.MLP_DATA), ) *
+        (4 if use_tc_permute else 3),
         check_vma=False,
     )(hidden_states, topk_indices)
+    x, group_sizes, topk_argsort_revert_indices = outs[:3]
+    topk_argsort_indices = outs[3] if use_tc_permute else None
 
     try:
         x = jnp.pad(x, ((0, 0), (0, padded_hidden_size - hidden_size)))
@@ -762,6 +1669,7 @@ def fused_moe_func(
             scatter_results=scatter_results,
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
+            topk_argsort_indices=topk_argsort_indices,
         )
     else:
         x = tensor_parallel_gmm(

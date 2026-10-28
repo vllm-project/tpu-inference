@@ -8,6 +8,13 @@ from tpu_inference.envs import enable_envs_cache, environment_variables
 
 
 def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
+    # A default is only observable if the variable is unset, and the TPU device
+    # plugin injects TPU_ACCELERATOR_TYPE and TPU_NAME into any container
+    # holding a chip.
+    for name in ("JAX_PLATFORMS", "PHASED_PROFILING_DIR", "TPU_NAME",
+                 "TPU_ACCELERATOR_TYPE"):
+        monkeypatch.delenv(name, raising=False)
+
     assert envs.JAX_PLATFORMS == ""
     assert envs.PHASED_PROFILING_DIR == ""
     monkeypatch.setenv("JAX_PLATFORMS", "tpu")
@@ -133,6 +140,51 @@ def test_moe_stage_weights_on_host(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setenv("MOE_STAGE_WEIGHTS_ON_HOST", "0")
     assert envs.MOE_STAGE_WEIGHTS_ON_HOST is False
+
+
+def test_moe_hierarchical_dispatch(monkeypatch: pytest.MonkeyPatch):
+    """MOE_HIERARCHICAL_DISPATCH is opt-in: off unless it is asked for."""
+    monkeypatch.delenv("MOE_HIERARCHICAL_DISPATCH", raising=False)
+    assert envs.MOE_HIERARCHICAL_DISPATCH is False
+
+    monkeypatch.setenv("MOE_HIERARCHICAL_DISPATCH", "1")
+    assert envs.MOE_HIERARCHICAL_DISPATCH is True
+
+    monkeypatch.setenv("MOE_HIERARCHICAL_DISPATCH", "true")
+    assert envs.MOE_HIERARCHICAL_DISPATCH is True
+
+    monkeypatch.setenv("MOE_HIERARCHICAL_DISPATCH", "0")
+    assert envs.MOE_HIERARCHICAL_DISPATCH is False
+
+
+def test_moe_hierarchical_collect(monkeypatch: pytest.MonkeyPatch):
+    """MOE_HIERARCHICAL_COLLECT is opt-in: off unless it is asked for."""
+    monkeypatch.delenv("MOE_HIERARCHICAL_COLLECT", raising=False)
+    assert envs.MOE_HIERARCHICAL_COLLECT is False
+
+    monkeypatch.setenv("MOE_HIERARCHICAL_COLLECT", "1")
+    assert envs.MOE_HIERARCHICAL_COLLECT is True
+
+    monkeypatch.setenv("MOE_HIERARCHICAL_COLLECT", "true")
+    assert envs.MOE_HIERARCHICAL_COLLECT is True
+
+    monkeypatch.setenv("MOE_HIERARCHICAL_COLLECT", "0")
+    assert envs.MOE_HIERARCHICAL_COLLECT is False
+
+
+def test_moe_fold_routing_into_dispatch(monkeypatch: pytest.MonkeyPatch):
+    """MOE_FOLD_ROUTING_INTO_DISPATCH is opt-in: off unless it is asked for."""
+    monkeypatch.delenv("MOE_FOLD_ROUTING_INTO_DISPATCH", raising=False)
+    assert envs.MOE_FOLD_ROUTING_INTO_DISPATCH is False
+
+    monkeypatch.setenv("MOE_FOLD_ROUTING_INTO_DISPATCH", "1")
+    assert envs.MOE_FOLD_ROUTING_INTO_DISPATCH is True
+
+    monkeypatch.setenv("MOE_FOLD_ROUTING_INTO_DISPATCH", "true")
+    assert envs.MOE_FOLD_ROUTING_INTO_DISPATCH is True
+
+    monkeypatch.setenv("MOE_FOLD_ROUTING_INTO_DISPATCH", "0")
+    assert envs.MOE_FOLD_ROUTING_INTO_DISPATCH is False
 
 
 def test_dp_sched_routing(monkeypatch: pytest.MonkeyPatch):
@@ -305,8 +357,6 @@ def test_ray_env_vars(monkeypatch: pytest.MonkeyPatch):
     assert not envs.RAY_USAGE_STATS_ENABLED
     monkeypatch.setenv("RAY_USAGE_STATS_ENABLED", "1")
     assert envs.RAY_USAGE_STATS_ENABLED
-
-    assert envs.VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE == "shm"
 
 
 def test_invalid_attribute_raises_error():

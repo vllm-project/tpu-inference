@@ -1,0 +1,205 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Qwen3.8-2.4T-A95B-FP8 on a v7x-32 slice (2x2x4, four hosts). It runs on the
+# kube fleet only, so there is no ../Qwen_Qwen3_8-2_4T-A95B.yml. See README.md.
+
+steps:
+  # Loading the 2.4 TB checkpoint and compiling takes about an hour, so the
+  # model is served once: the UnitTest step brings the server up across the
+  # slice (serve_and_run.sh on the Ray head), runs a smoke request, GSM8K and
+  # an 8k/1k random benchmark against it, and publishes the measurements as
+  # build meta-data. Accuracy and Benchmark are cheap gates over those
+  # measurements. Benchmark depends on UnitTest's record rather than
+  # Accuracy's so that an accuracy regression does not also hide the perf
+  # result.
+  #
+  # Every step runs only in a MODEL_IMPL_TYPE=vllm v7x build. The model only
+  # has a vllm (torchax) implementation, so an auto build would repeat the
+  # same run, and a v6e build has no v7x-32 slice; a false `if:` keeps the
+  # steps out of the build entirely.
+  #
+  # The serve configuration matches the daily benchmark case
+  # (.buildkite/benchmark/cases/daily/daily_qwen3_8_2p4t_fp8_tpu7x_32.json),
+  # whose history is the reference for the perf thresholds; keep the two in
+  # sync. --num-gpu-blocks-override pins the KV pool of this hybrid attention /
+  # linear-attention model, which the scheduler otherwise sizes far too small.
+  # The head uploads ARTIFACTS_DIR, from which the step reads metrics.json
+  # into meta-data.
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Unit tests for Qwen/Qwen3.8-2.4T-A95B-FP8"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_UnitTest"
+    if: 'build.env("MODEL_IMPL_TYPE") == "vllm" && "${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      # Read by run.sh on the agent, not forwarded: they select the JobSet
+      # and the slice it asks for.
+      MULTIHOST_MANIFEST: "ray-multihost-slice.yaml"
+      MULTIHOST_SHAPE: "tpu7x-standard-4t/2x2x4"
+      ARTIFACTS_DIR: "qwen38_nightly_artifacts"
+      # The bare-metal step's 240 minutes, counted from admission.
+      TPU_MAX_RUNTIME_SECONDS: "14400"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - |
+        set -euo pipefail
+        # Every host's environment, not only the head's: the Ray workers load
+        # and shard the weights.
+        MULTIHOST_ENV_B64=$$(printf '%s\0' \
+          'MODEL_IMPL_TYPE=vllm' \
+          'NEW_MODEL_DESIGN=1' \
+          'MOE_HIERARCHICAL_DISPATCH=1' \
+          'MOE_STAGE_WEIGHTS_ON_HOST=1' \
+          'VLLM_INCREMENTAL_FP8_LOADING=1' \
+          'BF16_LINEAR_REQUANTIZE_BLOCK_SIZE=512' \
+          'BF16_LINEAR_REQUANTIZE_PATTERNS=re:.*self_attn\..*,re:.*linear_attn.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)$$,re:.*\.mlp\.shared_expert\.(gate_up_proj|gate_proj|up_proj|down_proj)$$' \
+          'USE_BATCHED_RPA_KERNEL=1' \
+          'USE_BATCHED_RPA_SEQ_ON_LANE=1' \
+          'RUNAI_STREAMER_MEMORY_LIMIT=128000000000' \
+          | base64 | tr -d '\n')
+        export MULTIHOST_ENV_B64
+        rc=0
+        .buildkite/kubernetes/run.sh bash .buildkite/kubernetes/serve_and_run.sh \
+          "vllm serve gs://tpu-commons-ci/qwen/Qwen3.8-2.4T-A95B-FP8 \
+            --served-model-name Qwen/Qwen3.8-2.4T-A95B-FP8 \
+            --tokenizer Qwen/Qwen3.8-2.4T-A95B-FP8 \
+            --load-format runai_streamer \
+            --port 8000 \
+            --seed 42 \
+            --tensor-parallel-size 32 \
+            --enable-expert-parallel \
+            --additional-config '{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true, \"attn_dp_size\": 8}}, \"compilation_sizes\": [384]}' \
+            --max-model-len 40960 \
+            --max-num-seqs 46 \
+            --max-num-batched-tokens 512 \
+            --block-size 128 \
+            --kv-cache-dtype fp8 \
+            --gpu-memory-utilization 0.98 \
+            --num-gpu-blocks-override 27232 \
+            --no-enable-prefix-caching \
+            --async-scheduling" \
+          "MODEL=Qwen/Qwen3.8-2.4T-A95B-FP8 OUT_DIR=$$ARTIFACTS_DIR \
+            GSM8K_REASONING_EFFORT=low \
+            BENCH_INPUT_LEN=8192 BENCH_OUTPUT_LEN=1024 \
+            BENCH_CONCURRENCY=368 BENCH_NUM_WARMUPS=368 \
+            bash tests/e2e/benchmarking/eval_running_server.sh" \
+          || rc=$$?
+        if buildkite-agent artifact download "$$ARTIFACTS_DIR/metrics.json" . ; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_metrics" < "$$ARTIFACTS_DIR/metrics.json"
+        else
+          echo "No metrics.json: the server did not come up or the client never ran."
+          [ "$$rc" -ne 0 ] || rc=1
+        fi
+        exit "$$rc"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for Qwen/Qwen3.8-2.4T-A95B-FP8"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3_8-2_4T-A95B_UnitTest"
+    if: 'build.env("MODEL_IMPL_TYPE") == "vllm" && "${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_UnitTest"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen3.8-2.4T-A95B"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_UnitTest
+
+  # GSM8K reference on this configuration: 0.9795 flexible / 0.9788 strict and
+  # 0.9795 / 0.9795 on two runs (stderr 0.0039). 0.96 sits about 5 stderr
+  # below; a broken model scores near zero.
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Accuracy for Qwen/Qwen3.8-2.4T-A95B-FP8"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_Accuracy"
+    if: 'build.env("MODEL_IMPL_TYPE") == "vllm" && "${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3_8-2_4T-A95B_UnitTest"
+    agents:
+      queue: "kube"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - |
+        buildkite-agent meta-data get "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_metrics" > metrics.json
+        python3 tests/e2e/benchmarking/check_eval_thresholds.py metrics.json --min-gsm8k 0.96
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record accuracy result for Qwen/Qwen3.8-2.4T-A95B-FP8"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3_8-2_4T-A95B_Accuracy"
+    if: 'build.env("MODEL_IMPL_TYPE") == "vllm" && "${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_Accuracy"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen3.8-2.4T-A95B"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_Accuracy
+
+  # Perf reference on this configuration: 1076.2 output / 9686.1 total tok/s
+  # (random 8192/1024, concurrency 368); the daily case varies by about 0.1%
+  # run to run. The limits are 3% below.
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance benchmarks for Qwen/Qwen3.8-2.4T-A95B-FP8"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_Benchmark"
+    if: 'build.env("MODEL_IMPL_TYPE") == "vllm" && "${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3_8-2_4T-A95B_UnitTest"
+    agents:
+      queue: "kube"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - |
+        buildkite-agent meta-data get "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_metrics" > metrics.json
+        python3 tests/e2e/benchmarking/check_eval_thresholds.py metrics.json \
+          --min-output-throughput 1045 --min-total-throughput 9395 --max-failed-requests 0
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for Qwen/Qwen3.8-2.4T-A95B-FP8"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3_8-2_4T-A95B_Benchmark"
+    if: 'build.env("MODEL_IMPL_TYPE") == "vllm" && "${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_Benchmark"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen3.8-2.4T-A95B"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_Benchmark

@@ -354,9 +354,13 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
                     socket = self._maybe_build_notif_socket(req_meta)
                     self._notify_pull_done(socket, req_id, req_meta.uuid)
                 else:
+                    # Full local prefix-cache hit: nothing was pulled, but
+                    # Prefill holds the KV until notified.
                     logger.info(
                         f"TPUConnectorHMA Worker {self.node_id} Decode --> "
                         f"skip insert | req_id={req_id}")
+                    socket = self._maybe_build_notif_socket(req_meta)
+                    self._notify_pull_done(socket, req_id, req_meta.uuid)
 
     def _prepare_kv_and_wait(self, req_id: str, req_meta: SendMeta):
         local_block_ids = req_meta.local_block_ids
@@ -374,18 +378,13 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
             self.kv_d2h_executor.submit(self._async_d2h_and_transfer, req_id,
                                         req_meta, kv, local_block_ids)
         else:
-            buffer_idx = -1
             # NOTE(xiang): We need to manually store the kv because:
             # Although we can set use_raw_buffers=True to let kv be safely
             # destroyed after calling await_pull, it could be a stranding
             # buffer if D never pulls it. So we have to set
             # use_raw_buffers=False and store the kv, then the kv buffer
             # will be safely destroyed by either D notifying or expiration.
-            self.reqs_wait_pull[req_id] = [
-                kv, req_meta.expiration_time, buffer_idx
-            ]
-            self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
-            self.kv_transfer_server.await_pull(req_meta.uuid, kv)
+            self._register_kv_for_pull(req_id, req_meta, kv, buffer_idx=-1)
             self.stats.increment_send(sum(k.nbytes for k in kv))
 
     def _async_d2h_and_transfer(self, req_id: str, req_meta: SendMeta,
@@ -418,11 +417,11 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
                 break
             time.sleep(0.001)
 
-        self.reqs_wait_pull[req_id] = [
-            dest_buffer, req_meta.expiration_time, buffer_idx
-        ]
-        self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
-        self.kv_transfer_server.await_pull(req_meta.uuid, updated_dest_buffer)
+        self._register_kv_for_pull(req_id,
+                                   req_meta,
+                                   updated_dest_buffer,
+                                   buffer_idx=buffer_idx,
+                                   pool_buffer=dest_buffer)
 
         total_bytes = sum(b.nbytes for b in updated_dest_buffer)
         logger.info(

@@ -248,6 +248,40 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
         return y.view(y_orig.shape)
 
+    def apply_lora_full_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        weight_stacked: torch.Tensor,
+        bias_stacked: torch.Tensor,
+        module_enabled: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        """
+        Applies request-routed full (dense) linear weights to selected rows,
+        used by ClassificationHeadWithLoRA for modules_to_save.
+
+        Semantics:
+            for i in range(num_tokens):
+                lora_id = sampler_indices[i]
+                if lora_id >= 0 and module_enabled[lora_id]:
+                    y[i] = x[i] @ weight_stacked[lora_id, 0].T + bias_stacked[lora_id]
+                # else y[i] is left unchanged
+
+        Args:
+            y (torch.Tensor): Output tensor (num_tokens, out_features).
+            x (torch.Tensor): Input tensor (num_tokens, in_features).
+            weight_stacked (torch.Tensor): Full linear weights of shape
+                (max_loras, 1, out_features, in_features).
+            bias_stacked (torch.Tensor): Full linear bias of shape
+                (max_loras, out_features).
+            module_enabled (torch.Tensor): Bool tensor of shape (max_loras,)
+                indicating which adapters have a saved full linear module.
+        """
+        indices = self._get_sampler_indices(x)
+        adapter_y = bgmv_shrink(x, weight_stacked, indices, 1.0)
+        return self._select_full_linear_output(y, adapter_y, bias_stacked,
+                                               module_enabled)
+
     @property
     def token_lora_indices(self) -> torch.Tensor:
         """

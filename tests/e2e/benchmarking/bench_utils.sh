@@ -52,7 +52,14 @@ waitForServerReady() {
             exit 1
         fi
 
-        if grep -Eq "$error_regex" "$LOG_FILE"; then
+        # JAX logs a lost compilation-cache write race as "UserWarning: ...
+        # OSError: [Errno 116] Stale file handle" and compiles anyway, so that
+        # line is not fatal. Assigned rather than piped into the test, which
+        # would trip the callers' `set -e` when nothing matches.
+        local fatal_lines
+        fatal_lines=$(grep -E "$error_regex" "$LOG_FILE" \
+            | grep -v -E 'UserWarning.*Stale file handle' || true)
+        if [[ -n "$fatal_lines" ]]; then
             echo "FATAL ERROR DETECTED: The server log contains a fatal error pattern."
             # Call cleanup and exit (cleanup must be handled by the calling script's trap)
             exit 1

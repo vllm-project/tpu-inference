@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
+import importlib
 import os
 import random
 from typing import TYPE_CHECKING, Optional, Tuple, Union
@@ -80,6 +82,8 @@ if hasattr(torch, "accelerator") and hasattr(torch.accelerator, "synchronize"):
 from vllm.platforms.interface import Platform, PlatformEnum
 
 from tpu_inference import envs
+from tpu_inference.layers.common.attention_backend import (
+    check_attention_backend_config, is_registered_attention_backend)
 from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 
@@ -152,6 +156,33 @@ else:
 logger = init_logger(__name__)
 
 
+@contextlib.contextmanager
+def _no_uniproc_startup_threads(*args, **kwargs):
+    yield
+
+
+def _disable_uniproc_startup_thread_cap() -> None:
+    """Undo vllm-project/vllm#58946 for the TPU UniProcExecutor path.
+
+    vllm#58946 wraps EngineCore process start in `torch.set_num_threads(n)`
+    plus `OMP_NUM_THREADS=n` when the executor is a UniProcExecutor. On TPU
+    the processes forked after that (EngineCore, then the DPScheduler workers)
+    hang inside libgomp, so e.g. Mistral-Small-4 with DP attention never
+    finishes its first step. Keep the pre-#58946 behavior on TPU.
+    """
+    try:
+        engine_utils = importlib.import_module("vllm.v1.engine.utils")
+    except ImportError:
+        return
+    if getattr(engine_utils, "_configure_uniproc_startup_threads",
+               None) in (None, _no_uniproc_startup_threads):
+        return
+    engine_utils._configure_uniproc_startup_threads = (
+        _no_uniproc_startup_threads)
+    logger.info("Disabled vLLM UniProc EngineCore startup thread cap "
+                "(vllm#58946) on TPU.")
+
+
 class TpuPlatform(Platform):
     _enum = PlatformEnum.TPU
     device_name: str = "tpu"
@@ -173,6 +204,16 @@ class TpuPlatform(Platform):
 
     additional_env_vars: list[str] = [
         "PHASED_PROFILING_DIR",
+        "MOE_HIERARCHICAL_DISPATCH",
+        "MOE_HIERARCHICAL_COLLECT",
+        "MOE_FOLD_ROUTING_INTO_DISPATCH",
+        "RAGGED_GATHER_MAX_ROW_SUBCHUNKS",
+        "RAGGED_GATHER_TRIM_ROWS",
+        "MOE_TC_PERMUTE",
+        "MOE_TC_PERMUTE_CAPACITY_FACTOR",
+        "USE_FUSED_EP_MOE_V2",
+        "FUSED_EP_MOE_V2_CAPACITY",
+        "FUSED_EP_MOE_V2_SHARDED_PLAN",
         "TPU_CHIPS_PER_HOST_BOUNDS",
         "TPU_HOST_BOUNDS",
         "TPU_MULTIHOST_BACKEND",
@@ -189,6 +230,8 @@ class TpuPlatform(Platform):
         "ENABLE_RS_KERNEL",
         "USE_GMM_FUSED_RS_KERNEL",
         "MOE_ALL_GATHER_ACTIVATION_DTYPE",
+        "SKIP_MAMBA_SCHEDULER_BLOCKS",
+        "TPU_MESH_ATTN_DP_RING",
     ]
 
     @classmethod
@@ -199,7 +242,16 @@ class TpuPlatform(Platform):
 
         use_mla = attn_selector_config.use_mla
         if use_mla:
+            # MLA layers do not run a registered backend.
+            if is_registered_attention_backend(selected_backend):
+                raise ValueError(
+                    f"--attention-backend {selected_backend.name.lower()} "
+                    "does not support MLA models.")
             selected_backend = AttentionBackendEnum.FLASH_ATTN_MLA
+        elif is_registered_attention_backend(selected_backend):
+            # A registered TPU backend; its name resolves to its own vLLM
+            # attention backend class.
+            pass
         elif selected_backend != AttentionBackendEnum.FLASH_ATTN:
             logger.info("Cannot use %s backend on TPU. Setting to FLASH_ATTN.",
                         selected_backend)
@@ -425,6 +477,8 @@ class TpuPlatform(Platform):
                         )
                         cache_config.block_size = min_page_size  # type: ignore[assignment]
 
+        check_attention_backend_config(vllm_config)
+
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         parallel_config.worker_cls = \
@@ -436,6 +490,7 @@ class TpuPlatform(Platform):
                 logger.info("Force using UniProcExecutor for JAX on "
                             "single host without pipeline parallelism.")
                 parallel_config.distributed_executor_backend = "uni"
+                _disable_uniproc_startup_thread_cap()
             else:
                 logger.info("Force using MultiprocExecutor for JAX on "
                             "single host with pipeline parallelism.")
@@ -443,20 +498,13 @@ class TpuPlatform(Platform):
                     MultiprocExecutor
                 parallel_config.distributed_executor_backend = MultiprocExecutor
         elif multihost_backend == "ray":
-            # Check if we should use Ray Executor V2 (V1-multiproc compatible)
-            if vllm_envs.VLLM_USE_RAY_V2_EXECUTOR_BACKEND:
-                from tpu_inference.executors.ray_distributed_executor_v2 import \
-                    RayDistributedExecutorV2
-                parallel_config.distributed_executor_backend = RayDistributedExecutorV2
-                logger.info(
-                    "Force using RayDistributedExecutorV2 for JAX on multihost."
-                )
-            else:
-                from tpu_inference.executors.ray_distributed_executor import \
-                    RayDistributedExecutor
-                parallel_config.distributed_executor_backend = RayDistributedExecutor
-                logger.info(
-                    "Force using RayDistributedExecutor for JAX on multihost.")
+            # RayDistributedExecutorV2 is the only Ray executor; upstream vLLM
+            # removed the legacy compiled-graph RayDistributedExecutor.
+            from tpu_inference.executors.ray_distributed_executor_v2 import \
+                RayDistributedExecutorV2
+            parallel_config.distributed_executor_backend = RayDistributedExecutorV2
+            logger.info(
+                "Force using RayDistributedExecutorV2 for JAX on multihost.")
         else:
             logger.warning(
                 f"Unknown TPU multihost backend: {multihost_backend}. "
@@ -584,6 +632,14 @@ class TpuPlatform(Platform):
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         return True
+
+    @classmethod
+    def register_custom_kv_cache_specs(cls, vllm_config: VllmConfig) -> None:
+        # Unconditional: the manager is only used for specs the runner emits
+        # under SKIP_MAMBA_SCHEDULER_BLOCKS.
+        from tpu_inference.core.runner_slot_mamba import \
+            register_runner_slot_mamba_spec
+        register_runner_slot_mamba_spec()
 
     @classmethod
     def current_device(cls) -> torch.device:

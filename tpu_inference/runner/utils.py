@@ -23,6 +23,7 @@ from jax._src.interpreters import pxla
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
 from tpu_inference import envs
+from tpu_inference import utils as common_utils
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.input_batch import InputBatch
 
@@ -947,7 +948,7 @@ def host_extract_sampled_tokens(
     """host retrieve the sampled tokens for the current step."""
     next_tokens = sampled_output
     if spec_decode_metadata is None:
-        next_tokens = np.asarray(jax.device_get(next_tokens))
+        next_tokens = common_utils.safe_device_get(next_tokens)
         # Map tokens back to the pre-dp shuffling order
         if logits_indices_selector is not None:
             next_tokens = next_tokens[logits_indices_selector]
@@ -955,7 +956,8 @@ def host_extract_sampled_tokens(
         valid_sampled_token_ids = selected_token_ids.tolist()
     else:
         valid_sampled_token_ids = runner.rejection_sampler.parse_output(
-            next_tokens, runner.input_batch.vocab_size,
+            common_utils.safe_device_get(next_tokens),
+            runner.input_batch.vocab_size,
             spec_decode_metadata.draft_lengths_cpu, num_reqs,
             spec_decode_metadata.final_logits_indices.shape[0], runner.dp_size,
             spec_decode_metadata.req_indices_dp)
@@ -968,21 +970,45 @@ def host_extract_sampled_tokens(
 
 def get_eos_token_id(model_config: Any) -> tuple[int, ...]:
     """Extract EOS token ID from the model configuration with fallback."""
-    eos_token_id = model_config.get_vocab_size() - 1
-    if hasattr(model_config, "hf_config"):
-        eos_token_id = getattr(model_config.hf_config, "eos_token_id",
-                               eos_token_id)
-        if eos_token_id is None:
-            eos_token_id = model_config.get_vocab_size() - 1
+    eos_ids: list[int] = []
 
-    if isinstance(eos_token_id, int):
-        return (eos_token_id, )
-    elif isinstance(eos_token_id, list):
-        return tuple(eos_token_id)
-    elif eos_token_id is None:
-        return ()
-    else:
-        return tuple(eos_token_id)
+    def _add_eos(val: Any) -> None:
+        if isinstance(val, int) and not isinstance(val, bool):
+            if val not in eos_ids:
+                eos_ids.append(val)
+        elif isinstance(val, (list, tuple, set)):
+            for item in val:
+                if isinstance(item, int) and not isinstance(item, bool):
+                    if item not in eos_ids:
+                        eos_ids.append(item)
+
+    if hasattr(model_config, "hf_config"):
+        _add_eos(getattr(model_config.hf_config, "eos_token_id", None))
+
+    if hasattr(model_config, "hf_text_config"):
+        _add_eos(getattr(model_config.hf_text_config, "eos_token_id", None))
+
+    if hasattr(model_config, "try_get_generation_config"):
+        try:
+            gen_cfg = model_config.try_get_generation_config()
+            if isinstance(gen_cfg, dict):
+                _add_eos(gen_cfg.get("eos_token_id"))
+        except Exception:
+            pass
+
+    if eos_ids:
+        return tuple(eos_ids)
+
+    if hasattr(model_config, "get_vocab_size"):
+        try:
+            vocab_size = model_config.get_vocab_size()
+            if isinstance(vocab_size,
+                          int) and not isinstance(vocab_size, bool):
+                return (vocab_size - 1, )
+        except Exception:
+            pass
+
+    return ()
 
 
 def get_pad_token_id(model_config: Any) -> int:

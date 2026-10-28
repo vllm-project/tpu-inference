@@ -180,6 +180,8 @@ def quantize_to_fp8_block_3d(weight: torch.Tensor, block_m: int, block_n: int,
 
 
 def initialize_layer_weights(layer: torch.nn.Module):
+    # Seed so weights and inputs don't depend on test order.
+    torch.manual_seed(42)
     assert isinstance(layer, LinearBase)
     assert isinstance(layer.quant_method, VllmFp8LinearMethod)
     layer.quant_method.linear_config.requant_block_size = None
@@ -269,7 +271,7 @@ def test_row_parallel_linear(model, bias, num_devices, enable_sp,
                              max_num_seqs=4,
                              trust_remote_code=True)
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
+    vllm_config.additional_config["enable_sp"] = enable_sp
 
     vllm_config.model_config.dtype = dtype
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
@@ -308,7 +310,7 @@ def test_column_parallel_linear(model, bias, num_devices, enable_sp,
                              max_num_seqs=4,
                              trust_remote_code=True)
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
+    vllm_config.additional_config["enable_sp"] = enable_sp
 
     vllm_config.model_config.dtype = dtype
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
@@ -348,7 +350,7 @@ def test_qkv_parallel_linear(model, bias, num_devices, enable_sp, fuse_matmuls,
                              max_num_seqs=4,
                              trust_remote_code=True)
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
+    vllm_config.additional_config["enable_sp"] = enable_sp
 
     vllm_config.model_config.dtype = torch.bfloat16
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
@@ -393,7 +395,7 @@ def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
                              max_num_seqs=4,
                              trust_remote_code=True)
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
+    vllm_config.additional_config["enable_sp"] = enable_sp
 
     vllm_config.model_config.dtype = torch.bfloat16
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
@@ -673,6 +675,7 @@ def test_fp8_moe_incremental_loading_trigger():
     mesh = test_utils.get_spmd_mesh(1)
     mock_moe_config = MagicMock()
     mock_moe_config.num_experts = 4
+    mock_moe_config.moe_backend = "auto"
     layer = MagicMock()
     layer.moe_config = mock_moe_config
     layer.global_num_experts = 4
@@ -725,6 +728,7 @@ class _StopAfterLoads(Exception):
 def _make_fp8_moe_method_and_layer(mesh):
     mock_moe_config = MagicMock()
     mock_moe_config.num_experts = 4
+    mock_moe_config.moe_backend = "auto"
     mock_moe_config.has_bias = False
 
     fp8_config = MagicMock()

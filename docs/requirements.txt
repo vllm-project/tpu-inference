@@ -1,9 +1,25 @@
-mkdocs
-mkdocs-api-autonav
-mkdocs-material
-mkdocs-awesome-nav
-mkdocs-glightbox
-python-markdown-math
-mkdocs-same-dir
-mkdocs-open-in-new-tab
-mkdocs-table-reader-plugin
+# Documentation build dependencies (Read the Docs and local `mkdocs build`).
+#
+# Pinned on purpose. Read the Docs resolves this file fresh on every build, so
+# unpinned ranges mean a release upstream can silently change the published
+# site. These are the versions verified with `mkdocs build --strict`.
+# Bump deliberately and re-check the rendered site, in particular the
+# landing-page banner image.
+mkdocs==1.6.1
+mkdocs-material==9.7.7
+mkdocs-api-autonav==0.4.0
+mkdocs-awesome-nav==3.3.0
+mkdocs-glightbox==0.5.2
+mkdocs-same-dir==0.1.5
+mkdocs-open-in-new-tab==1.0.8
+mkdocs-table-reader-plugin==4.0.2
+# Renders GitHub-style `> [!NOTE]` / `> [!IMPORTANT]` callouts as admonitions
+# so the same markdown works in the GitHub README and on the docs site.
+markdown-callouts==0.4.0
+python-markdown-math==0.9
+# selectolax is the HTML parser mkdocs-glightbox uses to wrap <img> tags.
+# 1.0.1 (2026-10-17) changed node move/replace semantics so that glightbox
+# 0.5.2 silently drops every image it rewrites, which removed the banner from
+# the docs home page (and images site-wide). Keep below 1.0.1 until glightbox
+# ships a release that works with it.
+selectolax==1.0.0

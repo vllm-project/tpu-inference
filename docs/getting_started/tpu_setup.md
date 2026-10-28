@@ -1,6 +1,6 @@
 # Cloud TPU Setup
 
-This guide provides information on setting up and provisioning Google Cloud TPUs for use with `tpu-inference`.
+This guide provides information on setting up and provisioning Google Cloud TPUs for use with `vllm-jax`.
 
 ## TPU Versions and Topologies
 
@@ -9,7 +9,7 @@ integrated circuits (ASICs) used to accelerate machine learning workloads. TPUs
 are available in different versions each with different hardware specifications.
 For more information about TPUs, see [TPU System Architecture](https://cloud.google.com/tpu/docs/system-architecture-tpu-vm).
 
-The following TPU versions are compatible with `tpu-inference`. Selecting a topology allows you to configure the physical arrangements of the TPU chips, improving throughput and networking performance.
+The following TPU versions are compatible with `vllm-jax`. Selecting a topology allows you to configure the physical arrangements of the TPU chips, improving throughput and networking performance.
 
 ### Recommended
 

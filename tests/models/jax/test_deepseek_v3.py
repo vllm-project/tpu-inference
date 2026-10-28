@@ -24,7 +24,7 @@ import torch
 from flax import nnx
 from jax.sharding import Mesh, PartitionSpec
 from parameterized import parameterized
-from vllm.config import ModelConfig
+from vllm.config import AuxOutputConfig, ModelConfig
 
 # Assuming the model file is named deepseek_v3.py
 import tpu_inference.kernels.mla.v1.kernel as mla
@@ -65,6 +65,7 @@ class MockVllmConfig:
                  model_name: str = "deepseek-ai/DeepSeek-V3",
                  use_mla: bool = False):
         self.model_config = MagicMock(spec=ModelConfig)
+        self.aux_output_config = AuxOutputConfig()
         self.model_config.model = model_name
         self.model_config.use_mla = use_mla
 

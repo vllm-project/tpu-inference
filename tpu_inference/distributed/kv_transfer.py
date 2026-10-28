@@ -384,7 +384,7 @@ def _simple_copy_kernel(src_ref, host_ref_in, host_ref_out):
 def _get_copy_to_dest_fn(mesh, sharding_spec, out_sharding, dtype,
                          memory_kind):
     """Returns a cached JIT-compiled copy function."""
-    memory_space = pltpu.HOST if memory_kind == 'pinned_host' else pltpu.HBM
+    memory_space = pl.HOST if memory_kind == 'pinned_host' else pltpu.HBM
 
     def _copy_wrapped(src, dest):
         return pl.pallas_call(

@@ -46,6 +46,9 @@ from tpu_inference.layers.common.utils import (cpu_mesh_context,
 from tpu_inference.layers.jax import JaxModule, JaxModuleList
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.logger import init_logger
+from tpu_inference.models.common.layer_filter import (
+    filter_safetensors_by_layer, num_hidden_layers_override,
+    should_skip_layer_weight)
 from tpu_inference.models.jax.utils import file_utils
 from tpu_inference.utils import t2j
 
@@ -329,7 +332,11 @@ def _load_and_shard_weight(vllm_config,
                            keep_hf_weight_suffix_when_match: list[str],
                            keep_original_dtype_keys_regex: list[str]
                            | None = None,
-                           pp_missing_layers: list[str] | None = None):
+                           pp_missing_layers: list[str] | None = None,
+                           num_hidden_layers: int | None = None):
+    if should_skip_layer_weight(hf_key, num_hidden_layers):
+        return
+
     name_map = metadata_map.name_map
     reshape_keys = metadata_map.reshape_map
     bias_reshape_keys = metadata_map.bias_reshape_map
@@ -479,6 +486,7 @@ def _load_hf_weights_on_thread(
     filter_regex: Optional[str] = None,
     keep_original_dtype_keys_regex: Optional[list[str]] = None,
     pp_missing_layers: list[str] | None = None,
+    num_hidden_layers: int | None = None,
 ):
     """Loads weights from a single weights file."""
     try:
@@ -499,6 +507,7 @@ def _load_hf_weights_on_thread(
             keep_original_dtype_keys_regex=keep_original_dtype_keys_regex,
             pp_missing_layers=pp_missing_layers,
             keep_hf_weight_suffix_when_match=keep_hf_weight_suffix_when_match,
+            num_hidden_layers=num_hidden_layers,
         )
 
 
@@ -527,6 +536,11 @@ def load_hf_weights(
         shardings = nnx.get_named_sharding(params, mesh)
     except TypeError:
         shardings = params
+    if is_draft_model:
+        model_config = vllm_config.speculative_config.draft_model_config
+    else:
+        model_config = vllm_config.model_config
+    num_hidden_layers = num_hidden_layers_override(model_config)
     weights_iterator = None
     if hasattr(vllm_config.model_config, "runai_model_weights_iterator"):
         weights_iterator = vllm_config.model_config.runai_model_weights_iterator
@@ -553,15 +567,17 @@ def load_hf_weights(
                 pp_missing_layers=pp_missing_layers,
                 keep_hf_weight_suffix_when_match=
                 keep_hf_weight_suffix_when_match,
+                num_hidden_layers=num_hidden_layers,
             )
     else:
         # File-based path (multi-threaded)
-        if is_draft_model:
-            model_path = vllm_config.speculative_config.draft_model_config.model
-        else:
-            model_path = vllm_config.model_config.model
+        model_path = model_config.model
         weights_files = get_model_weights_files(
             model_path, vllm_config.load_config.download_dir)
+        if num_hidden_layers is not None and os.path.isdir(model_path):
+            # Skip shards that only hold pruned layers.
+            weights_files = filter_safetensors_by_layer(
+                model_path, weights_files, num_hidden_layers)
         max_workers = min(64, len(weights_files))
         # NOTE(xiang): Disable multi-threading mode if running on multi-host.
         # Because multi-threading would cause different JAX processes to load
@@ -583,6 +599,7 @@ def load_hf_weights(
                     pp_missing_layers=pp_missing_layers,
                     keep_hf_weight_suffix_when_match=
                     keep_hf_weight_suffix_when_match,
+                    num_hidden_layers=num_hidden_layers,
                 ) for weights_file in weights_files
             ]
             for future in futures:
@@ -1126,8 +1143,16 @@ class LoadableWithIterator:
             # Use next parent class in MRO.
             return super().load_weights(weights)
 
-        pytorch_pooler = getattr(getattr(self, "vllm_config", None),
-                                 "pytorch_pooler", None)
+        vllm_config = getattr(self, "vllm_config", None)
+        pytorch_pooler = getattr(vllm_config, "pytorch_pooler", None)
+        # The iterator comes from vLLM's model loader and yields every layer
+        # in the checkpoint; drop layers the truncated model never built.
+        num_hidden_layers = (num_hidden_layers_override(
+            vllm_config.model_config) if vllm_config is not None else None)
+        if num_hidden_layers is not None:
+            weights = (
+                (name, w) for name, w in weights
+                if not should_skip_layer_weight(name, num_hidden_layers))
         loader = JaxAutoWeightsLoader(
             self,
             pytorch_pooler=pytorch_pooler,

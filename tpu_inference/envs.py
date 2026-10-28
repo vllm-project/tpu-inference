@@ -28,7 +28,6 @@ if TYPE_CHECKING:
     USE_DENSE_MOE: bool = False
     NUM_SLICES: int = 1
     RAY_USAGE_STATS_ENABLED: bool = False
-    VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "shm"
     ENABLE_QUANTIZED_MATMUL_KERNEL: bool = False
     REQUANTIZE_BLOCK_SIZE: int | None = None
     REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
@@ -85,13 +84,30 @@ if TYPE_CHECKING:
     HASH_TABLE_ROW_MAJOR: bool = False
     MIN_TOKEN_BUCKET: int = 16
     MOE_ROUTE_PADDING_TO_EXPERT0: bool = False
+    MOE_HIERARCHICAL_DISPATCH: bool = False
+    MOE_HIERARCHICAL_COLLECT: bool = False
+    MOE_FOLD_ROUTING_INTO_DISPATCH: bool = False
+    RAGGED_GATHER_MAX_ROW_SUBCHUNKS: int = 4
+    RAGGED_GATHER_TRIM_ROWS: bool = True
+    MOE_TC_PERMUTE: bool = False
+    MOE_TC_PERMUTE_CAPACITY_FACTOR: float = 2.0
+    USE_FUSED_EP_MOE_V2: bool = False
+    FUSED_EP_MOE_V2_CAPACITY: int = 128
+    FUSED_EP_MOE_V2_SHARDED_PLAN: bool = True
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
+    TPU_MESH_ATTN_DP_RING: bool = False
     VERIFY_WEIGHTS: bool = False
     SAMPLING_MICROBATCH_SIZE: int = 0
     DISTRIBUTED_SAMPLING_MAX_TOP_K: int = 64
+    ENABLE_TOPK_PREFILTER: bool = False
     RAIDEN_H2D_SETTLE: bool = True
+    SKIP_MAMBA_SCHEDULER_BLOCKS: bool = False
+    TPU_MOE_SINGLE_SORT: bool = False
+    TPU_MOE_ROUTER_TOPK: str = "sort"
+    TPU_MOE_LOWTOK: bool = False
+    TPU_MOE_LOWTOK_MAX_TOKENS: int = 128
 
 
 def env_with_choices(
@@ -295,9 +311,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable/disable Ray usage statistics collection
     "RAY_USAGE_STATS_ENABLED":
     env_bool("RAY_USAGE_STATS_ENABLED"),
-    # Ray compiled DAG channel type for TPU
-    "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE":
-    env_with_choices("VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE", "shm", ["shm"]),
     "ENABLE_QUANTIZED_MATMUL_KERNEL":
     env_bool("ENABLE_QUANTIZED_MATMUL_KERNEL"),
     # Specify block quantization size
@@ -527,6 +540,73 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # is interleaved per rank and a single valid-token count cannot describe it.
     "MOE_ROUTE_PADDING_TO_EXPERT0":
     env_bool("MOE_ROUTE_PADDING_TO_EXPERT0", default=False),
+    # Replace the MoE dispatch all-gather over the attention-data axes with a
+    # hierarchical gather: each chip's two cores each gather half the hidden
+    # columns over the attention-data axes, then swap halves on-chip. Halves
+    # the cross-chip traffic. Applies only when the model axis pairs a chip's
+    # two cores at adjacent indices and the hidden size is a multiple of 256;
+    # otherwise the one-step gather is kept. With the fp8 all-gather
+    # (MOE_ALL_GATHER_ACTIVATION_DTYPE=fp8) both steps move fp8. Only the
+    # expert-parallel GMM path uses it: not GMM_TP or FUSED_MOE, and not with
+    # USE_GMM_FUSED_RS_KERNEL. See fused_moe_gmm.py.
+    "MOE_HIERARCHICAL_DISPATCH":
+    env_bool("MOE_HIERARCHICAL_DISPATCH", default=False),
+    # The reverse for the EP collect: each chip's two cores add column halves
+    # on-chip, then reduce-scatter half the columns over the attention-data
+    # axes. Same mesh and hidden-size conditions as MOE_HIERARCHICAL_DISPATCH.
+    # Not bitwise identical: the sum is added in a different order. Not with
+    # USE_GMM_FUSED_RS_KERNEL. See fused_moe_gmm.py.
+    "MOE_HIERARCHICAL_COLLECT":
+    env_bool("MOE_HIERARCHICAL_COLLECT", default=False),
+    # When attention-data axes beyond MLP-data are sharded, carry the MoE
+    # top-k ids and weights as extra columns of the dispatch all-gather of the
+    # tokens (one-step or hierarchical, bf16 or fp8) instead of all-gathering
+    # them separately. Bitwise identical for non-NaN weights. See
+    # fused_moe_gmm.py.
+    "MOE_FOLD_ROUTING_INTO_DISPATCH":
+    env_bool("MOE_FOLD_ROUTING_INTO_DISPATCH", default=False),
+    # EP dispatch permute gather: the ragged_gather_v2 kernel
+    # (kernels/sparse_core/ragged_gather_v2.py), called from fused_moe_gmm.py.
+    # max_row_subchunks: caps the SparseCore gather's block size; 1 gives the
+    # smallest blocks, which move fewer rows when one shard's rows are a small
+    # part of the input.
+    "RAGGED_GATHER_MAX_ROW_SUBCHUNKS":
+    lambda: int(os.getenv("RAGGED_GATHER_MAX_ROW_SUBCHUNKS") or "4"),
+    # trim_rows: copy the gather's output down to num_tokens * topk rows. When
+    # off, the block-padded output goes straight to gmm_v2, skipping the copy.
+    "RAGGED_GATHER_TRIM_ROWS":
+    env_bool("RAGGED_GATHER_TRIM_ROWS", default=True),
+    # EP dispatch permute and combine on the TensorCore instead of the
+    # SparseCore kernels: each EP shard gathers only its own rows into a
+    # compact buffer, runs the GMMs on it and combines with a one-hot matmul
+    # over those rows. For chips where the SparseCore is the bottleneck (TPU8i:
+    # one per chip, shared by both TensorCores). See fused_moe_gmm.py.
+    "MOE_TC_PERMUTE":
+    env_bool("MOE_TC_PERMUTE", default=False),
+    # Size of that compact buffer: this many times a shard's average row count,
+    # rounded up to a multiple of 128 and at least 512. A shard with more rows
+    # loops over them a buffer-full at a time while the other shards wait.
+    # Raise it if routing is uneven and many shards loop; lower it to save
+    # memory. At 2.0, Qwen3.8-2.4T (8k/1k requests, 16,384 tokens per step)
+    # overflows in about 1 in 10 MoE layers on each device.
+    "MOE_TC_PERMUTE_CAPACITY_FACTOR":
+    lambda: float(os.getenv("MOE_TC_PERMUTE_CAPACITY_FACTOR") or "2.0"),
+    # Run EP MoE layers with tokamax's fused expert-parallel kernel
+    # (MoEBackend.FUSED_EP_MOE_V2) instead of the GMM path. Supports fp8 weights
+    # with per-channel scales and bf16 weights; any other layer raises an error.
+    # Only vLLM-path models read this flag. See layers/common/fused_ep_moe_v2.py.
+    "USE_FUSED_EP_MOE_V2":
+    env_bool("USE_FUSED_EP_MOE_V2", default=False),
+    # Rows per tile in that kernel. Only 128, the default, has been tested and
+    # verified. The kernel keeps an expert's full weights in VMEM, so larger
+    # tiles may not fit next to them (on v7x, 128 is the most that fits at
+    # hidden 8192 x intermediate 2048).
+    "FUSED_EP_MOE_V2_CAPACITY":
+    lambda: int(os.getenv("FUSED_EP_MOE_V2_CAPACITY") or "128"),
+    # Each device builds only its own slices of the kernel's routing tables,
+    # instead of all of them. Faster at every size measured on Qwen3.8-2.4T.
+    "FUSED_EP_MOE_V2_SHARDED_PLAN":
+    env_bool("FUSED_EP_MOE_V2_SHARDED_PLAN", default=True),
     # Gap between token-bucket padding sizes for TPU precompilation. When 0,
     # buckets grow as powers of two; otherwise buckets increase by this gap
     # once past the power-of-two ramp. Previously provided by vllm.envs, which
@@ -537,6 +617,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Currently, it only supports a single host set up.
     "TPU_MESH_SORT_BY_COORDS":
     env_bool("TPU_MESH_SORT_BY_COORDS", default=False),
+    # Lay out an attn_dp x `model=4` mesh on a 2x2xZ v7x slice so that each
+    # attn_dp group is a physical ring of linked chips and each model group is
+    # the two cores of two linked chips. The default layout puts consecutive
+    # attn_dp ranks on unlinked chips, which doubles the load on the busiest
+    # link for attn_dp all-gathers and reduce-scatters. Single slice only;
+    # other meshes fall back to the regular layout. Takes precedence over
+    # TPU_MESH_SORT_BY_COORDS. On more than one host, each host's devices are
+    # no longer a contiguous block of the mesh, so jax's Mesh.local_mesh
+    # fails. See attn_dp_ring_device_mesh in utils.py.
+    "TPU_MESH_ATTN_DP_RING":
+    env_bool("TPU_MESH_ATTN_DP_RING", default=False),
     # Controls whether FP8 linear and MoE layers perform incremental weight
     # loading, sharding, and immediate host RAM cleanup. When enabled, weights
     # are sharded and transferred to TPU device memory layer-by-layer (or per
@@ -555,10 +646,41 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # read at trace time so candidate tensor shapes remain static.
     "DISTRIBUTED_SAMPLING_MAX_TOP_K":
     lambda: int(os.getenv("DISTRIBUTED_SAMPLING_MAX_TOP_K", "64")),
+    # Distributed candidate sampling: pick each vocab shard's candidates with
+    # the chunked top-k prefilter, and apply top-p to the merged candidates with
+    # one sort. Off by default. Read at trace time.
+    # Rule of thumb (default DISTRIBUTED_SAMPLING_MAX_TOP_K): enable it when
+    # each device holds more than ~8K logits per row (vocab / TP); below that,
+    # plain lax.top_k is usually as fast or faster.
+    "ENABLE_TOPK_PREFILTER":
+    env_bool("ENABLE_TOPK_PREFILTER", default=False),
     # RL weight sync: wait for the async Raiden H2D DMA to settle before
     # letting the rollout resume. See RaidenWorkerSync._wait_until_settled.
     "RAIDEN_H2D_SETTLE":
     env_bool("RAIDEN_H2D_SETTLE", default=True),
+    # With prefix caching off, stop the scheduler from charging GDN layers one
+    # block per group per request from the attention pool. The TPU runner keeps
+    # GDN state in its own arrays and never reads those blocks. Applies to GDN
+    # layers only; other mamba layers keep their blocks. Ignored with prefix
+    # caching, speculative decoding or a KV connector. Read by the model runner;
+    # TpuPlatform.additional_env_vars carries it to Ray workers on other hosts.
+    # See core/runner_slot_mamba.py.
+    "SKIP_MAMBA_SCHEDULER_BLOCKS":
+    env_bool("SKIP_MAMBA_SCHEDULER_BLOCKS", default=False),
+    # Build the MoE permutation, its inverse, and the sorted token ids from
+    # one packed sort instead of three.
+    "TPU_MOE_SINGLE_SORT":
+    env_bool("TPU_MOE_SINGLE_SORT", default=False),
+    # MoE router top-k implementation: "rowmax" is the sort-free k-pass
+    # selection, "sort" is jax.lax.top_k.
+    "TPU_MOE_ROUTER_TOPK":
+    env_with_choices("TPU_MOE_ROUTER_TOPK", "sort", ["sort", "rowmax"]),
+    # Experimental small-batch MoE (kernels/experimental/moe_lowtok) for EP
+    # calls of at most TPU_MOE_LOWTOK_MAX_TOKENS rows.
+    "TPU_MOE_LOWTOK":
+    env_bool("TPU_MOE_LOWTOK", default=False),
+    "TPU_MOE_LOWTOK_MAX_TOKENS":
+    lambda: int(os.getenv("TPU_MOE_LOWTOK_MAX_TOKENS", "128")),
 }
 
 

@@ -59,6 +59,7 @@ D workflow:
 """
 
 import copy
+import datetime
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -232,6 +233,15 @@ class TPUConnector(KVConnectorBase_V1):
                      finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """
+        Blocks of requests whose KV pull from P failed. The scheduler fails or
+        recomputes those requests according to kv_load_failure_policy.
+        """
+        if self.connector_worker is None:
+            return set()
+        return self.connector_worker.get_block_ids_with_load_errors()
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """
@@ -485,6 +495,8 @@ class TPUConnectorWorker:
         # req_id: (pull_thread_future, kv, block_ids)
         self.reqs_pulling: dict[ReqId, list[Future, list[jax.Array],
                                             list[int]]] = {}
+        # D: local blocks of failed pulls, not yet reported to the scheduler.
+        self._invalid_block_ids: set[int] = set()
 
         # req_id: (kv, indices)
         self.reqs_ready_to_insert: dict[ReqId, tuple[list[jax.Array],
@@ -495,6 +507,13 @@ class TPUConnectorWorker:
         # decode req_id:cmpl-cd70b21e-0f2b-46ed-910c-9525f706389a-0-23cb9419
         # this map will use the uuid to query the original request id
         self.kv_pull_uuid_to_req_id_map: dict[int, ReqId] = {}
+        # P: "pull done" notifications that arrived before the request was
+        # registered with the transfer server (uuid: arrival time). D can
+        # notify first when it skips the pull on a full prefix-cache hit.
+        self._early_pull_done: dict[int, float] = {}
+        # P: serializes KV registration (reqs_wait_pull, the uuid map and
+        # await_pull) with the notify listener and get_finished.
+        self._pull_done_lock = threading.Lock()
 
         self.host_ip = dist_utils.get_host_ip()
         self.kv_transfer_port = dist_utils.get_kv_transfer_port()
@@ -601,30 +620,93 @@ class TPUConnectorWorker:
         while True:
             client_id, uuid_bytes = sock.recv_multipart()
             uuid = int(uuid_bytes.decode('utf-8'))
-            if uuid in self.kv_pull_uuid_to_req_id_map:
-                req_id = self.kv_pull_uuid_to_req_id_map[uuid]
-                logger.info(
-                    f"TPUConnector Worker {self.node_id} --> zmq recieve | req_id={req_id} | uuid={uuid}"
-                )
-                if req_id in self.reqs_wait_pull:
-                    # Set the expiration time of this request to -1, mark to be done
-                    buffer, _, buffer_index = self.reqs_wait_pull[req_id]
-                    if buffer_index != -1 and self.host_kv_pool is not None:
-                        self.host_kv_pool.return_buffer(buffer_index, buffer)
-                    self.reqs_wait_pull[req_id][1] = -1
-                    self.reqs_wait_pull[req_id][2] = -1
-                    self.kv_pull_uuid_to_req_id_map.pop(uuid)
-                else:
-                    logger.warning(
-                        f"TPUConnector Worker {self.node_id} --> Disagg producer recives a non-exist pulling finished notification request {req_id} | uuid {uuid}"
-                    )
-            else:
-                logger.warning(
-                    f"TPUConnector Worker {self.node_id} --> Disagg producer recives a non-exist pulling finished notification uuid {uuid}"
-                )
+            self._handle_pull_done(uuid)
             time.sleep(0)
             # The response is not really needed.
             # sock.send_multipart([client_id, b"", b"ACK"])
+
+    def _handle_pull_done(self, uuid: int):
+        """Handles D's notification that it no longer needs the KV of uuid."""
+        with self._pull_done_lock:
+            req_id = self.kv_pull_uuid_to_req_id_map.get(uuid)
+            if req_id is None:
+                # Not registered yet; released right after registration.
+                self._early_pull_done[uuid] = time.perf_counter()
+                logger.info(
+                    f"TPUConnector Worker {self.node_id} --> pulling finished notification before registration | uuid={uuid}"
+                )
+                return
+            logger.info(
+                f"TPUConnector Worker {self.node_id} --> zmq recieve | req_id={req_id} | uuid={uuid}"
+            )
+            if req_id not in self.reqs_wait_pull:
+                logger.warning(
+                    f"TPUConnector Worker {self.node_id} --> Disagg producer recives a non-exist pulling finished notification request {req_id} | uuid {uuid}"
+                )
+            self._release_kv(req_id, uuid)
+
+    def _release_kv(self, req_id: ReqId, uuid: int):
+        """Frees P's copy of a request's KV. Caller holds _pull_done_lock."""
+        self.kv_pull_uuid_to_req_id_map.pop(uuid, None)
+        entry = self.reqs_wait_pull.get(req_id)
+        if entry is not None:
+            buffer, _, buffer_index = entry
+            if buffer_index != -1 and self.host_kv_pool is not None:
+                self.host_kv_pool.return_buffer(buffer_index, buffer)
+            # Expiration time -1 marks the request done sending in get_finished.
+            entry[1] = -1
+            entry[2] = -1
+        self._drop_pull_entry(uuid)
+
+    def _drop_pull_entry(self, uuid: int):
+        """Drops the transfer server's reference to the KV registered for uuid.
+
+        await_pull keeps the arrays alive until D pulls them, which never
+        happens if D skipped the pull (full prefix-cache hit) or gave up.
+        Re-registering uuid with no arrays and a deadline that has already
+        passed replaces that entry, so the arrays can be freed.
+        """
+        try:
+            self.kv_transfer_server.await_pull(uuid, [],
+                                               timeout=datetime.datetime.now())
+        except Exception as e:
+            logger.warning(
+                f"TPUConnector Worker {self.node_id} --> drop pull entry failed | uuid={uuid} | {e}"
+            )
+
+    def _register_kv_for_pull(self,
+                              req_id: ReqId,
+                              req_meta: SendMeta,
+                              kv: list[jax.Array],
+                              buffer_idx: int,
+                              pool_buffer: Any = None):
+        """Registers a request's KV with the transfer server for D to pull.
+
+        pool_buffer is the host KV pool buffer backing kv, if any; it is
+        returned to the pool once the request is released.
+        """
+        with self._pull_done_lock:
+            self.reqs_wait_pull[req_id] = [
+                kv if pool_buffer is None else pool_buffer,
+                req_meta.expiration_time, buffer_idx
+            ]
+            self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
+
+            if jax.profiler.TraceAnnotation.is_enabled():
+                dims_str, kv_size_bytes = get_kv_transfer_metadata(kv)
+
+                with jax.profiler.TraceAnnotation(
+                        "KV_Cache_Await_Pull",
+                        uuid=req_meta.uuid,
+                        request_id=trim_request_id_suffix(req_id),
+                        bytes=kv_size_bytes,
+                        dimensions=dims_str):
+                    self.kv_transfer_server.await_pull(req_meta.uuid, kv)
+            else:
+                self.kv_transfer_server.await_pull(req_meta.uuid, kv)
+
+            if self._early_pull_done.pop(req_meta.uuid, None) is not None:
+                self._release_kv(req_id, req_meta.uuid)
 
     def process_send_load(self, metadata: TPUConnectorMetadata):
         """
@@ -680,9 +762,13 @@ class TPUConnectorWorker:
                     socket = self._maybe_build_notif_socket(req_meta)
                     self._notify_pull_done(socket, req_id, req_meta.uuid)
                 else:
+                    # Full local prefix-cache hit: nothing was pulled, but P
+                    # holds the KV until notified.
                     logger.info(
                         f"TPUConnector Worker {self.node_id} --> req_id={req_id}, skip insert_kv_chunks."
                     )
+                    socket = self._maybe_build_notif_socket(req_meta)
+                    self._notify_pull_done(socket, req_id, req_meta.uuid)
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """
@@ -706,29 +792,12 @@ class TPUConnectorWorker:
             self.kv_d2h_executor.submit(self._async_d2h_and_transfer, req_id,
                                         req_meta, kv, len(local_block_ids))
         else:
-            buffer_idx = -1
             # NOTE(xiang): We need to manually store the kv because:
             # Although we can set use_raw_buffers=True to let kv be safely destroyed after
             # calling await_pull, it could be a stranding buffer if D never pulls it.
             # So we have to set use_raw_buffers=False and stores the kv, then the kv buffer
             # will be safely destroyed by either D notifying or expiration.
-            self.reqs_wait_pull[req_id] = [
-                kv, req_meta.expiration_time, buffer_idx
-            ]
-            self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
-
-            if jax.profiler.TraceAnnotation.is_enabled():
-                dims_str, kv_size_bytes = get_kv_transfer_metadata(kv)
-
-                with jax.profiler.TraceAnnotation(
-                        "KV_Cache_Await_Pull",
-                        uuid=req_meta.uuid,
-                        request_id=trim_request_id_suffix(req_id),
-                        bytes=kv_size_bytes,
-                        dimensions=dims_str):
-                    self.kv_transfer_server.await_pull(req_meta.uuid, kv)
-            else:
-                self.kv_transfer_server.await_pull(req_meta.uuid, kv)
+            self._register_kv_for_pull(req_id, req_meta, kv, buffer_idx=-1)
 
     def _async_d2h_and_transfer(self, req_id: str, req_meta: SendMeta,
                                 kv_src: list[jax.Array],
@@ -774,26 +843,11 @@ class TPUConnectorWorker:
                                                 d2h_transfer_time)
 
         # 4. Network transfer
-        self.reqs_wait_pull[req_id] = [
-            dest_buffer, req_meta.expiration_time, buffer_idx
-        ]
-        self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
-
-        if jax.profiler.TraceAnnotation.is_enabled():
-            dims_str, kv_size_bytes = get_kv_transfer_metadata(
-                updated_dest_buffer)
-
-            with jax.profiler.TraceAnnotation(
-                    "KV_Cache_Await_Pull",
-                    uuid=req_meta.uuid,
-                    request_id=trim_request_id_suffix(req_id),
-                    bytes=kv_size_bytes,
-                    dimensions=dims_str):
-                self.kv_transfer_server.await_pull(req_meta.uuid,
-                                                   updated_dest_buffer)
-        else:
-            self.kv_transfer_server.await_pull(req_meta.uuid,
-                                               updated_dest_buffer)
+        self._register_kv_for_pull(req_id,
+                                   req_meta,
+                                   updated_dest_buffer,
+                                   buffer_idx=buffer_idx,
+                                   pool_buffer=dest_buffer)
 
     def _maybe_build_kv_connection(self, req_meta: LoadMeta) -> Any:
         if isinstance(req_meta.remote_host, list):
@@ -815,7 +869,14 @@ class TPUConnectorWorker:
             )
         return conn
 
-    def _pull_kv(self, req_id: str, conn: Any, req_meta: LoadMeta):
+    def _pull_kv(self, req_id: str, conn: Any,
+                 req_meta: LoadMeta) -> list[jax.Array] | None:
+        """Pull the request's KV from P.
+
+        Returns None if the pull failed. The arrays of a pull that never
+        completes never become ready, so they must not be inserted into the
+        KV cache: every later step would wait on them and hang the engine.
+        """
         # The local allocated blocks which don't hit prefix caching.
         local_block_ids = req_meta.local_block_ids
         # The remote computed blocks which need to pull from P.
@@ -829,19 +890,26 @@ class TPUConnectorWorker:
             f"Worker {self.node_id} --> kv transfer | start pull req_id={req_id} | uuid={req_meta.uuid}"
         )
         start_time = time.perf_counter()
-        if jax.profiler.TraceAnnotation.is_enabled():
-            dims_str, expected_bytes = get_kv_transfer_metadata(kv_spec)
-            with jax.profiler.TraceAnnotation(
-                    "KV_Cache_Pull",
-                    uuid=req_meta.uuid,
-                    request_id=trim_request_id_suffix(req_id),
-                    bytes=expected_bytes,
-                    dimensions=dims_str,
-                    source=dist_utils.format_host_port(req_meta.remote_host,
-                                                       req_meta.remote_port)):
+        try:
+            if jax.profiler.TraceAnnotation.is_enabled():
+                dims_str, expected_bytes = get_kv_transfer_metadata(kv_spec)
+                with jax.profiler.TraceAnnotation(
+                        "KV_Cache_Pull",
+                        uuid=req_meta.uuid,
+                        request_id=trim_request_id_suffix(req_id),
+                        bytes=expected_bytes,
+                        dimensions=dims_str,
+                        source=dist_utils.format_host_port(
+                            req_meta.remote_host, req_meta.remote_port)):
+                    kv = conn.pull(req_meta.uuid, kv_spec)
+            else:
                 kv = conn.pull(req_meta.uuid, kv_spec)
-        else:
-            kv = conn.pull(req_meta.uuid, kv_spec)
+        except Exception:
+            logger.exception(
+                f"Worker {self.node_id} --> kv transfer | failed to start pull req_id={req_id} | "
+                f"uuid={req_meta.uuid}")
+            self.transfer_stats.record_failed_transfer()
+            return None
         kv_size_mb = sum(k.nbytes for k in kv) / (1024 * 1024)
         end_time_0, end_time_1 = time.perf_counter(), None
         prepare_time_ms = (end_time_0 - start_time) * 1000
@@ -869,6 +937,7 @@ class TPUConnectorWorker:
                     f"uuid={req_meta.uuid} | prepare time={prepare_time_ms:.2f}ms | "
                     f"size={kv_size_mb:.2f}MB")
                 self.transfer_stats.record_failed_transfer()
+                return None
         else:
             logger.info(
                 f"Worker {self.node_id} --> kv transfer | done pull req_id={req_id} | "
@@ -925,25 +994,60 @@ class TPUConnectorWorker:
             if self.reqs_pulling[req_id][1] is None:
                 future = self.reqs_pulling[req_id][0]
                 if future.done():
-                    kv = future.result()
-                    self.reqs_pulling[req_id][1] = kv
+                    try:
+                        kv = future.result()
+                    except Exception:
+                        logger.exception(
+                            f"Worker {self.node_id} --> kv transfer | pull raised for req_id={req_id}"
+                        )
+                        kv = None
+                    if kv is None:
+                        # The pull failed. Drop the request's pull state so its
+                        # unready KV is never inserted, and report its blocks
+                        # through get_block_ids_with_load_errors() in this same
+                        # step, so the scheduler applies kv_load_failure_policy
+                        # (fail or recompute) to the request.
+                        _, _, block_ids = self.reqs_pulling.pop(req_id)
+                        self._invalid_block_ids.update(
+                            _flatten_block_ids(block_ids))
+                        logger.warning(
+                            f"Worker {self.node_id} --> kv transfer | reporting load error for req_id={req_id}"
+                        )
+                    else:
+                        self.reqs_pulling[req_id][1] = kv
+                    # Reported either way: the scheduler needs the request
+                    # finished receiving to act on the load error.
                     done_recving.add(req_id)
 
         # Mark a req as done seding when it's expired.
         # This req can then be released blocks in the current scheduler step.
         now = time.perf_counter()
-        for req_id in list(self.reqs_wait_pull):
-            buffer, expires, buffer_index = self.reqs_wait_pull[req_id]
-            if now > expires:
-                if expires > 0:
-                    logger.warning(
-                        f"Worker {self.node_id} --> req_id={req_id} KV transfer timeout. Force recycle the memory buffer."
-                    )
-                if buffer_index != -1 and self.host_kv_pool is not None:
-                    self.host_kv_pool.return_buffer(buffer_index, buffer)
-                del self.reqs_wait_pull[req_id]
-                done_sending.add(req_id)
-                # Return the buffer to the pool
+        with self._pull_done_lock:
+            timed_out = set()
+            for req_id in list(self.reqs_wait_pull):
+                buffer, expires, buffer_index = self.reqs_wait_pull[req_id]
+                if now > expires:
+                    if expires > 0:
+                        logger.warning(
+                            f"Worker {self.node_id} --> req_id={req_id} KV transfer timeout. Force recycle the memory buffer."
+                        )
+                        timed_out.add(req_id)
+                    # Return the buffer to the pool
+                    if buffer_index != -1 and self.host_kv_pool is not None:
+                        self.host_kv_pool.return_buffer(buffer_index, buffer)
+                    del self.reqs_wait_pull[req_id]
+                    done_sending.add(req_id)
+            if timed_out:
+                for uuid, req_id in list(
+                        self.kv_pull_uuid_to_req_id_map.items()):
+                    if req_id in timed_out:
+                        del self.kv_pull_uuid_to_req_id_map[uuid]
+                        self._drop_pull_entry(uuid)
+            if self._early_pull_done:
+                ttl = dist_utils.get_p2p_wait_pull_timeout()
+                for uuid, arrival in list(self._early_pull_done.items()):
+                    if now - arrival > ttl:
+                        del self._early_pull_done[uuid]
 
         if done_sending:
             logger.info(
@@ -952,6 +1056,23 @@ class TPUConnectorWorker:
             logger.info(
                 f"Worker {self.node_id} -->  done_recving={done_recving}")
         return done_sending, done_recving
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Return, and forget, the local blocks of pulls that failed.
+
+        vLLM reads this right after get_finished() in the same step, so a
+        failed request's blocks arrive with its done_recving entry.
+        """
+        invalid_block_ids = self._invalid_block_ids
+        self._invalid_block_ids = set()
+        return invalid_block_ids
+
+
+def _flatten_block_ids(block_ids: list[int] | list[list[int]]) -> list[int]:
+    """Flatten per-kv-cache-group block ids (HMA) into a single list."""
+    if block_ids and isinstance(block_ids[0], (list, tuple)):
+        return [b for group in block_ids for b in group]
+    return list(block_ids)
 
 
 def get_uuid() -> int:

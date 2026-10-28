@@ -17,7 +17,9 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import lax
+from jax.experimental.layout import Layout, with_layout_constraint
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
@@ -28,13 +30,22 @@ from tpu_inference.layers.common.binary_search import topk_mask, topp_mask
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
+from tpu_inference.logger import init_logger
+from tpu_inference.models.common.compiler_options import \
+    get_sampling_compiler_options
+from tpu_inference.utils import TPU_SECOND_LAST_MINOR
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import VllmSchedulerOutput
 
     from tpu_inference.runner.input_batch import CachedRequestState
 
+logger = init_logger(__name__)
+
 _SAMPLING_EPS = 1e-5
+
+# Largest chunk size the top-k prefilter tries.
+_MAX_PREFILTER_CHUNK = 256
 
 
 def _distributed_sampling_max_top_k() -> int:
@@ -86,6 +97,89 @@ def _can_sample_distributed(
         (tpu_sampling_metadata.top_k <= _distributed_sampling_max_top_k()) &
         (tpu_sampling_metadata.top_p > 0.0))
     return jnp.all(is_greedy | supported)
+
+
+def _topk_prefilter_enabled() -> bool:
+    """Whether distributed sampling uses the top-k prefilter (opt-in)."""
+    return envs.ENABLE_TOPK_PREFILTER
+
+
+def _topk_prefilter_chunk(num_values: int, k: int) -> int:
+    """Returns the chunk size that sorts the fewest values, or 0 to skip.
+
+    Multiples of 8 (`TPU_SECOND_LAST_MINOR`) fill whole float32 TPU tiles, so
+    they are tried first (they were faster in micro-benchmarks). If none
+    divides the shard, any divisor is used (e.g. chunk 11 for 12628 values),
+    which still beats lax.top_k.
+    """
+    tile = TPU_SECOND_LAST_MINOR
+    multiples_of_tile = range(tile, _MAX_PREFILTER_CHUNK + 1, tile)
+    any_size = range(2, _MAX_PREFILTER_CHUNK + 1)
+    for candidates in (multiples_of_tile, any_size):
+        best_chunk, best_cost = 0, num_values
+        for candidate in candidates:
+            if num_values % candidate or num_values // candidate < k:
+                continue
+            cost = num_values // candidate + k * candidate
+            if cost < best_cost:
+                best_chunk, best_cost = candidate, cost
+        if best_chunk:
+            return best_chunk
+    return 0
+
+
+def _prefiltered_top_k(
+        values: jax.Array,
+        k: int,
+        chunk: Optional[int] = None) -> tuple[jax.Array, jax.Array]:
+    """Same values as `lax.top_k(values, k)`, but only the k chunks with the
+    largest maxima (which hold every top-k value) go through the final top-k.
+
+    Chunk c holds values c, c + num_chunks, c + 2 * num_chunks, ..., so the
+    chunk maxima are an elementwise max across rows. On TPU7x this layout is
+    faster than contiguous chunks.
+
+    Like `lax.top_k`, the values come back in descending order;
+    `_merge_topk_candidates` relies on this. Indices of tied values may differ
+    from `lax.top_k`.
+    """
+    batch, num_values = values.shape
+    if chunk is None:
+        chunk = _topk_prefilter_chunk(num_values, k)
+    if chunk == 0:
+        logger.warning_once(
+            "Top-k prefilter skipped: no chunk size up to %d helps for %d "
+            "values per vocab shard, so sampling uses lax.top_k.",
+            _MAX_PREFILTER_CHUNK, num_values)
+        return lax.top_k(values, k)
+    num_chunks = num_values // chunk
+    # chunks[b, r, c] = values[b, r * num_chunks + c].
+    chunks = values.reshape(batch, chunk, num_chunks)
+    _, chunk_ids = lax.top_k(jnp.max(chunks, axis=1), k)
+    candidates = jnp.take_along_axis(chunks, chunk_ids[:, None, :], axis=2)
+    top_values, positions = lax.top_k(candidates.reshape(batch, chunk * k), k)
+    top_ids = ((positions // k) * num_chunks +
+               jnp.take_along_axis(chunk_ids, positions % k, axis=1))
+    return top_values, top_ids
+
+
+def _topp_mask_sorted(values: jax.Array, top_p: jax.Array,
+                      replace_val: float) -> jax.Array:
+    """`topp_mask` for a few candidates: one sort instead of 32 passes."""
+    sorted_values = -lax.sort(-values, dimension=values.ndim - 1)
+    cumulative = jnp.cumsum(jax.nn.softmax(sorted_values, axis=-1), axis=-1)
+    cutoff = jnp.sum(cumulative < top_p[:, None], axis=-1, keepdims=True)
+    cutoff = jnp.minimum(cutoff, values.shape[-1] - 1)
+    threshold = jnp.take_along_axis(sorted_values, cutoff, axis=-1)
+    return jnp.where(values >= threshold, values, replace_val)
+
+
+def _shard_topk_candidates(values: jax.Array,
+                           k: int) -> tuple[jax.Array, jax.Array]:
+    """Each vocab shard's top-k candidates, in descending order."""
+    if _topk_prefilter_enabled():
+        return _prefiltered_top_k(values, k)
+    return lax.top_k(values, k)
 
 
 @dataclass
@@ -230,11 +324,16 @@ def _merge_topk_candidates(
                                     axis=-1)[:, 0]
     shard_candidates = candidate_values.reshape(candidate_values.shape[0], -1,
                                                 candidates_per_shard)
+    # Each shard's candidates are sorted in descending order, so the last one
+    # is the smallest.
     shard_tails = shard_candidates[:, :, -1]
     incomplete = jnp.any(shard_tails >= threshold[:, None], axis=-1)
     topk_values = jnp.where(candidate_values >= threshold[:, None],
                             candidate_values, -1e12)
-    filtered_values = topp_mask(topk_values, top_p, replace_val=-1e12)
+    if _topk_prefilter_enabled():
+        filtered_values = _topp_mask_sorted(topk_values, top_p, -1e12)
+    else:
+        filtered_values = topp_mask(topk_values, top_p, replace_val=-1e12)
     return filtered_values, candidate_ids, incomplete
 
 
@@ -256,12 +355,10 @@ def _distributed_topk_sample(
     Returns sampled global token IDs and a replicated scalar indicating that
     the gathered candidates may not contain the complete top-k tie group.
     """
-    data_spec = P(ShardingAxisName.MLP_DATA)
-    logits_spec = P(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR)
+    logits_spec = P(None, ShardingAxisName.MLP_TENSOR)
     replicated = P()
 
-    def local_sample(local_rng, local_logits, local_temperature, local_top_k,
-                     local_top_p):
+    def local_sample(local_logits, local_temperature):
         candidates_per_shard = _distributed_sampling_candidates_per_shard()
         local_vocab_size = local_logits.shape[-1]
         if local_vocab_size < candidates_per_shard:
@@ -269,12 +366,6 @@ def _distributed_topk_sample(
                 "Distributed top-k sampling requires at least "
                 f"{candidates_per_shard} logits per vocabulary shard")
 
-        data_axis = ShardingAxisName.MLP_DATA
-        if data_axis in mesh.axis_names and mesh.shape[data_axis] > 1:
-            local_rng = jax.random.fold_in(local_rng,
-                                           lax.axis_index(data_axis))
-        # Preserve the candidate sampler's existing key derivation.
-        sample_rng = jax.random.split(local_rng, 1)[0]
         shard_index = lax.axis_index(ShardingAxisName.MLP_TENSOR)
 
         # Greedy rows do not consume the categorical result. A safe positive
@@ -284,9 +375,13 @@ def _distributed_topk_sample(
             jnp.ones_like(local_temperature),
             local_temperature,
         )
+        # Constrain local_logits so the vocabulary reduction dimension is major
+        # and the batch dimension is minor across TPU vector lanes for top_k.
+        local_logits = with_layout_constraint(local_logits,
+                                              Layout(major_to_minor=(1, 0)))
         scaled_logits = local_logits / safe_temperature[:, None]
-        local_values, local_ids = lax.top_k(scaled_logits,
-                                            candidates_per_shard)
+        local_values, local_ids = _shard_topk_candidates(
+            scaled_logits, candidates_per_shard)
         local_ids = (local_ids + shard_index * local_vocab_size).astype(
             jnp.int32)
 
@@ -302,28 +397,38 @@ def _distributed_topk_sample(
             axis=-1,
             tiled=True,
         )
-        safe_top_k = jnp.clip(local_top_k, 1,
-                              _distributed_sampling_max_top_k())
-        filtered_values, candidate_ids, incomplete = _merge_topk_candidates(
-            candidate_values, candidate_ids, safe_top_k, local_top_p)
-        incomplete = jnp.logical_and(incomplete, local_temperature
-                                     >= _SAMPLING_EPS)
-        sampled_positions = jax.random.categorical(sample_rng, filtered_values)
-        sampled_ids = jnp.take_along_axis(candidate_ids,
-                                          sampled_positions[:, None],
-                                          axis=-1)[:, 0]
-        return sampled_ids, jnp.any(incomplete)
+        return candidate_values, candidate_ids
 
-    return jax.shard_map(
+    candidate_values, candidate_ids = jax.shard_map(
         local_sample,
         mesh=mesh,
-        in_specs=(replicated, logits_spec, data_spec, data_spec, data_spec),
-        out_specs=(data_spec, replicated),
+        in_specs=(logits_spec, replicated),
+        out_specs=(replicated, replicated),
         check_vma=False,
-    )(rng, logits, temperature, top_k, top_p)
+    )(logits, temperature)
+
+    candidate_values = jax.lax.with_sharding_constraint(
+        candidate_values,
+        NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
+    candidate_ids = jax.lax.with_sharding_constraint(
+        candidate_ids, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA,
+                                             None)))
+
+    safe_top_k = jnp.clip(top_k, 1, _distributed_sampling_max_top_k())
+    filtered_values, candidate_ids, incomplete = _merge_topk_candidates(
+        candidate_values, candidate_ids, safe_top_k, top_p)
+    incomplete = jnp.logical_and(incomplete, temperature >= _SAMPLING_EPS)
+    sampled_positions = jax.random.categorical(rng, filtered_values)
+    sampled_ids = jnp.take_along_axis(candidate_ids,
+                                      sampled_positions[:, None],
+                                      axis=-1)[:, 0]
+    return sampled_ids, jnp.any(incomplete)
 
 
-@jax.jit(static_argnames=["mesh", "allow_distributed_sampling"])
+@jax.jit(
+    static_argnames=["mesh", "allow_distributed_sampling"],
+    compiler_options=get_sampling_compiler_options(),
+)
 def sample(
     rng: jax.Array,
     mesh: Mesh,
@@ -336,6 +441,14 @@ def sample(
         # Force a dependency on the dummy tensor's shape to ensure unique HLO.
         logits = logits + 0 * jnp.sum(
             tpu_sampling_metadata._cache_collision_dummy)
+
+    use_distributed_candidates = (allow_distributed_sampling
+                                  and _distributed_sampling_fits(
+                                      mesh, logits.shape[-1]))
+    if not use_distributed_candidates and tpu_sampling_metadata.do_sampling:
+        # Unshard the logits explicitly to avoid latency increase.
+        logits = jax.lax.with_sharding_constraint(
+            logits, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
 
     greedy_tokens = jnp.argmax(logits, axis=-1)
     logits = logits.astype(jnp.float32)
@@ -357,9 +470,6 @@ def sample(
                                       processed_logits)
             return tokens, output_logits
 
-        use_distributed_candidates = (allow_distributed_sampling
-                                      and _distributed_sampling_fits(
-                                          mesh, logits.shape[-1]))
         if use_distributed_candidates:
             # Candidate shapes use a trace-time maximum; each request's top-k
             # remains dynamic. Greedy and padded rows do not consume a sample.
@@ -426,17 +536,46 @@ def compute_and_gather_logprobs(
 @jax.jit(static_argnames=("max_logprobs", ), out_shardings=P())
 def compute_and_gather_prompt_logprobs(
     logits: jax.Array,
-    input_ids: jax.Array,
+    prompt_target_ids: jax.Array,
     max_logprobs: int,
 ) -> LogprobsTensors:
-    """Compute logprobs from full logits and gather the requested top-k for prompt tokens."""
-    prompt_target_ids = jnp.roll(input_ids, -1, axis=0)
+    """Same math as compute_and_gather_logprobs, for prompt positions.
+
+    Kept separate because the second argument means something different here:
+    the next prompt token at each packed position, not the sampled token per
+    request. Build it with `_build_prompt_target_ids` -- get it wrong and you
+    get a plausible logprob back rather than an error.
+    """
     return compute_and_gather_logprobs(logits, prompt_target_ids, max_logprobs)
+
+
+def _build_prompt_target_ids(
+    total_padded_tokens: int,
+    req_snaps: List[PromptLogprobsReqSnap],
+    mesh: Optional[Mesh] = None,
+) -> jax.Array:
+    """Build the next-token target for every row of the packed logits buffer.
+
+    The host has the whole prompt, so it can look one token past the end of a
+    chunk; the packed device buffer cannot. Rows no request claims stay 0 and
+    are never read back.
+    """
+    targets = np.zeros((total_padded_tokens, ), dtype=np.int32)
+    for snap in req_snaps:
+        if snap.num_logits <= 0:
+            continue
+        s = snap.start_idx + 1
+        o = snap.req_offset
+        targets[o:o + snap.num_logits] = np.asarray(
+            snap.req_state.prompt_token_ids[s:s + snap.num_logits],
+            dtype=np.int32)
+    if mesh is not None:
+        return jax.device_put(targets, NamedSharding(mesh, P()))
+    return jax.device_put(targets)
 
 
 def compute_prompt_logprobs(
     full_logits: Optional[jax.Array],
-    input_ids: Optional[jax.Array],
     num_prompt_logprobs: Dict[str, int],
     requests: Dict[str, "CachedRequestState"],
     scheduler_output: "VllmSchedulerOutput",
@@ -448,16 +587,8 @@ def compute_prompt_logprobs(
     Returns PromptLogprobsAsyncData containing the async-copied tensors and
     the snapshotted state needed to safely slice them in get_output().
     """
-    if (not num_prompt_logprobs or full_logits is None or input_ids is None):
+    if not num_prompt_logprobs or full_logits is None:
         return None
-
-    # Gather compact [total_padded_tokens, max_logprobs+1] tensors on TPU and
-    # start async transfer to host (overlaps with next step's execute_model).
-    # We use the statically precompiled max_logprobs instead of the dynamic user max_k
-    # to avoid triggering JAX recompilation. The correct num_k is preserved in req_snaps.
-    prompt_lp_tensors = compute_and_gather_prompt_logprobs(
-        full_logits, input_ids, max_logprobs)
-    prompt_lp_tensors = _jax_logprobs_copy_to_host_async(prompt_lp_tensors)
 
     # Snapshot all mutable per-request state before update_states(N+1) runs.
     padded_tokens_per_dp = full_logits.shape[0] // dp_size
@@ -491,6 +622,20 @@ def compute_prompt_logprobs(
                             num_k=num_k,
                         ))
                 local_token_offset += num_scheduled
+
+    # Gather compact [total_padded_tokens, max_logprobs+1] tensors on TPU and
+    # start async transfer to host (overlaps with next step's execute_model).
+    # We use the statically precompiled max_logprobs instead of the dynamic user max_k
+    # to avoid triggering JAX recompilation. The correct num_k is preserved in req_snaps.
+    # Must follow the loop: the targets come from req_snaps.
+    sharding = getattr(full_logits, "sharding", None)
+    mesh = getattr(sharding, "mesh", None)
+    prompt_target_ids = _build_prompt_target_ids(full_logits.shape[0],
+                                                 req_snaps,
+                                                 mesh=mesh)
+    prompt_lp_tensors = compute_and_gather_prompt_logprobs(
+        full_logits, prompt_target_ids, max_logprobs)
+    prompt_lp_tensors = _jax_logprobs_copy_to_host_async(prompt_lp_tensors)
 
     return PromptLogprobsAsyncData(tensors=prompt_lp_tensors,
                                    req_snaps=req_snaps)

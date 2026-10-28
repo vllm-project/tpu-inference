@@ -85,7 +85,7 @@ def calculate_and_store_out(
                 or cfgs.serve.dtype_out == batch_l.dtype == jnp.bfloat16):
             result = lax.div(batch_acc, batch_l)
         else:
-            result = batch_acc.astype(jnp.float32) * pl.reciprocal(
+            result = batch_acc.astype(jnp.float32) * pltpu.reciprocal(
                 batch_l.astype(jnp.float32), approx=True)
         out = result.astype(cfgs.serve.dtype_out)
 
@@ -283,7 +283,7 @@ def _dense_combine_and_store(
                 or cfgs.serve.dtype_out == batch_l.dtype == jnp.bfloat16):
             result = lax.div(acc_all, batch_l)
         else:
-            result = acc_all.astype(jnp.float32) * pl.reciprocal(
+            result = acc_all.astype(jnp.float32) * pltpu.reciprocal(
                 batch_l.astype(jnp.float32), approx=True)
         out = result.astype(cfgs.serve.dtype_out)
         if cfgs.aligned_q_head_dim != cfgs.aligned_kv_head_dim:

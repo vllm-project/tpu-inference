@@ -253,7 +253,7 @@ def _attention_kernel(
         o_prev = swa_acc
         acc = exp_m_diff * o_prev + pv
         out = (lax.div(acc, l_sum) if q_dtype == jnp.float32 else
-               (acc * pl.reciprocal(l_sum, approx=True)).astype(q_dtype))
+               (acc * pltpu.reciprocal(l_sum, approx=True)).astype(q_dtype))
         return out
 
     def _async_copy(src, dst, sem, wait):

@@ -37,7 +37,7 @@
         }
       },
       "client_command_options": {
-        "command_type": "vllm_bench_serve",
+        "command_type": "local_benchmark_serving",
         "args": {
           "model": "meta-llama/Llama-3.1-8B-Instruct",
           "backend": "vllm",

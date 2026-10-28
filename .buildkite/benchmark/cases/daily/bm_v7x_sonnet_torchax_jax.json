@@ -39,7 +39,7 @@
         }
       },
       "client_command_options": {
-        "command_type": "vllm_bench_serve",
+        "command_type": "local_benchmark_serving",
         "args": {
           "model": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
           "backend": "vllm",
@@ -87,7 +87,7 @@
         }
       },
       "client_command_options": {
-        "command_type": "vllm_bench_serve",
+        "command_type": "local_benchmark_serving",
         "args": {
           "model": "Qwen/Qwen3-0.6B",
           "backend": "vllm",
@@ -134,7 +134,7 @@
         }
       },
       "client_command_options": {
-        "command_type": "vllm_bench_serve",
+        "command_type": "local_benchmark_serving",
         "args": {
           "model": "openai/gpt-oss-20b",
           "backend": "vllm",

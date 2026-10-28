@@ -114,7 +114,7 @@ def _prewarm_jax_compilation_cache():
     Use `compilation_cache._initialize_cache()` (JAX's own lazy-init helper)
     instead of a dummy `jax.jit(...)` because a JIT would also initialize the
     backend (libtpu on TPU) in the pytest parent process, which conflicts with
-    tests that fork worker processes (e.g. Ray's RayDistributedExecutor, vLLM
+    tests that fork worker processes (e.g. Ray's RayDistributedExecutorV2, vLLM
     MultiProcExecutor) and produces `Internal error when accessing libtpu
     multi-process lockfile`. `_initialize_cache` only constructs the LRUCache
     object from the configured cache dir — no backend touched.

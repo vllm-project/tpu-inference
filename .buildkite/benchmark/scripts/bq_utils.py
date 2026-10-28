@@ -76,6 +76,14 @@ def build_insert_sql(record_id: str,
     """
     table = resolve_table(bq_table)
     repository = os.getenv("REPOSITORY") or DEFAULT_REPOSITORY
+    # Which fleet produced the row, when the fleet says: the same cases run on
+    # bare metal and on kube and write this one table, so a reader needs to be
+    # able to hold one of them constant. In config, as vllm-torchtpu's copy of
+    # this file puts it, rather than a column only some producers fill. A row
+    # without the key came from bare metal, which sets nothing.
+    runner = os.getenv("CI_RUNNER")
+    if runner:
+        config = {**config, "runner": runner}
     config_json = sql_escape(json.dumps(config))
     metrics_elems = ", ".join(
         f"STRUCT('{metrics_type}', "

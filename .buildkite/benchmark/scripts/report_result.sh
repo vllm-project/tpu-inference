@@ -346,20 +346,25 @@ if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_P
       Config = excluded.Config
       $update_metrics;"
 
-  echo "Executing Atomic Upsert SQL:"
-  echo "$SQL"
+  # Off unless SPANNER_UPLOAD_ENABLED=true. Spanner bills each call to the
+  # caller's own project, so on a host whose project doesn't have the Spanner
+  # API enabled (the inferact tpu7x-8 hosts) the write fails the whole job.
+  if [[ "${SPANNER_UPLOAD_ENABLED:-false}" == "true" ]]; then
+    echo "Executing Atomic Upsert SQL:"
+    echo "$SQL"
 
-  gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
-    --project="$GCP_PROJECT_ID" \
-    --instance="$GCP_INSTANCE_ID" \
-    --sql="$SQL"
-  echo "--- Reporting finished (DB written)"
+    gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
+      --project="$GCP_PROJECT_ID" \
+      --instance="$GCP_INSTANCE_ID" \
+      --sql="$SQL"
+    echo "--- Reporting finished (DB written)"
+  else
+    echo "--- Reporting to Spanner (skipped)"
+  fi
 
-  # Dual write the same result to BigQuery, sharing the Spanner RecordId so
-  # the two rows can be joined. Dashboards are migrating off Spanner and both
-  # sinks have to stay truthful until they have. Non-fatal: a BigQuery outage
-  # or a missing grant must not fail an otherwise good benchmark run, and
-  # Spanner remains the source of record.
+  # Keyed by RECORD_ID, the same key as RunRecord, so rows in the two sinks
+  # can be joined. Non-fatal: a BigQuery outage or a missing grant must not
+  # fail an otherwise good benchmark run.
   if [[ "${BQ_UPLOAD_ENABLED:-true}" == "true" ]]; then
     echo "--- Reporting to BigQuery"
     python3 "$(dirname "${BASH_SOURCE[0]}")/report_bigquery.py" \

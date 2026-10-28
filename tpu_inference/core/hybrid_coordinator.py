@@ -9,6 +9,7 @@ from vllm.v1.core.kv_cache_coordinator import (HybridKVCacheCoordinator,
 from vllm.v1.core.kv_cache_coordinator import \
     get_kv_cache_coordinator as orig_get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
+from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager, get_manager_for_kv_cache_spec)
@@ -299,11 +300,37 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
     def __init__(
         self,
         kv_cache_config: KVCacheConfig,
+        max_model_len: int,
+        max_in_flight_tokens: int,
+        use_eagle: bool,
+        enable_caching: bool,
+        enable_kv_cache_events: bool,
+        dcp_world_size: int,
+        pcp_world_size: int,
+        scheduler_block_size: int,
+        hash_block_size: int,
+        metrics_collector: KVCacheMetricsCollector | None = None,
+        num_prefill_lookahead: int = 0,
         *args,
         mamba_num_blocks: int | None = None,
         **kwargs,
     ):
-        super().__init__(kv_cache_config, *args, **kwargs)
+        super().__init__(
+            kv_cache_config,
+            max_model_len,
+            max_in_flight_tokens,
+            use_eagle,
+            enable_caching,
+            enable_kv_cache_events,
+            dcp_world_size=dcp_world_size,
+            pcp_world_size=pcp_world_size,
+            scheduler_block_size=scheduler_block_size,
+            hash_block_size=hash_block_size,
+            metrics_collector=metrics_collector,
+            num_prefill_lookahead=num_prefill_lookahead,
+            *args,
+            **kwargs,
+        )
 
         # Base __init__ initialized self.block_pool with kv_cache_config.num_blocks (Attention pool)
         self.attention_block_pool = self.block_pool
@@ -351,7 +378,7 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # Allocate dedicated Mamba block pool
         self.mamba_block_pool = MambaBlockPool(
             num_gpu_blocks=self.mamba_num_blocks,
-            enable_caching=self.enable_caching,
+            enable_caching=enable_caching,
             hash_block_size=self.hash_block_size,
             enable_kv_cache_events=self.attention_block_pool.
             enable_kv_cache_events,
@@ -377,20 +404,18 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # Re-bind Mamba managers to mamba_block_pool
         new_managers = list(self.single_type_managers)
         for i in self.mamba_group_ids:
-            old_mgr = self.single_type_managers[i]
             pool = self.mamba_block_pool
             if self.mirror_mamba_groups and i != self.primary_mamba_group_id:
                 pool = self._mirror_pool
             new_managers[i] = get_manager_for_kv_cache_spec(
                 kv_cache_spec=kv_cache_config.kv_cache_groups[i].kv_cache_spec,
-                max_in_flight_tokens=getattr(old_mgr, "max_in_flight_tokens",
-                                             128),
-                max_model_len=self.max_model_len,
+                max_in_flight_tokens=max_in_flight_tokens,
+                max_model_len=max_model_len,
                 block_pool=pool,
-                enable_caching=self.enable_caching,
+                enable_caching=enable_caching,
                 kv_cache_group_id=i,
-                dcp_world_size=getattr(self, "dcp_world_size", 1),
-                pcp_world_size=getattr(self, "pcp_world_size", 1),
+                dcp_world_size=dcp_world_size,
+                pcp_world_size=pcp_world_size,
                 scheduler_block_size=self.scheduler_block_size,
                 needs_kv_cache_zeroing=self.kv_cache_config.
                 needs_kv_cache_zeroing,
@@ -430,9 +455,14 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         apply_admission_cap: bool = False,
         watermark_blocks: int = 0,
         reserved_blocks: int = 0,
+        prefill_end: int = 0,
     ) -> bool:
         attn_blocks_needed = 0
         mamba_blocks_needed = 0
+        # Mirror upstream: under dense retention every chunk publishes a
+        # state, so `prefill_end` is ignored.
+        if self.retention_interval != 0:
+            prefill_end = 0
 
         for i, manager in enumerate(self.single_type_managers):
             is_mamba = i in self.mamba_group_ids
@@ -455,6 +485,7 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     num_local_computed_tokens,
                     num_tokens_main_model,
                     apply_admission_cap=apply_admission_cap,
+                    prefill_end=prefill_end,
                 )
 
             if is_mamba:
@@ -487,9 +518,12 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        prefill_end: int = 0,
     ) -> int:
         """Returns attention blocks needed. Used by scheduler for in-flight prefill reservation."""
         num_blocks_to_allocate = 0
+        if self.retention_interval != 0:
+            prefill_end = 0
         for i, manager in enumerate(self.single_type_managers):
             if i in self.mamba_group_ids:
                 continue
@@ -512,6 +546,7 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     num_local_computed_tokens,
                     num_tokens_main_model,
                     apply_admission_cap=apply_admission_cap,
+                    prefill_end=prefill_end,
                 )
         return num_blocks_to_allocate
 
@@ -532,6 +567,7 @@ class TPUKVCacheManager(KVCacheManager):
         full_sequence_must_fit: bool = False,
         reserved_blocks: int = 0,
         has_scheduled_reqs: bool = True,
+        skip_zeroing_group_ids: tuple[int, ...] = (),
     ) -> KVCacheBlocks | None:
         if not isinstance(self.coordinator, TPUHybridKVCacheCoordinator):
             return super().allocate_slots(
@@ -546,6 +582,7 @@ class TPUKVCacheManager(KVCacheManager):
                 full_sequence_must_fit=full_sequence_must_fit,
                 reserved_blocks=reserved_blocks,
                 has_scheduled_reqs=has_scheduled_reqs,
+                skip_zeroing_group_ids=skip_zeroing_group_ids,
             )
 
         if num_new_tokens == 0 and num_external_computed_tokens == 0:
@@ -572,6 +609,10 @@ class TPUKVCacheManager(KVCacheManager):
         ):
             watermark_blocks = self.watermark_blocks
 
+        # Matches the scheduler's own prefill boundary: `num_tokens - 1`
+        # extends it to resumed requests replaying their output tokens.
+        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+
         if full_sequence_must_fit:
             full_num_tokens = min(request.num_tokens, self.max_model_len)
             can_fit = self.coordinator.can_allocate_tokens(
@@ -585,6 +626,7 @@ class TPUKVCacheManager(KVCacheManager):
                 apply_admission_cap=True,
                 watermark_blocks=watermark_blocks,
                 reserved_blocks=0,
+                prefill_end=prefill_end,
             )
             if not can_fit:
                 return None
@@ -611,6 +653,7 @@ class TPUKVCacheManager(KVCacheManager):
             apply_admission_cap=False,
             watermark_blocks=watermark_blocks,
             reserved_blocks=reserved_blocks,
+            prefill_end=prefill_end,
         )
         if not can_fit:
             return None
@@ -622,6 +665,7 @@ class TPUKVCacheManager(KVCacheManager):
                 new_computed_blocks=new_computed_block_list,
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,
+                skip_zeroing_group_ids=skip_zeroing_group_ids,
             )
 
         new_blocks = self.coordinator.allocate_new_blocks(

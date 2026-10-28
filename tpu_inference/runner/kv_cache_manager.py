@@ -39,8 +39,9 @@ from tpu_inference import envs as tpu_envs
 from tpu_inference import utils
 from tpu_inference import utils as common_utils
 from tpu_inference.core.hybrid_coordinator import (  # noqa: F401
-    DEFAULT_MAMBA_CACHE_MULTIPLIER, mamba_blocks_per_request, mamba_pool_size,
-    set_mamba_num_blocks)
+    DEFAULT_MAMBA_CACHE_MULTIPLIER, is_mamba_group, mamba_blocks_per_request,
+    mamba_pool_size, set_mamba_num_blocks)
+from tpu_inference.core.runner_slot_mamba import maybe_runner_slot_mamba_spec
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.kv_share import compute_kv_share_map
@@ -114,7 +115,8 @@ class KVCacheManager:
         if self.use_mla:
             page_size_bytes = get_attention_page_size_bytes(
                 self.runner.mesh, block_size, num_kv_heads, head_size,
-                self.runner.kv_cache_dtype, True)
+                self.runner.kv_cache_dtype, True,
+                self.runner.attention_backend)
             page_size_padded = (self._hybrid_uniform_page_size_bytes
                                 if self._hybrid_uniform_page_size_bytes
                                 is not None else int(page_size_bytes))
@@ -128,7 +130,8 @@ class KVCacheManager:
         else:
             page_size_bytes = get_attention_page_size_bytes(
                 self.runner.mesh, block_size, num_kv_heads, head_size,
-                self.runner.kv_cache_dtype, False)
+                self.runner.kv_cache_dtype, False,
+                self.runner.attention_backend)
             page_size_padded = (self._hybrid_uniform_page_size_bytes
                                 if self._hybrid_uniform_page_size_bytes
                                 is not None else int(page_size_bytes))
@@ -206,7 +209,8 @@ class KVCacheManager:
             first_attn_module.head_size)
         attn_page_size_bytes = get_attention_page_size_bytes(
             self.runner.mesh, self.runner.cache_config.block_size,
-            num_kv_heads, head_size, self.runner.kv_cache_dtype, False)
+            num_kv_heads, head_size, self.runner.kv_cache_dtype, False,
+            self.runner.attention_backend)
 
         mamba_modules = [
             module for module in layers.values()
@@ -649,7 +653,9 @@ class KVCacheManager:
                     spec = attn_module.get_kv_cache_spec(
                         self.runner.vllm_config)
                     if spec is not None:
-                        kv_cache_spec[layer_name] = spec
+                        kv_cache_spec[
+                            layer_name] = maybe_runner_slot_mamba_spec(
+                                spec, self.runner.vllm_config)
                     continue
 
                 if is_cache_for_ds_v4(attn_module):
@@ -719,7 +725,8 @@ class KVCacheManager:
         context_cnt = utils.get_mesh_shape_product(self.runner.mesh,
                                                    ShardingAxisName.KV_CONTEXT)
         block_sizes = [
-            kv_cache_group.kv_cache_spec.block_size * context_cnt
+            kv_cache_group.kv_cache_spec.block_size *
+            (1 if is_mamba_group(kv_cache_group) else context_cnt)
             for kv_cache_group in kv_cache_config.kv_cache_groups
         ]
         if block_sizes != [self.runner.cache_config.block_size]:
@@ -851,7 +858,7 @@ class KVCacheManager:
                             total_group_page_size += get_attention_page_size_bytes(
                                 self.runner.mesh, spec.block_size,
                                 spec.num_kv_heads, spec.head_size, spec.dtype,
-                                self.use_mla)
+                                self.use_mla, self.runner.attention_backend)
                     tensor_num_blocks = kv_cache_tensor.size // total_group_page_size
                 alloc_per_layer = True
             else:
@@ -994,6 +1001,7 @@ class KVCacheManager:
                     layer_names=[first_layer_name],
                     cache_dtype=t2j_dtype(layer_spec.dtype),
                     use_mla=self.use_mla,
+                    attention_backend=self.runner.attention_backend,
                 )[0]
                 kv_caches.append(kv_cache)
 

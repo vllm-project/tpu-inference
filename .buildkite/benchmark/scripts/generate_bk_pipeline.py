@@ -22,9 +22,28 @@ from typing import Any, Dict, List, Set
 
 import yaml
 
+# Kueue shape for each bare-metal queue a case can name, used when
+# BENCHMARK_TARGET=kube. A shape spanning more than one host - the v7x-16 and
+# v7x-32 slices - runs as a Ray cluster across the slice; run_job_kube.sh
+# tells the two apart from the shape itself.
+KUBE_SHAPES = {
+    "tpu_v6e_queue": "ct6e-standard-1t/1x1",
+    "tpu_v6e_8_queue": "ct6e-standard-8t/2x4",
+    "tpu_v7x_2_queue": "tpu7x-standard-1t/1x1x1",
+    "tpu_v7x_8_queue": "tpu7x-standard-4t/2x2x1",
+    "tpu_v7x_16_queue": "tpu7x-standard-4t/2x2x2",
+    "tpu_v7x_32_queue": "tpu7x-standard-4t/2x2x4",
+}
+
 # List of authorized command types
 ALLOWED_SERVER_COMMAND_TYPES = {"vllm_serve"}
-ALLOWED_CLIENT_COMMAND_TYPES = {"vllm_bench_serve", "lm_eval"}
+# local_benchmark_serving is this repo's scripts/vllm/benchmarking/
+# benchmark_serving.py, for datasets `vllm bench serve` no longer has (sonnet).
+ALLOWED_CLIENT_COMMAND_TYPES = {
+    "vllm_bench_serve", "local_benchmark_serving", "lm_eval"
+}
+# Clients that benchmark a server run_bm.sh starts, and so share its rules.
+SERVING_CLIENT_COMMAND_TYPES = {"vllm_bench_serve", "local_benchmark_serving"}
 
 
 def str2bool(v):
@@ -134,8 +153,8 @@ def validate_parameter_dependencies(case_data: Dict[str, Any], file_path: str,
                 f"but for 'lm_eval', it must be one of {sorted(list(allowed_datasets))}."
             )
 
-    # Specific Rules for `vllm_bench_serve`
-    if client_cmd_type == "vllm_bench_serve":
+    # Specific Rules for the serving clients
+    if client_cmd_type in SERVING_CLIENT_COMMAND_TYPES:
         # Ensure percentile-metrics is present and contains 'e2el'
         percentile_metrics = client_args.get("percentile-metrics")
         if not percentile_metrics:
@@ -163,12 +182,44 @@ def validate_parameter_dependencies(case_data: Dict[str, Any], file_path: str,
                 f"Validation Error: Model mismatch in {file_path}. Server is '{server_model}' "
                 f"but client is '{client_model}'.")
 
-        # vllm_bench_serve requires a server to be defined
+        # A serving client requires a server to be defined
         if not case_data.get("server_command_options"):
             errors.append(
-                f"Validation Error: {file_path} uses 'vllm_bench_serve' but is missing 'server_command_options'. "
+                f"Validation Error: {file_path} uses '{client_cmd_type}' but is missing 'server_command_options'. "
                 "The infra requires a server to start for this benchmark type."
             )
+
+
+def _is_kube_target() -> bool:
+    return os.getenv("BENCHMARK_TARGET") == "kube"
+
+
+def _get_kube_queue_filter() -> Set[str]:
+    """Bare-metal queues whose cases a kube build runs; empty means all."""
+    selected = os.getenv("KUBE_BENCHMARK_QUEUES")
+    if selected:
+        return {s.strip() for s in selected.split(',') if s.strip()}
+    return set()
+
+
+def _kube_concurrency(shape: str) -> Dict[str, Any]:
+    """Buildkite concurrency settings for this build's steps on one shape.
+
+    A kube step's launcher submits its workload as soon as the step starts,
+    and the TPU queues admit in submission order, so a build that starts every
+    case at once parks a backlog in Kueue ahead of other lanes' later steps on
+    the same chips. Capping each shape at KUBE_BENCHMARK_CHIPS chips per build
+    keeps the backlog in Buildkite, where it does not hold other lanes up.
+    """
+    budget = int(os.getenv("KUBE_BENCHMARK_CHIPS", "16"))
+    chips = 1
+    for dim in shape.split("/")[1].split("x"):
+        chips *= int(dim)
+    build = os.getenv("BUILDKITE_BUILD_ID", "local")
+    return {
+        "concurrency": max(1, budget // chips),
+        "concurrency_group": f"tpu-inference-benchmark-kube/{build}/{shape}",
+    }
 
 
 def _get_mlcompass_select_tests() -> Set[str]:
@@ -221,7 +272,13 @@ def create_benchmark_steps(case_data: Dict[str, Any],
     # Construct the Step dictionary
     child_steps = []
     mlcompass_select_tests = _get_mlcompass_select_tests()
+    kube = _is_kube_target()
+    kube_queue_filter = _get_kube_queue_filter()
     for agent in ci_queues:
+        if kube and (agent not in KUBE_SHAPES or
+                     (kube_queue_filter and agent not in kube_queue_filter)):
+            continue
+
         # Determine TPU version from queue name
         tpu_version = "tpu7x" if "v7x" in agent else "tpu6e"
 
@@ -231,6 +288,14 @@ def create_benchmark_steps(case_data: Dict[str, Any],
             "ci_queue": agent,
             "USE_PREBUILT_IMAGE": "1",
             "TPU_VERSION": tpu_version,
+            # Both off for every step, whatever the build or the case asks
+            # for. A failed MLCompass export fails the job, and it fails on
+            # every host without a grant on MLCompass's table. The Spanner
+            # row duplicates the BigQuery one report_result.sh writes anyway.
+            # A step's env wins over the build's, so this also overrides a
+            # schedule that sets either.
+            "MLCOMPASS_EXPORT_ENABLED": "false",
+            "SPANNER_UPLOAD_ENABLED": "false",
         }
 
         timeout_in_minutes = step_env.pop("BK_TIMEOUT_IN_MINUTES", None)
@@ -257,18 +322,43 @@ def create_benchmark_steps(case_data: Dict[str, Any],
             "key": step_safe_key,
         }
 
-        if timeout_in_minutes is not None:
-            step["timeout_in_minutes"] = timeout_in_minutes
+        if kube:
+            # The step timeout covers queueing for chips as well as running,
+            # so the case's own budget becomes the workload's deadline, which
+            # starts once the chips are held.
+            step["timeout_in_minutes"] = 1440
+            if timeout_in_minutes is not None:
+                step_env["TPU_MAX_RUNTIME_SECONDS"] = str(
+                    int(timeout_in_minutes) * 60)
+            step_env["SHAPE"] = KUBE_SHAPES[agent]
+            step.update(_kube_concurrency(KUBE_SHAPES[agent]))
+            step.update({
+                "env":
+                step_env,
+                "agents": {
+                    "queue": "kube"
+                },
+                "plugins": [{
+                    "kubernetes": {
+                        "podTemplate": "tpu-launcher"
+                    }
+                }],
+                "command":
+                f"bash .buildkite/benchmark/scripts/run_job_kube.sh {case_parameter}",
+            })
+        else:
+            if timeout_in_minutes is not None:
+                step["timeout_in_minutes"] = timeout_in_minutes
 
-        step.update({
-            "env":
-            step_env,
-            "agents": {
-                "queue": agent
-            },
-            "command":
-            f"bash .buildkite/benchmark/scripts/run_job.sh {case_parameter}",
-        })
+            step.update({
+                "env":
+                step_env,
+                "agents": {
+                    "queue": agent
+                },
+                "command":
+                f"bash .buildkite/benchmark/scripts/run_job.sh {case_parameter}",
+            })
 
         # Add dependency on global case name validation if it was uploaded in bootstrap
         if os.environ.get("BENCHMARK_VALIDATION_UPLOADED") == "true":
@@ -340,7 +430,17 @@ def main():
         sys.exit(1)
 
     if not all_steps:
-        if _get_mlcompass_select_tests():
+        if _is_kube_target():
+            # Every case in the file is on a queue the kube pipeline leaves
+            # out, or outside KUBE_BENCHMARK_QUEUES.
+            all_steps.append({
+                "label":
+                "⏭️ Benchmark file skipped — no case on a kube-runnable queue.",
+                "command":
+                "echo Benchmark file skipped — no case on a kube-runnable queue.",
+                "skip": True
+            })
+        elif _get_mlcompass_select_tests():
             all_steps.append({
                 "label":
                 "⏭️ Benchmark case skipped — not selected by MLCompass.",

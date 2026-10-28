@@ -34,8 +34,6 @@ from vllm.config.parallel import ParallelConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import \
-    get_routed_experts_attn_gid
 from vllm.tasks import SupportedTask
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import GrammarOutput
@@ -43,8 +41,7 @@ from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, KVConnectorOutput, LogprobsLists,
-                             LogprobsTensors, ModelRunnerOutput,
-                             RoutedExpertsLists)
+                             LogprobsTensors, ModelRunnerOutput)
 from vllm.v1.request import Request
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.kv_connector_model_runner_mixin import \
@@ -54,9 +51,10 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 import tpu_inference.envs as envs
 from tpu_inference import utils as common_utils
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
+from tpu_inference.layers.common.attention_backend import (
+    HostStepInputs, attention_backend_name, create_attention_backend)
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, GroupedAttentionMetadata, PCPMetadata,
-    SharedAttentionMetadata, pcp_seq_arrays, pcp_token_layout)
+    AttentionMetadata, GroupedAttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   MESH_AXIS_NAMES_2D,
                                                   ShardingAxisName,
@@ -80,8 +78,13 @@ from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 from tpu_inference.runner.kv_cache_manager import KVCacheManager
 from tpu_inference.runner.lora_utils import LoraUtils
 from tpu_inference.runner.multimodal_manager import MultiModalManager
+from tpu_inference.runner.pcp_utils import (PCPPreprocessor, pcp_buffer_tokens,
+                                            pcp_max_buffer_tokens)
 from tpu_inference.runner.persistent_batch_manager import \
     PersistentBatchManager
+from tpu_inference.runner.routed_experts import (RoutedExpertsStepEntry,
+                                                 TPUAuxOutputWorker,
+                                                 get_routed_experts_attn_gid)
 from tpu_inference.runner.speculative_decoding_manager import (
     SpecDecodeMetadata, SpeculativeDecodingManager)
 from tpu_inference.runner.structured_decoding_manager import \
@@ -219,28 +222,30 @@ def _process_continue_decode_outputs(
     expert_indices: Optional[jax.Array] = None,
     enable_return_routed_experts: bool = False,
     requests: Optional[Dict[str, Any]] = None,
-    block_size: int = 0,
     routed_experts_attn_gid: int = 0,
+    dp_rank_by_req: Optional[Dict[str, int]] = None,
     scheduler_output: Optional["VllmSchedulerOutput"] = None,
     input_batch: Optional[Any] = None,
     max_num_reqs: int = 0,
     max_model_len: int = 0,
     attn_metadata: Optional[Any] = None,
     is_async: bool = False,
-) -> Tuple[List[List[int]], Optional[Any], Optional[Any], int, int]:
+    block_ids_by_req: Optional[Dict[str, List[int]]] = None,
+) -> Tuple[List[List[int]], Optional[Any], List[RoutedExpertsStepEntry], int,
+           int]:
     """Process continue_decode TPU outputs into CPU data structures.
 
     Performs host transfers, realigns physical rows by indices_selector, trims
-    tokens at EOS, and builds LogprobsLists and RoutedExpertsLists. Optionally
-    updates input_batch, scheduler_output, and attn_metadata for synchronous
-    runs.
+    tokens at EOS, and builds LogprobsLists and per-request routed-experts
+    step entries. Optionally updates input_batch, scheduler_output, and
+    attn_metadata for synchronous runs.
     """
-    generated_tokens_cpu, actual_steps_cpu = jax.device_get(
+    generated_tokens_cpu, actual_steps_cpu = common_utils.safe_device_get(
         (generated_tokens, actual_steps))
 
     all_expert_indices_cpu = None
     if expert_indices is not None:
-        all_expert_indices_cpu = jax.device_get(expert_indices)
+        all_expert_indices_cpu = common_utils.safe_device_get(expert_indices)
 
     lp_token_ids_cpu = None
     lp_vals_cpu = None
@@ -250,7 +255,7 @@ def _process_continue_decode_outputs(
             lp_token_ids_cpu,
             lp_vals_cpu,
             lp_ranks_cpu,
-        ) = jax.device_get((
+        ) = common_utils.safe_device_get((
             logprobs_tensors.logprob_token_ids,
             logprobs_tensors.logprobs,
             logprobs_tensors.selected_token_ranks,
@@ -279,8 +284,8 @@ def _process_continue_decode_outputs(
             lp_ranks_cpu = lp_ranks_cpu[:, indices_selector]
 
     sampled_token_ids: List[List[int]] = []
-    expert_indices_list = []
-    expert_slots_list = []
+    routed_experts_entries: List[RoutedExpertsStepEntry] = []
+    dp_rank_by_req = dp_rank_by_req or {}
     lp_token_ids_list = []
     lp_vals_list = []
     lp_ranks_list = []
@@ -291,6 +296,12 @@ def _process_continue_decode_outputs(
     num_eos_hits = int(has_eos.sum())
     requests_dict = requests if requests is not None and hasattr(
         requests, "get") else None
+    chunk_start: Dict[str, int] = {}
+    if all_expert_indices_cpu is not None and scheduler_output is not None:
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        if cached_reqs is not None:
+            chunk_start = dict(
+                zip(cached_reqs.req_ids, cached_reqs.num_computed_tokens))
 
     for req_idx, req_id in enumerate(req_ids):
         req_state = requests_dict.get(
@@ -299,28 +310,14 @@ def _process_continue_decode_outputs(
         valid_tokens = generated_tokens_cpu[req_idx, :actual_len].tolist()
         sampled_token_ids.append(valid_tokens)
 
-        if scheduler_output is not None:
-            scheduler_output.num_scheduled_tokens[req_id] = actual_len
-
-        if all_expert_indices_cpu is not None:
-            req_experts = all_expert_indices_cpu[:actual_len, :, req_idx, :]
-            expert_indices_list.append(req_experts.transpose(1, 0, 2))
-
         if lp_token_ids_cpu is not None:
             lp_token_ids_list.append(lp_token_ids_cpu[:actual_len, req_idx])
             lp_vals_list.append(lp_vals_cpu[:actual_len, req_idx])
             lp_ranks_list.append(lp_ranks_cpu[:actual_len, req_idx])
 
         if req_state is not None:
-            req_state.output_token_ids.extend(valid_tokens)
-
-            if (all_expert_indices_cpu is not None and actual_len > 0):
-                slots_arr = _reconstruct_slots_for_request(
-                    _block_ids_for_group(req_state, routed_experts_attn_gid),
-                    actual_len,
-                    block_size,
-                    start_pos=req_state.num_computed_tokens)
-                expert_slots_list.append(slots_arr)
+            if not is_async:
+                req_state.output_token_ids.extend(valid_tokens)
 
             if input_batch is not None:
                 start_idx = input_batch.num_tokens_no_spec[req_idx]
@@ -331,23 +328,26 @@ def _process_continue_decode_outputs(
                     input_batch.num_tokens_no_spec[req_idx] = end_idx
                     input_batch.num_tokens[req_idx] = end_idx
 
+        if all_expert_indices_cpu is not None and actual_len > 0:
+            # The on-device burst is not yet reflected in
+            # num_computed_tokens, so it starts right there.
+            routed_experts_entries.append(
+                RoutedExpertsStepEntry(
+                    req_id=req_id,
+                    rows=all_expert_indices_cpu[:actual_len, :, req_idx, :],
+                    token_start=(chunk_start[req_id] if req_id in chunk_start
+                                 else req_state.num_computed_tokens),
+                    num_accepted=actual_len,
+                    block_ids=(block_ids_by_req[req_id] if block_ids_by_req
+                               is not None else _block_ids_for_group(
+                                   req_state, routed_experts_attn_gid)),
+                    dp_rank=dp_rank_by_req.get(req_id, 0),
+                ))
+
         if (attn_metadata is not None
                 and hasattr(attn_metadata, "seq_lens_cpu")
                 and attn_metadata.seq_lens_cpu is not None):
             attn_metadata.seq_lens_cpu[req_idx] += actual_len
-
-    expert_indices_cpu = None
-    if expert_indices_list:
-        expert_indices_cpu = np.concatenate(expert_indices_list, axis=1)
-
-    routed_experts = None
-    if expert_indices_cpu is not None and expert_slots_list:
-        routing_data = expert_indices_cpu.transpose(1, 0, 2)
-        slot_mapping = np.concatenate(expert_slots_list, axis=0)
-        routed_experts = RoutedExpertsLists(
-            routing_data=routing_data,
-            slot_mapping=slot_mapping,
-        )
 
     logprobs_lists = None
     if lp_token_ids_list:
@@ -365,7 +365,7 @@ def _process_continue_decode_outputs(
             cu_num_generated_tokens=cu_num_generated_tokens,
         )
 
-    return sampled_token_ids, logprobs_lists, routed_experts, actual_steps_int, num_eos_hits
+    return sampled_token_ids, logprobs_lists, routed_experts_entries, actual_steps_int, num_eos_hits
 
 
 class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
@@ -422,10 +422,11 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         if self._model_runner_output.sampled_token_ids:
             return self._model_runner_output
 
+        aux_output_worker = getattr(self._runner, "aux_output_worker", None)
         (
             sampled_token_ids,
             logprobs,
-            routed_experts,
+            routed_experts_entries,
             actual_steps,
             num_eos_hits,
         ) = _process_continue_decode_outputs(
@@ -436,14 +437,15 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
             indices_selector=self.logits_indices_selector,
             logprobs_tensors=self._logprobs_tensors,
             expert_indices=self._expert_indices,
-            enable_return_routed_experts=getattr(
-                self._runner.model_config, "enable_return_routed_experts",
-                False) if self._runner else False,
+            enable_return_routed_experts=aux_output_worker is not None,
             requests=getattr(self._runner, "requests", None),
-            block_size=getattr(self._runner, "block_size", 0),
             routed_experts_attn_gid=getattr(self._runner,
                                             "routed_experts_attn_gid", 0),
+            dp_rank_by_req=getattr(self._scheduler_output, "assigned_dp_rank",
+                                   None),
+            scheduler_output=self._scheduler_output,
             is_async=True,
+            block_ids_by_req=self._routed_experts_block_ids,
         )
 
         _log_continue_decode_summary(
@@ -460,8 +462,10 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._model_runner_output.sampled_token_ids = sampled_token_ids
         if logprobs is not None:
             self._model_runner_output.logprobs = logprobs
-        if routed_experts is not None:
-            self._model_runner_output.routed_experts = routed_experts
+        if aux_output_worker is not None:
+            self._model_runner_output.aux_output_connector_output = (
+                aux_output_worker.process_step(
+                    self._model_runner_output.req_ids, routed_experts_entries))
 
         return self._model_runner_output
 
@@ -490,24 +494,33 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
                 self._runner._get_prompt_logprobs_dict(
                     self._prompt_logprobs_async_data))
 
-        if self._runner.model_config.enable_return_routed_experts and self._expert_indices is not None:
-            expert_indices_cpu = np.asarray(
-                jax.device_get(self._expert_indices))
-
-            if self._scheduler_output is not None:
-                routed_experts = _reconstruct_routed_experts(
+        aux_output_worker = self._runner.aux_output_worker
+        if aux_output_worker is not None:
+            entries = []
+            if (self._expert_indices is not None
+                    and self._scheduler_output is not None):
+                entries = _routed_experts_step_entries(
                     runner=self._runner,
                     scheduler_output=self._scheduler_output,
-                    expert_indices_cpu=expert_indices_cpu,
+                    expert_indices_cpu=np.asarray(
+                        jax.device_get(self._expert_indices)),
                     req_ids=self._model_runner_output.req_ids,
+                    sampled_token_ids=valid_sampled_token_ids,
                     req_ids_dp=self._req_ids_dp,
                     padded_num_scheduled_tokens_per_dp_rank=self.
                     _padded_num_scheduled_tokens_per_dp_rank,
                     block_ids_by_req=self._routed_experts_block_ids,
                 )
-                self._model_runner_output.routed_experts = routed_experts
+            self._model_runner_output.aux_output_connector_output = (
+                aux_output_worker.process_step(
+                    self._model_runner_output.req_ids, entries))
 
         return self._model_runner_output
+
+    def get_kv_connector_output(self) -> Optional[KVConnectorOutput]:
+        """Get the KV connector output for this async output.
+        """
+        return self._model_runner_output.kv_connector_output
 
 
 @dataclass
@@ -694,8 +707,7 @@ def _snapshot_block_ids_for_routed_experts(
     Copying the list also keeps the snapshot stable if the request's block list
     is mutated afterwards.
 
-    ``kv_cache_group_id`` must be the full-attention group, the one the
-    scheduler reads back with (see
+    ``kv_cache_group_id`` must be the full-attention group (see
     :func:`TPUModelRunner.initialize_kv_cache`).
     """
     snapshot: Dict[str, List[int]] = {}
@@ -720,78 +732,25 @@ def _block_ids_for_group(
     return list(req_state.block_ids[kv_cache_group_id])
 
 
-def _reconstruct_slots_for_request(
-    block_ids: List[int],
-    num_tokens: int,
-    block_size: int,
-    start_pos: int,
-) -> np.ndarray:
-    """Reconstructs physical KV-cache slots for ``num_tokens`` tokens of a
-    request using vectorized NumPy.
-
-    ``start_pos`` is the absolute sequence position of the first of these
-    tokens and is supplied by the caller, because the two call sites have
-    different token contracts: the routed-experts reconstruction passes a
-    single scheduler chunk (whose tokens end at ``num_computed_tokens``, so it
-    passes ``num_computed_tokens - num_tokens``), while the continue_decode
-    path passes an on-device decode burst (not reflected in
-    ``num_computed_tokens``, so it passes ``num_computed_tokens``). The slots
-    must match the scheduler-side read (``RoutedExpertsManager.get``, which is
-    block-relative from position 0).
-
-    ``block_ids`` is the full-attention group's block list, resolved and copied
-    by :func:`_snapshot_block_ids_for_routed_experts`.
-    """
-    if num_tokens <= 0:
-        return np.array([], dtype=np.int32)
-
-    assert start_pos >= 0, (
-        f"[routed-experts] start_pos must be non-negative, got {start_pos} "
-        f"(num_tokens={num_tokens}); slots would be wrong via numpy negative "
-        f"indexing")
-
-    pos = np.arange(start_pos, start_pos + num_tokens, dtype=np.int32)
-    block_idx = pos // block_size
-
-    if block_ids:
-        # Pad block_ids with 0s up to the max required index to avoid IndexError
-        block_ids_arr = np.zeros(max(len(block_ids),
-                                     int(block_idx[-1]) + 1),
-                                 dtype=np.int32)
-        block_ids_arr[:len(block_ids)] = block_ids
-        block_id = block_ids_arr[block_idx]
-        slots_arr = block_id * block_size + (pos % block_size)
-    else:
-        slots_arr = np.zeros_like(pos, dtype=np.int32)
-
-    return slots_arr
-
-
-def _reconstruct_routed_experts(
+def _routed_experts_step_entries(
     runner,
     scheduler_output: "VllmSchedulerOutput",
     expert_indices_cpu: np.ndarray,
     req_ids: List[str],
+    sampled_token_ids: List[List[int]],
     req_ids_dp: Dict,
     padded_num_scheduled_tokens_per_dp_rank: int,
     block_ids_by_req: Dict[str, List[int]],
-) -> RoutedExpertsLists:
-    """Reconstructs physical slot mappings and performs DP-rank reordering for MoE routed expert indices."""
-    num_layers, _, top_k = expert_indices_cpu.shape
-    block_size = runner.block_size
-    total_active_tokens = scheduler_output.total_num_scheduled_tokens
-    dp_size = runner.dp_size
+) -> List[RoutedExpertsStepEntry]:
+    """Splits one step's DP-sharded expert indices into per-request entries.
 
-    # Absolute start position of each request's chunk = its PRE-step
-    # computed-token count, sourced from scheduler_output (not from
-    # req_state.num_computed_tokens). req_state.num_computed_tokens is advanced
-    # at different times across the two output paths that reach this function:
-    # it is already advanced past this step on the async get_output path, but is
-    # still the pre-step value on the sync _sample_from_logits path
-    # (async_scheduling=False, required by continue_decode). scheduler_output
-    # always carries the pre-step value, so it is correct for both; deriving
-    # start_pos as `num_computed_tokens - n` underflows to a negative value on a
-    # fresh prefill in the sync path.
+    ``expert_indices_cpu`` is (num_layers, padded_tokens, top_k), with each DP
+    rank's tokens starting at ``padded_num_scheduled_tokens_per_dp_rank *
+    dp_rank`` in ``req_ids_dp`` order.
+    """
+    # Each request's chunk starts at its PRE-step computed-token count, taken
+    # from scheduler_output rather than req_state.num_computed_tokens, which
+    # is already advanced on the async path but not on the sync path.
     chunk_start = {}
     for new_req in scheduler_output.scheduled_new_reqs:
         chunk_start[new_req.req_id] = new_req.num_computed_tokens
@@ -799,59 +758,37 @@ def _reconstruct_routed_experts(
     for i, rid in enumerate(cached_reqs.req_ids):
         chunk_start[rid] = cached_reqs.num_computed_tokens[i]
 
-    # 1. Compute global start offsets of every request in input batch order
-    global_start_offsets = {}
-    current_global_offset = 0
-    for req_id in req_ids:
-        global_start_offsets[req_id] = current_global_offset
-        current_global_offset += scheduler_output.num_scheduled_tokens[req_id]
+    num_sampled = {
+        req_id: len(sampled)
+        for req_id, sampled in zip(req_ids, sampled_token_ids)
+    }
+    spec_tokens = scheduler_output.scheduled_spec_decode_tokens
 
-    # 2. Map DP-sharded indices to global contiguous input batch order,
-    # and reconstruct physical slots in a single pre-allocated array.
-    indices_map = np.zeros(total_active_tokens, dtype=np.int32)
-    global_slots = np.zeros(total_active_tokens, dtype=np.int32)
-
-    for dp_rank in range(dp_size):
+    entries = []
+    for dp_rank in range(runner.dp_size):
         if dp_rank not in req_ids_dp:
             continue
-
-        token_offset = padded_num_scheduled_tokens_per_dp_rank * dp_rank
-        current_dp_offset = token_offset
-
+        offset = padded_num_scheduled_tokens_per_dp_rank * dp_rank
         for req_id in req_ids_dp[dp_rank]:
             n = scheduler_output.num_scheduled_tokens[req_id]
-            dp_start = current_dp_offset
-            dp_end = dp_start + n
-            current_dp_offset = dp_end
-
-            global_start = global_start_offsets[req_id]
-            global_end = global_start + n
-
-            # Map sharded JAX positions to global contiguous positions
-            indices_map[global_start:global_end] = np.arange(dp_start,
-                                                             dp_end,
-                                                             dtype=np.int32)
-
-            # Reconstruct slots for this request using vectorized NumPy. Use the
-            # pre-step chunk start from scheduler_output (see chunk_start above);
-            # the slots must match the scheduler-side block-relative read
-            # (RoutedExpertsManager.get, from position 0).
-            if n > 0:
-                global_slots[
-                    global_start:global_end] = _reconstruct_slots_for_request(
-                        block_ids_by_req.get(req_id, []),
-                        n,
-                        block_size,
-                        start_pos=chunk_start[req_id])
-
-    # 3. Perform global rank reordering and transpose in a single fancy indexing sweep!
-    expert_indices_reordered = expert_indices_cpu[:, indices_map, :].transpose(
-        1, 0, 2)
-
-    routed_experts = RoutedExpertsLists(routing_data=expert_indices_reordered,
-                                        slot_mapping=global_slots)
-
-    return routed_experts
+            rows = expert_indices_cpu[:,
+                                      offset:offset + n, :].transpose(1, 0, 2)
+            offset += n
+            sampled = num_sampled.get(req_id, 0)
+            # Spec decode rejects a suffix of the scheduled tokens; the
+            # accepted rows are the leading ones.
+            num_accepted = (0 if sampled == 0 else
+                            sampled if spec_tokens.get(req_id) else n)
+            entries.append(
+                RoutedExpertsStepEntry(
+                    req_id=req_id,
+                    rows=rows,
+                    token_start=chunk_start[req_id],
+                    num_accepted=num_accepted,
+                    block_ids=block_ids_by_req.get(req_id, []),
+                    dp_rank=dp_rank,
+                ))
+    return entries
 
 
 class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
@@ -865,6 +802,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         is_last_rank: bool = True,
     ):
         self.vllm_config = vllm_config
+        # The KV cache layout etc. of the TPU attention backend
+        # --attention-backend selects.
+        self.attention_backend = create_attention_backend(
+            attention_backend_name(vllm_config))
         self.model_config = vllm_config.model_config
         # TODO(jevinjiang): override block size based on RPA v3.
         self.cache_config = vllm_config.cache_config
@@ -885,6 +826,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.is_first_rank = is_first_rank
         self.is_last_rank = is_last_rank
         self.routed_experts_attn_gid = 0
+        self.aux_output_worker: Optional[TPUAuxOutputWorker] = None
 
         self._init_random()
         self._init_mesh()
@@ -980,6 +922,25 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             sharding_config.prefill_cp_size,
         )
 
+        if envs.TPU_MESH_ATTN_DP_RING:
+            try:
+                devices_array = common_utils.attn_dp_ring_device_mesh(
+                    mesh_shape, MESH_AXIS_NAMES, self.devices)
+            except ValueError as e:
+                logger.warning(
+                    "TPU_MESH_ATTN_DP_RING is set but %s: falling back to the "
+                    "regular mesh layout.", e)
+            else:
+                rows = devices_array.reshape(sharding_config.attn_dp_size, -1)
+                logger.info(
+                    "TPU_MESH_ATTN_DP_RING: attn_dp ranks in ring order, "
+                    "model index across columns: %s", "; ".join(
+                        f"dp{r}: " +
+                        " ".join(f"({d.coords[0]},{d.coords[1]},{d.coords[2]})"
+                                 f"c{d.core_on_chip}" for d in row)
+                        for r, row in enumerate(rows)))
+                return devices_array
+
         if envs.TPU_MESH_SORT_BY_COORDS:
             sorted_devices = sorted(self.devices,
                                     key=lambda x:
@@ -1003,6 +964,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             return np.array(self.devices).reshape(mesh_shape)
 
     def _create_multi_slice_mesh(self, num_slices: int) -> jax.Array:
+        if envs.TPU_MESH_ATTN_DP_RING:
+            logger.warning(
+                "TPU_MESH_ATTN_DP_RING is set but it only supports a single "
+                "slice, got NUM_SLICES=%d: using the regular mesh layout.",
+                num_slices)
         sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
         dp_inner = sharding_config.model_dp_size // num_slices
 
@@ -1037,6 +1003,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 tuple(i * d for i, d in zip(ici_mesh_shape, dcn_mesh_shape)))
 
     def _create_2d_mesh(self) -> jax.sharding.Mesh:
+        if envs.TPU_MESH_ATTN_DP_RING:
+            logger.warning(
+                "TPU_MESH_ATTN_DP_RING is set but it needs NEW_MODEL_DESIGN "
+                "(the 2D mesh has no attn_dp axis): using the regular mesh "
+                "layout.")
 
         sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
         mesh_shape = (
@@ -1133,15 +1104,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             cache_dtype = self.dtype
         kv_cache_dtype = to_jax_dtype(cache_dtype)
         kv_packing = common_utils.get_dtype_packing(kv_cache_dtype)
-        # PCP rounds every request's chunk size up independently, so the token
-        # buffer the layout needs can exceed max_num_batched_tokens by up to
-        # 2 * pcp_size * max_num_seqs; add a bucket with exactly that headroom.
         if pcp_size > 1:
-            _worst = (scheduler_config.max_num_batched_tokens +
-                      2 * pcp_size * scheduler_config.max_num_seqs)
-            # 128-aligned so T_pad % pcp_size == 0 for any power-of-two pcp.
+            _worst = pcp_max_buffer_tokens(
+                scheduler_config.max_num_batched_tokens,
+                scheduler_config.max_num_seqs,
+                pcp_size,
+                align=self.block_size)
+            # The page-order map needs each dp shard's T_pad / pcp to be a
+            # whole number of KV pages (128-alignment keeps the bucket
+            # TPU-friendly): align the per-dp value, then scale, so the
+            # invariant holds per shard for any dp_size.
             additional_sizes = list(additional_sizes) + [
-                common_utils.align_to(_worst * self.dp_size, 128)
+                common_utils.align_to(_worst,
+                                      max(128, pcp_size * self.block_size)) *
+                self.dp_size
             ]
         # Never pad a step past the scheduler's own token budget: a full
         # chunked-prefill step must not jump to the next exponential bucket
@@ -1229,6 +1205,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.pcp_num_reqs_paddings = [1, _max_seqs]
         else:
             self.pcp_num_reqs_paddings = [1]
+        self.pcp_preprocessor = None
+        if pcp_size > 1:
+            self.pcp_preprocessor = PCPPreprocessor(pcp_size, self.mesh,
+                                                    self.pcp_num_reqs_paddings,
+                                                    self.block_size)
 
         # Padding for logits. Without speculative decoding, each request has one position to select from.
         # With speculative decoding, each request has multiple positions to select from.
@@ -1398,15 +1379,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.topology_order_id = topology_order_id
         self.kv_cache_config = kv_cache_config
         self.use_hybrid_kvcache = len(kv_cache_config.kv_cache_groups) > 1
-        self.routed_experts_attn_gid = (
-            get_routed_experts_attn_gid(kv_cache_config)
-            if self.model_config.enable_return_routed_experts else 0)
+        if self.vllm_config.aux_output_config.enable_return_routed_experts:
+            self.routed_experts_attn_gid = get_routed_experts_attn_gid(
+                kv_cache_config)
+            self.aux_output_worker = TPUAuxOutputWorker(
+                self.vllm_config, kv_cache_config, self.block_size,
+                self.dp_size)
         self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
-        self.input_batch.has_mamba_layers = kv_cache_config.has_mamba_layers
-
-        if self.kv_cache_manager.actual_mamba_num_blocks is not None:
-            self.input_batch.init_mamba_pools(
-                self.kv_cache_manager.actual_mamba_num_blocks)
+        self._wire_input_batch_mamba_state(kv_cache_config)
 
         # This buffer grows dynamically to accommodate metadata and block tables.
         # We re-initialize with a precise capacity now that kv_cache_config is known.
@@ -1428,11 +1408,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if has_kv_transfer_group():
             get_kv_transfer_group().register_runner(self)
 
+    def _wire_input_batch_mamba_state(self,
+                                      kv_cache_config: KVCacheConfig) -> None:
+        self.input_batch.has_mamba_layers = kv_cache_config.has_mamba_layers
+        if self.kv_cache_manager.actual_mamba_num_blocks is not None:
+            self.input_batch.init_mamba_pools(
+                self.kv_cache_manager.actual_mamba_num_blocks)
+
     def delete_kv_cache(self) -> None:
         self.kv_cache_manager.delete_kv_cache()
 
     def reinitialize_kv_cache(self) -> None:
         self.kv_cache_manager.reinitialize_kv_cache()
+        self._wire_input_batch_mamba_state(self.kv_cache_config)
 
     def reset_encoder_cache(self) -> None:
         self.encoder_cache.clear()
@@ -1533,7 +1521,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         pre_scheduler_output = self._pre_async_results.scheduler_output
 
         if getattr(self._pre_async_results, "is_continue_decode", False):
-            generated_tokens_cpu, actual_steps = jax.device_get((
+            generated_tokens_cpu, actual_steps = common_utils.safe_device_get((
                 pre_next_tokens,
                 self._pre_async_results.continue_decode_actual_steps,
             ))
@@ -1546,7 +1534,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             valid_lens, _ = _extract_valid_lengths_host(
                 generated_tokens_cpu, self.eos_token_id)
-            for pre_req_idx, req_state, _ in pre_request_seq_lens:
+            for pre_req_idx, req_state, start_idx in pre_request_seq_lens:
                 req_id = pre_req_ids[pre_req_idx]
                 if req_id not in self.input_batch.req_id_to_index:
                     continue
@@ -1556,19 +1544,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 valid_tokens = generated_tokens_cpu[
                     pre_req_idx, :actual_len].tolist()
 
-                start_idx = self.input_batch.num_tokens_no_spec[req_idx]
+                end_idx = start_idx + actual_len
+                self.input_batch.token_ids_cpu[
+                    req_idx, start_idx:end_idx] = valid_tokens
+                self.input_batch.num_tokens_no_spec[req_idx] = end_idx
+                self.input_batch.num_tokens[req_idx] = end_idx
+                self.input_batch.num_computed_tokens_cpu[req_idx] = end_idx - 1
+                req_state.num_computed_tokens = end_idx - 1
 
-                self.input_batch.token_ids_cpu[req_idx, start_idx:start_idx +
-                                               actual_len] = valid_tokens
-                self.input_batch.num_tokens_no_spec[
-                    req_idx] = start_idx + actual_len
-                self.input_batch.num_tokens[req_idx] = start_idx + actual_len
-                self.input_batch.num_computed_tokens_cpu[
-                    req_idx] = start_idx + actual_len
-
-                if pre_scheduler_output is not None:
-                    pre_scheduler_output.num_scheduled_tokens[
-                        req_id] = actual_len
+                num_prev_out = (start_idx -
+                                self.input_batch.num_prompt_tokens[req_idx])
+                del req_state.output_token_ids[num_prev_out:]
+                req_state.output_token_ids.extend(valid_tokens)
             return
 
         valid_sampled_token_ids = runner_utils.host_extract_sampled_tokens(
@@ -1671,8 +1658,40 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[JaxIntermediateTensors] = None,
     ) -> JaxIntermediateTensors | ModelRunnerOutput | None:
+        # Under async_scheduling, step T is scheduled on the host while step
+        # T-1's multi-step continue_decode burst is still in flight on the TPU,
+        # so scheduler_output.scheduled_cached_reqs only accounts for 1
+        # placeholder token instead of the K tokens actually generated.
+        # Reconcile step T-1's results BEFORE update_states() so that:
+        # 1. All requests from step T-1 (including any about to be unscheduled
+        #    or finished in step T) have their output_token_ids and
+        #    num_computed_tokens updated while still in self.input_batch.
+        # 2. scheduled_cached_reqs carries the true post-burst token counts into
+        #    update_states() and downstream routed_experts slot reconstruction.
+        if (self.scheduler_config.async_scheduling
+                and self._pre_async_results is not None and getattr(
+                    self._pre_async_results, "is_continue_decode", False)):
+            pre_req_ids = set(self._pre_async_results.req_ids)
+            self._modify_prev_results()
+            self._pre_async_results = None
+            cached_reqs = getattr(scheduler_output, "scheduled_cached_reqs",
+                                  None)
+            if cached_reqs is not None:
+                resumed = getattr(cached_reqs, "resumed_req_ids", None) or ()
+                for i, req_id in enumerate(cached_reqs.req_ids):
+                    if req_id in pre_req_ids and req_id not in resumed:
+                        req_state = self.requests.get(req_id)
+                        if req_state is not None:
+                            cached_reqs.num_computed_tokens[
+                                i] = req_state.num_computed_tokens
+                            cached_reqs.num_output_tokens[i] = len(
+                                req_state.output_token_ids)
+
         self.persistent_batch_manager.update_states(
             scheduler_output, self.get_mrope_input_positions_fn)
+        if self.aux_output_worker is not None:
+            self.aux_output_worker.begin_step(
+                scheduler_output.aux_output_connector_metadata)
         if not scheduler_output.total_num_scheduled_tokens:
             if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
                 self._modify_prev_results()
@@ -1694,15 +1713,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 #     "Should not schedule a request that does nothing!")
             return EMPTY_MODEL_RUNNER_OUTPUT
 
-        # Check if the entire batch is in the decode phase.
-        # request_distribution[0] tracks the number of decode requests.
-        is_decode_only = self.input_batch.request_distribution[
-            0] == self.input_batch.num_reqs
-        has_structured_output = getattr(scheduler_output,
-                                        "has_structured_output_requests",
-                                        False)
-        if (is_decode_only and self.enable_continue_decode
-                and not has_structured_output):
+        if TPUModelRunner._can_use_continue_decode(self, scheduler_output):
             return self._execute_continue_decode(scheduler_output)
 
         # TODO(pooyam): I guess we can remove returning sampling_metadata in `_prepare_inputs` after https://github.com/njhill/vllm/commit/b7433ca1a47732394b1bdea4099d98389515954b
@@ -1872,7 +1883,34 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         remaining_slots = self.max_model_len - num_tokens
         if len(remaining_slots) == 0:
             return 0
-        return int(np.min(remaining_slots))
+        min_remaining = int(np.min(remaining_slots))
+        if (self.kv_cache_config.has_mamba_layers and getattr(
+                self.cache_config, "mamba_cache_mode", "none") == "align"):
+            # In mamba align mode (prefix caching), MambaManager does not
+            # pre-allocate lookahead blocks and TPUMambaManager only caches
+            # state checkpoints at block boundaries (seq_len % mamba_block_size == 0).
+            # Stop at or just before each block boundary so the scheduler
+            # allocates and caches the boundary block on the next step.
+            mamba_block_size = getattr(self.cache_config, "mamba_block_size",
+                                       None) or self.block_size
+            rem = num_tokens % mamba_block_size
+            steps_to_boundary = np.where(rem == 0, 1, mamba_block_size - rem)
+            min_remaining = min(min_remaining, int(np.min(steps_to_boundary)))
+        return min_remaining
+
+    def _can_use_continue_decode(
+            self, scheduler_output: "VllmSchedulerOutput") -> bool:
+        if self.enable_continue_decode is not True:
+            return False
+        num_reqs = self.input_batch.num_reqs
+        if num_reqs <= 0 or self.input_batch.request_distribution[
+                0] != num_reqs:
+            return False
+        if getattr(scheduler_output, "has_structured_output_requests", False):
+            return False
+        return bool(
+            np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] >=
+                   self.input_batch.num_prompt_tokens[:num_reqs]))
 
     def _execute_continue_decode(
         self,
@@ -1880,6 +1918,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     ) -> ModelRunnerOutput | None:
         if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
             self._modify_prev_results()
+            self._pre_async_results = None
 
         (
             input_ids,
@@ -1955,9 +1994,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                  is_first_rank=self.is_first_rank,
                  is_last_rank=self.is_last_rank,
                  dp_size=self.dp_size,
-                 collect_expert_indices=getattr(
-                     self.vllm_config.model_config,
-                     "enable_return_routed_experts", False),
+                 collect_expert_indices=self.aux_output_worker is not None,
                  max_logprobs=self.model_config.max_logprobs,
                  logprobs_mode=self.model_config.logprobs_mode,
                  continue_decode_eos_check_interval=self.
@@ -1983,11 +2020,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             placeholder_req_id_to_index: dict[str, int] = {}
             for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
                 req_state = self.requests[req_id]
-                seq_len = (req_state.num_computed_tokens +
-                           scheduler_output.num_scheduled_tokens[req_id])
-                request_seq_lens.append((i, req_state, seq_len))
-
                 start_idx = self.input_batch.num_tokens_no_spec[i]
+                request_seq_lens.append((i, req_state, start_idx))
+
                 end_idx = start_idx + max_decode_steps
                 self.input_batch.num_tokens_no_spec[i] = end_idx
                 self.input_batch.num_tokens[i] = end_idx
@@ -2029,6 +2064,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 logprobs_tensors=logprobs_tensors,
                 expert_indices=all_expert_indices,
                 scheduler_output=scheduler_output,
+                routed_experts_block_ids=(
+                    _snapshot_block_ids_for_routed_experts(
+                        self, model_runner_output.req_ids,
+                        self.routed_experts_attn_gid) if
+                    (self.aux_output_worker is not None
+                     and all_expert_indices is not None) else None),
                 runner=self,
             )
             async_output._is_continue_decode = True
@@ -2048,7 +2089,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         (
             sampled_token_ids,
             logprobs_lists,
-            routed_experts,
+            routed_experts_entries,
             actual_steps,
             num_eos_hits,
         ) = _process_continue_decode_outputs(
@@ -2059,12 +2100,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             indices_selector=tokens_indices_selector,
             logprobs_tensors=logprobs_tensors,
             expert_indices=all_expert_indices,
-            enable_return_routed_experts=getattr(
-                self.vllm_config.model_config, "enable_return_routed_experts",
-                False),
+            enable_return_routed_experts=self.aux_output_worker is not None,
             requests=self.requests,
-            block_size=self.block_size,
             routed_experts_attn_gid=self.routed_experts_attn_gid,
+            dp_rank_by_req=getattr(scheduler_output, "assigned_dp_rank", None),
             scheduler_output=scheduler_output,
             input_batch=self.input_batch,
             max_num_reqs=self.max_num_reqs,
@@ -2092,8 +2131,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             kv_connector_output=kv_connector_output,
         )
 
-        if routed_experts is not None:
-            output.routed_experts = routed_experts
+        if self.aux_output_worker is not None:
+            output.aux_output_connector_output = (
+                self.aux_output_worker.process_step(output.req_ids,
+                                                    routed_experts_entries))
 
         self._continue_decode_output = output
         return None
@@ -2203,7 +2244,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             prompt_logprobs_async = compute_prompt_logprobs(
                 full_logits,
-                input_ids,
                 self.input_batch.num_prompt_logprobs,
                 self.requests,
                 scheduler_output,
@@ -2339,8 +2379,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 routed_experts_block_ids=(
                     _snapshot_block_ids_for_routed_experts(
                         self, model_runner_output.req_ids,
-                        self.routed_experts_attn_gid) if
-                    self.model_config.enable_return_routed_experts else None),
+                        self.routed_experts_attn_gid)
+                    if self.aux_output_worker is not None else None),
                 runner=self)
             return async_model_runner_output
 
@@ -2391,22 +2431,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             kv_connector_output=kv_connector_output,
         )
 
-        if self.model_config.enable_return_routed_experts and expert_indices is not None:
-            expert_indices_cpu = np.asarray(jax.device_get(expert_indices))
-
-            routed_experts = _reconstruct_routed_experts(
-                runner=self,
-                scheduler_output=scheduler_output,
-                expert_indices_cpu=expert_indices_cpu,
-                req_ids=self.input_batch.req_ids[:num_reqs],
-                req_ids_dp=req_ids_dp,
-                padded_num_scheduled_tokens_per_dp_rank=
-                padded_num_scheduled_tokens_per_dp_rank,
-                block_ids_by_req=_snapshot_block_ids_for_routed_experts(
-                    self, self.input_batch.req_ids[:num_reqs],
-                    self.routed_experts_attn_gid),
-            )
-            model_runner_output.routed_experts = routed_experts
+        if self.aux_output_worker is not None:
+            entries = []
+            if expert_indices is not None:
+                entries = _routed_experts_step_entries(
+                    runner=self,
+                    scheduler_output=scheduler_output,
+                    expert_indices_cpu=np.asarray(
+                        jax.device_get(expert_indices)),
+                    req_ids=req_ids,
+                    sampled_token_ids=valid_sampled_token_ids,
+                    req_ids_dp=req_ids_dp,
+                    padded_num_scheduled_tokens_per_dp_rank=
+                    padded_num_scheduled_tokens_per_dp_rank,
+                    block_ids_by_req=_snapshot_block_ids_for_routed_experts(
+                        self, req_ids, self.routed_experts_attn_gid),
+                )
+            model_runner_output.aux_output_connector_output = (
+                self.aux_output_worker.process_step(req_ids, entries))
 
         return model_runner_output
 
@@ -2552,30 +2594,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         max_num_scheduled_tokens_across_dp = max(
             num_scheduled_tokens_per_dp_rank.values())
 
-        # PCP rounds each request's chunk size up independently, so size the
-        # bucket off the layout's padded requirement, not the raw token count.
-        pcp_size = self.vllm_config.sharding_config.prefill_cp_size
-        if pcp_size > 1:
+        # The PCP layout can need more rows than the raw token count.
+        if self.pcp_preprocessor is not None:
             for dp_rank in range(dp_size):
                 counts = scheduled_tokens_per_dp_rank[dp_rank]
                 if not counts:
                     continue
-                _, _, s_live = pcp_token_layout([int(c) for c in counts],
-                                                pcp_size)
                 max_num_scheduled_tokens_across_dp = max(
-                    max_num_scheduled_tokens_across_dp, pcp_size * s_live)
+                    max_num_scheduled_tokens_across_dp,
+                    pcp_buffer_tokens([int(c) for c in counts],
+                                      self.pcp_preprocessor.pcp_size,
+                                      align=self.block_size))
 
         # Find maximum number of requests across DP ranks
         max_num_reqs_across_dp = max(
             len(req_ids) for req_ids in req_ids_dp.values())
 
-        is_decode_only = (self.input_batch.request_distribution[0] ==
-                          self.input_batch.num_reqs)
-        has_structured_output = getattr(scheduler_output,
-                                        "has_structured_output_requests",
-                                        False)
-        use_continue_decode = (is_decode_only and self.enable_continue_decode
-                               and not has_structured_output)
+        use_continue_decode = TPUModelRunner._can_use_continue_decode(
+            self, scheduler_output)
 
         padded_num_reqs_per_dp_rank = runner_utils.get_padded_token_len(
             self.num_reqs_paddings_per_dp, max_num_reqs_across_dp)
@@ -3001,128 +3037,21 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         request_distribution = np.array(_request_distribution,
                                         dtype=np.int32).ravel()
 
-        # Prefill context parallelism (prefill-only batches): zigzag-chunk
-        # each request independently and lay the tokens out in rank order.
         pcp_metadata = None
-        pcp_size = self.vllm_config.sharding_config.prefill_cp_size
-        if pcp_size > 1:
+        if self.pcp_preprocessor is not None:
             assert dp_size == 1, "PCP with DP > 1 is not supported."
-            counts = [int(c) for c in scheduled_tokens_per_dp_rank[0]]
-            req_idxs = [int(i) for i in req_indices_dp[0]]
-            computed = [
-                int(self.input_batch.num_computed_tokens_cpu[i])
-                for i in req_idxs
-            ]
-            # Prefill-only: a decode request would occupy 2P query rows to
-            # carry one token.
-            for n_i, l_i in zip(counts, computed):
-                if n_i == 1 and l_i > 0:
-                    raise NotImplementedError(
-                        "PCP supports prefill-only batches; got a decode "
-                        f"request (num_scheduled=1, num_computed={l_i}).")
-
-            num_pcp_reqs = len(counts)
-            two_p = 2 * pcp_size
-            # The layout covers the live requests only: both attention phases
-            # iterate the seq count from request_distribution, so the slots
-            # padding the count up to `PCPMetadata.num_reqs` need no rows.
-            chunk, off, s_live = pcp_token_layout(counts, pcp_size)
-            t_pad = padded_num_scheduled_tokens_per_dp_rank
-            assert t_pad % pcp_size == 0 and t_pad >= pcp_size * s_live, (
-                f"PCP token bucket {t_pad} cannot hold {pcp_size * s_live} "
-                f"tokens ({num_pcp_reqs} reqs, chunks {chunk})")
-            s_pad = t_pad // pcp_size
-            if num_pcp_reqs == 1:
-                # Single request: chunk = t_pad / 2P, filling every rank's
-                # slice.  pcp_forward's kernel-side K/V remap derives the chunk
-                # from the buffer width, so the layout must match it.
-                assert t_pad % two_p == 0, (t_pad, two_p)
-                chunk = [t_pad // two_p]
-                off = [0]
-
-            # `perm[g]` is the token-order source of global rank-order slot g
-            # (-1 for padding); `kv_order` is the inverse map for the
-            # all-gathered current K/V, into request-major token order.
-            src_off = np.cumsum([0] + counts)[:-1]
-            perm = np.full(t_pad, -1, np.int64)
-            kv_order = np.zeros(t_pad, np.int32)
-            ranks = np.arange(pcp_size)
-            for i in range(num_pcp_reqs):
-                c_i = chunk[i]
-                j = np.arange(c_i)
-                kv_base = pcp_size * off[i]  # == kv_new_starts of request i
-                for h in (0, 1):
-                    chunk_idx = ranks if h == 0 else two_p - 1 - ranks
-                    dst = (ranks[:, None] * s_pad + off[i] + h * c_i +
-                           j[None, :])
-                    tok = chunk_idx[:, None] * c_i + j[None, :]
-                    real = tok < counts[i]
-                    perm[dst[real]] = src_off[i] + tok[real]
-                    kv_order[kv_base + tok.ravel()] = dst.ravel()
-
-            valid = perm >= 0
-            for buf in (positions, input_ids_view):
-                src = np.asarray(buf).copy()
-                buf[:] = 0
-                buf[valid] = src[perm[valid]]
-
-            # Attention metadata: request i occupies seqs 2i (head), 2i+1
-            # (tail), carrying identical request-level values.
-            n_seqs = 2 * num_pcp_reqs
-            n_off = np.asarray(seq_lens_view).shape[0]  # attn_max_num_seqs
-            assert n_seqs <= n_off, (
-                f"PCP needs {n_seqs} attention seq slots, have {n_off}")
-
-            def per_seq(xs):
-                return np.repeat(np.asarray(xs, np.int32), 2)
-
-            seq_lens_view[:n_seqs] = per_seq(
-                [l_i + n_i for n_i, l_i in zip(counts, computed)])
-            seq_lens_view[n_seqs:] = 0
-            request_distribution[:] = (0, 0, n_seqs)
-            kv_cache_lens_np = np.zeros(n_off, np.int32)
-            kv_cache_lens_np[:n_seqs] = per_seq(computed)
-
-            # cu_q_lens is rank-invariant (both halves are full length); only
-            # q_pos_offsets varies by rank.
-            cu_row, pcp_qpos_np, kv_new_starts_np = pcp_seq_arrays(
-                chunk, off, pcp_size, n_off)
-            # A zero-length seq inside the iterated range hangs the kernel.
-            assert np.all(np.diff(cu_row[:n_seqs + 1]) > 0), (
-                f"zero-length PCP seq in cu_q_lens: {cu_row[:n_seqs + 1]}")
-            pcp_cu_np = np.tile(cu_row, (pcp_size, 1))
-
-            # logits_indices: the global slot of each request's last token.
-            logits_indices_view[:] = -1
-            for i in range(num_pcp_reqs):
-                last = counts[i] - 1
-                c = last // chunk[i]
-                rank = c if c < pcp_size else two_p - 1 - c
-                h = 0 if c < pcp_size else 1
-                logits_indices_view[i] = (rank * s_pad + off[i] +
-                                          h * chunk[i] + last % chunk[i])
-
-            pcp_spec = NamedSharding(
-                self.mesh, PartitionSpec(ShardingAxisName.PREFILL_CONTEXT,
-                                         None))
-            repl = NamedSharding(self.mesh, PartitionSpec())
-            (pcp_query_start_loc,
-             pcp_q_pos_offsets) = device_array(self.mesh,
-                                               (pcp_cu_np, pcp_qpos_np),
-                                               sharding=pcp_spec)
-            (pcp_kv_cache_lens, pcp_kv_new_starts,
-             pcp_kv_token_order) = device_array(
-                 self.mesh, (kv_cache_lens_np, kv_new_starts_np, kv_order),
-                 sharding=repl)
-            pcp_metadata = PCPMetadata(
-                query_start_loc=pcp_query_start_loc,
-                kv_cache_lens=pcp_kv_cache_lens,
-                q_pos_offsets=pcp_q_pos_offsets,
-                kv_new_starts=pcp_kv_new_starts,
-                kv_token_order=pcp_kv_token_order,
-                has_cached_kv=any(l_i > 0 for l_i in computed),
-                num_reqs=runner_utils.get_padded_token_len(
-                    self.pcp_num_reqs_paddings, num_pcp_reqs),
+            pcp_metadata = self.pcp_preprocessor.prepare_inputs(
+                num_scheduled_tokens=[
+                    int(c) for c in scheduled_tokens_per_dp_rank[0]
+                ],
+                num_computed_tokens=self.input_batch.num_computed_tokens_cpu[
+                    req_indices_dp[0]].tolist(),
+                t_pad=padded_num_scheduled_tokens_per_dp_rank,
+                positions=positions,
+                input_ids=input_ids_view,
+                seq_lens=seq_lens_view,
+                request_distribution=request_distribution,
+                logits_indices=logits_indices_view,
             )
         spec_decode_metadata = None
         if self.speculative_config:
@@ -3164,7 +3093,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                      sharding=data_parallel_attn_sharding)
 
         # Collect block tables host arrays loops zone presence zones legality
-        def build_block_table_host(kv_cache_gid: int) -> None:
+        def build_block_table_host(kv_cache_gid: int) -> np.ndarray:
 
             block_table_obj = self.input_batch.block_table[kv_cache_gid]
             block_tables_view = self.device_buffer.get_view(
@@ -3189,7 +3118,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                         out=block_tables_view[req_offset:req_offset +
                                               _num_reqs])
 
-            if pcp_size > 1:
+            if self.pcp_preprocessor is not None:
                 # Each request is two fused seqs (head, tail) and the kernel
                 # indexes page_indices by seq, so the tail must carry a copy
                 # of its request's block table or its KV write lands on page 0.
@@ -3197,15 +3126,31 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 block_tables_view[:2 * n] = np.repeat(block_tables_view[:n],
                                                       2,
                                                       axis=0)
+            return block_tables_view
 
+        block_tables_views: dict[int, np.ndarray] = {}
         if len(self.kv_cache_config.kv_cache_groups) <= 1:
             no_kv_cache = len(self.kv_cache_config.kv_cache_groups) == 0
             if not no_kv_cache:
-                build_block_table_host(0)
+                block_tables_views[0] = build_block_table_host(0)
         else:
             for gid, kv_cache_group in enumerate(
                     self.kv_cache_config.kv_cache_groups):
-                build_block_table_host(gid)
+                block_tables_views[gid] = build_block_table_host(gid)
+
+        self.attention_backend.prepare_step(
+            HostStepInputs(
+                kv_cache_groups=self.kv_cache_config.kv_cache_groups,
+                block_tables=block_tables_views,
+                query_start_loc=query_start_loc_view,
+                seq_lens=seq_lens_view,
+                request_distribution=request_distribution,
+                scheduled_tokens_per_dp_rank=scheduled_tokens_per_dp_rank,
+                dp_size=dp_size,
+                max_num_reqs_per_dp_rank=max_num_reqs_per_dp_rank,
+                padded_num_scheduled_tokens_per_dp_rank=(
+                    padded_num_scheduled_tokens_per_dp_rank),
+            ), self.device_buffer)
 
         metadata_blob, metadata_layout = self.device_buffer.build()
 
@@ -3258,7 +3203,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             seq_lens, positions = self._subtract_num_rejected_tokens(
                 seq_lens, positions, req_ids_dp, scheduled_tokens_per_dp_rank)
 
-        def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
+        def build_attn(block_tables: jax.Array | None,
+                       gid: int) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
                 block_tables=block_tables,
@@ -3268,6 +3214,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=attn_padded_num_reqs,
                 pcp=pcp_metadata,
+                backend_metadata=self.attention_backend.backend_metadata(
+                    metadata, gid),
             )
 
             return attention_metadata_gid
@@ -3289,7 +3237,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             no_kv_cache = len(self.kv_cache_config.kv_cache_groups) == 0
             block_tables = metadata.get(
                 "block_tables_gid_0") if not no_kv_cache else None
-            attention_metadata = build_attn(block_tables)
+            attention_metadata = build_attn(block_tables, 0)
             shared_attention_metadata = build_shared_attn()
         else:
             # One AttentionMetadata per group, layers of a group
@@ -3297,8 +3245,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # sharing across the jit boundary. See its docstring.
             attention_metadata = GroupedAttentionMetadata(
                 groups=tuple(
-                    build_attn(metadata[f"block_tables_gid_{gid}"]) for gid in
-                    range(len(self.kv_cache_config.kv_cache_groups))),
+                    build_attn(metadata[f"block_tables_gid_{gid}"], gid) for
+                    gid in range(len(self.kv_cache_config.kv_cache_groups))),
                 layer_names_per_group=tuple(
                     tuple(group.layer_names)
                     for group in self.kv_cache_config.kv_cache_groups),

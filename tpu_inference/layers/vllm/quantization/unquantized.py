@@ -100,6 +100,31 @@ def _host_numpy_view(tensor: torch.Tensor) -> Optional[np.ndarray]:
     return t.view(torch.uint8).numpy().view(jax_dtype)
 
 
+def _pathways_device_put(tensor: torch.Tensor,
+                         sharding: NamedSharding) -> jax.Array:
+    """Puts a CPU tensor at `sharding` under Pathways, in its own dtype.
+
+    Sends the tensor's native bytes (1 byte/element for fp8, 2 for bf16)
+    instead of widening it to float32 on the host and casting back on device,
+    which costs host CPU time plus 4x (fp8) or 2x (bf16) the host-to-device
+    bytes. Tensors without a zero-copy view (0-dim or non-contiguous) fall back
+    to the float32 path. Values are bit-identical either way.
+
+    The view leaves `tensor`'s storage non-resizable (see `_host_numpy_view`),
+    so free it with fp8's `_free_torch_storage`, not `resize_(0)`.
+    """
+    np_view = _host_numpy_view(tensor)
+    if np_view is None:
+        dtype = to_jax_dtype(tensor.dtype)
+        np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
+        return jax.device_put(np_tensor, sharding).astype(dtype)
+    array = jax.device_put(np_view, sharding)
+    # np_view aliases the torch storage and callers free that storage as soon
+    # as this returns, so the asynchronous copy has to be forced here.
+    jax.block_until_ready(array)
+    return array
+
+
 def _load_weight_on_host(tensor: torch.Tensor,
                          sharding: NamedSharding) -> Optional[jax.Array]:
     """Build the sharded array straight from host memory, or None if we can't.
@@ -202,9 +227,7 @@ def _load_weight_for_layer(
         )
 
     # Pathways real-weight path
-    dtype = to_jax_dtype(tensor.dtype)
-    np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
-    return jax.device_put(np_tensor, sharding).astype(dtype)
+    return _pathways_device_put(tensor, sharding)
 
 
 def _prefix_matches(prefix: str, patterns: Sequence[str]) -> bool:
@@ -376,8 +399,12 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
         weight = _load_weight_for_layer(layer, "weight", loading_sharding)
         weight = jnp.transpose(weight)
 
+        # fp8 imports this module, so it can only be imported lazily.
+        from tpu_inference.layers.vllm.quantization.fp8 import \
+            _free_torch_storage
+
         # Free CPU memory immediately
-        layer.weight.untyped_storage().resize_(0)
+        _free_torch_storage(layer.weight)
         delattr(layer, 'weight')
         if layer.bias is not None and not layer.skip_bias_add:
             if layer.return_bias:
@@ -385,7 +412,7 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
             bias_sharding = NamedSharding(self.linear_config.mesh,
                                           self.linear_config.bias_sharding)
             bias = _load_weight_for_layer(layer, "bias", bias_sharding)
-            layer.bias.untyped_storage().resize_(0)
+            _free_torch_storage(layer.bias)
             delattr(layer, 'bias')
         else:
             bias = None
@@ -670,17 +697,21 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         ep_sharding = NamedSharding(self.mesh, P(ShardingAxisName.EXPERT))
         w13_weight = _load_weight_for_layer(layer, "w13_weight", ep_sharding)
         w2_weight = _load_weight_for_layer(layer, "w2_weight", ep_sharding)
+        # fp8 imports this module, so it can only be imported lazily.
+        from tpu_inference.layers.vllm.quantization.fp8 import \
+            _free_torch_storage
+
         # Free CPU memory immediately
-        layer.w13_weight.untyped_storage().resize_(0)
-        layer.w2_weight.untyped_storage().resize_(0)
+        _free_torch_storage(layer.w13_weight)
+        _free_torch_storage(layer.w2_weight)
         delattr(layer, 'w13_weight')
         delattr(layer, 'w2_weight')
 
         if self.moe.has_bias:
             w13_bias = _load_weight_for_layer(layer, "w13_bias", ep_sharding)
             w2_bias = _load_weight_for_layer(layer, "w2_bias", ep_sharding)
-            layer.w13_bias.untyped_storage().resize_(0)
-            layer.w2_bias.untyped_storage().resize_(0)
+            _free_torch_storage(layer.w13_bias)
+            _free_torch_storage(layer.w2_bias)
             delattr(layer, 'w13_bias')
             delattr(layer, 'w2_bias')
         else:

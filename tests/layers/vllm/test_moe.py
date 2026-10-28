@@ -63,3 +63,34 @@ def test_select_moe_backend_logic(monkeypatch, mock_moe_config,
         result = select_moe_backend_from_fused_moe_config(mock_moe_config)
 
     assert result == expected_backend
+
+
+@pytest.mark.parametrize(
+    "env_use_v2, env_use_ep_kernel, config_use_ep, expected_backend",
+    [
+        # USE_FUSED_EP_MOE_V2 with EP -> FUSED_EP_MOE_V2
+        (True, False, True, MoEBackend.FUSED_EP_MOE_V2),
+        # Without EP it falls back to GMM_TP
+        (True, False, False, MoEBackend.GMM_TP),
+        # USE_MOE_EP_KERNEL keeps precedence when both are set
+        (True, True, True, MoEBackend.FUSED_MOE),
+    ])
+def test_select_fused_ep_moe_v2(mock_moe_config, env_use_v2, env_use_ep_kernel,
+                                config_use_ep, expected_backend):
+    with (patch("tpu_inference.envs.USE_FUSED_EP_MOE_V2", env_use_v2),
+          patch("tpu_inference.envs.USE_MOE_EP_KERNEL", env_use_ep_kernel)):
+        mock_moe_config.use_ep = config_use_ep
+        result = select_moe_backend_from_fused_moe_config(mock_moe_config)
+    assert result == expected_backend
+
+
+def test_select_warns_when_both_kernels_set(mock_moe_config):
+    """With both flags set, the v1 fused kernel runs and a warning says so."""
+    mock_moe_config.use_ep = True
+    with (patch("tpu_inference.envs.USE_FUSED_EP_MOE_V2",
+                True), patch("tpu_inference.envs.USE_MOE_EP_KERNEL", True),
+          patch("tpu_inference.layers.vllm.interface.moe.logger") as logger):
+        result = select_moe_backend_from_fused_moe_config(mock_moe_config)
+    assert result == MoEBackend.FUSED_MOE
+    logger.warning_once.assert_called_once()
+    assert "USE_FUSED_EP_MOE_V2" in logger.warning_once.call_args.args[0]

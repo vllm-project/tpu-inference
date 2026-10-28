@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the tpu-inference project
 
 import os
-import sys
-import types
 
 # Disable CUDA-specific shared experts stream for TPU
 # This prevents errors when trying to create CUDA streams on TPU hardware
@@ -34,10 +32,9 @@ try:
     if not hasattr(vllm, "SamplingStatus"):
         from vllm.sampling_params import RequestOutputKind
         vllm.RequestOutputKind = RequestOutputKind
-except ImportError:
+except (ImportError, AttributeError):
+    # AttributeError is raised when vllm.sampling_params is only partially
+    # initialized (e.g. `from vllm import SamplingParams` triggers
+    # `vllm.config` -> `vllm.platforms.current_platform` -> `tpu_inference`
+    # before `SamplingParams` is defined in `vllm.sampling_params`).
     pass
-
-# Bypass cutlass installation requirement. It is unconditionally imported by
-# upstream vLLM (e.g. DeepSeek V4 ops), but only actually invoked on NVIDIA GPUs.
-if "cutlass" not in sys.modules:
-    sys.modules["cutlass"] = types.ModuleType("cutlass")

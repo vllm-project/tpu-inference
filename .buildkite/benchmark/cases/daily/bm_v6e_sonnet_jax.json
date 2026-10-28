@@ -35,7 +35,7 @@
         }
       },
       "client_command_options": {
-        "command_type": "vllm_bench_serve",
+        "command_type": "local_benchmark_serving",
         "args": {
           "model": "meta-llama/Llama-3.1-8B-Instruct",
           "backend": "vllm",
@@ -79,7 +79,7 @@
         }
       },
       "client_command_options": {
-        "command_type": "vllm_bench_serve",
+        "command_type": "local_benchmark_serving",
         "args": {
           "model": "Qwen/Qwen3-4B",
           "backend": "vllm",
@@ -123,7 +123,7 @@
         }
       },
       "client_command_options": {
-        "command_type": "vllm_bench_serve",
+        "command_type": "local_benchmark_serving",
         "args": {
           "model": "Qwen/Qwen3-8B",
           "backend": "vllm",
@@ -167,7 +167,7 @@
         }
       },
       "client_command_options": {
-        "command_type": "vllm_bench_serve",
+        "command_type": "local_benchmark_serving",
         "args": {
           "model": "Qwen/Qwen2.5-1.5B-Instruct",
           "backend": "vllm",
@@ -211,7 +211,7 @@
         }
       },
       "client_command_options": {
-        "command_type": "vllm_bench_serve",
+        "command_type": "local_benchmark_serving",
         "args": {
           "model": "Qwen/Qwen3-32B",
           "backend": "vllm",
@@ -255,7 +255,7 @@
         }
       },
       "client_command_options": {
-        "command_type": "vllm_bench_serve",
+        "command_type": "local_benchmark_serving",
         "args": {
           "model": "meta-llama/Llama-3.1-70B-Instruct",
           "backend": "vllm",
@@ -299,7 +299,7 @@
         }
       },
       "client_command_options": {
-        "command_type": "vllm_bench_serve",
+        "command_type": "local_benchmark_serving",
         "args": {
           "model": "meta-llama/Llama-3.3-70B-Instruct",
           "backend": "vllm",

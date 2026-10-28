@@ -91,7 +91,7 @@ def calculate_and_store_out(
                 or cfgs.serve.dtype_out == batch_l.dtype == jnp.bfloat16):
             result = lax.div(batch_acc, batch_l)
         else:
-            result = batch_acc * pl.reciprocal(batch_l, approx=True)
+            result = batch_acc * pltpu.reciprocal(batch_l, approx=True)
         out = result.astype(cfgs.serve.dtype_out)
 
         o_u32_vref = o_vref.at[b_idx].bitcast(jnp.uint32)
@@ -525,7 +525,7 @@ def rpa_kernel(
             flat_smem = jax.tree_util.tree_leaves(schedule_ref)
             dma_list = []
             for h, s in zip(flat_hbm, flat_smem):
-                if h.memory_space == pltpu.HBM:
+                if jax.typeof(h).memory_space == pltpu.HBM:
                     read_size = (h.shape[0] // cfgs.max_steps_ub) * safe_steps
                     read_size = utils.align_to(read_size, 1024)
 

@@ -28,7 +28,8 @@ from jax.sharding import PartitionSpec as P
 from tpu_inference.kernels.quantized_matmul.util import \
     xla_quantized_batched_matmul
 from tpu_inference.layers.common.linear import (
-    _pad_sharded_activation, _parse_einsum_dims, sharded_matmul,
+    _GMM_TILING_VMEM_HEADROOM_BYTES, _pad_sharded_activation,
+    _parse_einsum_dims, _safe_calculate_tiling, sharded_matmul,
     sharded_quantized_batched_matmul, sharded_quantized_matmul,
     xla_quantized_matmul)
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
@@ -320,6 +321,64 @@ class TestShardedMatmulPadding(unittest.TestCase):
                 rtol=0.05,
                 atol=0.5,
             )
+
+    def test_safe_calculate_tiling_vmem_headroom(self):
+        from dataclasses import dataclass
+
+        @dataclass(frozen=True)
+        class FakeTileSizes:
+            tile_m: int
+            tile_k: int
+            tile_n: int
+            bucket_base: int
+            lhs_buffer_count: int = 2
+
+        vmem_limit = int(64 * 1024 * 1024 * 0.9)  # 57.60 MiB on TPU v7x
+
+        # Case 1: calculate_tiling picks (tm=48, tk=8192, tn=2304, lhs_buffer_count=3)
+        # at full limit, but with 1 MiB headroom it would shrink tn to 1920.
+        # _safe_calculate_tiling should preserve (tm=48, tk=8192, tn=2304) and
+        # fall back to lhs_buffer_count=2.
+        def fake_calc_tight(dims, lhs_cfgs, rhs_cfgs, limit, fuse_act=None):
+            if limit >= vmem_limit:
+                return FakeTileSizes(48, 8192, 2304, 48, lhs_buffer_count=3)
+            return FakeTileSizes(48, 8192, 1920, 48, lhs_buffer_count=3)
+
+        with patch("tpu_inference.layers.common.linear.calculate_tiling",
+                   side_effect=fake_calc_tight):
+            tiles = _safe_calculate_tiling(None, None, None, vmem_limit, None)
+            self.assertEqual(
+                tiles, FakeTileSizes(48, 8192, 2304, 48, lhs_buffer_count=2))
+
+        # Case 2: lhs_buffer_count=3 still fits comfortably with headroom -> keep 3.
+        def fake_calc_roomy(dims, lhs_cfgs, rhs_cfgs, limit, fuse_act=None):
+            self.assertGreaterEqual(
+                limit, vmem_limit - _GMM_TILING_VMEM_HEADROOM_BYTES)
+            return FakeTileSizes(48, 8192, 1024, 48, lhs_buffer_count=3)
+
+        with patch("tpu_inference.layers.common.linear.calculate_tiling",
+                   side_effect=fake_calc_roomy):
+            tiles = _safe_calculate_tiling(None, None, None, vmem_limit, None)
+            self.assertEqual(
+                tiles, FakeTileSizes(48, 8192, 1024, 48, lhs_buffer_count=3))
+
+    def test_sharded_quantized_matmul_passes_safe_tiling(self):
+        x = jnp.ones((16, 64), dtype=jnp.bfloat16)
+        w_q = jnp.ones((64, 32), dtype=jnp.float8_e4m3fn)
+        w_s = jnp.ones((1, 1, 1, 32), dtype=jnp.float32)
+
+        def fake_gmm_v2(*, lhs, rhs, tile_info=None, **kwargs):
+            self.assertIs(tile_info, _safe_calculate_tiling)
+            return jnp.zeros((lhs.shape[0], rhs.shape[2]), dtype=lhs.dtype)
+
+        with patch("tpu_inference.layers.common.linear.gmm_v2",
+                   side_effect=fake_gmm_v2):
+            out = sharded_quantized_matmul(x,
+                                           w_q,
+                                           w_s,
+                                           P(None, "model"),
+                                           mesh=self.mesh)
+            self.assertEqual(out.shape, (16, 32))
 
 
 if __name__ == "__main__":

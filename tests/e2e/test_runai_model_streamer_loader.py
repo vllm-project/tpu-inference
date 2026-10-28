@@ -147,7 +147,7 @@ def test_correctness_torchax_ray_distributed_executor(
     """
     Compare the outputs of a codegemma model loaded from GCS via
     runai_model_streamer, and a model loaded from
-    Hugging Face, both using RayDistributedExecutor. The outputs should be the same.
+    Hugging Face, both using RayDistributedExecutorV2. The outputs should be the same.
     Note that these are run on the same node since a multi-node TPU setup would
     require additional changes to the CI pipeline. This test uses the default 
     HTTP GCS RunAI model streamer client.
@@ -174,7 +174,7 @@ def test_correctness_torchax_ray_distributed_executor(
                   max_num_batched_tokens=256)
     gcs_outputs = gcs_llm.generate([prompt], sampling_config)
     gcs_output_text = gcs_outputs[0].outputs[0].text
-    gcs_llm.llm_engine.engine_core.shutdown()
+    gcs_llm.llm_engine.engine_core.shutdown(timeout=30)
 
     # Test with Hugging Face model
     hf_llm = LLM(model=hf_model_name,
@@ -184,7 +184,7 @@ def test_correctness_torchax_ray_distributed_executor(
                  max_num_batched_tokens=256)
     hf_outputs = hf_llm.generate([prompt], sampling_config)
     hf_output_text = hf_outputs[0].outputs[0].text
-    hf_llm.llm_engine.engine_core.shutdown()
+    hf_llm.llm_engine.engine_core.shutdown(timeout=30)
 
     assert gcs_output_text == hf_output_text, (
         f"Outputs do not match! "

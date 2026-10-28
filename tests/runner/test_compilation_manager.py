@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
+from unittest import mock
 
 import jax
 import jax.numpy as jnp
@@ -144,3 +145,36 @@ class TestPrecompileGatherLogprobsSharding:
         spec = _precompiled_logits_specs(logprobs_mode)[0]
         assert (spec == PartitionSpec(ShardingAxisName.ATTN_DATA,
                                       None)) is uses_processed
+
+
+class TestMultiHostLockstep:
+    """On multi-host, every host must finish compiling before any host
+    starts the warmup collectives, or the PJRT stream can deadlock."""
+
+    def _manager(self, tasks):
+        manager = CompilationManager.__new__(CompilationManager)
+        manager.runner = SimpleNamespace(
+            mesh=Mesh(np.array(jax.devices()[:1]), ("x", )))
+        manager._compile_futures = []
+        manager._warmup_tasks = tasks
+        return manager
+
+    def test_barrier_runs_before_warmup_on_multi_host(self):
+        events = []
+        tasks = [("t", lambda: events.append("warmup") or jnp.zeros(
+            ()), (), {}, None)]
+        manager = self._manager(tasks)
+        with mock.patch("jax.process_count", return_value=2), mock.patch(
+                "tpu_inference.runner.compilation_manager.multihost_utils."
+                "sync_global_devices",
+                side_effect=lambda name: events.append(name)):
+            manager._flush_compilations()
+        assert events == ["flush_pre_warmup", "warmup"]
+
+    def test_no_barrier_on_single_host(self):
+        manager = self._manager([])
+        with mock.patch("jax.process_count", return_value=1), mock.patch(
+                "tpu_inference.runner.compilation_manager.multihost_utils."
+                "sync_global_devices") as mock_sync:
+            manager._flush_compilations()
+        mock_sync.assert_not_called()

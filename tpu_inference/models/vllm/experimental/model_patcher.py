@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Sequence
 
 import jax
 import torchax
-from torchax.interop import JittableModule, torch_view
+from torchax.interop import JittableModule, jax_jit, torch_view
 
 from tpu_inference import envs
 from tpu_inference.logger import init_logger
@@ -41,6 +41,77 @@ if TYPE_CHECKING:
     from tpu_inference.models.vllm.vllm_model_wrapper import _VllmRunner
 
 logger = init_logger(__name__)
+
+
+class _FunctionalJittableModule(JittableModule):
+    """JittableModule that forwards parameters bound by ``torch.func.functional_call``.
+
+    Upstream ``JittableModule`` always passes load-time ``self.params`` and
+    ``self.buffers``, which overrides outer ``functional_call`` tracers and
+    inlines submodule weights as HLO constants when nested inside ``jax.jit``.
+    """
+
+    def __init__(self, m, extra_jit_args=None, dedup_parameters: bool = False):
+        super().__init__(m,
+                         extra_jit_args=extra_jit_args,
+                         dedup_parameters=dedup_parameters)
+        self._param_targets = {
+            k: self._resolve_attr_target(k)
+            for k in self.params
+        }
+        self._buffer_targets = {
+            k: self._resolve_attr_target(k)
+            for k in self.buffers
+        }
+
+    def _resolve_attr_target(self,
+                             dotted_key: str) -> tuple[object, str, object]:
+        parts = dotted_key.split(".")
+        parent = self._model
+        for part in parts[:-1]:
+            parent = getattr(parent, part)
+        attr_name = parts[-1]
+        return parent, attr_name, getattr(parent, attr_name)
+
+    @staticmethod
+    def _resolve_store(
+        store: dict[str, torchax.torch.Tensor],
+        targets: dict[str, tuple[object, str, object]],
+    ) -> dict[str, torchax.torch.Tensor]:
+        resolved = {}
+        for k, fallback in store.items():
+            parent, attr_name, init_val = targets[k]
+            cur = getattr(parent, attr_name)
+            resolved[k] = (cur if (cur is not init_val and isinstance(
+                cur,
+                (torchax.tensor.Tensor, torchax.tensor.View))) else fallback)
+        return resolved
+
+    def _current_params_and_buffers(
+        self,
+    ) -> tuple[dict[str, torchax.torch.Tensor], dict[str,
+                                                     torchax.torch.Tensor]]:
+        return (
+            self._resolve_store(self.params, self._param_targets),
+            self._resolve_store(self.buffers, self._buffer_targets),
+        )
+
+    def make_jitted(self, key: str):
+        jitted = jax_jit(
+            functools.partial(self.functional_call, key),
+            kwargs_for_jax_jit=self._extra_jit_args,
+        )
+
+        def call(*args, **kwargs):
+            params, buffers = self._current_params_and_buffers()
+            return jitted(params, buffers, *args, **kwargs)
+
+        self._jitted[key] = call
+
+    def jittable_call(self, method_name: str, *args, **kwargs):
+        if method_name not in self._jitted:
+            self.make_jitted(method_name)
+        return self._jitted[method_name](*args, **kwargs)
 
 
 def patch_mm_model(
@@ -177,8 +248,9 @@ def patch_mm_model(
             "static_argnames": ("grid_thw", ),
         }
 
-        jitted_module = JittableModule(getattr(cur_module, target_module_name),
-                                       extra_jit_args=extra_jit_args)
+        jitted_module = _FunctionalJittableModule(
+            getattr(cur_module, target_module_name),
+            extra_jit_args=extra_jit_args)
         setattr(cur_module, target_module_name, jitted_module)
 
         # params_and_buffers is a dict. for each key with prefix of the module,

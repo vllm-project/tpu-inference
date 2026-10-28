@@ -352,7 +352,9 @@ def test_step_fn_kv_cache_sharding_is_a_fixed_point(vllm_config, mesh, rng):
         allocated = jax.tree.map(lambda c: c.sharding, kv_caches)
         cache_index = tuple((f"layer.{i}", i) for i in range(num_layers))
 
-        def step(caches, num_tokens, with_options=True):
+        def step(caches, num_tokens, with_options=True, state_leaves=None):
+            if state_leaves is None:
+                state_leaves = model.state_leaves
             step_fn = (model.model_fn
                        if with_options else model.model.step_fn_no_options)
             num_reqs = min(num_tokens, 8)
@@ -366,7 +368,7 @@ def test_step_fn_kv_cache_sharding_is_a_fixed_point(vllm_config, mesh, rng):
                                                dtype=jnp.int32),
             )
             return step_fn(
-                model.state_leaves,
+                state_leaves,
                 caches,
                 jnp.ones((num_tokens, ), dtype=jnp.int32),
                 attention_metadata,
@@ -401,10 +403,12 @@ def test_step_fn_kv_cache_sharding_is_a_fixed_point(vllm_config, mesh, rng):
 
         # The eagle3 drafter and the `continue_decode` loop both call the step
         # fn from inside an outer jit, where `kv_caches` arrives as tracers
-        # with no queryable sharding. That must still work.
-        traced_step = jax.jit(
-            lambda caches: step(caches, buckets[0], with_options=False))
-        traced_step(kv_caches)
+        # with no queryable sharding. Pass `state_leaves` as an argument rather
+        # than capturing it by closure so the model weights are not inlined into
+        # the serialized XLA executable (>2 GiB).
+        traced_step = jax.jit(lambda state_leaves, caches: step(
+            caches, buckets[0], with_options=False, state_leaves=state_leaves))
+        traced_step(model.state_leaves, kv_caches)
 
 
 def test_get_flax_model_with_pooling(vllm_config, mesh, rng):

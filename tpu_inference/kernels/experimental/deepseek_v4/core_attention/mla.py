@@ -481,7 +481,8 @@ def _mla_ragged_paged_attention_kernel(
             l_sum = l_ref[...] + exp_attention_sinks
             l_sum = broadcast_minor(l_sum, acc.shape)
             out = (lax.div(acc, l_sum) if q_dtype == jnp.float32 else
-                   (acc * pl.reciprocal(l_sum, approx=True)).astype(q_dtype))
+                   (acc *
+                    pltpu.reciprocal(l_sum, approx=True)).astype(q_dtype))
 
             # Wait for previous bo to be fully sent before storing new bo.
             bo_sem_idx = sem_ids_ref[2]

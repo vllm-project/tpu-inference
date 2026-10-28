@@ -21,7 +21,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import numpy as np
-from tokamax._src.ops.experimental.gmm_v2.gmm_v2 import gmm_v2
+from tokamax._src.ops.gmm_v2.gmm_v2 import gmm_v2
 
 from tools.kernel.tuner.v1.common.kernel_tuner_base import KernelTunerBase
 from tools.kernel.tuner.v1.common.tuner_datatypes import (RunConfig,
@@ -59,7 +59,7 @@ class TunableParams:
         return self.tm <= other.tm and self.tk <= other.tk and self.tn <= other.tn
 
     def to_tile_sizes(self) -> Any:
-        from tokamax._src.ops.experimental.gmm_v2.gmm_v2 import TileSizes
+        from tokamax._src.ops.gmm_v2.gmm_v2 import TileSizes
 
         return TileSizes(tile_m=self.tm,
                          tile_k=self.tk,
