@@ -651,8 +651,7 @@ def _jax_logprobs_materialize(
     # rejected ones) and bonus tokens. We filter them to only keep the accepted
     # draft tokens and the actual bonus token for each request, and flatten them
     # back to match the output format.
-    if (spec_decode_metadata is not None
-            and np.sum(spec_decode_metadata.draft_lengths_cpu) > 0):
+    if spec_decode_metadata is not None:
         assert runner is not None
         vocab_size = runner.input_batch.vocab_size
         dp_size = runner.dp_size
@@ -865,8 +864,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.is_pooling_model: bool = self.model_config.runner_type == "pooling"
         """Generative model or pooling model select different computations."""
-        self.enable_continue_decode = self.vllm_config.additional_config.get(
+        self.enable_continue_decode = (self.vllm_config.additional_config.get(
             "enable_continue_decode", False)
+                                       and self.speculative_config is None)
         # continue_decode EOS-check interval: how often the fused decode loop
         # observes the any-sequence-hit-EOS early exit (see decode_loop.py). Set
         # via the CONTINUE_DECODE_EOS_CHECK_INTERVAL env var so it can be retuned
@@ -1066,6 +1066,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.speculative_config:
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
+                if (self.drafter.valid_ngram_num_drafts.shape[0]
+                        < self.max_num_reqs):
+                    self.drafter.valid_ngram_draft = np.zeros(
+                        (self.max_num_reqs, self.drafter.k), dtype=np.int32)
+                    self.drafter.valid_ngram_num_drafts = np.zeros(
+                        (self.max_num_reqs, ), dtype=np.int32)
             elif self.speculative_config.method == "dflash":
                 self.drafter = DFlashProposer(self.vllm_config, self)
             elif self.speculative_config.use_eagle():
@@ -1902,6 +1908,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self, scheduler_output: "VllmSchedulerOutput") -> bool:
         if self.enable_continue_decode is not True:
             return False
+        if self.speculative_config is not None:
+            return False
         num_reqs = self.input_batch.num_reqs
         if num_reqs <= 0 or self.input_batch.request_distribution[
                 0] != num_reqs:
@@ -2286,9 +2294,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         for req_id in self.input_batch.req_ids[:num_reqs]:
             prompt_logprobs_dict[req_id] = None
 
-        spec_decode_last_sampled_token_id = None
-        spec_decode_num_rejected_tokens = None
-        if self.speculative_config:
+        def _propose_draft_tokens():
             with self.maybe_forbid_compile, jax.set_mesh(self.mesh):
                 last_sampled_token_id, num_rejected_tokens = extract_last_sampled_tokens(
                     spec_decode_metadata, next_tokens,
@@ -2309,19 +2315,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     input_ids,
                     full_hidden_states,
                 )
-                spec_decode_last_sampled_token_id = last_sampled_token_id
-                spec_decode_num_rejected_tokens = num_rejected_tokens
-
-        spec_decode_next_tokens = None
-        if self.speculative_config and self.scheduler_config.async_scheduling:
-            assert spec_decode_last_sampled_token_id is not None
-            with self.maybe_forbid_compile, jax.set_mesh(self.mesh):
-                spec_decode_next_tokens = concat_last_sampled_tokens_and_draft_tokens(
-                    spec_decode_last_sampled_token_id,
-                    self.speculative_decoding_manager._draft_token_ids)
+                return last_sampled_token_id, num_rejected_tokens
 
         # If async scheduler enabled
         if self.scheduler_config.async_scheduling:
+            spec_decode_num_rejected_tokens = None
+            spec_decode_next_tokens = None
+            if self.speculative_config:
+                spec_decode_last_sampled_token_id, spec_decode_num_rejected_tokens = (
+                    _propose_draft_tokens())
+                with self.maybe_forbid_compile, jax.set_mesh(self.mesh):
+                    spec_decode_next_tokens = concat_last_sampled_tokens_and_draft_tokens(
+                        spec_decode_last_sampled_token_id,
+                        self.speculative_decoding_manager._draft_token_ids)
+
             # Get previous results from TPU and replace the placeholder.
             if self._pre_async_results is not None:
                 self._modify_prev_results()
@@ -2425,6 +2432,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
             self.input_batch.num_tokens[req_idx] = end_idx
             req_state.output_token_ids.extend(sampled_ids)
+
+        if self.speculative_config:
+            _propose_draft_tokens()
 
         if logprobs is not None:
             # Use materialize to ensure logprobs are ready on host when we return async results

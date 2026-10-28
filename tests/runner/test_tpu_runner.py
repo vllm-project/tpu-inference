@@ -950,6 +950,145 @@ class TestTPUJaxRunner:
             assert layer_md.gdn_read_offsets is not None
             assert int(np.asarray(layer_md.gdn_read_offsets)[0]) == 2
 
+    @patch("tpu_inference.runner.tpu_runner.extract_last_sampled_tokens")
+    @patch(
+        "tpu_inference.runner.tpu_runner.runner_utils.host_extract_sampled_tokens"
+    )
+    def test_sample_from_logits_sync_updates_tokens_and_mamba_offset_before_propose(
+        self,
+        mock_host_extract,
+        mock_extract_last,
+    ):
+        """In sync mode, _sample_from_logits updates token_ids_cpu, num_tokens_no_spec, and mamba_read_offset BEFORE calling propose_draft_token_ids."""
+        self.runner.scheduler_config.async_scheduling = False
+        self.runner.speculative_config = SimpleNamespace(
+            num_speculative_tokens=3)
+        self.runner.aux_output_worker = None
+        self.runner.rng_params_for_sampling = self.mock_rng_key
+
+        req_state = SimpleNamespace(
+            req_id="req1",
+            num_computed_tokens=4,
+            num_tokens=4,
+            output_token_ids=[],
+            mamba_read_offset=0,
+        )
+        self.runner.requests = {"req1": req_state}
+        self.runner.input_batch = MagicMock()
+        self.runner.input_batch.num_reqs = 1
+        self.runner.input_batch.req_ids = ["req1"]
+        self.runner.input_batch.req_id_to_index = {"req1": 0}
+        self.runner.input_batch.vocab_size = 1000
+        self.runner.input_batch.token_ids_cpu = np.zeros((16, 64),
+                                                         dtype=np.int32)
+        self.runner.input_batch.token_ids_cpu[0, :4] = [10, 20, 30, 40]
+        self.runner.input_batch.num_tokens_no_spec = np.zeros(16,
+                                                              dtype=np.int32)
+        self.runner.input_batch.num_tokens_no_spec[0] = 4
+        self.runner.input_batch.num_tokens = np.zeros(16, dtype=np.int32)
+        self.runner.input_batch.num_tokens[0] = 4
+        self.runner.input_batch.num_prompt_logprobs = {}
+
+        # Simulate a verify step with 3 draft tokens (q_len=4), where 2 drafts + 1 bonus = 3 tokens are accepted (1 rejected -> mamba_read_offset = 4 - 1 - 1 = 2)
+        mock_host_extract.return_value = [[50, 60, 70]]
+        mock_extract_last.return_value = (
+            jnp.array([70], dtype=jnp.int32),
+            jnp.array([1], dtype=jnp.int32),
+        )
+
+        observed_in_propose = {}
+
+        def fake_propose(*args, **kwargs):
+            n = int(self.runner.input_batch.num_tokens_no_spec[0])
+            observed_in_propose["num_tokens_no_spec"] = n
+            observed_in_propose["tokens"] = (
+                self.runner.input_batch.token_ids_cpu[0, :n].tolist())
+            observed_in_propose["mamba_read_offset"] = (
+                req_state.mamba_read_offset)
+
+        self.runner.speculative_decoding_manager.propose_draft_token_ids = (
+            MagicMock(side_effect=fake_propose))
+        self.runner._select_from_array_fn = MagicMock(
+            return_value=jnp.zeros((1, 16), dtype=jnp.float32))
+        self.runner._extract_draft_token_ids = MagicMock(
+            return_value=jnp.zeros((3, ), dtype=jnp.int32))
+        self.runner.rejection_sampler = MagicMock(
+            return_value=jnp.array([[50, 60, 70, -1]], dtype=jnp.int32))
+
+        tpu_sampling_metadata = SimpleNamespace(do_sampling=False,
+                                                logprobs=False)
+        spec_decode_metadata = SimpleNamespace(
+            bonus_logits_indices=jnp.array([0], dtype=jnp.int32),
+            target_logits_indices=jnp.array([0, 1, 2], dtype=jnp.int32),
+            final_logits_indices=jnp.array([0, 1, 2, 3], dtype=jnp.int32),
+            draft_lengths=jnp.array([3], dtype=jnp.int32),
+        )
+        scheduler_output = SimpleNamespace(
+            num_scheduled_tokens={"req1": 4},
+            scheduled_spec_decode_tokens={"req1": [50, 60, 99]},
+            total_num_scheduled_tokens=4,
+        )
+
+        with patch(
+                "tpu_inference.runner.tpu_runner.sample",
+                return_value=(
+                    jnp.array([70], dtype=jnp.int32),
+                    jnp.zeros((1, 16), dtype=jnp.float32),
+                ),
+        ):
+            self.runner._sample_from_logits(
+                scheduler_output=scheduler_output,
+                attn_metadata=MagicMock(),
+                tpu_sampling_metadata=tpu_sampling_metadata,
+                input_ids=jnp.zeros((4, ), dtype=jnp.int32),
+                hidden_states=jnp.zeros((4, 8), dtype=jnp.float32),
+                logits=jnp.zeros((4, 16), dtype=jnp.float32),
+                aux_hidden_states=None,
+                spec_decode_metadata=spec_decode_metadata,
+                kv_connector_output=None,
+                padded_num_reqs=1,
+            )
+
+        assert observed_in_propose["num_tokens_no_spec"] == 7
+        assert observed_in_propose["tokens"] == [10, 20, 30, 40, 50, 60, 70]
+        assert observed_in_propose["mamba_read_offset"] == 2
+
+    def test_jax_logprobs_materialize_spec_decode_zero_draft_tokens(self):
+        from vllm.v1.outputs import LogprobsTensors
+
+        from tpu_inference.runner.tpu_runner import _jax_logprobs_materialize
+
+        # Simulate a prefill or 0-draft step with spec_decode enabled:
+        # 4 padded draft slots (all -1 placeholders) + 2 bonus slots (tokens 42, 99).
+        logprob_token_ids = jnp.array(
+            [[-1, 5], [-1, 5], [-1, 5], [-1, 5], [42, 7], [99, 8]],
+            dtype=jnp.int32,
+        )
+        logprobs = jnp.zeros((6, 2), dtype=jnp.float32)
+        selected_token_ranks = jnp.ones((6, ), dtype=jnp.int32)
+        tensors = LogprobsTensors(
+            logprob_token_ids=logprob_token_ids,
+            logprobs=logprobs,
+            selected_token_ranks=selected_token_ranks,
+        )
+        spec_decode_metadata = SimpleNamespace(
+            final_logits_indices=jnp.zeros((4, ), dtype=jnp.int32),
+            draft_lengths_cpu=np.array([0, 0], dtype=np.int32),
+            req_indices_dp={0: [0, 1]},
+        )
+        self.runner.input_batch.vocab_size = 1000
+        self.runner.dp_size = 1
+
+        res = _jax_logprobs_materialize(
+            tensors,
+            logits_indices_selector=[0, 1],
+            runner=self.runner,
+            spec_decode_metadata=spec_decode_metadata,
+            num_reqs=2,
+        )
+        assert res.logprob_token_ids[:, 0].tolist() == [42, 99]
+        assert res.cu_num_generated_tokens == [0, 1, 2]
+
 
 class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
 
@@ -1187,6 +1326,7 @@ class TestTPUJaxRunnerDisableMM:
         """_can_use_continue_decode checks enable flag, distribution, structured outputs, and prompt chunking."""
         runner = MagicMock()
         runner.enable_continue_decode = True
+        runner.speculative_config = None
         runner.input_batch.num_reqs = 2
         runner.input_batch.request_distribution = [2, 0, 2]  # decode only
         runner.input_batch.num_computed_tokens_cpu = np.array([10, 20],
@@ -1200,6 +1340,12 @@ class TestTPUJaxRunnerDisableMM:
         # 1. Nominal case: decode-only, tokens computed >= prompt tokens -> True
         assert TPUModelRunner._can_use_continue_decode(runner,
                                                        sched_out) is True
+
+        # 1b. Speculative decoding enabled -> False
+        runner.speculative_config = MagicMock()
+        assert TPUModelRunner._can_use_continue_decode(runner,
+                                                       sched_out) is False
+        runner.speculative_config = None
 
         # 2. Disabled flag -> False
         runner.enable_continue_decode = False
