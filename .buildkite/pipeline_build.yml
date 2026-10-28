@@ -30,12 +30,10 @@ steps:
         key: "build_docker_tpu6e"
         <<: *docker_build_template
         env:
-          BM_INFRA: "true"
           TPU_VERSION: "tpu6e"
 
       - label: ":docker: Build and Push Base Image (tpu7x)"
         key: "build_docker_tpu7x"
         <<: *docker_build_template
         env:
-          BM_INFRA: "true"
           TPU_VERSION: "tpu7x"

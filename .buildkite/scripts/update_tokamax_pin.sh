@@ -26,7 +26,7 @@ if [[ -z "$NEW_VERSION" ]]; then
 fi
 
 TARGET_BRANCH="${TARGET_BRANCH:-main}"
-REQUIREMENTS_FILE="requirements.txt"
+REQUIREMENTS_FILE="pyproject.toml"
 
 # BUILDKITE_PULL_REQUEST is an environment var Buildkite sets on every
 # job. It holds the PR number as a string when the build came from a PR.
@@ -51,7 +51,7 @@ git reset --hard origin/"${TARGET_BRANCH}"
 
 # Update the tokamax pin
 echo "Updating $REQUIREMENTS_FILE to: tokamax==$NEW_VERSION"
-sed -i "s/^tokamax==.*$/tokamax==${NEW_VERSION}/" "$REQUIREMENTS_FILE"
+sed -i -E "s|^([[:space:]]*\"tokamax==)[^\"]+(\".*)|\1${NEW_VERSION}\2|" "$REQUIREMENTS_FILE"
 
 # Check in file
 git add "$REQUIREMENTS_FILE"

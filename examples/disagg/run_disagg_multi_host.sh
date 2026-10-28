@@ -209,7 +209,12 @@ fi
 if [ "$RUN_IN_BUILDKITE" = "false" ]; then
     echo "Running in local mode, building image."
     docker image prune -f
-    docker build -f docker/Dockerfile -t ${DOCKER_IMAGE} .
+    # dev installs tpu_inference editable from /workspace/tpu_inference, so the
+    # bind mount below overrides the copy baked into the image. vLLM comes from
+    # the pyproject.toml pin in site-packages; do not combine build_image.sh -s
+    # with this mount, as -s stages vLLM under /workspace/tpu_inference/vllm
+    # and the mount would hide it.
+    ./docker/build_image.sh --target dev -t "${DOCKER_IMAGE}"
 fi
 
 # log folder $HOME/logs
@@ -225,9 +230,8 @@ fi
 # mount the image into local source code
 local_mounts=()
 if [ "$RUN_IN_BUILDKITE" = "false" ]; then
-  echo "Running in local mode, mounting local vllm and tpu-inference directories."
+  echo "Running in local mode, mounting local tpu-inference directory."
   local_mounts=(
-    -v "$HOME/vllm:/workspace/vllm"
     -v "$HOME/tpu-inference:/workspace/tpu_inference"
   )
 fi

@@ -8,7 +8,7 @@ In order to begin benchmarking TPU Inference (via vLLM), you'll want to copy all
 * `scripts/vllm/benchmarking/benchmark_serving.py`
 * `scripts/vllm/benchmarking/benchmark_utils.py`
 
-You'll also want to install all the necessary requirements via `pip install -r requirements_benchmarking.txt`
+You'll also want to install all the necessary requirements via `uv pip install -e '.[benchmarking]'` from the repository root
 
 ## Downloading the Data
 To download and extract the MLPerf data, you can run:
@@ -38,10 +38,10 @@ In order to run the benchmarks, navigate to your vLLM root directory and spin up
 vllm serve meta-llama/Llama-3.1-8B-Instruct --max-model-len=1024 --disable-log-requests --tensor-parallel-size 8 --max-num-batched-tokens 8192
 ```
 
-Once the server has begun -- you should see a message such as `INFO:     Application startup complete.` -- you can now run the client benchmarking command (in a new terminal) in your local vLLM repo:
+Once the server has begun -- you should see a message such as `INFO:     Application startup complete.` -- you can now run the client benchmarking command (in a new terminal) from the tpu-inference repository root:
 
 ```
- python benchmarks/benchmark_serving.py \
+ python scripts/vllm/benchmarking/benchmark_serving.py \
     --backend vllm \
     --model meta-llama/Llama-3.1-8B-Instruct \
     --dataset-name mlperf \

@@ -13,44 +13,89 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set -e
+set -euo pipefail
 
-NEW_LKG_HASH=$1
-if [[ -z "$NEW_LKG_HASH" ]]; then
-    echo "Error: No hash provided."
-    exit 1
+NEW_LKG_HASH="${1:-}"
+if [ -z "${NEW_LKG_HASH}" ]; then
+  echo "[ERROR] No hash provided. Usage: $0 <new_lkg_hash>" >&2
+  exit 1
 fi
 
-# Configuration
-TARGET_BRANCH="main"
+TARGET_BRANCH="${TARGET_BRANCH:-main}"
+MAX_ATTEMPTS=3
+LKG_PROMOTE_ENABLED="${LKG_PROMOTE_ENABLED:-true}"
 
-NEW_LKG_HASH=$1
-VERSION_FILE=".buildkite/vllm_lkg.version"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+# Create a throwaway temporary worktree directory
+WORKTREE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/vllm-lkg-worktree.XXXXXX")"
 
-# Configure credentials
-git config user.name "vllm-ci-bot[bot]"
-git config user.email "vllm-ci-bot[bot]@users.noreply.github.com"
+cleanup() {
+  echo "Cleaning up worktree at ${WORKTREE_DIR}..."
+  git -C "${REPO_ROOT}" worktree remove --force "${WORKTREE_DIR}" 2>/dev/null || true
+  git -C "${REPO_ROOT}" worktree prune 2>/dev/null || true
+  rm -rf "${WORKTREE_DIR}"
+}
+trap cleanup EXIT INT TERM
 
-# Fetch and checkout
-git fetch origin "${TARGET_BRANCH}"
-git checkout -f "${TARGET_BRANCH}"
-git reset --hard origin/"${TARGET_BRANCH}"
+success=false
+for attempt in $(seq 1 "${MAX_ATTEMPTS}"); do
+  echo "--- [Attempt ${attempt}/${MAX_ATTEMPTS}] Fetching and preparing worktree for ${TARGET_BRANCH}"
 
-# Update vllm_lkg.version
-echo "Current directory: $(pwd)" # debug
-echo "Updating $VERSION_FILE to: $NEW_LKG_HASH"
-echo "$NEW_LKG_HASH" > "$VERSION_FILE"
+  # Clean up previous attempt if needed
+  git -C "${REPO_ROOT}" worktree remove --force "${WORKTREE_DIR}" 2>/dev/null || true
+  rm -rf "${WORKTREE_DIR}"
 
-# Check in file
-git add "$VERSION_FILE"
+  if ! git -C "${REPO_ROOT}" fetch origin "${TARGET_BRANCH}" || \
+     ! git -C "${REPO_ROOT}" worktree add --detach "${WORKTREE_DIR}" "origin/${TARGET_BRANCH}"; then
+    echo "Attempt ${attempt} failed during fetch or worktree add. Retrying..."
+    sleep 2
+    continue
+  fi
 
-# Check if we have change anything
-if git diff --cached --quiet; then
-    echo "No changes in LKG version. Skipping push."
-else
-    git commit -s -m "[skip ci] Update vLLM LKG to $NEW_LKG_HASH"
-    echo "Pushing LKG update to $TARGET_BRANCH..."
-    git push origin $TARGET_BRANCH 
-    echo "Successfully updated LKG to $NEW_LKG_HASH"
+  if (
+    cd "${WORKTREE_DIR}"
+
+    echo "Updating pyproject.toml with new LKG hash: ${NEW_LKG_HASH}"
+    sed -i -E "s|(git\+https://github\.com/vllm-project/vllm\.git@)[a-zA-Z0-9.-]+|\1${NEW_LKG_HASH}|g" pyproject.toml
+
+    if git diff --quiet pyproject.toml; then
+      echo "No change in LKG version. Skipping push."
+      exit 0
+    fi
+
+    if [ "${LKG_PROMOTE_ENABLED}" != "true" ] && [ "${LKG_PROMOTE_ENABLED}" != "1" ]; then
+      echo "LKG_PROMOTE_ENABLED is not 'true'. Performing dry-run."
+      echo "Diff for pyproject.toml:"
+      git diff pyproject.toml
+      if command -v buildkite-agent &> /dev/null; then
+        buildkite-agent annotate ":information_source: LKG dry-run to ${NEW_LKG_HASH} (promotion disabled)" --style "info"
+      fi
+      exit 0
+    fi
+
+    git add pyproject.toml
+    # [skip ci] is crucial to prevent infinite Buildkite loop triggers
+    git -C "${WORKTREE_DIR}" -c "user.name=vllm-ci-bot[bot]" -c "user.email=vllm-ci-bot[bot]@users.noreply.github.com" commit -s -m "[skip ci] Update vLLM LKG to ${NEW_LKG_HASH}"
+
+    echo "Pushing updated version to remote ${TARGET_BRANCH}..."
+    git push origin HEAD:"${TARGET_BRANCH}"
+    echo "Successfully promoted LKG pin to ${NEW_LKG_HASH}"
+
+    if command -v buildkite-agent &> /dev/null; then
+      buildkite-agent annotate ":white_check_mark: LKG updated to ${NEW_LKG_HASH}" --style "success"
+    fi
+  ); then
+    success=true
+    break
+  else
+    echo "Attempt ${attempt} failed (possible push race condition). Retrying..."
+    sleep 2
+  fi
+done
+
+if [ "${success}" != "true" ]; then
+  echo "ERROR: Failed to promote LKG version after ${MAX_ATTEMPTS} attempts." >&2
+  exit 1
 fi

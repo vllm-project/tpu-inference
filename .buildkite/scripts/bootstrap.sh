@@ -149,15 +149,15 @@ export RUN_KERNEL_COLLECTIVES_TESTS=0
 
 # Trigger general kernel tests if any of the following are modified:
 # - tpu_inference/kernels/* or tests/kernels/*
-# - tests/conftest.py or requirements.txt
-if echo "$FILES_CHANGED" | grep -qE '^(tpu_inference/kernels|tests/kernels|tests/conftest.py|requirements.txt)'; then
+# - tests/conftest.py or pyproject.toml
+if echo "$FILES_CHANGED" | grep -qE '^(tpu_inference/kernels|tests/kernels|tests/conftest.py|pyproject.toml)'; then
     export RUN_KERNEL_TESTS=1
 fi
 
 # Trigger collective-specific kernel tests if any of the following are modified:
 # - tpu_inference/kernels/collectives/* or tests/kernels/collectives/*
-# - tests/conftest.py or requirements.txt
-if echo "$FILES_CHANGED" | grep -qE '^(tpu_inference/kernels/collectives|tests/kernels/collectives|tests/conftest.py|requirements.txt)'; then
+# - tests/conftest.py or pyproject.toml
+if echo "$FILES_CHANGED" | grep -qE '^(tpu_inference/kernels/collectives|tests/kernels/collectives|tests/conftest.py|pyproject.toml)'; then
     export RUN_KERNEL_COLLECTIVES_TESTS=1
 fi
 
@@ -203,9 +203,6 @@ upload_kube_pipeline() {
                         export TESTS_GROUP_LABEL="${TESTS_GROUP_LABEL:-[jax] TPU6e Tests Group}"
                     fi
                     upload_with_priority .buildkite/pipeline_jax_kube.yml "$JOB_PRIORITY"
-                    if [[ "${TPU_VERSION:-tpu6e}" == "tpu6e" ]]; then
-                        upload_with_priority .buildkite/pipeline_pypi_kube.yml "$JOB_PRIORITY"
-                    fi
                     ;;
                 models|features|parallelism|rl)
                     upload_kube_lane "${lane}"
@@ -225,7 +222,6 @@ upload_kube_pipeline() {
       set_kube_jax_envs v7
       upload_with_priority .buildkite/pipeline_jax_kube.yml "$JOB_PRIORITY"
       set_kube_jax_envs unset
-      upload_with_priority .buildkite/pipeline_pypi_kube.yml "$JOB_PRIORITY"
     fi
     # Nightly and tag builds: nightly_verify.yml, as on bare metal. Its "Upload
     # Tests" step sends up the kube suites (upload_kube_nightly_suites).
@@ -257,9 +253,6 @@ upload_pipeline() {
       set_jax_envs v7
       upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
       set_jax_envs unset
-
-      # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
-      upload_with_priority .buildkite/pipeline_pypi.yml "$JOB_PRIORITY"
     fi
 
     upload_with_priority .buildkite/nightly_verify.yml "$JOB_PRIORITY"
@@ -363,10 +356,11 @@ rm "$NOTIFY_FILE"
 
 echo "Configure testing logic"
 if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
-    # Note: Integration pipeline always fetch latest vllm version
-    VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
+    # Integration pipeline tests upstream HEAD
+    VLLM_COMMIT_HASH=$(git ls-remote "https://github.com/vllm-project/vllm.git" HEAD | awk '{ print $1 }')
+    VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH_OVERRIDE:-$VLLM_COMMIT_HASH}"
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
-    echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
+    echo "Using vLLM commit: ${VLLM_COMMIT_HASH}"
     choose_ci_fleet
     # The pin moves on the results of the run that owns the integration: bare
     # metal, unless the kube schedule sets KUBE_OWNS_NIGHTLY=1. A kube run
@@ -396,10 +390,12 @@ if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
     fi
 
 else
-  # Note: PR and Nightly pipelines will load VLLM_COMMIT_HASH from vllm_lkg.version file, if not exists, get the latest commit hash from vllm repo
+  # Standard builds test the pinned LKG version
   VLLM_COMMIT_HASH=$(get_vllm_commit_hash)
+  # Support manual developer override via environment variable
+  VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH_OVERRIDE:-$VLLM_COMMIT_HASH}"
   buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
-  echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
+  echo "Using vLLM commit: ${VLLM_COMMIT_HASH}"
     
   # Check if the current build is a pull request
   if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then

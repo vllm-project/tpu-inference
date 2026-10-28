@@ -14,34 +14,36 @@
 # limitations under the License.
 
 # Bootstrap for the tpu-inference-dev (dev/experimental) pipeline.
-# Sets VLLM_COMMIT_HASH from vllm_lkg.version and uploads pipeline_dev.yml.
+# Sets VLLM_COMMIT_HASH from pyproject.toml and uploads pipeline_dev.yml.
 # Configure the Buildkite pipeline's "Steps" to run this script.
 
 set -euo pipefail
 
-echo "--- :git: Setting VLLM_COMMIT_HASH from vllm_lkg.version"
+# Resolve the absolute directory path of the current script.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-LKG_FILE=".buildkite/vllm_lkg.version"
+# Source the shared pipeline config file (priority constants +
+# upload_with_priority).
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/configs/pipeline_config.sh"
 
-if [ ! -f "${LKG_FILE}" ]; then
-    echo "ERROR: ${LKG_FILE} not found. Cannot determine vllm commit hash."
-    exit 1
-fi
-
-VLLM_COMMIT_HASH="$(cat "${LKG_FILE}")"
-
-if [ -z "${VLLM_COMMIT_HASH}" ]; then
-    echo "ERROR: ${LKG_FILE} is empty. Cannot determine vllm commit hash."
-    exit 1
-fi
-
+# Resolve and publish Version Metadata for developer pipeline
+VLLM_COMMIT_HASH=$(get_vllm_commit_hash)
 buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
-echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
+echo "Using vLLM commit: ${VLLM_COMMIT_HASH}"
 
-# Which pipeline to upload.  Defaults to the demo pipeline_dev.yml; set
+# Which pipeline to upload. Defaults to the demo pipeline_dev.yml; set
 # DEV_PIPELINE_FILE in the build's env to run a different dev pipeline
 # (e.g. .buildkite/xla_autotune/pipeline.yml) without editing this file.
 DEV_PIPELINE_FILE="${DEV_PIPELINE_FILE:-.buildkite/pipeline_dev.yml}"
+
+if [[ ! -f "${DEV_PIPELINE_FILE}" ]]; then
+  echo "ERROR: dev pipeline file '${DEV_PIPELINE_FILE}' not found on branch" \
+       "'${BUILDKITE_BRANCH:-unknown}' at commit ${BUILDKITE_COMMIT:-unknown}." \
+       "Create it on your branch, or point DEV_PIPELINE_FILE at an existing file."
+  exit 1
+fi
+
 echo "--- :pipeline: Uploading ${DEV_PIPELINE_FILE}"
 buildkite-agent pipeline upload "${DEV_PIPELINE_FILE}"
 
