@@ -69,11 +69,13 @@ class PCPMetadata:
         "mamba_state_indices",
         "pcp",
         "backend_metadata",
+        "gdn_read_offsets",
     ],
     meta_fields=[
         "padded_num_reqs",
         "pcp_cache_pages",
         "use_causal_mask",
+        "num_spec_tokens",
     ],
 )
 @dataclass
@@ -118,6 +120,15 @@ class AttentionMetadata(object):
     # of its own type (AttentionBackend.prepare_step); None for RPA.
     backend_metadata: Any = None
 
+    # (max_num_seqs,) int32 — per-request offset ∈ [0, num_spec_tokens] into the
+    # strided mamba/GDN state slot group indicating which accepted checkpoint
+    # from the previous speculative verification step to read from.
+    # None when speculative decoding or mamba/GDN state is disabled.
+    gdn_read_offsets: jax.Array | None = None
+
+    # STATIC: number of speculative draft tokens (K) per verification step.
+    num_spec_tokens: int = 0
+
 
 @functools.partial(
     jax.tree_util.register_dataclass,
@@ -127,8 +138,12 @@ class AttentionMetadata(object):
         "query_start_loc",
         "request_distribution",
         "mamba_state_indices",
+        "gdn_read_offsets",
     ],
-    meta_fields=["padded_num_reqs"],
+    meta_fields=[
+        "padded_num_reqs",
+        "num_spec_tokens",
+    ],
 )
 @dataclass
 class SharedAttentionMetadata(object):
@@ -155,6 +170,13 @@ class SharedAttentionMetadata(object):
     # power of 2 between min and max requests.
     # Env var ATTN_CUSTOM_NUM_REQS_BUCKETS can manually override the buckets.
     padded_num_reqs: int = -1
+
+    # (max_num_seqs,) int32 — per-request offset ∈ [0, num_spec_tokens] into the
+    # strided mamba/GDN state slot group.
+    gdn_read_offsets: jax.Array | None = None
+
+    # STATIC: number of speculative draft tokens (K) per verification step.
+    num_spec_tokens: int = 0
 
 
 class GroupedAttentionMetadata(dict):

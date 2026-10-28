@@ -36,6 +36,7 @@ class CachedRequestState(NewRequestData):
     # [num_prompt_tokens-1, ...]. Set to None when prefill completes.
     in_progress_prompt_logprobs_cpu: Optional[tuple] = None
     mamba_state_slot: Optional[int] = None
+    mamba_read_offset: int = 0
 
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)
