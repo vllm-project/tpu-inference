@@ -492,6 +492,19 @@ class CompilationManager:
         else:
             mamba_state_indices = None
 
+        spec_config = getattr(self.runner, "speculative_config", None)
+        num_spec_tokens = (
+            spec_config.num_speculative_tokens
+            if (spec_config and self.runner.kv_cache_config.has_mamba_layers)
+            else 0)
+        if num_spec_tokens > 0:
+            gdn_read_offsets = device_array(self.runner.mesh,
+                                            np.zeros(self.runner.max_num_reqs,
+                                                     dtype=np.int32),
+                                            sharding=metadata_attn_sharding)
+        else:
+            gdn_read_offsets = None
+
         def build_block_table(kv_cache_gid: int) -> jax.Array:
             block_table_obj = self.runner.input_batch.block_table[kv_cache_gid]
             shape = (self.runner.max_num_reqs,
@@ -517,6 +530,8 @@ class CompilationManager:
                 backend_metadata=attention_backend.backend_metadata(
                     attention_arrays, gid),
                 is_decode=is_decode,
+                gdn_read_offsets=gdn_read_offsets,
+                num_spec_tokens=num_spec_tokens,
             )
 
             return attention_metadata_gid
@@ -530,6 +545,8 @@ class CompilationManager:
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=num_reqs,
                 is_decode=is_decode,
+                gdn_read_offsets=gdn_read_offsets,
+                num_spec_tokens=num_spec_tokens,
             )
 
         attention_metadata: AttentionMetadata | dict[str, AttentionMetadata]
@@ -1627,13 +1644,22 @@ class CompilationManager:
         # ForbidCompile guard inside `Eagle3Proposer.propose` raises. None for
         # pure-attention models (the common eagle3 case) so the field stays
         # absent end-to-end.
+        spec_config = getattr(self.runner, "speculative_config", None)
         if self.runner.kv_cache_config.has_mamba_layers:
             eagle3_mamba_state_indices = device_array(
                 self.runner.mesh,
                 np.zeros(self.runner.max_num_reqs, dtype=np.int32),
                 sharding=dp_sharding)
+            eagle3_num_spec_tokens = (spec_config.num_speculative_tokens
+                                      if spec_config else 0)
+            eagle3_gdn_read_offsets = (device_array(
+                self.runner.mesh,
+                np.zeros(self.runner.max_num_reqs, dtype=np.int32),
+                sharding=dp_sharding) if eagle3_num_spec_tokens > 0 else None)
         else:
             eagle3_mamba_state_indices = None
+            eagle3_num_spec_tokens = 0
+            eagle3_gdn_read_offsets = None
 
         num_reqs_dp = self._create_dummy_tensor((dp_size, ),
                                                 jnp.int32,
@@ -1652,6 +1678,8 @@ class CompilationManager:
                     request_distribution=request_distribution,
                     mamba_state_indices=eagle3_mamba_state_indices,
                     padded_num_reqs=num_reqs,
+                    gdn_read_offsets=eagle3_gdn_read_offsets,
+                    num_spec_tokens=eagle3_num_spec_tokens,
                 )
 
                 def drafter_propose_warmup(_fn, _args, _call_kwargs):
@@ -1762,14 +1790,23 @@ class CompilationManager:
         # ForbidCompile guard inside `Eagle3Proposer.propose` raises. None for
         # pure-attention models (the common eagle3 case) so the field stays
         # absent end-to-end.
+        spec_config = getattr(self.runner, "speculative_config", None)
         if self.runner.kv_cache_config.has_mamba_layers:
             mamba_state_indices = device_array(self.runner.mesh,
                                                np.zeros(
                                                    self.runner.max_num_reqs,
                                                    dtype=np.int32),
                                                sharding=dp_sharding)
+            mtp_num_spec_tokens = (spec_config.num_speculative_tokens
+                                   if spec_config else 0)
+            mtp_gdn_read_offsets = (device_array(
+                self.runner.mesh,
+                np.zeros(self.runner.max_num_reqs, dtype=np.int32),
+                sharding=dp_sharding) if mtp_num_spec_tokens > 0 else None)
         else:
             mamba_state_indices = None
+            mtp_num_spec_tokens = 0
+            mtp_gdn_read_offsets = None
 
         num_reqs_dp = self._create_dummy_tensor((dp_size, ),
                                                 jnp.int32,
@@ -1796,6 +1833,8 @@ class CompilationManager:
                     request_distribution=request_distribution,
                     mamba_state_indices=mamba_state_indices,
                     padded_num_reqs=num_reqs,
+                    gdn_read_offsets=mtp_gdn_read_offsets,
+                    num_spec_tokens=mtp_num_spec_tokens,
                 )
 
                 def drafter_propose_warmup(_fn, _args, _call_kwargs):
@@ -1886,13 +1925,22 @@ class CompilationManager:
                                             request_distribution,
                                             sharding=dp_sharding)
 
+        spec_config = getattr(self.runner, "speculative_config", None)
         if self.runner.kv_cache_config.has_mamba_layers:
             dflash_mamba_state_indices = device_array(
                 self.runner.mesh,
                 np.zeros(self.runner.max_num_reqs, dtype=np.int32),
                 sharding=dp_sharding)
+            dflash_num_spec_tokens = (spec_config.num_speculative_tokens
+                                      if spec_config else 0)
+            dflash_gdn_read_offsets = (device_array(
+                self.runner.mesh,
+                np.zeros(self.runner.max_num_reqs, dtype=np.int32),
+                sharding=dp_sharding) if dflash_num_spec_tokens > 0 else None)
         else:
             dflash_mamba_state_indices = None
+            dflash_num_spec_tokens = 0
+            dflash_gdn_read_offsets = None
 
         num_reqs_dp = self._create_dummy_tensor((dp_size, ),
                                                 jnp.int32,
@@ -1930,6 +1978,8 @@ class CompilationManager:
                     request_distribution=request_distribution,
                     mamba_state_indices=dflash_mamba_state_indices,
                     padded_num_reqs=num_reqs,
+                    gdn_read_offsets=dflash_gdn_read_offsets,
+                    num_spec_tokens=dflash_num_spec_tokens,
                 )
 
                 def drafter_propose_warmup(_fn,
@@ -1989,6 +2039,8 @@ class CompilationManager:
                     request_distribution=request_distribution,
                     mamba_state_indices=dflash_mamba_state_indices,
                     padded_num_reqs=num_reqs,
+                    gdn_read_offsets=dflash_gdn_read_offsets,
+                    num_spec_tokens=dflash_num_spec_tokens,
                 )
 
                 aux_hidden_states = [

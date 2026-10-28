@@ -2422,6 +2422,28 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self, spec_decode_metadata, next_tokens, logits_indices_selector,
             discard_sampled_tokens_req_indices, num_reqs)
 
+        if self.speculative_config:
+            raw_max_decode = getattr(self.input_batch, "max_decode_tokens",
+                                     None)
+            max_decode_tokens = (
+                raw_max_decode if isinstance(raw_max_decode, int) else
+                self.speculative_config.num_speculative_tokens + 1)
+            discard_set = set(discard_sampled_tokens_req_indices)
+            for req_idx, req_id in enumerate(req_ids):
+                req_state = self.requests[req_id]
+                q_len = scheduler_output.num_scheduled_tokens[req_id]
+                if q_len <= max_decode_tokens:
+                    num_drafts = len(
+                        scheduler_output.scheduled_spec_decode_tokens.get(
+                            req_id, ()))
+                    num_sampled = len(valid_sampled_token_ids[req_idx])
+                    num_rejected = (0 if
+                                    (req_idx in discard_set or num_drafts == 0)
+                                    else num_drafts + 1 - num_sampled)
+                    req_state.mamba_read_offset = q_len - 1 - num_rejected
+                else:
+                    req_state.mamba_read_offset = 0
+
         # Append sampled tokens
         for req_idx, req_state, _ in request_seq_lens:
             sampled_ids = valid_sampled_token_ids[req_idx]
@@ -3223,6 +3245,27 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 self.mesh, (request_distribution, metadata_blob),
                 sharding=metadata_attn_sharding)
 
+        spec_config = getattr(self, "speculative_config", None)
+        num_spec_tokens = (spec_config.num_speculative_tokens
+                           if (spec_config
+                               and self.kv_cache_config.has_mamba_layers) else
+                           0)
+        if num_spec_tokens > 0:
+            gdn_read_offsets_cpu = np.zeros(self.max_num_reqs, dtype=np.int32)
+            for dp_rank in range(dp_size):
+                _num_reqs = num_req_per_dp_rank[dp_rank]
+                if _num_reqs == 0:
+                    continue
+                req_offset = dp_rank * max_num_reqs_per_dp_rank
+                for i, req_id in enumerate(req_ids_dp[dp_rank]):
+                    gdn_read_offsets_cpu[req_offset + i] = (
+                        self.requests[req_id].mamba_read_offset)
+            gdn_read_offsets = device_array(self.mesh,
+                                            gdn_read_offsets_cpu,
+                                            sharding=metadata_attn_sharding)
+        else:
+            gdn_read_offsets = None
+
         metadata = common_utils.DeviceBuffer.unpack_arrays(
             dev_arrays_payload, metadata_layout)
         input_ids = metadata["input_ids"]
@@ -3267,6 +3310,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 backend_metadata=self.attention_backend.backend_metadata(
                     metadata, gid),
                 is_decode=is_decode_only,
+                gdn_read_offsets=gdn_read_offsets,
+                num_spec_tokens=num_spec_tokens,
             )
 
             return attention_metadata_gid
@@ -3280,6 +3325,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=attn_padded_num_reqs,
                 is_decode=is_decode_only,
+                gdn_read_offsets=gdn_read_offsets,
+                num_spec_tokens=num_spec_tokens,
             )
 
         attention_metadata: AttentionMetadata | dict[str, AttentionMetadata]

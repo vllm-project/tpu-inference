@@ -166,6 +166,7 @@ class TestTPUJaxRunner:
         # `MagicMock` recurses on every `dtype` access).
         self.runner.input_batch.mamba_state_indices_cpu = np.zeros(
             self.runner.max_num_reqs, dtype=np.int32)
+        self.runner.input_batch._mamba_local_slots = 16
 
         # Mock block tables
         # there will be 2 block tables since there are 2 kv cache groups
@@ -897,6 +898,57 @@ class TestTPUJaxRunner:
             assert runner_b.mesh.devices.shape == mesh_shape
             flat_results_b = runner_b.mesh.devices.flatten().tolist()
             assert flat_results_b == unordered_devices
+
+    @patch('tpu_inference.runner.tpu_runner.TPUSupportedSamplingMetadata')
+    def test_prepare_inputs_populates_gdn_read_offsets_and_num_spec_tokens(
+            self, mock_sampling_metadata):
+        """_prepare_inputs populates gdn_read_offsets and num_spec_tokens when has_mamba_layers and speculative_config are enabled."""
+        self._create_mock_hybrid_kv_cache_config()
+        self.runner.kv_cache_config.has_mamba_layers = True
+        self.runner.speculative_config = SimpleNamespace(
+            num_speculative_tokens=3)
+
+        req_state = MagicMock()
+        req_state.mamba_read_offset = 2
+        self.runner.requests = {'req1': req_state}
+
+        scheduler_output = MagicMock()
+        scheduler_output.total_num_scheduled_tokens = 4
+        scheduler_output.num_scheduled_tokens = {'req1': 4}
+        scheduler_output.scheduled_spec_decode_tokens = {'req1': [10, 11, 12]}
+        scheduler_output.grammar_bitmask = None
+
+        self.runner.input_batch = MagicMock()
+        self.runner.input_batch.max_decode_tokens = 4
+        self.runner.input_batch.num_reqs = 1
+        self.runner.input_batch.req_ids = ['req1']
+        self.runner.input_batch.req_id_to_index = {'req1': 0}
+        self.runner.input_batch.num_computed_tokens_cpu = np.array([10])
+        self.runner.input_batch.token_ids_cpu = np.random.randint(
+            0, 1000, (8, 64), dtype=np.int32)
+        self.runner.input_batch.mamba_state_indices_cpu = np.zeros(
+            self.runner.max_num_reqs, dtype=np.int32)
+        self.runner.input_batch._mamba_local_slots = 16
+
+        mock_block_table = MagicMock()
+        mock_block_table.max_num_blocks_per_req = 8
+        mock_block_table.get_cpu_tensor.return_value = np.zeros((1, 8),
+                                                                dtype=np.int32)
+        self.runner.input_batch.block_table = [
+            mock_block_table, mock_block_table
+        ]
+        mock_sampling_metadata.from_input_batch.return_value = MagicMock()
+
+        with patch('jax.device_put', side_effect=lambda x, *a, **kw: x):
+            output = self.runner._prepare_inputs(scheduler_output)
+        attention_metadata = output[2]
+        shared_attention_metadata = output[11]
+
+        assert shared_attention_metadata.num_spec_tokens == 3
+        for layer_md in attention_metadata.values():
+            assert layer_md.num_spec_tokens == 3
+            assert layer_md.gdn_read_offsets is not None
+            assert int(np.asarray(layer_md.gdn_read_offsets)[0]) == 2
 
 
 class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
