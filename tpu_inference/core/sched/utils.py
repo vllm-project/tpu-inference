@@ -27,9 +27,9 @@ def patch_vllm_scheduler_for_continue_decode():
        or 2 * (max_decode_steps - 1) under async_scheduling).
     2. patched_update_base: Reconciles request.num_computed_tokens on host by
        adding the extra (N - 1) tokens generated on-device once model output returns.
-    3. patched_async_update_request_with_output: Pre-compensates in-flight
-       num_output_placeholders in AsyncScheduler by adding (N - 1) before
-       subtracting N, preventing placeholder underflow in async mode.
+    3. Placeholder pre-compensation in patched_update_base: adds (N - 1) to
+       num_output_placeholders before vLLM subtracts N, preventing placeholder
+       underflow in async mode.
     """
     from vllm.v1.core.sched.scheduler import Scheduler
 
@@ -47,6 +47,11 @@ def patch_vllm_scheduler_for_continue_decode():
             stale = is_stale or getattr(scheduler_self, "_cd_stale_in_flight",
                                         False)
             computed_before = request.num_computed_tokens
+            num_new_tokens = len(new_token_ids)
+            if not stale and num_new_tokens > 1 and \
+                    request.num_output_placeholders > 0:
+                request.num_output_placeholders += num_new_tokens - 1
+
             # Original update appends new_token_ids to request output and trims on stop token.
             res_token_ids, stopped = original_update_base(scheduler_self,
                                                           request,
@@ -54,18 +59,15 @@ def patch_vllm_scheduler_for_continue_decode():
                                                           is_stale=stale,
                                                           **kwargs)
 
-            # schedule() only incremented num_computed_tokens (and in-flight
-            # placeholders under AsyncScheduler) by 1. Reconcile against the
-            # trimmed output count, accounting for any stop-trimmed subtraction
-            # performed by the base scheduler. A stale delivery predates
-            # preemption rollback and must not advance either counter.
+            # schedule() only incremented num_computed_tokens by 1. Reconcile
+            # against the trimmed output count, accounting for any stop-trimmed
+            # subtraction performed by the base scheduler. A stale delivery
+            # predates preemption rollback and must not advance the counter.
             if res_token_ids and not stale:
                 delta = (computed_before + len(res_token_ids) -
                          1) - request.num_computed_tokens
                 if delta > 0:
                     request.num_computed_tokens += delta
-                    if getattr(scheduler_self, "_cd_in_async_update", False):
-                        request.num_output_placeholders += delta
 
             return res_token_ids, stopped
 
