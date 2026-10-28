@@ -14,8 +14,12 @@ tooling fix a release needs goes to main and is cherry-picked to the branch.
 
 ## Cut a release
 
-1. Check that **tpu-inference-ci** passed on the release commit of
-   `releases/vX.Y.Z` (all three `MODEL_IMPL_TYPE` runs).
+1. Run the full CI on the release commit: a **New Build** of
+   **tpu-inference-ci** on `releases/vX.Y.Z` with `NIGHTLY=1`, once for each
+   `MODEL_IMPL_TYPE` (`auto`, `flax_nnx`, `vllm`). This is not the scheduled
+   nightly, which runs on `main`. Without `NIGHTLY=1` a build runs only the
+   smoke tests (BVT) and skips the model and feature tests. All three builds
+   must pass; the approver checks them, the pipeline doesn't.
 2. Start a **New Build** of **tpu-inference-release** on `releases/vX.Y.Z`, at
    that commit. For a pre-release set `RELEASE_VERSION=vX.Y.Zrc1`.
 3. The build then, without anyone's help:

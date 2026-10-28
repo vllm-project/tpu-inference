@@ -51,6 +51,6 @@ buildkite-agent meta-data set release-prerelease "${PRE}"
 buildkite-agent annotate --style info --context release-plan <<EOF
 **tpu-inference ${VERSION}** from \`${BUILDKITE_BRANCH}\` at \`${BUILDKITE_COMMIT:0:12}\` (pre-release: ${PRE})
 
-- CI: confirm tpu-inference-ci passed on this commit before approving: https://buildkite.com/vllm/tpu-inference-ci/builds?branch=${BUILDKITE_BRANCH}
+- CI: before approving, confirm tpu-inference-ci passed on this commit with \`NIGHTLY=1\` for each \`MODEL_IMPL_TYPE\` (auto, flax_nnx, vllm): https://buildkite.com/vllm/tpu-inference-ci/builds?branch=${BUILDKITE_BRANCH}
 - Docker Hub: ${DOCKERHUB_LINE}
 EOF
