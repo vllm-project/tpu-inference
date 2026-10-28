@@ -23,10 +23,44 @@ from jax._src import test_util as jtu
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     ref_ragged_paged_attention
 from tpu_inference.layers.common import flywheel_attention as fa
+from tpu_inference.layers.common.quantization import quantize_kv
 
 jax.config.parse_flags_with_absl()
 
 HEAD_DIM = 256
+FP8_KV_DTYPES = [jnp.float8_e4m3fn, jnp.float8_e5m2]
+# Note: powers of two, so every stored fp8 value times its scale is exact in
+# bf16.
+K_SCALE, V_SCALE = 0.25, 0.5
+
+
+def quantize_cache(cache_v3: jax.Array, kv_dtype: jnp.dtype,
+                   kv_scales: tuple[float, float]) -> jax.Array:
+    """quantize_kv on a (..., 2, head_dim) cache of (K, V) row pairs."""
+    return jnp.stack(quantize_kv(kv_dtype, cache_v3[..., 0, :],
+                                 cache_v3[..., 1, :], *kv_scales),
+                     axis=-2)
+
+
+def dequantize(stored: jax.Array, scale: float) -> jax.Array:
+    """What quantize_kv stored, times its scale, in bf16."""
+    return (stored.astype(jnp.float32) * scale).astype(jnp.bfloat16)
+
+
+def merge_kv_cache(cache_v3: jax.Array) -> jax.Array:
+    """A (pages, page_size, H, 2, head_dim) cache of (K, V) row pairs in the
+    backend's layout: bf16 [k0, v0, k1, v1, ...], the pair axis folded in;
+    fp8 each head pair's two K rows, then its two V rows, [k0, k1, v0, v1,
+    ...], an odd H padded with one zero head."""
+    num_pages, page_size, num_kv_heads, _, head_dim = cache_v3.shape
+    if cache_v3.dtype == jnp.bfloat16:
+        return cache_v3.reshape(num_pages, page_size, 2 * num_kv_heads,
+                                head_dim)
+    padded = jnp.pad(cache_v3,
+                     ((0, 0), (0, 0), (0, num_kv_heads % 2), (0, 0), (0, 0)))
+    head_pairs = padded.reshape(num_pages, page_size, -1, 2, 2, head_dim)
+    return head_pairs.swapaxes(3, 4).reshape(num_pages, page_size, -1,
+                                             head_dim)
 
 
 @jtu.with_config(jax_numpy_dtype_promotion="standard")
@@ -47,14 +81,17 @@ class FlywheelTpuWrapperTest(jtu.JaxTestCase):
                  num_tokens: int = 1024,
                  should_check_cache_copies: bool = True,
                  is_dense: bool = False,
-                 phase: str | None = None) -> None:
+                 phase: str | None = None,
+                 kv_dtype: jnp.dtype = jnp.bfloat16) -> None:
         """Run one step of seq_lens [(q_len, kv_len)], decode rows first, and
         compare output and updated cache against ref_ragged_paged_attention.
 
         is_dense routes the prefill through the dense kernel, which takes one
         fresh request as a (1, num_tokens) row. phase
         overrides the one the runner picks for these lengths, as a DP step
-        does when its ranks disagree.
+        does when its ranks disagree. An fp8 kv_dtype gives the backend K/V
+        and a cache as quantize_kv stores them, K / K_SCALE and V / V_SCALE,
+        and the reference the stored values times their scales.
         """
         num_q_heads, num_kv_heads = num_heads
         rng = np.random.default_rng(1234)
@@ -77,6 +114,15 @@ class FlywheelTpuWrapperTest(jtu.JaxTestCase):
         k = _gen((num_tokens, num_kv_heads, HEAD_DIM))
         v = _gen((num_tokens, num_kv_heads, HEAD_DIM))
         kv_cache_v3 = _gen((num_pages, page_size, num_kv_heads, 2, HEAD_DIM))
+        kv_scales = ((1.0, 1.0) if kv_dtype == jnp.bfloat16 else
+                     (K_SCALE, V_SCALE))
+        stored_k, stored_v = quantize_kv(kv_dtype, k, v, *kv_scales)
+        stored_cache_v3 = quantize_cache(kv_cache_v3, kv_dtype, kv_scales)
+        k = dequantize(stored_k, kv_scales[0])
+        v = dequantize(stored_v, kv_scales[1])
+        cache_k = dequantize(stored_cache_v3[..., 0, :], kv_scales[0])
+        cache_v = dequantize(stored_cache_v3[..., 1, :], kv_scales[1])
+        kv_cache_v3 = jnp.stack([cache_k, cache_v], axis=-2)
         page_indices = jnp.asarray(
             rng.permutation(num_pages)[:max_num_seqs * pages_per_seq].astype(
                 np.int32))
@@ -130,30 +176,31 @@ class FlywheelTpuWrapperTest(jtu.JaxTestCase):
                                           num_tokens)
         kernel_index = jnp.array([fa.step_kernels(num_tokens).index(kernel)],
                                  jnp.int32)
-        static_kwargs = dict(sm_scale=sm_scale)
+        static_kwargs = dict(sm_scale=sm_scale,
+                             k_scale=kv_scales[0],
+                             v_scale=kv_scales[1])
         run = jax.jit(fa.flywheel_tpu_attention,
                       static_argnames=tuple(static_kwargs),
                       donate_argnums=(3, ))
-        # Note: the backend's [k0, v0, k1, v1, ...] head axis is the
-        # v3 (pages, page_size, kv_heads, 2, head_dim) cache with its (K, V)
-        # pair axis folded in, so a reshape converts either way.
-        cache = kv_cache_v3.reshape(num_pages, page_size, 2 * num_kv_heads,
-                                    HEAD_DIM)
+        cache = merge_kv_cache(stored_cache_v3)
         if should_check_cache_copies:
-            hlo = run.lower(q, k, v, cache, kv_lens_arr, page_indices,
-                            cu_q_lens, kv_write_slices, kv_write_num_slices,
-                            distribution, kernel_index,
+            hlo = run.lower(q, stored_k, stored_v, cache, kv_lens_arr,
+                            page_indices, cu_q_lens, kv_write_slices,
+                            kv_write_num_slices, distribution, kernel_index,
                             **static_kwargs).compile().as_text()
-            cache_type = "bf16[" + ",".join(map(str, cache.shape)) + "]"
+            # Note: by shape alone, which no other buffer has, so it matches
+            # any cache dtype's HLO name.
+            cache_shape = "[" + ",".join(map(str, cache.shape)) + "]"
             copies = [
                 line for line in hlo.splitlines()
-                if " copy(" in line and cache_type in line
+                if " copy(" in line and cache_shape in line
             ]
             self.assertEqual(copies, [], msg="\n".join(copies))
         pointer = cache.unsafe_buffer_pointer()
-        output, updated = run(q, k, v, cache, kv_lens_arr, page_indices,
-                              cu_q_lens, kv_write_slices, kv_write_num_slices,
-                              distribution, kernel_index, **static_kwargs)
+        output, updated = run(q, stored_k, stored_v, cache, kv_lens_arr,
+                              page_indices, cu_q_lens, kv_write_slices,
+                              kv_write_num_slices, distribution, kernel_index,
+                              **static_kwargs)
         self.assertEqual(updated.unsafe_buffer_pointer(), pointer)
 
         total = cu_q[-1]
@@ -161,8 +208,10 @@ class FlywheelTpuWrapperTest(jtu.JaxTestCase):
                             expected[:total].astype(jnp.float32),
                             atol=5e-2,
                             rtol=5e-2)
-        self.assertArraysEqual(updated.reshape(kv_cache_v3.shape),
-                               expected_cache_v3)
+        self.assertArraysEqual(
+            updated,
+            merge_kv_cache(
+                quantize_cache(expected_cache_v3, kv_dtype, kv_scales)))
 
     # Note: (8, 1) covers one KV head per chip, whose cache token row
     # is a single (K, V) row pair; (24, 4) and (16, 4) put four pairs in a row.
@@ -234,6 +283,48 @@ class FlywheelTpuWrapperTest(jtu.JaxTestCase):
                       num_heads,
                       128,
                       phase=fa._EXTEND_PHASE)
+
+    # Note: an fp8 cache pads an odd KV head count with one zero head, so
+    # (12, 3) holds 8 head rows per token and (8, 1), one KV head per chip,
+    # holds 4.
+    @parameterized.product(kv_dtype=FP8_KV_DTYPES,
+                           num_heads=[(24, 4), (12, 3), (8, 1)],
+                           page_size=[128, 256])
+    def test_fp8_decode_only(self, kv_dtype, num_heads, page_size):
+        self.run_case([(1, 300), (1, 129), (1, 1), (1, 1000)],
+                      4,
+                      num_heads,
+                      page_size,
+                      kv_dtype=kv_dtype)
+
+    @parameterized.product(kv_dtype=FP8_KV_DTYPES,
+                           num_heads=[(24, 4), (12, 3), (8, 1)])
+    def test_fp8_prefill_only(self, kv_dtype, num_heads):
+        self.run_case([(300, 300), (129, 129), (513, 513)],
+                      0,
+                      num_heads,
+                      128,
+                      kv_dtype=kv_dtype)
+
+    @parameterized.product(kv_dtype=FP8_KV_DTYPES,
+                           num_heads=[(24, 4), (12, 3)])
+    def test_fp8_dense_prefill(self, kv_dtype, num_heads):
+        self.run_case([(700, 700)],
+                      0,
+                      num_heads,
+                      128,
+                      is_dense=True,
+                      kv_dtype=kv_dtype)
+
+    @parameterized.product(kv_dtype=FP8_KV_DTYPES,
+                           num_heads=[(24, 4), (12, 3), (8, 1)])
+    def test_fp8_extend_with_decode_rows_and_a_cached_prefix(
+            self, kv_dtype, num_heads):
+        self.run_case([(1, 300), (1, 129), (40, 700), (200, 457)],
+                      2,
+                      num_heads,
+                      128,
+                      kv_dtype=kv_dtype)
 
 
 if __name__ == "__main__":

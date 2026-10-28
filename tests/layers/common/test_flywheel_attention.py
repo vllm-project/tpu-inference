@@ -40,6 +40,8 @@ NUM_HEADS, NUM_KV_HEADS, HEAD_DIM = 24, 4, 256
 NUM_BLOCKS, BLOCK_SIZE, MAX_BLOCKS_PER_SEQ = 32, 128, 8
 KV_WRITE_BOUND = fa.kv_write_slice_bound(TOTAL_TOKENS, MAX_NUM_SEQS,
                                          BLOCK_SIZE)
+FP8_KV_DTYPES = [jnp.float8_e4m3fn, jnp.float8_e5m2]
+K_SCALE, V_SCALE = 0.25, 0.5
 
 
 @pytest.fixture
@@ -123,10 +125,23 @@ class TestDispatch:
         assert kv_write_slices.shape == (3 * KV_WRITE_BOUND, )
         assert kv_write_num_slices.shape == (1, )
         np.testing.assert_array_equal(distribution, [0, 0, NUM_SEQS])
-        assert kwargs == {"sm_scale": HEAD_DIM**-0.5}
+        assert kwargs == {
+            "sm_scale": HEAD_DIM**-0.5,
+            "k_scale": 1.0,
+            "v_scale": 1.0
+        }
         assert output.shape == (TOTAL_TOKENS, NUM_HEADS, HEAD_DIM)
         assert kv_cache.shape == (NUM_BLOCKS, BLOCK_SIZE, 2 * NUM_KV_HEADS,
                                   HEAD_DIM)
+
+    def test_passes_the_kv_scales_through(self, mesh, monkeypatch):
+        wrapper, _ = self.run_attention(mesh,
+                                        monkeypatch,
+                                        k_scale=K_SCALE,
+                                        v_scale=V_SCALE)
+
+        kwargs = wrapper.call_args.kwargs
+        assert (kwargs["k_scale"], kwargs["v_scale"]) == (K_SCALE, V_SCALE)
 
     @pytest.mark.parametrize(("option", "value", "expected"), [
         ("sinks", jnp.ones((NUM_HEADS, ), jnp.float32), "sinks"),
@@ -143,6 +158,7 @@ class TestDispatch:
 def make_vllm_config(*,
                      block_size: int = 16,
                      user_specified_block_size: bool = False,
+                     cache_dtype: str = "auto",
                      dtype: torch.dtype = torch.bfloat16,
                      head_size: int = HEAD_DIM) -> SimpleNamespace:
     """The vllm_config fields FlywheelAttentionBackend.check_config reads."""
@@ -150,7 +166,7 @@ def make_vllm_config(*,
         cache_config=SimpleNamespace(
             block_size=block_size,
             user_specified_block_size=user_specified_block_size,
-            cache_dtype="auto"),
+            cache_dtype=cache_dtype),
         model_config=SimpleNamespace(use_mla=False,
                                      dtype=dtype,
                                      get_head_size=lambda: head_size),
@@ -170,11 +186,19 @@ class TestCheckConfig:
 
         assert vllm_config.cache_config.block_size == fa.PAGE_SIZE_MULTIPLE
 
+    @pytest.mark.parametrize("cache_dtype", ["fp8", "fp8_e4m3", "fp8_e5m2"])
+    def test_accepts_an_fp8_kv_cache(self, cache_dtype):
+        fa.FlywheelAttentionBackend().check_config(
+            make_vllm_config(cache_dtype=cache_dtype))
+
     @pytest.mark.parametrize(("overrides", "expected"), [
         ({
             "block_size": 16,
             "user_specified_block_size": True
         }, "block size 16"),
+        ({
+            "cache_dtype": "fp8_inc"
+        }, "'fp8_inc' is not bfloat16 or fp8"),
         ({
             "dtype": torch.float16
         }, "not bfloat16"),
@@ -456,3 +480,134 @@ class TestPrepareStep:
                 backend.backend_metadata(arrays, gid)) == jax.tree.map(
                     jnp.shape, backend.backend_metadata(warmup_arrays, gid)))
         assert step_kernel(arrays, bucket) in fa.step_kernels(bucket)
+
+
+# Note: a 128-token bucket holds every kind of step kernel: decode, extend,
+# dense and the ragged span 128. Three KV heads leave an fp8 cache one zero
+# head of padding.
+FP8_STEP_TOKENS, FP8_NUM_HEADS, FP8_NUM_KV_HEADS, FP8_HEAD_DIM = 128, 6, 3, 128
+FP8_SM_SCALE = FP8_HEAD_DIM**-0.5
+
+
+class TestFp8KvCache:
+
+    @pytest.mark.parametrize("kv_dtype", FP8_KV_DTYPES)
+    @pytest.mark.parametrize(("num_kv_heads", "cache_heads"), [(4, 8), (3, 8),
+                                                               (1, 4)])
+    def test_cache_pads_to_whole_head_pairs(self, mesh, kv_dtype, num_kv_heads,
+                                            cache_heads):
+        shape = kv_cache_mod.get_kv_cache_shape_with_mesh(
+            mesh,
+            NUM_BLOCKS,
+            BLOCK_SIZE,
+            num_kv_heads,
+            HEAD_DIM,
+            kv_dtype,
+            attention_backend=fa.FlywheelAttentionBackend())
+
+        assert shape == (NUM_BLOCKS, BLOCK_SIZE, cache_heads, HEAD_DIM)
+
+    def run_step(
+        self, monkeypatch: pytest.MonkeyPatch, kv_dtype: jnp.dtype,
+        kernel: str | int
+    ) -> tuple[jax.Array, jax.Array, dict[str, dict[str, object]]]:
+        """One step of a FP8_STEP_TOKENS-token prefill request on an fp8
+        cache with every kernel stubbed, running step_kernels entry `kernel`:
+        the decode stub returns zeros and the others their q. Returns q, the
+        output and what each kernel got."""
+        seen: dict[str, dict[str, object]] = {}
+
+        def _write(k, v, kv_cache, *args):
+            seen["write"] = {"k_dtype": k.dtype, "v_dtype": v.dtype}
+            return kv_cache
+
+        def _decode(q, k_cache, v_cache, k, v, **kwargs):
+            seen["decode"] = kwargs
+            return jnp.zeros(q.shape, q.dtype), k_cache
+
+        def _varlen(q, k, v, *args, block_table=None, **kwargs):
+            # Note: the paged extend kernel reads the cache, passed as k,
+            # and the ragged one this step's K/V.
+            if block_table is None:
+                seen["ragged"] = dict(kwargs, k_dtype=k.dtype, v_dtype=v.dtype)
+            else:
+                seen["extend"] = kwargs
+            return q
+
+        def _dense(q, k, v, **kwargs):
+            seen["dense"] = dict(kwargs, k_dtype=k.dtype, v_dtype=v.dtype)
+            return q
+
+        monkeypatch.setattr(fa, "write_kv_cache_pages", _write)
+        monkeypatch.setattr(fa, "flash_attn_with_kvcache", _decode)
+        monkeypatch.setattr(fa, "flash_attn_varlen_func", _varlen)
+        monkeypatch.setattr(fa, "flash_attn_func", _dense)
+        rng = np.random.default_rng(0)
+        num_tokens = FP8_STEP_TOKENS
+        q = jnp.asarray(
+            rng.normal(size=(num_tokens, FP8_NUM_HEADS, FP8_HEAD_DIM)),
+            jnp.bfloat16)
+        k, v = (jnp.asarray(
+            rng.normal(size=(num_tokens, FP8_NUM_KV_HEADS, FP8_HEAD_DIM)),
+            kv_dtype) for _ in range(2))
+        kv_cache = jnp.zeros(
+            fa.FlywheelAttentionBackend().get_kv_cache_shape(
+                NUM_BLOCKS, BLOCK_SIZE, FP8_NUM_KV_HEADS, FP8_HEAD_DIM,
+                kv_dtype), kv_dtype)
+        output, _ = fa.flywheel_tpu_attention(
+            q,
+            k,
+            v,
+            kv_cache,
+            jnp.array([num_tokens, 0, 0, 0], jnp.int32),
+            jnp.zeros((MAX_NUM_SEQS * MAX_BLOCKS_PER_SEQ, ), jnp.int32),
+            jnp.array([0] + [num_tokens] * MAX_NUM_SEQS, jnp.int32),
+            jnp.zeros((3 * KV_WRITE_BOUND, ), jnp.int32),
+            jnp.zeros((1, ), jnp.int32),
+            jnp.array([0, 0, 1], jnp.int32),
+            jnp.array([fa.step_kernels(num_tokens).index(kernel)], jnp.int32),
+            sm_scale=FP8_SM_SCALE,
+            k_scale=K_SCALE,
+            v_scale=V_SCALE)
+        return q, output, seen
+
+    @pytest.mark.parametrize("kv_dtype", FP8_KV_DTYPES)
+    def test_every_kernel_reads_the_quantized_kv_with_its_scales(
+            self, monkeypatch, kv_dtype):
+        # Note: lax.switch traces every branch, so one step reaches every
+        # kernel.
+        _, _, seen = self.run_step(monkeypatch, kv_dtype, fa._EXTEND_PHASE)
+
+        assert seen["write"] == {"k_dtype": kv_dtype, "v_dtype": kv_dtype}
+        paged = {
+            "softmax_scale": FP8_SM_SCALE,
+            "k_descale": K_SCALE,
+            "v_descale": V_SCALE,
+            "nheads_k": FP8_NUM_KV_HEADS,
+        }
+        assert paged.items() <= seen["decode"].items()
+        assert paged.items() <= seen["extend"].items()
+        # The prefill kernels attend this step's K/V cast to bf16; k_scale
+        # rides on Q, not in the static softmax_scale.
+        prefill = {
+            "softmax_scale": FP8_SM_SCALE,
+            "k_dtype": jnp.bfloat16,
+            "v_dtype": jnp.bfloat16,
+        }
+        assert prefill.items() <= seen["dense"].items()
+        assert prefill.items() <= seen["ragged"].items()
+
+    # The paged extend kernel applies both descales itself; the prefill
+    # kernels get Q times k_scale, which their stubs return, and leave V's
+    # scale to the backend.
+    @pytest.mark.parametrize(("kernel", "output_scale"), [
+        (fa._DENSE_KERNEL, K_SCALE * V_SCALE),
+        (FP8_STEP_TOKENS, K_SCALE * V_SCALE),
+        (fa._EXTEND_PHASE, 1.0),
+    ])
+    def test_output_takes_each_scale_once(self, monkeypatch, kernel,
+                                          output_scale):
+        q, output, _ = self.run_step(monkeypatch, jnp.float8_e4m3fn, kernel)
+
+        np.testing.assert_array_equal(np.asarray(output, np.float32),
+                                      np.asarray(q, np.float32) * output_scale)
