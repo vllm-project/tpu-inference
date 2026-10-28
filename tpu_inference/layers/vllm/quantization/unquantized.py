@@ -732,6 +732,17 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         layer.w13_weight = Parameter(weights.w13_weight, requires_grad=False)
         layer.w2_weight = Parameter(weights.w2_weight, requires_grad=False)
 
+        if weights.w13_weight_scale is not None:
+            layer.w13_weight_scale = Parameter(weights.w13_weight_scale,
+                                               requires_grad=False)
+        else:
+            layer.w13_weight_scale = None
+        if weights.w2_weight_scale is not None:
+            layer.w2_weight_scale = Parameter(weights.w2_weight_scale,
+                                              requires_grad=False)
+        else:
+            layer.w2_weight_scale = None
+
         if self.moe.has_bias:
             layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
             layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
@@ -749,12 +760,16 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
 
+        w13_scale = getattr(layer, "w13_weight_scale", None)
+        w2_scale = getattr(layer, "w2_weight_scale", None)
         weights = FusedMoEWeights(
             w13_weight=jax_view(layer.w13_weight),
-            w13_weight_scale=None,
+            w13_weight_scale=jax_view(w13_scale)
+            if w13_scale is not None else None,
             w13_bias=jax_view(layer.w13_bias) if self.moe.has_bias else None,
             w2_weight=jax_view(layer.w2_weight),
-            w2_weight_scale=None,
+            w2_weight_scale=jax_view(w2_scale)
+            if w2_scale is not None else None,
             w2_bias=jax_view(layer.w2_bias) if self.moe.has_bias else None,
         )
 
