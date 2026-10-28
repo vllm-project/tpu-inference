@@ -589,7 +589,12 @@ class CompilationManager:
                 num_tokens=num_tokens,
                 num_reqs=num_reqs,
                 warmup_handler=model_fn_warmup,
-                shared_attention_metadata=shared_attention_metadata,
+                # Pass the metadata through call_kwargs so the AOT-compiled
+                # executable has the same signature as the warm-up and serving
+                # calls; otherwise the warm-up recompiles the backbone.
+                call_kwargs={
+                    "shared_attention_metadata": shared_attention_metadata
+                },
             )
 
     def _precompile_substitute_placeholder_token(self) -> None:
