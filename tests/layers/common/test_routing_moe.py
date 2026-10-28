@@ -34,8 +34,8 @@ from tests.layers.common.test_fused_ep_moe_v2 import (HIDDEN, INTER,
 from tests.layers.common.test_moe_hierarchical_dispatch import (_make_mesh,
                                                                 _mesh_id)
 from tpu_inference.layers.common import moe, routing_moe
-from tpu_inference.layers.common.fused_moe_gmm import select_experts
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
+from tpu_inference.layers.common.moe_router import select_experts
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, _get_moe_weight_shardings)
 from tpu_inference.layers.common.sharding import (ShardingAxisName,
@@ -137,6 +137,22 @@ def test_matches_dense_reference(sizes, fp8):
     assert out.sharding.is_equivalent_to(x.sharding, x.ndim)
     error = _rel_l2(out, want)
     assert error < (0.07 if fp8 else 0.01), error
+
+
+@requires_4_devices
+@pytest.mark.usefixtures("tokamax_kernel")
+def test_local_scatter_matches_dense_reference():
+    """ROUTING_MOE_REMOTE_SCATTER=0 (tokamax's local mode) gives the same
+    result."""
+    mesh = _make_mesh(**_SUPPORTED_MESHES[0])
+    x, gating = _inputs(mesh, 2048)
+    w = _weights(mesh, True)
+    want = _dense_reference(x, gating, *w)
+    with mock.patch("tpu_inference.envs.ROUTING_MOE_REMOTE_SCATTER", False):
+        out = _run_kernel(mesh, x, gating, *w)
+    assert out.sharding.is_equivalent_to(x.sharding, x.ndim)
+    error = _rel_l2(out, want)
+    assert error < 0.07, error
 
 
 @requires_4_devices
@@ -296,3 +312,24 @@ def test_each_token_keeps_its_routing(sizes, score_bias):
                                                 **kwargs)
     np.testing.assert_array_equal(out[:, :TOPK], want_indices)
     np.testing.assert_allclose(out[:, TOPK:2 * TOPK], want_weights, rtol=1e-6)
+
+
+@pytest.mark.usefixtures("tokamax_kernel")
+@pytest.mark.parametrize("remote", [True, False])
+def test_scatter_mode_follows_the_flag(remote):
+    """ROUTING_MOE_REMOTE_SCATTER picks the kernel's scatter mode."""
+    from tokamax._src.ops.experimental.routing_moe.layer import modular
+    plans = []
+
+    def fake_kernel(x, *args, moe_plan, **kwargs):
+        del args, kwargs
+        plans.append(moe_plan)
+        return x
+
+    mesh = _make_mesh()
+    x, gating = _inputs(mesh, 64)
+    w1, w2, s1, s2 = _weights(mesh, True)
+    with (mock.patch("tpu_inference.envs.ROUTING_MOE_REMOTE_SCATTER", remote),
+          mock.patch.object(modular, "routing_moe", fake_kernel)):
+        _run_kernel(mesh, x, gating, w1, w2, s1, s2)
+    assert [p.remote_scatter for p in plans] == [remote]

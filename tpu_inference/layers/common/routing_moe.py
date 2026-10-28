@@ -28,7 +28,11 @@ the same order; the weights stay where they are, in the GMM_EP layout
 (w13 = [gate | up], sharded over the expert axes). Devices with the same
 attention-data coordinates hold the same token rows; each of them passes the
 kernel its own share of those rows, so every token is routed once. The
-experts are picked by the GMM path's routing, fused_moe_gmm.select_experts.
+experts are picked by moe_router.select_experts, as on the GMM path.
+
+ROUTING_MOE_REMOTE_SCATTER=0 selects tokamax's local mode instead of the remote
+scatter above: each device sums its experts' rows into a partial result for
+every token, and a reduce-scatter combines the partial results.
 """
 
 import jax
@@ -37,7 +41,7 @@ from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
 import tpu_inference.envs as envs
-from tpu_inference.layers.common.fused_moe_gmm import select_experts
+from tpu_inference.layers.common.moe_router import select_experts
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import as_axes
 from tpu_inference.logger import init_logger
@@ -211,17 +215,18 @@ def routing_moe_func(
     mesh_1d, replica, _ = ep_layout(mesh)
     num_tokens, hidden_size = hidden_states.shape
     num_experts, padded_hidden, _ = w1.shape
-    # An expert id outside the weights would leave its rows unsent, and the
-    # remote scatter would wait for them forever.
+    # An expert id outside the weights would leave its rows unsent, and with
+    # remote scatter the kernel would wait for them forever.
     assert gating_output.shape == (num_tokens, num_experts)
     if padded_hidden != hidden_size:
         hidden_states = jnp.pad(hidden_states,
                                 ((0, 0), (0, padded_hidden - hidden_size)))
     logger.info_once(
         "[MoE]: routing_moe over %d devices, %d experts each, token rows "
-        "split over replica axes %s; %s weights.", mesh.devices.size,
-        num_experts // mesh.devices.size, replica,
-        "fp8" if w1.dtype == jnp.float8_e4m3fn else "bf16")
+        "split over replica axes %s; %s weights, %s scatter.",
+        mesh.devices.size, num_experts // mesh.devices.size, replica,
+        "fp8" if w1.dtype == jnp.float8_e4m3fn else "bf16",
+        "remote" if envs.ROUTING_MOE_REMOTE_SCATTER else "local")
     num_replicas = get_mesh_shape_product(mesh, list(replica))
     num_local_rows = num_tokens * num_replicas // mesh.devices.size
     x = _to_ep_rows(hidden_states, mesh, replica)
@@ -251,8 +256,8 @@ def routing_moe_func(
             tp_axis=None,
             ep_axis=_EP_AXIS,
             use_sp=True,
-            # Each output row goes straight to the device that owns its token.
-            moe_plan=tk_plan.RoutingMoEPlan(remote_scatter=True),
+            moe_plan=tk_plan.RoutingMoEPlan(
+                remote_scatter=envs.ROUTING_MOE_REMOTE_SCATTER),
         )
     out = _from_ep_rows(out, mesh, replica, num_local_rows)
     return out[:, :hidden_size]

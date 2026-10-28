@@ -95,6 +95,7 @@ if TYPE_CHECKING:
     FUSED_EP_MOE_V2_CAPACITY: int = 128
     FUSED_EP_MOE_V2_SHARDED_PLAN: bool = True
     USE_ROUTING_MOE: bool = False
+    ROUTING_MOE_REMOTE_SCATTER: bool = True
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
@@ -616,6 +617,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # tested for now; TP support is a TODO. See layers/common/routing_moe.py.
     "USE_ROUTING_MOE":
     env_bool("USE_ROUTING_MOE", default=False),
+    # How routing_moe returns the expert outputs (remote or local).
+    "ROUTING_MOE_REMOTE_SCATTER":
+    env_bool("ROUTING_MOE_REMOTE_SCATTER", default=True),
     # Gap between token-bucket padding sizes for TPU precompilation. When 0,
     # buckets grow as powers of two; otherwise buckets increase by this gap
     # once past the power-of-two ramp. Previously provided by vllm.envs, which
