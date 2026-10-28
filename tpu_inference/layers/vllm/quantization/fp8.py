@@ -388,6 +388,7 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod, VllmQuantizationMethod):
                 ))
 
         self.fp8_backend = None
+        self.per_act_token_quant = False
 
         self.mesh = mesh
         self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)

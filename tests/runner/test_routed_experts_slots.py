@@ -379,7 +379,16 @@ def _worker(num_blocks=16, dp_size=1):
 
 
 def _connector(hash_block_size=_BLOCK_SIZE):
-    if inspect.signature(AuxOutputSchedulerConnector).parameters:
+    params = inspect.signature(AuxOutputSchedulerConnector).parameters
+    if "kv_cache_manager" in params:
+        manager = SimpleNamespace(block_size=_BLOCK_SIZE, block_pool=None)
+        kv_cache_manager = SimpleNamespace(
+            coordinator=SimpleNamespace(full_attention_group_id=0,
+                                        single_type_managers=[manager]),
+            block_pool=SimpleNamespace(hash_block_size=hash_block_size),
+            kv_cache_config=SimpleNamespace(num_blocks=16))
+        return AuxOutputSchedulerConnector(kv_cache_manager)
+    if params:
         return AuxOutputSchedulerConnector(hash_block_size)
     return AuxOutputSchedulerConnector()
 
