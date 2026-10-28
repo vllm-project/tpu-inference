@@ -58,6 +58,9 @@ class TestDPScheduler:
         config.cache_config.enable_prefix_caching = False
         config.cache_config.prefix_caching_hash_algo = "sha256"
         config.cache_config.mamba_num_blocks = None
+        config.compilation_config = MagicMock()
+        config.compilation_config.static_forward_context = {}
+        config.device_config = MagicMock(slice=None)
         return config
 
     @pytest.fixture
@@ -1366,6 +1369,136 @@ class TestDPScheduler:
 
         # num_scheduled_tokens should remain 100 for prefill, not overwritten with len(sampled_token_ids) == 1
         assert scheduler_output.num_scheduled_tokens["req1"] == 100
+
+    def test_init_detaches_unpicklable_compiled_state_during_worker_spawn(
+        self,
+        mock_kv_cache_config,
+        mock_structured_output_manager,
+    ):
+        """Test that unpicklable compiled state is detached during Process spawn and restored after."""
+        import gc
+        import pickle
+        import threading
+        import types
+
+        unpicklable_attn = threading.Lock()
+        unpicklable_slice = threading.Lock()
+        moe_layer_names = ["model.layers.0.mlp.experts"]
+
+        vllm_config = types.SimpleNamespace(
+            sharding_config=types.SimpleNamespace(total_dp_size=2),
+            scheduler_config=types.SimpleNamespace(
+                _original_scheduler_cls=Scheduler,
+                max_num_seqs=8,
+                max_num_batched_tokens=1024,
+                async_scheduling=False,
+            ),
+            cache_config=types.SimpleNamespace(
+                enable_prefix_caching=False,
+                prefix_caching_hash_algo="sha256",
+                mamba_num_blocks=None,
+            ),
+            compilation_config=types.SimpleNamespace(
+                static_forward_context={"layer_0": unpicklable_attn},
+                static_all_moe_layers=list(moe_layer_names),
+            ),
+            device_config=types.SimpleNamespace(slice=unpicklable_slice),
+        )
+
+        with pytest.raises(TypeError):
+            pickle.dumps(vllm_config)
+
+        observed_during_spawn = []
+
+        def inspect_process(*args, **kwargs):
+            spawn_vllm_config = kwargs["args"][3]
+            # The full vllm_config payload must be picklable while detached during worker spawn,
+            # with static_all_moe_layers (list[str]) kept intact.
+            pickle.dumps(spawn_vllm_config)
+            observed_during_spawn.append((
+                dict(spawn_vllm_config.compilation_config.
+                     static_forward_context),
+                list(spawn_vllm_config.compilation_config.static_all_moe_layers
+                     ),
+                spawn_vllm_config.device_config.slice,
+            ))
+            proc = MagicMock()
+            proc.start.side_effect = lambda: pickle.dumps(spawn_vllm_config)
+            return proc
+
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
+            with patch('multiprocessing.get_context') as mock_get_context:
+                mock_ctx = _make_mock_mp_context()
+                mock_ctx.Process.side_effect = inspect_process
+                mock_get_context.return_value = mock_ctx
+
+                DPScheduler(
+                    vllm_config=vllm_config,
+                    kv_cache_config=mock_kv_cache_config,
+                    structured_output_manager=mock_structured_output_manager,
+                    block_size=16,
+                    log_stats=False,
+                )
+
+        assert observed_during_spawn == [
+            ({}, moe_layer_names, None),
+            ({}, moe_layer_names, None),
+        ]
+        assert vllm_config.compilation_config.static_forward_context == {
+            "layer_0": unpicklable_attn
+        }
+        assert (vllm_config.compilation_config.static_all_moe_layers ==
+                moe_layer_names)
+        assert vllm_config.device_config.slice is unpicklable_slice
+        with pytest.raises(TypeError):
+            pickle.dumps(vllm_config)
+        assert gc.isenabled()
+
+    def test_init_restores_unpicklable_state_and_gc_on_spawn_error(
+        self,
+        mock_vllm_config,
+        mock_kv_cache_config,
+        mock_structured_output_manager,
+    ):
+        """Test that unpicklable compiled state and gc are restored if Process spawn raises."""
+        import gc
+        import threading
+
+        unpicklable_attn = threading.Lock()
+        unpicklable_slice = threading.Lock()
+
+        mock_vllm_config.compilation_config = MagicMock()
+        mock_vllm_config.compilation_config.static_forward_context = {
+            "layer_0": unpicklable_attn
+        }
+        mock_vllm_config.device_config = MagicMock()
+        mock_vllm_config.device_config.slice = unpicklable_slice
+
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
+            with patch('multiprocessing.get_context') as mock_get_context:
+                mock_ctx = _make_mock_mp_context()
+                mock_ctx.Process.side_effect = RuntimeError("spawn failed")
+                mock_get_context.return_value = mock_ctx
+
+                with pytest.raises(RuntimeError, match="spawn failed"):
+                    DPScheduler(
+                        vllm_config=mock_vllm_config,
+                        kv_cache_config=mock_kv_cache_config,
+                        structured_output_manager=
+                        mock_structured_output_manager,
+                        block_size=16,
+                        log_stats=False,
+                    )
+
+        assert mock_vllm_config.compilation_config.static_forward_context == {
+            "layer_0": unpicklable_attn
+        }
+        assert mock_vllm_config.device_config.slice is unpicklable_slice
+        assert gc.isenabled()
 
 
 class TestUpdateVllmConfigForDPScheduler:

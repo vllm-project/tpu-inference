@@ -491,46 +491,64 @@ class DPScheduler(SchedulerInterface):
         self.output_conns: List[Connection] = []  # child writes, parent reads
         self.processes: List[Process] = []
 
+        # Keep unpicklable config state out of process arguments while workers
+        # start, and restore it afterwards in a finally block.
+        compilation_config = self.vllm_config.compilation_config
+        cached_static_forward_context = (
+            compilation_config.static_forward_context.copy())
+        compilation_config.static_forward_context.clear()
+        # `slice` is not declared on DeviceConfig; core_tpu.py attaches it
+        # dynamically via setattr (holding jax.devices()) only in disagg mode.
+        device_config = self.vllm_config.device_config
+        cached_slice = getattr(device_config, 'slice', None)
+        if cached_slice is not None:
+            device_config.slice = None
+
         gc_was_enabled = gc.isenabled()
         if gc_was_enabled:
             gc.disable()
         gc.freeze()
 
-        for rank in range(self.dp_size):
-            # Each pipe gives (parent_end, child_end)
-            # Input pipe: parent sends commands, child receives
-            input_parent_conn, input_child_conn = ctx.Pipe()
-            # Output pipe: child sends results, parent receives
-            output_parent_conn, output_child_conn = ctx.Pipe()
+        try:
+            for rank in range(self.dp_size):
+                # Each pipe gives (parent_end, child_end)
+                # Input pipe: parent sends commands, child receives
+                input_parent_conn, input_child_conn = ctx.Pipe()
+                # Output pipe: child sends results, parent receives
+                output_parent_conn, output_child_conn = ctx.Pipe()
 
-            self.input_conns.append(input_parent_conn)
-            self.output_conns.append(output_parent_conn)
+                self.input_conns.append(input_parent_conn)
+                self.output_conns.append(output_parent_conn)
 
-            process = ctx.Process(
-                target=_scheduler_worker_process,
-                args=(
-                    rank,
-                    input_child_conn,
-                    output_child_conn,
-                    self.vllm_config,
-                    self.per_rank_kv_cache_configs[rank],
-                    structured_output_manager,
-                    block_size,
-                    self.hash_block_size,
-                    mm_registry,
-                    include_finished_set,
-                    log_stats,
-                    original_scheduler_cls,
-                ),
-            )
-            process.start()
-            # Close child ends in parent process
-            input_child_conn.close()
-            output_child_conn.close()
-            self.processes.append(process)
-
-        if gc_was_enabled:
-            gc.enable()
+                process = ctx.Process(
+                    target=_scheduler_worker_process,
+                    args=(
+                        rank,
+                        input_child_conn,
+                        output_child_conn,
+                        self.vllm_config,
+                        self.per_rank_kv_cache_configs[rank],
+                        structured_output_manager,
+                        block_size,
+                        self.hash_block_size,
+                        mm_registry,
+                        include_finished_set,
+                        log_stats,
+                        original_scheduler_cls,
+                    ),
+                )
+                process.start()
+                # Close child ends in parent process
+                input_child_conn.close()
+                output_child_conn.close()
+                self.processes.append(process)
+        finally:
+            compilation_config.static_forward_context.update(
+                cached_static_forward_context)
+            if cached_slice is not None:
+                device_config.slice = cached_slice
+            if gc_was_enabled:
+                gc.enable()
 
         # Reverse mapping from output connection to rank for wait()-based collection.
         self._output_conn_to_rank: Dict[int, int] = {
