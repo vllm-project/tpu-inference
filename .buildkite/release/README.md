@@ -1,16 +1,18 @@
-# tpu-inference-release
+# vllm-tpu-release
 
 One Buildkite pipeline publishes the Docker image (`vllm/vllm-tpu`) and two
 wheels (`tpu-inference` and the combined `vllm-tpu`) of each tpu-inference
 release. It builds the image and both wheels once from the release branch,
 stages the image in GAR and checks the wheels, waits for approval, then
 publishes those same bytes to Docker Hub and PyPI, so users get exactly what
-was built and approved. It runs on the `release-tpu-inference` queue.
+was built and approved. It runs only in the **TPU Release** cluster, on the
+`release-tpu-inference` queue.
 
 The pipeline's settings upload [`pipeline.yml`](pipeline.yml) from the build's
 own checkout, and only for builds of `releases/v*`. A release branch runs the
-release tooling (this directory and `.buildkite/scripts`) it was cut with; a
-tooling fix a release needs goes to main and is cherry-picked to the branch.
+release tooling (`.buildkite/release` and `.buildkite/scripts`) it was cut
+with; a tooling fix a release needs goes to main and is cherry-picked to the
+branch.
 
 ## Cut a release
 
@@ -20,7 +22,7 @@ tooling fix a release needs goes to main and is cherry-picked to the branch.
    nightly, which runs on `main`. Without `NIGHTLY=1` a build runs only the
    smoke tests (BVT) and skips the model and feature tests. All three builds
    must pass; the approver checks them, the pipeline doesn't.
-2. Start a **New Build** of **tpu-inference-release** on `releases/vX.Y.Z`, at
+2. Start a **New Build** of **vllm-tpu-release** on `releases/vX.Y.Z`, at
    that commit. For a pre-release set `RELEASE_VERSION=vX.Y.Zrc1`.
 3. The build then, without anyone's help:
    - **preflight**: resolves the version (the branch, or `RELEASE_VERSION`,
@@ -75,8 +77,6 @@ Build env knobs:
 - The `release-tpu-inference` agents can push to
   `us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci` and
   have `docker buildx` with `imagetools create --prefer-index`.
-- That repository's cleanup policy keeps `vllm-tpu:release-*` tags at least
-  until they are published.
 - PyPI: a Google Trusted Publisher on both `tpu-inference` and `vllm-tpu` for
   the service account of the agents on the `release-tpu-inference` queue.
   Without it, `publish_wheel.sh` can't mint a token and uploads nothing.
