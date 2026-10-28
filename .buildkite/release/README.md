@@ -1,15 +1,16 @@
 # tpu-inference-release
 
-One Buildkite pipeline publishes the Docker image of each tpu-inference
-release, `vllm/vllm-tpu`. It builds the image once from the release branch,
-stages it in GAR, waits for approval, then copies those same bytes to Docker
-Hub, so users pull exactly the image that was built and approved. It runs on
-the `release-tpu-inference` queue.
+One Buildkite pipeline publishes the Docker image (`vllm/vllm-tpu`) and two
+wheels (`tpu-inference` and the combined `vllm-tpu`) of each tpu-inference
+release. It builds the image and both wheels once from the release branch,
+stages the image in GAR and checks the wheels, waits for approval, then
+publishes those same bytes to Docker Hub and PyPI, so users get exactly what
+was built and approved. It runs on the `release-tpu-inference` queue.
 
 The pipeline's settings upload [`pipeline.yml`](pipeline.yml) from the build's
 own checkout, and only for builds of `releases/v*`. A release branch runs the
-release tooling (this directory) it was cut with; a tooling fix a release needs
-goes to main and is cherry-picked to the branch.
+release tooling (this directory and `.buildkite/scripts`) it was cut with; a
+tooling fix a release needs goes to main and is cherry-picked to the branch.
 
 ## Cut a release
 
@@ -19,20 +20,27 @@ goes to main and is cherry-picked to the branch.
    that commit. For a pre-release set `RELEASE_VERSION=vX.Y.Zrc1`.
 3. The build then, without anyone's help:
    - **preflight**: resolves the version (the branch, or `RELEASE_VERSION`,
-     which must be a version of the branch's `X.Y.Z`) and warns if `vX.Y.Z`
-     is already on Docker Hub;
+     which must be a version of the branch's `X.Y.Z`), checks PyPI doesn't have
+     the version yet, and warns if `vX.Y.Z` is already on Docker Hub;
    - **builds once**: the image, from the release checkout's
      `docker/Dockerfile` and vLLM pin (`.buildkite/vllm_lkg.version`), staged
-     in GAR as `vllm-tpu:release-<version>-build<N>`. CI's own `vllm-tpu` tags
-     are `<commit>-<vllm commit>-<tpu>`, so the two never collide.
+     in GAR as `vllm-tpu:release-<version>-build<N>` (CI's own `vllm-tpu` tags
+     are `<commit>-<vllm commit>-<tpu>`, so the two never collide), and both
+     wheels (`tpu-inference` and `vllm-tpu`);
+   - **checks**: the wheels resolve together from pypi.org for CPython 3.12
+     on x86_64 Linux (`check_wheels.sh`).
 4. **Approve** the publish block. It names the staged digest and asks whether
    to move `latest` (never for a pre-release; no default) and whether an
-   existing Docker Hub tag may be replaced.
-5. The build publishes what it built:
-   - the staged image, copied by digest to Docker Hub as
+   existing Docker Hub tag may be replaced. PyPI releases can't be replaced.
+5. The build publishes what it built and checked:
+   - copies the staged image by digest to Docker Hub as
      `vllm/vllm-tpu:vX.Y.Z` (and `latest` if chosen);
-   - then checks, without credentials, that an anonymous request for the tag
-     returns the staged digest.
+   - uploads `tpu-inference`, then `vllm-tpu`, to PyPI with Trusted Publishing
+     (`.buildkite/scripts/publish_wheel.sh`), waiting until each wheel installs
+     from PyPI;
+   - checks, without credentials, that an anonymous request for the Docker Hub
+     tag returns the staged digest and that `vllm-tpu==X.Y.Z` resolves from
+     pypi.org.
 
 Build env knobs:
 
@@ -47,14 +55,14 @@ Build env knobs:
 - GitHub: no builds on push or pull request (manual only).
 - Steps:
 
-    ```yaml
-    steps:
-      - label: ":pipeline: Upload the release pipeline"
-        branches: "releases/v*"
-        agents:
-          queue: release-tpu-inference
-        command: buildkite-agent pipeline upload .buildkite/release/pipeline.yml
-    ```
+  ```yaml
+  steps:
+    - label: ":pipeline: Upload the release pipeline"
+      branches: "releases/v*"
+      agents:
+        queue: release-tpu-inference
+      command: buildkite-agent pipeline upload .buildkite/release/pipeline.yml
+  ```
 
 ## One-time setup outside this repo
 
@@ -65,3 +73,6 @@ Build env knobs:
   have `docker buildx` with `imagetools create --prefer-index`.
 - That repository's cleanup policy keeps `vllm-tpu:release-*` tags at least
   until they are published.
+- PyPI: a Google Trusted Publisher on both `tpu-inference` and `vllm-tpu` for
+  the service account of the agents on the `release-tpu-inference` queue.
+  Without it, `publish_wheel.sh` can't mint a token and uploads nothing.
