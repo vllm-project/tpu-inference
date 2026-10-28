@@ -575,7 +575,8 @@ class KVCacheManager:
                         sliding_window=sliding_window)
 
             speculative_config = self.runner.speculative_config
-            if speculative_config:
+            if (speculative_config
+                    and speculative_config.draft_model_config is not None):
                 method = speculative_config.method
                 draft_model_config = speculative_config.draft_model_config
                 draft_hf_config = draft_model_config.hf_config
