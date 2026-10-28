@@ -68,6 +68,13 @@ if [[ -n "${NUM_GPU_BLOCKS_OVERRIDE}" ]]; then
   VLLM_EXTRA_ARGS+=(--num-gpu-blocks-override "${NUM_GPU_BLOCKS_OVERRIDE}")
 fi
 
+# API server processes in front of the one engine. Unset, vLLM starts one per
+# vLLM data-parallel rank, which is 1 here (attention DP is inside the engine),
+# and that single event-loop thread streams every request's tokens.
+if [[ -n "${API_SERVER_COUNT:-}" ]]; then
+  VLLM_EXTRA_ARGS+=(--api-server-count "${API_SERVER_COUNT}")
+fi
+
 # ---------------------------------------------------------------------------
 # Where the weights come from.
 #
