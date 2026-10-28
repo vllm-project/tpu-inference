@@ -14,7 +14,7 @@
 """Host-side pooling paths for flax_nnx pooling models (`--runner pooling`).
 
 The pooling runner copies the step's hidden states to the host and runs
-vLLM's pooler on CPU. Two optional speed-ups live here:
+vLLM's pooler on CPU. Three optional speed-ups live here:
 
 * `pool_on_host`: the same D2H copy and the same vLLM pooler call as before,
   but the pooler runs as plain torch on the host instead of under torchax's
@@ -27,6 +27,10 @@ vLLM's pooler on CPU. Two optional speed-ups live here:
   its embedding head (normalization, `dimensions`, ST projector) is applied
   exactly as before. Opt-in, for models that declare
   `supports_device_mean_pooling` (JinaBert, `JINA_BERT_DEVICE_POOLING=1`).
+* `DeviceSeqClassifier`: the `classify` counterpart for models that declare
+  `supports_device_classifier` (JinaBertForSequenceClassification): mean
+  pooling, the linear head and softmax all run on the TPU and only
+  [num_reqs, num_labels] is copied to the host.
 """
 
 import dataclasses
@@ -285,3 +289,158 @@ class DeviceMeanPooler:
         while reqs <= limit:
             yield reqs
             reqs *= 2
+
+
+def classifier_logits_and_probs(
+        means: jax.Array, kernel: jax.Array,
+        bias: jax.Array) -> tuple[jax.Array, jax.Array]:
+    """float32 [R, L] logits and softmax probabilities of a linear head.
+
+    `kernel` is [hidden, L], `bias` [L]. HIGHEST precision keeps the head in
+    true float32 on the MXU so scores near a decision threshold match the
+    PyTorch reference.
+    """
+    logits = lax.dot(means.astype(jnp.float32),
+                     kernel.astype(jnp.float32),
+                     precision=lax.Precision.HIGHEST,
+                     preferred_element_type=jnp.float32)
+    logits = logits + bias.astype(jnp.float32)
+    return logits, jax.nn.softmax(logits, axis=-1)
+
+
+def _segment_classify(hidden: jax.Array, bounds: jax.Array, kernel: jax.Array,
+                      bias: jax.Array) -> tuple[jax.Array, jax.Array]:
+    """Per-request (logits, probs) of a linear head on segment means."""
+    return classifier_logits_and_probs(_segment_means(hidden, bounds), kernel,
+                                       bias)
+
+
+def classify_from_seq_lens(
+    hidden: jax.Array,
+    seq_lens: jax.Array,
+    kernel: jax.Array,
+    bias: jax.Array,
+    max_reqs: int = FUSED_POOLING_MAX_REQS,
+) -> tuple[jax.Array, jax.Array]:
+    """(logits, probs) [max_reqs, L], fused into the model step's XLA program.
+
+    Same role as `mean_pool_from_seq_lens` for the classify task: the mean
+    pooling, head and softmax run in the encoder's XLA launch.
+    """
+    means, _ = mean_pool_from_seq_lens(hidden, seq_lens, max_reqs)
+    return classifier_logits_and_probs(means, kernel, bias)
+
+
+class DeviceSeqClassifier:
+    """Mean pooling + linear head + softmax on the device (`classify` task).
+
+    Drop-in for `DeviceMeanPooler` (same `__call__` / `precompile`), selected
+    for models with `supports_device_classifier`. Returns, per request, the
+    softmax probabilities (or raw logits when the request sets
+    `use_activation=False`) as float32 [num_labels] CPU tensors, i.e. what
+    vLLM's ClassifierPoolerHead returns. Pooler-config score calibration
+    (`logit_mean` / `logit_sigma`) is not applied here: steps that need it
+    are left to the CPU pooler.
+    """
+
+    def __init__(self,
+                 kernel: jax.Array,
+                 bias: jax.Array,
+                 max_num_reqs: int,
+                 fused_max_reqs: int = 0):
+        self.kernel = kernel
+        self.bias = bias
+        self.max_reqs = min(MAX_DEVICE_POOLING_REQS,
+                            _req_bucket(max(max_num_reqs, 1)))
+        self.fused_max_reqs = min(max(fused_max_reqs, 0), self.max_reqs)
+        self._classify = jax.jit(_segment_classify)
+
+    @classmethod
+    def maybe_create(cls,
+                     kernel: jax.Array,
+                     bias: jax.Array,
+                     mesh: Mesh,
+                     max_num_reqs: int,
+                     fused_max_reqs: int = 0,
+                     calibrated: bool = False
+                     ) -> Optional["DeviceSeqClassifier"]:
+        if mesh.size != 1:
+            logger.warning(
+                "Device classification supports a single-device mesh only "
+                "(got %d devices); using vLLM's CPU pooler.", mesh.size)
+            return None
+        if calibrated:
+            logger.warning(
+                "Pooler config sets logit_mean/logit_sigma; using vLLM's CPU "
+                "pooler for classification.")
+            return None
+        obj = cls(kernel, bias, max_num_reqs, fused_max_reqs=fused_max_reqs)
+        logger.info(
+            "Mean pooling + classifier head run on the device (up to %d "
+            "requests per step, fused_max_reqs=%d, num_labels=%d).",
+            obj.max_reqs, obj.fused_max_reqs, int(bias.shape[0]))
+        return obj
+
+    def __call__(
+        self,
+        hidden_states: jax.Array,
+        pooling_metadata: Any,
+        num_scheduled_tokens: np.ndarray,
+        aux_hidden_states: Optional[Sequence[jax.Array]] = None,
+    ) -> Optional[list]:
+        """Pooler output for this step, or None to use the CPU pooler."""
+        num_reqs = len(num_scheduled_tokens)
+        if not 0 < num_reqs <= self.max_reqs:
+            return None
+        if any(task != "classify" for task in pooling_metadata.tasks):
+            return None
+        lens = np.asarray(num_scheduled_tokens, dtype=np.int64)
+        # Partial prefills: leave them to the CPU pooler.
+        if not np.array_equal(lens, pooling_metadata.prompt_lens.numpy()):
+            return None
+        ends = np.cumsum(lens)
+        if ends[-1] > hidden_states.shape[0]:
+            return None
+
+        if (aux_hidden_states is not None and len(aux_hidden_states) == 2
+                and num_reqs <= aux_hidden_states[0].shape[0]):
+            logits_dev, probs_dev = aux_hidden_states
+        else:
+            bounds = np.zeros((2, _req_bucket(num_reqs)), np.int32)
+            bounds[0, :num_reqs] = ends - lens
+            bounds[1, :num_reqs] = ends
+            logits_dev, probs_dev = self._classify(hidden_states, bounds,
+                                                   self.kernel, self.bias)
+
+        # Same rule as vLLM's ClassifierPoolerHead: activation iff
+        # bool(use_activation) (the serving layer resolves None to the
+        # pooler default before requests reach the runner).
+        use_act = [
+            bool(getattr(p, "use_activation", None))
+            for p in pooling_metadata.pooling_params
+        ]
+        if all(use_act):
+            arr = np.array(np.asarray(probs_dev)[:num_reqs], copy=True)
+        elif not any(use_act):
+            arr = np.array(np.asarray(logits_dev)[:num_reqs], copy=True)
+        else:
+            probs = np.asarray(probs_dev)[:num_reqs]
+            logits = np.asarray(logits_dev)[:num_reqs]
+            arr = np.where(np.asarray(use_act)[:, None], probs, logits)
+        return list(torch.from_numpy(np.ascontiguousarray(arr)))
+
+    def precompile(self, num_tokens_paddings: Sequence[int], hidden_size: int,
+                   dtype: Any, sharding: NamedSharding) -> None:
+        """Compiles the standalone (non-fused) path for every bucket pair."""
+        for num_tokens in num_tokens_paddings:
+            hidden = jax.device_put(
+                jnp.zeros((num_tokens, hidden_size), dtype), sharding)
+            limit = min(self.max_reqs, _req_bucket(num_tokens))
+            reqs = MIN_REQ_BUCKET
+            while reqs <= limit:
+                if reqs > self.fused_max_reqs:
+                    bounds = np.zeros((2, reqs), np.int32)
+                    jax.block_until_ready(
+                        self._classify(hidden, bounds, self.kernel,
+                                       self.bias))
+                reqs *= 2

@@ -26,8 +26,9 @@ with the same interpreter that runs vLLM:
 3. sitecustomize.py registry hook — `vllm serve` spawns an API-server
    process that validates ModelConfig BEFORE loading vllm.general_plugins
    or importing tpu_inference, so in-repo registration cannot fire there.
-   The hook registers the JinaBert archs the moment vLLM's registry module
-   is imported, in every process.
+   The hook registers the JinaBert archs (incl.
+   JinaBertForSequenceClassification) the moment vLLM's registry module is
+   imported, in every process. Re-running upgrades an older hook in place.
 
 Also remember: install tpu-inference editable (`pip install -e .`) so all
 vLLM subprocesses import the repo code rather than a stale site-packages
@@ -122,11 +123,15 @@ class _JinaRegFinder(_jina_abc.MetaPathFinder):
         def exec_module(module, _orig=_orig):
             _orig(module)
             try:
-                for arch in ("JinaBertForMaskedLM", "JinaBertModel"):
+                for arch, cls in (
+                    ("JinaBertForMaskedLM", "JinaBertForMaskedLM"),
+                    ("JinaBertModel", "JinaBertForMaskedLM"),
+                    ("JinaBertForSequenceClassification",
+                     "JinaBertForSequenceClassification"),
+                ):
                     module.ModelRegistry.register_model(
                         arch,
-                        "tpu_inference.models.vllm.jina_bert_compat:"
-                        "JinaBertForMaskedLM")
+                        "tpu_inference.models.vllm.jina_bert_compat:" + cls)
             except Exception:
                 pass
 
@@ -135,15 +140,32 @@ class _JinaRegFinder(_jina_abc.MetaPathFinder):
 
 
 _jina_sys.meta_path.insert(0, _JinaRegFinder())
+# --- end {marker} ---
 '''.format(marker=MARKER)
+
+# Present only in the current hook version (older hooks lack it).
+_HOOK_VERSION_TAG = "JinaBertForSequenceClassification"
+_HOOK_LAST_LINE = "_jina_sys.meta_path.insert(0, _JinaRegFinder())\n"
 
 
 def patch_sitecustomize():
     sc = os.path.join(site.getsitepackages()[0], "sitecustomize.py")
-    if os.path.exists(sc) and MARKER in open(sc).read():
+    src = open(sc).read() if os.path.exists(sc) else ""
+    if MARKER in src and _HOOK_VERSION_TAG in src:
         print(f"[skip] sitecustomize already hooked: {sc}")
         return
-    with open(sc, "a" if os.path.exists(sc) else "w") as f:
+    if MARKER in src:
+        # Older hook: replace it with the current one, keep everything else.
+        start = src.rfind("\n", 0, src.index(MARKER)) + 1
+        end = src.index(_HOOK_LAST_LINE, start) + len(_HOOK_LAST_LINE)
+        if src.startswith(f"# --- end {MARKER}", end):
+            end = src.index("\n", end) + 1
+        src = src[:start] + SITECUSTOMIZE_HOOK.lstrip("\n") + src[end:]
+        with open(sc, "w") as f:
+            f.write(src)
+        print(f"[ok]   upgraded hook in {sc}")
+        return
+    with open(sc, "a" if src else "w") as f:
         f.write(SITECUSTOMIZE_HOOK)
     print(f"[ok]   hooked {sc}")
 

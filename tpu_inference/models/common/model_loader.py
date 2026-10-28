@@ -86,7 +86,8 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     from tpu_inference.models.jax.llama4 import Llama4ForCausalLM
     from tpu_inference.models.jax.llama_eagle3 import EagleLlama3ForCausalLM
     from tpu_inference.models.jax.llama_guard_4 import LlamaGuard4ForCausalLM
-    from tpu_inference.models.jax.jina_bert import JinaBertForMaskedLM
+    from tpu_inference.models.jax.jina_bert import (
+        JinaBertForMaskedLM, JinaBertForSequenceClassification)
     from tpu_inference.models.jax.qwen2 import Qwen2ForCausalLM
     from tpu_inference.models.jax.qwen2_5_vl import \
         Qwen2_5_VLForConditionalGeneration
@@ -111,6 +112,9 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     # arch string when the checkpoint is exported without the MLM head.
     _MODEL_REGISTRY["JinaBertForMaskedLM"] = JinaBertForMaskedLM
     _MODEL_REGISTRY["JinaBertModel"] = JinaBertForMaskedLM
+    # JinaBert + mean pooling + linear head (runner="pooling", classify).
+    _MODEL_REGISTRY[
+        "JinaBertForSequenceClassification"] = JinaBertForSequenceClassification
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
@@ -330,6 +334,31 @@ def _not_support(*args, **kwargs):
     raise NotImplementedError("The action on this path is not supported yet.")
 
 
+def _build_seq_cls_pooler(pooler_config: Any, jit_model: Optional[Any]):
+    """vLLM `classify` DispatchPooler: mean pooling + the model's head.
+
+    This is the CPU (fallback) path; `DeviceSeqClassifier` normally computes
+    the same thing on the TPU. The head is a float32 torch copy of the
+    loaded JAX `classifier` (kernel [hidden, L] -> torch weight [L, hidden]).
+    """
+    from vllm.model_executor.layers.pooler import DispatchPooler
+    from vllm.model_executor.layers.pooler.seqwise.methods import MeanPool
+
+    classifier = None
+    if jit_model is not None:
+        kernel, bias = jit_model.classifier_params()
+        kernel = np.asarray(kernel, dtype=np.float32)
+        bias = np.asarray(bias, dtype=np.float32)
+        classifier = torch.nn.Linear(kernel.shape[0], kernel.shape[1])
+        with torch.no_grad():
+            classifier.weight.copy_(torch.from_numpy(kernel.T.copy()))
+            classifier.bias.copy_(torch.from_numpy(bias.copy()))
+        classifier.eval()
+    return DispatchPooler.for_seq_cls(pooler_config,
+                                      pooling=MeanPool(),
+                                      classifier=classifier)
+
+
 # TODO(pooyam): We need to refactor this. This is returning a bunch of functions that do not work with all models and this is not very easy to see from the code.
 def get_flax_model(
     vllm_config: VllmConfig,
@@ -355,12 +384,15 @@ def get_flax_model(
 
     # Instantiate pooler if needed for Hybrid Path
     is_pooling = vllm_config.model_config.runner_type == "pooling"
+    is_classify = (is_pooling
+                   and vllm_config.model_config.convert_type == "classify")
+    pooler_config = None
     pooler = None
     if is_pooling:
         from vllm.model_executor.layers.pooler import DispatchPooler
         pooler_config = getattr(vllm_config.model_config, "pooler_config",
                                 None)
-        if pooler_config is not None:
+        if pooler_config is not None and not is_classify:
             pooler = DispatchPooler.for_embedding(pooler_config)
 
     jit_model = _get_nnx_model(model_class,
@@ -370,6 +402,15 @@ def get_flax_model(
                                pooler=pooler,
                                is_draft_model=is_draft_model)
     vllm_config.model_config.dtype = original_dtype
+
+    supports_device_classifier = getattr(model_class,
+                                         "supports_device_classifier", False)
+    if is_classify and pooler_config is not None:
+        # Built after loading: the CPU-fallback classifier is a torch copy
+        # of the loaded head.
+        pooler = _build_seq_cls_pooler(
+            pooler_config,
+            jit_model if supports_device_classifier else None)
     kv_cache_sharding = NamedSharding(
         mesh,
         PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
@@ -391,8 +432,28 @@ def get_flax_model(
     _state_treedef = jax.tree_util.tree_structure(state)
 
     device_mean_pooler = None
+    fuse_classifier = False
     if pooler is not None:
-        if getattr(model_class, "supports_device_mean_pooling", False):
+        if is_classify and supports_device_classifier:
+            if envs.JINA_BERT_DEVICE_POOLING:
+                from tpu_inference.models.common.pooling import (
+                    FUSED_POOLING_MAX_REQS, DeviceSeqClassifier,
+                    classify_from_seq_lens)
+                kernel, bias = jit_model.classifier_params()
+                calibrated = (
+                    getattr(pooler_config, "logit_mean", None) is not None
+                    or getattr(pooler_config, "logit_sigma", None) is not None)
+                device_mean_pooler = DeviceSeqClassifier.maybe_create(
+                    kernel,
+                    bias,
+                    mesh,
+                    vllm_config.scheduler_config.max_num_seqs,
+                    fused_max_reqs=FUSED_POOLING_MAX_REQS
+                    if envs.JINA_BERT_FUSED_POOLING else 0,
+                    calibrated=calibrated,
+                )
+                fuse_classifier = device_mean_pooler is not None
+        elif getattr(model_class, "supports_device_mean_pooling", False):
             if envs.JINA_BERT_DEVICE_POOLING:
                 from tpu_inference.models.common.pooling import (
                     FUSED_POOLING_MAX_REQS, DeviceMeanPooler,
@@ -411,6 +472,7 @@ def get_flax_model(
                 model_class.__name__)
     fuse_mean_pooling = (not is_draft_model and device_mean_pooler is not None
                          and device_mean_pooler.fused_max_reqs > 0)
+    fuse_classifier = fuse_classifier and fuse_mean_pooling
 
     @jax.jit(
         out_shardings=(
@@ -429,7 +491,19 @@ def get_flax_model(
         state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
         model = nnx.merge(graphdef, state)
         kv_caches, hidden_states, aux_hidden_states, *rest = model(*args)
-        if fuse_mean_pooling and not aux_hidden_states:
+        if fuse_classifier and not aux_hidden_states:
+            # args: (kv_caches, input_ids, attn_metadata, ...). Pooled
+            # (logits, probs) [fused_max_reqs, num_labels] in the same launch.
+            kernel, bias = model.classifier_params()
+            aux_hidden_states = list(
+                classify_from_seq_lens(
+                    hidden_states,
+                    args[2].seq_lens,
+                    kernel,
+                    bias,
+                    device_mean_pooler.fused_max_reqs,
+                ))
+        elif fuse_mean_pooling and not aux_hidden_states:
             # args: (kv_caches, input_ids, attn_metadata, ...)
             aux_hidden_states = list(
                 mean_pool_from_seq_lens(

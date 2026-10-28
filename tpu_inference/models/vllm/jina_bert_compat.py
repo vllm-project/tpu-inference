@@ -31,6 +31,13 @@ import torch
 class JinaBertForMaskedLM(torch.nn.Module):
     # Interface flags read by vLLM's registry inspection.
     is_pooling_model = True
+    # Bidirectional encoder: vLLM then disables prefix caching and chunked
+    # prefill (a cached prefix would reach the model as a partial prefill,
+    # which mean pooling over bidirectional attention cannot serve).
+    attn_type = "encoder_only"
+    # Mean pooling. `default_seq_pooling_type` is the name read by current
+    # vLLM; `default_pooling_type` is kept for older versions.
+    default_seq_pooling_type = "MEAN"
     default_pooling_type = "MEAN"
 
     def __init__(self, *args, **kwargs):
@@ -60,3 +67,13 @@ class JinaBertForMaskedLM(torch.nn.Module):
     def load_weights(self, *args, **kwargs):
         # Prevent vLLM from trying to load weights into this stub.
         return None
+
+
+class JinaBertForSequenceClassification(JinaBertForMaskedLM):
+    """Registry stub for JinaBert + mean pooling + linear head.
+
+    The `...ForSequenceClassification` suffix makes vLLM default to
+    `--runner pooling --convert classify`. The real model is
+    `tpu_inference.models.jax.jina_bert.JinaBertForSequenceClassification`.
+    """
+

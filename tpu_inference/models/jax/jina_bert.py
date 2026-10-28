@@ -580,9 +580,60 @@ class JinaBertForMaskedLM(JaxModule, LoadableWithIterator):
                     name = name[len("bert."):]
                 if name.startswith("cls.") or name.startswith("pooler."):
                     continue
+                # Sequence-classification head (subclass): kept in float32.
+                if name.startswith("classifier."):
+                    yield name, weight.float()
+                    continue
                 yield name, weight.to(torch_dtype)
 
         loader = JaxAutoWeightsLoader(self, skip_prefixes=None)
         loaded = loader.load_weights(_filtered(weights))
         self.model.encoder.pack_megakernel_weights()
         return loaded
+
+
+class JinaBertForSequenceClassification(JinaBertForMaskedLM):
+    """JinaBert + mean pooling + linear head ("...ForSequenceClassification").
+
+    Serves `--runner pooling --convert classify` (the default for this arch
+    string): `/classify` returns softmax(classifier(mean_pool(hidden))). The
+    head is `classifier.weight` [num_labels, hidden] / `classifier.bias`
+    [num_labels] in the checkpoint, kept in float32 and applied at HIGHEST
+    matmul precision whatever the encoder dtype, so scores near a decision
+    threshold match the PyTorch reference. With device pooling (default) the
+    mean pooling, head and softmax are computed on the TPU (fused into the
+    model step for <= FUSED_POOLING_MAX_REQS requests), and only
+    [num_requests, num_labels] is copied to the host.
+    """
+
+    supports_device_classifier = True
+
+    def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
+                 mesh: Mesh) -> None:
+        super().__init__(vllm_config, rng_key, mesh)
+        config = vllm_config.model_config.hf_config
+        self.num_labels = int(getattr(config, "num_labels", 2))
+        self.classifier = JaxLinear(
+            config.hidden_size,
+            self.num_labels,
+            use_bias=True,
+            dtype=jnp.float32,
+            kernel_init=nnx.with_partitioning(init_fn, (None, None)),
+            bias_init=nnx.with_partitioning(init_fn, (None, )),
+            rngs=nnx.Rngs(rng_key),
+            prefix="classifier",
+        )
+
+    def classify_pooled(self, pooled: jax.Array) -> jax.Array:
+        """[R, hidden] pooled embeddings -> float32 [R, num_labels] logits."""
+        logits = jax.lax.dot(pooled.astype(jnp.float32),
+                             self.classifier.weight.value.astype(jnp.float32),
+                             precision=jax.lax.Precision.HIGHEST,
+                             preferred_element_type=jnp.float32)
+        return logits + self.classifier.bias.value.astype(jnp.float32)
+
+    def classifier_params(self) -> Tuple[jax.Array, jax.Array]:
+        """(kernel [hidden, num_labels], bias [num_labels]) as float32."""
+        return (self.classifier.weight.value.astype(jnp.float32),
+                self.classifier.bias.value.astype(jnp.float32))
+
