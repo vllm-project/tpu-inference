@@ -491,6 +491,17 @@ class CompilationManager:
         else:
             mamba_state_indices = None
 
+        num_spec_tokens = (
+            self.runner.speculative_config.num_speculative_tokens
+            if self.runner.speculative_config else 0)
+        if self.runner.kv_cache_config.has_mamba_layers and num_spec_tokens > 0:
+            gdn_read_offsets = device_array(self.runner.mesh,
+                                            np.zeros(self.runner.max_num_reqs,
+                                                     dtype=np.int32),
+                                            sharding=metadata_attn_sharding)
+        else:
+            gdn_read_offsets = None
+
         def build_block_table(kv_cache_gid: int) -> jax.Array:
             block_table_obj = self.runner.input_batch.block_table[kv_cache_gid]
             shape = (self.runner.max_num_reqs,
@@ -515,6 +526,8 @@ class CompilationManager:
                 pcp=pcp,
                 backend_metadata=attention_backend.backend_metadata(
                     attention_arrays, gid),
+                gdn_read_offsets=gdn_read_offsets,
+                num_spec_tokens=num_spec_tokens,
             )
 
             return attention_metadata_gid
@@ -527,6 +540,8 @@ class CompilationManager:
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=num_reqs,
+                gdn_read_offsets=gdn_read_offsets,
+                num_spec_tokens=num_spec_tokens,
             )
 
         attention_metadata: AttentionMetadata | dict[str, AttentionMetadata]

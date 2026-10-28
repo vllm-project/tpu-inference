@@ -249,3 +249,33 @@ def test_default_backend_has_no_step_metadata():
                                  dp_size=1,
                                  mesh=None,
                                  sharding=None) == {}
+
+
+def test_gdn_forwards_read_offsets_and_num_spec_tokens(mesh):
+    captured = {}
+
+    def capturing_kernel(qkv, b, a, conv_state, recurrent_state, conv_weight,
+                         conv_bias, a_log, dt_bias, query_start_loc,
+                         state_indices, distribution, seq_lens,
+                         read_state_indices, *extra_args, **options):
+        captured["num_extra_args"] = len(extra_args)
+        captured["options"] = options
+        read_offset_val = extra_args[0][0]
+        output = jnp.broadcast_to(
+            read_offset_val.astype(qkv.dtype),
+            (qkv.shape[0], options["n_v"] * options["d_v"]),
+        )
+        return (conv_state, recurrent_state), output
+
+    inputs = make_gdn_inputs(mesh)
+    read_offsets = jnp.array([2], jnp.int32)
+    _, output = gdn_attention.run_jax_gdn_attention(
+        **inputs,
+        read_offsets=read_offsets,
+        num_spec_tokens=3,
+        conv1d_gdn_kernel=capturing_kernel,
+    )
+
+    assert captured["num_extra_args"] == 1
+    assert captured["options"]["num_spec_tokens"] == 3
+    np.testing.assert_array_equal(output.astype(jnp.float32), 2.0)
