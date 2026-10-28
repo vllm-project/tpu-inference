@@ -91,7 +91,7 @@ def run_jax_gdn_attention(
           resumes from the cached state block of the last block boundary and
           checkpoints into the block covering its current position.
         conv1d_gdn_kernel: The linear attention backend's fused conv1d + GDN
-          kernel. Defaults to the GDN v3 kernel.
+          kernel. Defaults to GDNLinearAttentionBackend's kernel.
 
     Returns:
         A tuple containing:

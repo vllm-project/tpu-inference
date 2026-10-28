@@ -22,6 +22,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from jax.sharding import Mesh
+from tokamax._src.ops.causal_conv1d_gated_delta_rule import \
+    wrapper as tokamax_gdn
 from vllm.config.attention import AttentionConfig
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import \
     QwenGatedDeltaNetAttention
@@ -30,7 +32,6 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
-from tpu_inference.kernels.gdn.v3 import wrapper as v3_gdn
 from tpu_inference.layers.common import (attention_backend,
                                          attention_interface, gdn_attention)
 from tpu_inference.layers.common.attention_backend import (
@@ -48,7 +49,7 @@ FAKE_OUTPUT = 7
 NUM_TOKENS, NUM_HEADS, HEAD_DIM, KERNEL_SIZE = 8, 2, 128, 4
 QKV_DIM = 3 * NUM_HEADS * HEAD_DIM
 NUM_STATE_SLOTS, WRITE_SLOT, READ_SLOT = 4, 2, 1
-V3_MARKER, FAKE_MARKER = 1, 2
+TOKAMAX_MARKER, FAKE_MARKER = 1, 2
 
 
 def stub_gdn_kernel(marker: int):
@@ -173,12 +174,13 @@ def test_rpa_kv_cache_shape(head_dim, kernel):
 
 
 @pytest.mark.parametrize(("backend_cls", "marker"), [
-    (None, V3_MARKER),
-    (GDNLinearAttentionBackend, V3_MARKER),
+    (None, TOKAMAX_MARKER),
+    (GDNLinearAttentionBackend, TOKAMAX_MARKER),
     (FakeLinearAttentionBackend, FAKE_MARKER),
 ])
 def test_gdn_runs_the_given_kernel(mesh, monkeypatch, backend_cls, marker):
-    monkeypatch.setattr(v3_gdn, "fused_conv1d_gdn", stub_gdn_kernel(V3_MARKER))
+    monkeypatch.setattr(tokamax_gdn, "fused_conv1d_gdn",
+                        stub_gdn_kernel(TOKAMAX_MARKER))
     kernel = backend_cls().conv1d_gdn_kernel() if backend_cls else None
 
     states, output = gdn_attention.run_jax_gdn_attention(
