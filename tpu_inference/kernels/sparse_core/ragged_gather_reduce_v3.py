@@ -29,6 +29,8 @@ from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
 
 from tpu_inference.kernels.sparse_core import core_map_helper
+from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v2 import \
+    ragged_gather_reduce as ragged_gather_reduce_v2
 
 _TOKEN_SUBCHUNK = 16
 _NUM_TOKEN_SUBCHUNKS = 4
@@ -330,7 +332,25 @@ def ragged_gather_reduce(
 ) -> jax.Array:
     """Destination-major prototype for MoE output combine."""
     sc_info = pltpu.get_tpu_info().sparse_core
-    if (sc_info is None or x.dtype != jnp.bfloat16
+    if sc_info is None:
+        return _fallback_implementation(
+            x,
+            indices,
+            topk_weights,
+            valid_rows_mask,
+            reduce_group_size,
+        )
+    # v3 is optimized for architectures with 16 SIMD lanes per SparseCore (e.g. TPU v7x).
+    # On architectures with 8 lanes (e.g. TPU v6e), delegate to the v2 kernel.
+    if sc_info.num_lanes != _TOKEN_SUBCHUNK:
+        return ragged_gather_reduce_v2(
+            x,
+            indices,
+            topk_weights,
+            valid_rows_mask,
+            reduce_group_size,
+        )
+    if (x.dtype != jnp.bfloat16
             or x.shape[-1] % pltpu.get_tpu_info().num_lanes != 0):
         return _fallback_implementation(
             x,
