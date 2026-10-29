@@ -26,8 +26,7 @@ import numpy as np
 import pytest
 from jax.sharding import Mesh
 
-from tests.layers.common.test_fused_ep_moe_v2 import (HIDDEN, INTER,
-                                                      NUM_EXPERTS, TOPK,
+from tests.layers.common.test_fused_ep_moe_v2 import (INTER, NUM_EXPERTS, TOPK,
                                                       _dense_reference,
                                                       _inputs, _layer, _rel_l2,
                                                       _weights)
@@ -110,12 +109,14 @@ def test_weight_shardings_match_gmm_ep():
                          ids=lambda v: _mesh_id(v)
                          if isinstance(v, dict) else "")
 def test_layout(sizes, replica):
-    """The 1-D mesh keeps the device order; the replica axes are the used
-    axes that aren't attention-data axes."""
+    """The EP axes are the mesh's expert axes, in ShardingAxisName.EXPERT's
+    order; the replica axes are the used axes that aren't attention-data
+    axes."""
     mesh = _make_mesh(**sizes)
-    mesh_1d, got, reason = routing_moe.ep_layout(mesh)
-    assert reason is None
-    assert list(mesh_1d.devices) == list(mesh.devices.reshape(-1))
+    ep_axes, got = routing_moe._layout(mesh)
+    assert ep_axes == tuple(a for a in ShardingAxisName.EXPERT
+                            if a in mesh.axis_names)
+    assert all(a in ep_axes for a in sizes)
     assert got == replica
 
 
@@ -170,63 +171,19 @@ def test_rows_not_divisible_by_replicas():
 
 @pytest.mark.parametrize("case, want", [
     (None, None),
-    ("hidden_dtype", "bf16 hidden states"),
-    ("block_scales", "one weight scale per output channel"),
-    ("w2_block_scales", "one weight scale per output channel"),
-    ("dtypes_differ", "dtypes differ"),
-    ("bf16_scaled", "unscaled"),
-    ("bias", "biases"),
-    ("hidden", "hidden size"),
-    ("inter_padded", "intermediate sizes"),
-    ("inter_128", "intermediate sizes"),
-    ("experts", "split evenly"),
     ("data_axis", "expert axes"),
-    ("hash_topk", "hash routing"),
-    ("approx_topk", "MOE_APPROX_TOPK"),
     ("random_routing", "FORCE_MOE_RANDOM_ROUTING"),
-    ("activation", "only silu"),
-    ("scoring_fn", "doesn't score"),
 ])
 def test_unsupported_reason(case, want):
-    """Each check refuses its case with its reason; one device is enough for
-    all but the two mesh checks."""
-    sizes = {
-        "data_axis": dict(data=2),
-        "experts": dict(attn_dp=2)
-    }.get(case, {})
+    """Each case the integration doesn't handle is refused with its reason.
+    Limits of select_experts and the kernel are left to them."""
+    sizes = dict(data=2) if case == "data_axis" else {}
     if len(jax.devices()) < max(sizes.values(), default=1):
         pytest.skip("needs 2 devices")
     mesh = _make_mesh(**sizes)
-    w1, w2, s1, s2 = _weights(mesh, True, block_scales=case == "block_scales")
-    if case == "w2_block_scales":
-        s2 = _weights(mesh, True, block_scales=True)[3]
-    elif case == "dtypes_differ":
-        w2 = w2.astype(jnp.bfloat16)
-    elif case == "bf16_scaled":
-        w1, w2 = w1.astype(jnp.bfloat16), w2.astype(jnp.bfloat16)
-    elif case == "hidden":
-        w1 = w1[:, :HIDDEN - 128]
-    elif case == "inter_padded":
-        # w13 padded to a multiple of 128 and w2 not, as GMM EP loads them.
-        w2 = w2[:, :INTER - 64]
-    elif case == "inter_128":
-        # A multiple of 128 that isn't one of 256: GMM EP leaves it as is.
-        w1 = jnp.concatenate([w1[..., :INTER - 128], w1[..., INTER:-128]],
-                             axis=-1)
-        w2 = w2[:, :INTER - 128]
-    elif case == "experts":
-        w1 = w1[:NUM_EXPERTS - 1]
-    with (mock.patch("tpu_inference.envs.FORCE_MOE_RANDOM_ROUTING",
-                     case == "random_routing"),
-          mock.patch("tpu_inference.envs.MOE_APPROX_TOPK",
-                     case == "approx_topk")):
-        reason = routing_moe.unsupported_reason(
-            mesh, jnp.float32 if case == "hidden_dtype" else jnp.bfloat16, w1,
-            w2, s1, s2,
-            jnp.zeros((NUM_EXPERTS, 1, 2 * INTER)) if case == "bias" else None,
-            None, "swigluoai" if case == "activation" else "silu",
-            "noaux_tc" if case == "scoring_fn" else "softmax",
-            jnp.zeros((8, TOPK), jnp.int32) if case == "hash_topk" else None)
+    with mock.patch("tpu_inference.envs.FORCE_MOE_RANDOM_ROUTING",
+                    case == "random_routing"):
+        reason = routing_moe.unsupported_reason(mesh)
     if want is None:
         assert reason is None, reason
     else:
@@ -239,8 +196,11 @@ def test_moe_apply_dispatch():
     mesh = _make_mesh()
     x, gating = _inputs(mesh, 512)
     w1, w2, s1, s2 = _weights(mesh, True)
-    weights = FusedMoEWeights(w1, s1, None, w2, s2, None)
-    extra = dict(e_score_correction_bias=jnp.zeros((NUM_EXPERTS, )))
+    b1 = jnp.zeros((NUM_EXPERTS, 1, 2 * INTER))
+    b2 = jnp.zeros((NUM_EXPERTS, 1, w2.shape[-1]))
+    weights = FusedMoEWeights(w1, s1, b1, w2, s2, b2)
+    extra = dict(e_score_correction_bias=jnp.zeros((NUM_EXPERTS, )),
+                 hash_based_topk_indices=jnp.zeros((512, TOPK), jnp.int32))
     with (mock.patch.object(routing_moe,
                             "routing_moe_func",
                             autospec=True,
@@ -254,27 +214,25 @@ def test_moe_apply_dispatch():
     assert kwargs["gating_output"] is gating and kwargs["topk"] == TOPK
     assert kwargs["mesh"] is mesh and kwargs["activation"] == "silu"
     assert kwargs["scoring_fn"] == "softmax"
+    assert kwargs["w1_bias"] is b1 and kwargs["w2_bias"] is b2
+    assert (kwargs["hash_based_topk_indices"]
+            is extra["hash_based_topk_indices"])
     assert (kwargs["expert_score_correction_bias"]
             is extra["e_score_correction_bias"])
 
 
-@pytest.mark.parametrize("extra, want", [
-    ({}, "per output channel"),
-    ({
-        "hash_based_topk_indices": jnp.zeros((8, TOPK), jnp.int32)
-    }, "hash routing"),
-])
-def test_moe_apply_refuses_an_unsupported_layer(extra, want):
-    """A layer the kernel can't run raises, naming the reason, rather than
-    running on another backend."""
+def test_moe_apply_refuses_an_unsupported_layer():
+    """A layer the integration can't run raises, naming the reason, rather
+    than running on another backend."""
     mesh = _make_mesh()
     x, gating = _inputs(mesh, 512)
-    w1, w2, s1, s2 = _weights(mesh, True, block_scales=not extra)
+    w1, w2, s1, s2 = _weights(mesh, True)
     weights = FusedMoEWeights(w1, s1, None, w2, s2, None)
-    with (mock.patch.object(moe, "fused_moe_func") as
-          gmm, pytest.raises(ValueError, match=want)):
+    with (mock.patch("tpu_inference.envs.FORCE_MOE_RANDOM_ROUTING",
+                     True), mock.patch.object(moe, "fused_moe_func") as
+          gmm, pytest.raises(ValueError, match="FORCE_MOE_RANDOM_ROUTING")):
         moe_apply(_layer(), x, gating, weights, MoEBackend.ROUTING_MOE, mesh,
-                  extra)
+                  {})
     assert not gmm.called
 
 
@@ -290,8 +248,8 @@ def _fake_kernel(x, topk_weights, topk_indices, *args, **kwargs):
 @requires_4_devices
 @pytest.mark.usefixtures("tokamax_kernel")
 @pytest.mark.parametrize("sizes", _SUPPORTED_MESHES, ids=_mesh_id)
-@pytest.mark.parametrize("score_bias", [False, True])
-def test_each_token_keeps_its_routing(sizes, score_bias):
+@pytest.mark.parametrize("routing", ["plain", "score_bias", "hash"])
+def test_each_token_keeps_its_routing(sizes, routing):
     """Routing after the split gives each token the experts and weights
     select_experts picks for it on the unsplit rows."""
     from tokamax._src.ops.experimental.routing_moe.layer import modular
@@ -303,9 +261,12 @@ def test_each_token_keeps_its_routing(sizes, score_bias):
     gating = gating.astype(jnp.float32)
     w1, w2, s1, s2 = _weights(mesh, True)
     kwargs = {}
-    if score_bias:
+    if routing == "score_bias":
         kwargs["expert_score_correction_bias"] = jax.random.normal(
             jax.random.key(2), (NUM_EXPERTS, ))
+    elif routing == "hash":
+        kwargs["hash_based_topk_indices"] = jax.random.randint(
+            jax.random.key(3), (num_tokens, TOPK), 0, NUM_EXPERTS)
     with mock.patch.object(modular, "routing_moe", _fake_kernel):
         out = _run_kernel(mesh, x, gating, w1, w2, s1, s2, **kwargs)
     want_weights, want_indices = select_experts(gating, TOPK, True, "softmax",
