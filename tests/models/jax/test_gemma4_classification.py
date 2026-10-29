@@ -35,6 +35,15 @@ def _make_single_device_mesh() -> Mesh:
     return Mesh(devices, MESH_AXIS_NAMES)
 
 
+def _make_tp_mesh() -> Mesh:
+    local = jax.local_devices()
+    tp = 2 if len(local) >= 2 else 1
+    shape = [1] * len(MESH_AXIS_NAMES)
+    shape[MESH_AXIS_NAMES.index("model")] = tp
+    devices = np.asarray(local[:tp], dtype=object).reshape(tuple(shape))
+    return Mesh(devices, MESH_AXIS_NAMES)
+
+
 def _make_supported_vllm_config(hidden_size: int = 4, num_labels: int = 2):
 
     class HeadConfig(SimpleNamespace):
@@ -185,11 +194,11 @@ class TestGemma4SequenceClassification:
                     dummy, [("score.weight", jnp.ones((3, 4)))])
 
     def test_pooler_and_flax_model_state_refresh(self):
-        mesh = _make_single_device_mesh()
-        cfg = _make_supported_vllm_config(hidden_size=4, num_labels=2)
+        mesh = _make_tp_mesh()
+        cfg = _make_supported_vllm_config(hidden_size=4, num_labels=3)
         rows = jnp.asarray([[1.0, 2.0, 3.0, 4.0], [2.0, 1.0, 0.0, 3.0]],
                            dtype=jnp.bfloat16)
-        weight = jnp.arange(8, dtype=jnp.float32).reshape(4, 2) / 8.0
+        weight = jnp.arange(12, dtype=jnp.float32).reshape(4, 3) / 8.0
         expected = np.asarray(rows, dtype=np.float32) @ np.asarray(weight)
         metadata = PoolingMetadata(
             prompt_lens=torch.tensor([1, 1], dtype=torch.int32),
@@ -208,7 +217,7 @@ class TestGemma4SequenceClassification:
                 parameter = nnx.Param(weight)
                 parameter.set_metadata("_is_loaded", True)
                 self.score = nnx.Dict(weight=parameter)
-                self.num_labels = 2
+                self.num_labels = 3
 
             def compute_logits(self, values):
                 return Gemma4ForSequenceClassification.compute_logits(

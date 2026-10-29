@@ -462,9 +462,11 @@ def get_flax_model(
         model = nnx.merge(graphdef, state)
         return model(*args)
 
+    logits_col_axis = (None if issubclass(
+        model_class, NativeSequenceClassificationModel) else
+                       ShardingAxisName.MLP_TENSOR)
     logits_sharding = NamedSharding(
-        mesh,
-        PartitionSpec(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR))
+        mesh, PartitionSpec(ShardingAxisName.MLP_DATA, logits_col_axis))
 
     @jax.jit(out_shardings=(logits_sharding))
     def run_compute_logits(state_leaves, *args):

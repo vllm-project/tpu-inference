@@ -6,9 +6,7 @@ import torch
 from jax.sharding import Mesh
 
 from tpu_inference import envs
-from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
 
@@ -38,7 +36,6 @@ def supports_native_sequence_classification(vllm_config, mesh: Mesh) -> bool:
         and vllm_config.cache_config.cache_dtype in ("auto", "bfloat16")
         and not envs.MOE_REQUANTIZE_WEIGHT_DTYPE
         and not envs.BF16_LINEAR_REQUANTIZE_PATTERNS
-        and get_mesh_shape_product(mesh, ShardingAxisName.MLP_TENSOR) == 1
         and pooler_config is not None
         and pooler_config.task in (None, "classify")
         and pooler_config.seq_pooling_type == "LAST"
