@@ -12,15 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# tpu-inference-release: builds the vllm/vllm-tpu image of a release once,
-# waits for approval, then publishes that same image to Docker Hub.
+# vllm-tpu-release: builds a release of tpu-inference once from its release
+# branch - the vllm/vllm-tpu Docker image and the tpu-inference and vllm-tpu
+# wheels - waits for one approval, then publishes those same files to Docker
+# Hub and PyPI.
 #
 # The pipeline's settings upload this file from the build's own checkout, for
-# builds of main and releases/v* only, so a release branch runs the release
-# tooling it was cut with. README.md has the how-to.
-#
-#   releases/vX.Y.Z   settle the version, build, wait for approval, then
-#                     publish (plan_publish.py)
+# builds of releases/v* only, so a release branch runs the release tooling it
+# was cut with. The release prep pipeline (prep_pipeline.yml) normally starts
+# it, after updating the branch's release support matrices. plan_publish.py adds the approval and
+# publish steps. README.md has the how-to.
 
 steps:
   - label: ":clipboard: Preflight: version, PyPI"
