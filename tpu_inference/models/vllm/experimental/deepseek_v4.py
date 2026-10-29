@@ -194,12 +194,6 @@ class DeepseekV4MoE(nn.Module):
             apply_routed_scale_to_output=True,
         )
 
-        # Upstream vLLM stores the hash routing table on the fused-topk router
-        # (`FusedTopKBiasRouter._hash_indices_table`). The TPU MoE apply path is
-        # only handed the `RoutedExperts` layer, so mirror the table onto it here
-        # so it can be sharded (see cleanup_sharding) and read at forward time.
-        self.experts.routed_experts.hash_indices_table = self.gate.tid2eid
-
     def forward(self,
                 hidden_states: torch.Tensor,
                 input_ids: torch.Tensor | None = None) -> torch.Tensor:
