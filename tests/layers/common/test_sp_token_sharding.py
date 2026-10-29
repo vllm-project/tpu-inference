@@ -44,7 +44,9 @@ def base_sharding_axes(monkeypatch):
     """Multi-axis sharding names (attn_dp, ...) and a clean env."""
     monkeypatch.setattr(ShardingAxisName, "_cls", ShardingAxisNameBase)
     monkeypatch.delenv("MOE_GMM_EP_RAGGED_A2A", raising=False)
-    monkeypatch.delenv("USE_MOE_EP_KERNEL", raising=False)
+    for flag in ("USE_MOE_EP_KERNEL", "USE_FUSED_EP_MOE_V2",
+                 "USE_ROUTING_MOE"):
+        monkeypatch.delenv(flag, raising=False)
     yield
 
 
@@ -61,10 +63,14 @@ def test_keeps_tokens_sharded_guards(monkeypatch):
     assert keeps(mesh, enable_sp=True)
     assert not keeps(mesh, enable_sp=False)
     assert not keeps(None, enable_sp=True)
-    # Disabled when using the fused MoE EP Pallas kernel.
-    monkeypatch.setenv("USE_MOE_EP_KERNEL", "1")
-    assert not keeps(mesh, enable_sp=True)
-    monkeypatch.delenv("USE_MOE_EP_KERNEL", raising=False)
+    # Disabled when another EP MoE backend is selected; they ignore
+    # keep_token_sharding.
+    for flag in ("USE_MOE_EP_KERNEL", "USE_FUSED_EP_MOE_V2",
+                 "USE_ROUTING_MOE"):
+        monkeypatch.setenv(flag, "1")
+        assert not keeps(mesh, enable_sp=True), flag
+        monkeypatch.delenv(flag, raising=False)
+    assert keeps(mesh, enable_sp=True)
     # Only under attention DP with attention TP > 1.
     assert not keeps(_make_mesh(model=8), enable_sp=True)
     assert not keeps(_make_mesh(attn_dp=8), enable_sp=True)

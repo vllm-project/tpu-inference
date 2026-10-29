@@ -151,21 +151,35 @@ def is_attn_dp(mesh: Mesh) -> bool:
     return (attn_dp_size // dp_size) > 1
 
 
+def _non_gmm_ep_moe_backend_requested() -> bool:
+    """Whether an env flag selects an EP MoE backend other than GMM_EP.
+
+    Mirrors the priority in `select_moe_backend_from_fused_moe_config`: these
+    backends replace `expert_parallel_gmm` and don't honor
+    `keep_token_sharding`.
+    """
+    return bool(envs.USE_MOE_EP_KERNEL or envs.USE_FUSED_EP_MOE_V2
+                or envs.USE_ROUTING_MOE)
+
+
 def keeps_tokens_sharded(mesh: Mesh | None, enable_sp: bool) -> bool:
     """Whether the residual stream stays token-sharded over EXPERT_DATA.
 
     Sequence parallelism (`enable_sp`) under attention DP with GMM_EP
-    (`USE_MOE_EP_KERNEL=0`, `expert_parallel_gmm`): the MoE consumes and produces tokens sharded over all devices
-    (EXPERT_DATA), so instead of resharding to ATTN_DATA around every linear
-    and the MoE, the activations outside attention stay token-sharded:
-    column-parallel projections all-gather (FP8) tokens over the attention TP
-    axis, row-parallel ones reduce-scatter, and router / shared expert / norms
-    run on the local token slice.
+    (`expert_parallel_gmm`): the MoE consumes and produces tokens sharded over
+    all devices (EXPERT_DATA), so instead of resharding to ATTN_DATA around
+    every linear and the MoE, the activations outside attention stay
+    token-sharded: column-parallel projections all-gather (FP8) tokens over the
+    attention TP axis, row-parallel ones reduce-scatter, and router / shared
+    expert / norms run on the local token slice.
 
     Only under attention DP with attention TP > 1 and GMM_EP; otherwise
-    `enable_sp` keeps its MLP_TENSOR input / output sharding.
+    `enable_sp` keeps its MLP_TENSOR input / output sharding. The other EP MoE
+    backends (`USE_MOE_EP_KERNEL`, `USE_FUSED_EP_MOE_V2`, `USE_ROUTING_MOE`)
+    take priority over GMM_EP in backend selection and ignore
+    `keep_token_sharding`, so any of them disables this mode.
     """
-    if not enable_sp or envs.USE_MOE_EP_KERNEL:
+    if not enable_sp or _non_gmm_ep_moe_backend_requested():
         return False
     if mesh is None or not is_attn_dp(mesh):
         return False
