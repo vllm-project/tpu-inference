@@ -250,3 +250,67 @@ def test_sp_token_sharding_standard_gmm_ep(monkeypatch, tc_permute,
                                np.asarray(ref, np.float32),
                                rtol=1e-2,
                                atol=1e-2)
+
+
+@requires_8_devices
+@pytest.mark.parametrize("tc_permute", [False, True])
+def test_sp_token_sharding_small_batch_fallback(monkeypatch, tc_permute):
+    """When num_tokens is divisible by ATTN_DATA (2) but not EXPERT_DATA (8),
+    e.g. small decode batches (16 tokens across 4 DP x 8 TP = 32 devices),
+    fused_moe_func falls back to ATTN_DATA instead of failing psum_scatter."""
+    monkeypatch.setenv("MOE_TC_PERMUTE", "1" if tc_permute else "0")
+    mesh = _make_mesh(attn_dp=2, model=4)
+    # 4 tokens: divisible by ATTN_DATA=2, not divisible by EXPERT_DATA=8;
+    # 4 * topk(4) = 16 satisfies the GMM row-alignment check.
+    num_tokens, hidden, inter, num_experts, topk = 4, 128, 32, 16, 4
+    k1, k2, k3, k4 = jax.random.split(jax.random.PRNGKey(11), 4)
+    x = jax.random.normal(k1, (num_tokens, hidden), jnp.bfloat16)
+    gating = jax.random.normal(k2, (num_tokens, num_experts), jnp.bfloat16)
+    w1 = jax.random.normal(k3, (num_experts, hidden, 2 * inter),
+                           jnp.bfloat16) * 0.1
+    w2 = jax.random.normal(k4,
+                           (num_experts, inter, hidden), jnp.bfloat16) * 0.1
+
+    attn_spec = NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None))
+    ep_spec = NamedSharding(mesh, P(ShardingAxisName.EXPERT, None, None))
+    x_in = jax.device_put(x, attn_spec)
+    g_in = jax.device_put(gating, attn_spec)
+    w1_s = jax.device_put(w1, ep_spec)
+    w2_s = jax.device_put(w2, ep_spec)
+
+    assert common_sharding.sp_token_axes(
+        mesh, common_sharding.keeps_tokens_sharded(mesh, True),
+        num_tokens) is None
+
+    def _run(keep_sharded):
+        return fused_moe_gmm.fused_moe_func(
+            hidden_states=x_in,
+            w1=w1_s,
+            w2=w2_s,
+            w1_scale=None,
+            w2_scale=None,
+            w1_bias=None,
+            w2_bias=None,
+            gating_output=g_in,
+            topk=topk,
+            renormalize=True,
+            mesh=mesh,
+            use_ep=True,
+            activation="silu",
+            scoring_fn="softmax",
+            all_gather_fp8=True,
+            onehot_moe_permute_threshold=0 if tc_permute else 10**8,
+            scatter_results=True,
+            keep_token_sharding=keep_sharded,
+        )
+
+    with mock.patch.object(fused_moe_gmm, "gmm_wrapper", _ref_gmm):
+        jax.clear_caches()
+        ref = _run(keep_sharded=False)
+        out = _run(keep_sharded=True)
+
+    assert out.sharding.is_equivalent_to(attn_spec, 2)
+    np.testing.assert_allclose(np.asarray(out, np.float32),
+                               np.asarray(ref, np.float32),
+                               rtol=1e-2,
+                               atol=1e-2)

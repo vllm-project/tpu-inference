@@ -32,7 +32,8 @@ from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.moe_weights import \
     FusedMoEWeights
 from tpu_inference.layers.common.sharding import (is_attn_dp,
-                                                  keeps_tokens_sharded)
+                                                  keeps_tokens_sharded,
+                                                  sp_token_axes)
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
@@ -157,7 +158,8 @@ def vllm_moe_apply(layer: RoutedExperts,
     # is not resharded back to ATTN_DATA.
     enable_sp = bool(vllm_config
                      and vllm_config.additional_config.get("enable_sp", False))
-    extra_kwargs["keep_token_sharding"] = keeps_tokens_sharded(mesh, enable_sp)
+    extra_kwargs["keep_token_sharding"] = (sp_token_axes(
+        mesh, keeps_tokens_sharded(mesh, enable_sp), x.shape[0]) is not None)
 
     # Defer the tensor-parallel all-reduce inside the GMM kernel exactly when the
     # runner does NOT expect the fused output to be reduced -- the deferred path

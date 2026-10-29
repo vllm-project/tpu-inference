@@ -121,6 +121,8 @@ class VllmQuantLinearConfig(QuantLinearConfig):
     def get_input_sharding(self, x: torchax.tensor.Tensor):
         if not self.enable_sp:
             return None
+        if self.keep_tokens_sharded and self.get_sp_token_axes(x) is None:
+            return None
         token_num = x.shape[0]
         # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
         if token_num // self.tp_size < TPU_SECOND_LAST_MINOR:
@@ -129,6 +131,8 @@ class VllmQuantLinearConfig(QuantLinearConfig):
 
     def get_output_sharding(self, x: torchax.tensor.Tensor):
         if self.enable_sp:
+            if self.keep_tokens_sharded and self.get_sp_token_axes(x) is None:
+                return None
             token_num = x.shape[0]
             # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
             if token_num // self.tp_size < TPU_SECOND_LAST_MINOR:

@@ -1486,6 +1486,9 @@ def fused_moe_func(
         hash_based_topk_indices=hash_based_topk_indices,
         expert_score_correction_bias=expert_score_correction_bias,
         num_valid_tokens=num_valid_tokens)
+    if keep_token_sharding and (num_tokens % get_mesh_shape_product(
+            mesh, ShardingAxisName.EXPERT_DATA)):
+        keep_token_sharding = False
     # All gathering topk_indices and topk_weights if attention dp is used.
     # MOE_FOLD_ROUTING_INTO_DISPATCH gathers them in the token all-gather.
     token_axes = (ShardingAxisName.EXPERT_DATA
