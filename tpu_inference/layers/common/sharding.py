@@ -14,6 +14,7 @@
 
 import json
 import math
+import re
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, List, Optional
 
@@ -162,7 +163,37 @@ def _non_gmm_ep_moe_backend_requested() -> bool:
                 or envs.USE_ROUTING_MOE)
 
 
-def keeps_tokens_sharded(mesh: Mesh | None, enable_sp: bool) -> bool:
+def is_shared_expert_prefix(prefix: str) -> bool:
+    """Whether a linear layer's prefix names a MoE shared expert.
+
+    Covers both checkpoint namings: `.shared_expert.` (Qwen) and
+    `.shared_experts.` (DeepSeek V2/V3 style).
+    """
+    return re.search(r"\.shared_experts?\.", prefix) is not None
+
+
+def shared_expert_is_replicated(shared_experts) -> bool:
+    """Whether every linear of the shared expert has replicated weights.
+
+    VllmQuantLinearConfig replicates the shared expert under the
+    sequence-parallel residual stream (`sharding.keeps_tokens_sharded`); it
+    then runs on the local token slice and its output is already complete.
+    Reads the linears' actual weight sharding, so it can't disagree with the
+    linear configs.
+    """
+    if shared_experts is None:
+        return False
+    configs = [
+        m.quant_method.linear_config for m in shared_experts.modules()
+        if getattr(getattr(m, "quant_method", None), "linear_config", None)
+        is not None
+    ]
+    return bool(configs) and all(
+        all(axis is None for axis in c.weight_sharding) for c in configs)
+
+
+def keeps_tokens_sharded(mesh: Mesh | None, enable_sp: bool, *,
+                         use_ep: bool) -> bool:
     """Whether the residual stream stays token-sharded over EXPERT_DATA.
 
     Sequence parallelism (`enable_sp`) under attention DP with GMM_EP
@@ -174,14 +205,26 @@ def keeps_tokens_sharded(mesh: Mesh | None, enable_sp: bool) -> bool:
     expert / norms run on the local token slice.
 
     Only under attention DP with attention TP > 1 and GMM_EP; otherwise
-    `enable_sp` keeps its MLP_TENSOR input / output sharding. The other EP MoE
-    backends (`USE_MOE_EP_KERNEL`, `USE_FUSED_EP_MOE_V2`, `USE_ROUTING_MOE`)
-    take priority over GMM_EP in backend selection and ignore
-    `keep_token_sharding`, so any of them disables this mode.
+    `enable_sp` keeps its MLP_TENSOR input / output sharding:
+
+    - `use_ep`: expert parallelism must be on. Without it the MoE runs GMM_TP,
+      which ignores `keep_token_sharding`.
+    - The other EP MoE backends (`USE_MOE_EP_KERNEL`, `USE_FUSED_EP_MOE_V2`,
+      `USE_ROUTING_MOE`) take priority over GMM_EP in backend selection and
+      ignore `keep_token_sharding`, so any of them disables this mode.
+    - The `expert` and `pcp` mesh axes must be size 1. The linears gather and
+      reduce-scatter tokens over ATTN_HEAD (`model`, `expert`, `dcp`) inside
+      each ATTN_DATA block, but EXPERT_DATA orders `expert` before `model` and
+      puts `pcp` last, so with either axis > 1 the token rows would not line
+      up with EXPERT_DATA.
     """
-    if not enable_sp or _non_gmm_ep_moe_backend_requested():
+    if not enable_sp or not use_ep or _non_gmm_ep_moe_backend_requested():
         return False
     if mesh is None or not is_attn_dp(mesh):
+        return False
+    if any(
+            utils.get_mesh_shape_product(mesh, axis) > 1
+            for axis in ("expert", "pcp")):
         return False
     return (utils.get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD) > 1
             and utils.get_mesh_shape_product(mesh,

@@ -14,11 +14,12 @@
 """Tests for the sequence-parallel residual stream: `enable_sp` under
 attention DP with the GMM_EP MoE (USE_MOE_EP_KERNEL=0).
 
-The sharded-matmul tests need 8 devices (e.g. CPU with
-XLA_FLAGS=--xla_force_host_platform_device_count=8, or a TPU v7x-8); the
-guard tests run anywhere.
+The sharded-matmul and MoE tests need 8 devices (e.g. CPU with
+XLA_FLAGS=--xla_force_host_platform_device_count=8, or a TPU v7x-8). The guard
+tests use a stand-in mesh and run anywhere.
 """
 
+from types import SimpleNamespace
 from unittest import mock
 
 import jax
@@ -55,31 +56,79 @@ def _make_mesh(**sizes):
     return Mesh(np.array(jax.devices()[:8]).reshape(shape), MESH_AXIS_NAMES)
 
 
-@requires_8_devices
+def _shape_only_mesh(**sizes):
+    """Stand-in for the guard tests: they only read the mesh shape."""
+    return SimpleNamespace(shape={a: sizes.get(a, 1)
+                                  for a in MESH_AXIS_NAMES},
+                           axis_names=MESH_AXIS_NAMES)
+
+
 def test_keeps_tokens_sharded_guards(monkeypatch):
-    keeps = common_sharding.keeps_tokens_sharded
-    mesh = _make_mesh(attn_dp=2, model=4)
+
+    def keeps(mesh, enable_sp=True, use_ep=True):
+        return common_sharding.keeps_tokens_sharded(mesh,
+                                                    enable_sp,
+                                                    use_ep=use_ep)
+
+    mesh = _shape_only_mesh(attn_dp=2, model=4)
     # Enabled under attention DP + attention TP > 1 with GMM_EP (default).
-    assert keeps(mesh, enable_sp=True)
+    assert keeps(mesh)
     assert not keeps(mesh, enable_sp=False)
-    assert not keeps(None, enable_sp=True)
+    assert not keeps(None)
+    # Expert parallelism off: the MoE runs GMM_TP, which ignores
+    # keep_token_sharding.
+    assert not keeps(mesh, use_ep=False)
     # Disabled when another EP MoE backend is selected; they ignore
     # keep_token_sharding.
     for flag in ("USE_MOE_EP_KERNEL", "USE_FUSED_EP_MOE_V2",
                  "USE_ROUTING_MOE"):
         monkeypatch.setenv(flag, "1")
-        assert not keeps(mesh, enable_sp=True), flag
+        assert not keeps(mesh), flag
         monkeypatch.delenv(flag, raising=False)
-    assert keeps(mesh, enable_sp=True)
+    assert keeps(mesh)
     # Only under attention DP with attention TP > 1.
-    assert not keeps(_make_mesh(model=8), enable_sp=True)
-    assert not keeps(_make_mesh(attn_dp=8), enable_sp=True)
+    assert not keeps(_shape_only_mesh(model=8))
+    assert not keeps(_shape_only_mesh(attn_dp=8))
+    # `expert` / `pcp` > 1: their order in EXPERT_DATA doesn't match the
+    # ATTN_HEAD gather / reduce-scatter inside an ATTN_DATA block.
+    assert not keeps(_shape_only_mesh(attn_dp=2, model=2, expert=2))
+    assert not keeps(_shape_only_mesh(attn_dp=2, model=2, pcp=2))
+    assert keeps(_shape_only_mesh(attn_dp=2, model=2, dcp=2))
 
 
-@requires_8_devices
+def test_is_shared_expert_prefix():
+    is_shared = common_sharding.is_shared_expert_prefix
+    assert is_shared("model.layers.3.mlp.shared_expert.down_proj")
+    assert is_shared("model.layers.3.mlp.shared_experts.gate_up_proj")
+    assert not is_shared("model.layers.3.mlp.experts.down_proj")
+    assert not is_shared("model.layers.3.self_attn.o_proj")
+    assert not is_shared("")
+
+
+def test_shared_expert_reduce_follows_weight_sharding():
+    """The runner skips the shared-expert all-reduce only when every shared
+    expert linear really has replicated weights."""
+
+    def linear(weight_sharding):
+        return SimpleNamespace(quant_method=SimpleNamespace(
+            linear_config=SimpleNamespace(weight_sharding=weight_sharding)))
+
+    def module(*children):
+        return SimpleNamespace(modules=lambda: [object(), *children])
+
+    replicated = common_sharding.shared_expert_is_replicated
+    assert replicated(module(linear(P(None, None)), linear(P(None, None))))
+    # A down_proj still sharded over attention TP returns partial sums.
+    assert not replicated(
+        module(linear(P(None, None)),
+               linear(P(ShardingAxisName.ATTN_HEAD, None))))
+    assert not replicated(module())
+    assert not replicated(None)
+
+
 def test_sp_token_axes():
     # What VllmQuantLinearConfig.get_sp_token_axes returns.
-    mesh = _make_mesh(attn_dp=2, model=4)
+    mesh = _shape_only_mesh(attn_dp=2, model=4)
     get_axes = common_sharding.sp_token_axes
     assert get_axes(mesh, True, 64) == ShardingAxisName.EXPERT_DATA
     # Token count not divisible by EXPERT_DATA (8): usual ATTN_DATA.
@@ -285,7 +334,7 @@ def test_sp_token_sharding_small_batch_fallback(monkeypatch, tc_permute):
     w2_s = jax.device_put(w2, ep_spec)
 
     assert common_sharding.sp_token_axes(
-        mesh, common_sharding.keeps_tokens_sharded(mesh, True),
+        mesh, common_sharding.keeps_tokens_sharded(mesh, True, use_ep=True),
         num_tokens) is None
 
     def _run(keep_sharded):

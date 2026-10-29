@@ -22,7 +22,7 @@ from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.sharding import (ShardingAxisName, is_attn_dp,
-                                                  keeps_tokens_sharded)
+                                                  shared_expert_is_replicated)
 from tpu_inference.layers.vllm.interface.moe import \
     select_moe_backend_from_fused_moe_config
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
@@ -38,19 +38,6 @@ def _get_mesh() -> Mesh | None:
         return get_vllm_model_wrapper_context().mesh
     except AssertionError:
         return None
-
-
-def _shared_expert_is_token_local(mesh: Mesh) -> bool:
-    """Whether the shared expert ran on token-sharded inputs with replicated
-    weights (sequence-parallel residual stream, see
-    `sharding.keeps_tokens_sharded`), so its output is already complete."""
-    try:
-        vllm_config = get_vllm_model_wrapper_context().vllm_config
-    except AssertionError:
-        return False
-    enable_sp = bool(vllm_config
-                     and vllm_config.additional_config.get("enable_sp", False))
-    return keeps_tokens_sharded(mesh, enable_sp)
 
 
 def _all_reduce_over_tp(t: torch.Tensor,
@@ -150,7 +137,7 @@ class VllmMoERunner(MoERunner):
 
         if (shared_output is not None and fused_output_is_reduced
                 and not self.moe_config.is_sequence_parallel
-                and not _shared_expert_is_token_local(mesh)):
+                and not shared_expert_is_replicated(self._shared_experts)):
             axis_name = (ShardingAxisName.ATTN_HEAD
                          if is_attn_dp(mesh) else ShardingAxisName.MLP_TENSOR)
             shared_output = _all_reduce_over_tp(shared_output, mesh, axis_name)

@@ -158,8 +158,12 @@ def vllm_moe_apply(layer: RoutedExperts,
     # is not resharded back to ATTN_DATA.
     enable_sp = bool(vllm_config
                      and vllm_config.additional_config.get("enable_sp", False))
+    keep = keeps_tokens_sharded(
+        mesh,
+        enable_sp,
+        use_ep=quant_method_instance.moe_backend == MoEBackend.GMM_EP)
     extra_kwargs["keep_token_sharding"] = (sp_token_axes(
-        mesh, keeps_tokens_sharded(mesh, enable_sp), x.shape[0]) is not None)
+        mesh, keep, x.shape[0]) is not None)
 
     # Defer the tensor-parallel all-reduce inside the GMM kernel exactly when the
     # runner does NOT expect the fused output to be reduced -- the deferred path
