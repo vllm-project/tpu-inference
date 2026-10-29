@@ -18,6 +18,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
+import torchax
 import vllm.envs as vllm_envs
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn import Parameter
@@ -480,6 +481,28 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         assert isinstance(layer, vllm_linear.LinearBase)
+
+        if not isinstance(x, torchax.tensor.Tensor) and x.device.type == "cpu":
+            # vLLM pooler heads run on the host on TPU (hidden states are copied
+            # to CPU before pooling in VllmModelWrapper.compute_pooler_output),
+            # so classifier/score heads receive plain CPU tensors.
+            if isinstance(layer.weight, torch.nn.ParameterList):
+                raise NotImplementedError(
+                    "host-side input is only supported for unfused linear layers"
+                )
+            if not jax_view(layer.weight).sharding.is_fully_replicated:
+                raise NotImplementedError(
+                    "host-side input requires a replicated weight")
+            if not hasattr(layer, "_host_weight"):
+                layer._host_weight = torch.from_numpy(
+                    np.asarray(jax_view(layer.weight), dtype=np.float32))
+            out = x.float() @ layer._host_weight
+            if bias is not None and not layer.skip_bias_add:
+                if not hasattr(layer, "_host_bias"):
+                    layer._host_bias = torch.from_numpy(
+                        np.asarray(jax_view(bias), dtype=np.float32))
+                out = out + layer._host_bias
+            return out.to(x.dtype)
 
         with jax.named_scope(layer._get_name()):
             if in_sharding := self.linear_config.get_input_sharding(x):

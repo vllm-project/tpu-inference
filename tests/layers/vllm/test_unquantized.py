@@ -1432,3 +1432,43 @@ def test_quantized_bf16_only_overrides_the_build_step():
             f"{name} should be inherited, not reimplemented")
     assert (VllmQuantizedBf16LinearMethod._build_linear_weights
             is not VllmUnquantizedLinearMethod._build_linear_weights)
+
+
+def test_replicated_linear_host_forward():
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+
+    mesh = test_utils.get_spmd_mesh(1)
+    engine_args = EngineArgs(
+        model=MODELS[0],
+        max_model_len=64,
+        max_num_batched_tokens=64,
+        max_num_seqs=4,
+    )
+    vllm_config = engine_args.create_engine_config()
+    vllm_config.model_config.dtype = torch.float32
+    quant_config = get_tpu_quantization_config(vllm_config, mesh)
+
+    with set_current_vllm_config(vllm_config):
+        layer = ReplicatedLinear(
+            input_size=8,
+            output_size=2,
+            bias=False,
+            params_dtype=torch.float32,
+            return_bias=False,
+            quant_config=quant_config,
+        )
+
+    w_original = torch.randn(2, 8, dtype=torch.float32)
+    layer.weight.data.copy_(w_original)
+    with torchax.default_env():
+        layer.quant_method.process_weights_after_loading(layer)
+
+    x = torch.randn(3, 8, dtype=torch.float32)
+    out1 = layer(x)
+    expected = torch.nn.functional.linear(x, w_original)
+    torch.testing.assert_close(out1, expected)
+
+    cached_weight = layer._host_weight
+    out2 = layer(x)
+    assert layer._host_weight is cached_weight
+    torch.testing.assert_close(out2, expected)
