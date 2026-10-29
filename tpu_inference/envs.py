@@ -298,9 +298,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use custom expert-parallel kernel for MoE (Mixture of Experts)
     "USE_MOE_EP_KERNEL":
     env_bool("USE_MOE_EP_KERNEL", default=False),
-    # Version of ragged gather reduce kernel to use for SparseCore combine ("v1", "v2", "v3")
+    # Version of ragged gather reduce kernel to use for SparseCore combine ("v2", "v3")
     "RAGGED_GATHER_REDUCE_VERSION":
-    env_with_choices("RAGGED_GATHER_REDUCE_VERSION", "v3", ["v1", "v2", "v3"]),
+    env_with_choices("RAGGED_GATHER_REDUCE_VERSION", "v3", ["v2", "v3"]),
     # Enable megablocks for JAX sparse matmul for MoE (Mixture of Experts)
     # using Unfused weights
     "USE_UNFUSED_MEGABLOCKS":

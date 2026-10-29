@@ -21,7 +21,6 @@ import jax.numpy as jnp
 import numpy as np
 from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
-
 from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v2 import \
     ragged_gather_reduce as ragged_gather_reduce_v2
 from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v3 import \
@@ -117,6 +116,13 @@ class ScatterTest(jtu.JaxTestCase):
                      [jnp.bfloat16],
                      [10],
                  ),
+                 itertools.product(
+                     [16384],
+                     [(99, 1120)],
+                     [4096],
+                     [jnp.bfloat16],
+                     [1],
+                 ),
              )
     ]
 
@@ -143,21 +149,39 @@ class ScatterTest(jtu.JaxTestCase):
         desired = reference_ragged_gather_reduce(x, indices, topk_weights,
                                                  valid_rows_mask,
                                                  reduce_group_size)
-        for rgr, name in (
-            (ragged_gather_reduce_v2, "ragged_gather_reduce_v2"),
-            (ragged_gather_reduce_v3, "ragged_gather_reduce_v3"),
-        ):
-            try:
-                actual = rgr(x, indices, topk_weights,
-                             valid_rows_mask,
-                             reduce_group_size)
-                np.testing.assert_allclose(actual, desired, atol=1e-2, rtol=1e-2)
-            except AssertionError:
-                raise
-            except Exception as e:  # pylint: disable=broad-except
-                print(f"Skipping {name} correctness check due to error: {e}")
+        try:
+            actual = ragged_gather_reduce_v2(x, indices, topk_weights,
+                                             valid_rows_mask,
+                                             reduce_group_size)
+            np.testing.assert_allclose(actual, desired, atol=1e-2, rtol=1e-2)
+        except AssertionError:
+            raise
+        except Exception as e:  # pylint: disable=broad-except
+            print("Skipping ragged_gather_reduce_v2 correctness check due to "
+                  f"error: {e}")
 
-    def test_sc_ragged_gather_reduce_v3_sentinel_does_not_read_uninitialized_rows(self):
+        # v3 is the default kernel and should always run without swallowing errors.
+        actual_v3 = ragged_gather_reduce_v3(x, indices, topk_weights,
+                                            valid_rows_mask, reduce_group_size)
+        np.testing.assert_allclose(actual_v3, desired, atol=1e-2, rtol=1e-2)
+
+    def test_sc_ragged_gather_reduce_v3_single_route_topk1(self):
+        """Verify v3 with reduce_group_size=1 (e.g. Llama 4 topk=1)."""
+        num_tokens, topk, hidden = 2048, 1, 4096
+        key = jax.random.key(123)
+        x = jax.random.normal(key, (num_tokens, hidden),
+                              jnp.float32).astype(jnp.bfloat16)
+        indices = jax.random.permutation(key, num_tokens)
+        topk_weights = jnp.ones((num_tokens, ), dtype=jnp.bfloat16)
+        valid_rows_mask = jnp.ones((num_tokens, ), dtype=bool)
+        desired = reference_ragged_gather_reduce(x, indices, topk_weights,
+                                                 valid_rows_mask, topk)
+        actual = ragged_gather_reduce_v3(x, indices, topk_weights,
+                                         valid_rows_mask, topk)
+        np.testing.assert_allclose(actual, desired, atol=1e-2, rtol=1e-2)
+
+    def test_sc_ragged_gather_reduce_v3_sentinel_does_not_read_uninitialized_rows(
+            self):
         """Regression: a 64-token block with exactly 2*64 valid routes that are not
         adjacent pairs makes v3 emit a zero-weight sentinel route. Under EP the
         rows of `x` outside the local expert range are uninitialized HBM; the
@@ -171,13 +195,16 @@ class ScatterTest(jtu.JaxTestCase):
         blk[:] = False
         blk[:, :2] = True
         blk[0, 1] = False
-        blk[1, 2] = True  # still 128 valid routes, but token 0 has 1 and token 1 has 3
+        blk[1,
+            2] = True  # still 128 valid routes, but token 0 has 1 and token 1 has 3
         valid[:64 * topk] = blk.reshape(-1)
         x = np.full((n, hidden), np.nan, np.float32)
-        x[perm[valid]] = rng.standard_normal((int(valid.sum()), hidden), dtype=np.float32)
+        x[perm[valid]] = rng.standard_normal((int(valid.sum()), hidden),
+                                             dtype=np.float32)
         x = jnp.asarray(x, dtype=jnp.bfloat16)
         indices = jnp.asarray(perm)
-        w = jnp.asarray(rng.standard_normal(n).astype(np.float32), dtype=jnp.bfloat16)
+        w = jnp.asarray(rng.standard_normal(n).astype(np.float32),
+                        dtype=jnp.bfloat16)
         vm = jnp.asarray(valid)
         desired = reference_ragged_gather_reduce(x, indices, w, vm, topk)
         actual = ragged_gather_reduce_v3(x, indices, w, vm, topk)

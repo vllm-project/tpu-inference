@@ -11,10 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Experimental destination-major SparseCore gather-reduce.
+"""Destination-major SparseCore gather-reduce.
 
 The v2 kernel streams valid routes and scatters FP32 partial rows.  This
-prototype instead assigns each core a contiguous block of destination tokens.
+kernel instead assigns each core a contiguous block of destination tokens.
 Valid routes are compacted across each block, gathered exactly once, scattered
 into FP32 VMEM with SparseCore vector scatter-add, and emitted as full 16-row
 BF16 tiles.
@@ -27,7 +27,6 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
-
 from tpu_inference.kernels.sparse_core import core_map_helper
 
 _TOKEN_SUBCHUNK = 16
@@ -54,17 +53,14 @@ def _fallback_implementation(
     return jnp.sum(out, axis=1).astype(x.dtype)
 
 
-def _calculate_num_column_partitions(
-    hidden_size: int, num_cores: int, num_lanes: int
-) -> int:
+def _calculate_num_column_partitions(hidden_size: int, num_cores: int,
+                                     num_lanes: int) -> int:
     preferred_num_stages = 4
     num_column_partitions = 1
-    while (
-        num_cores % (num_column_partitions * 2) == 0
-        and hidden_size % (num_lanes * num_column_partitions * 2) == 0
-        and hidden_size // (num_column_partitions * 2 * num_lanes)
-        >= preferred_num_stages
-    ):
+    while (num_cores % (num_column_partitions * 2) == 0
+           and hidden_size % (num_lanes * num_column_partitions * 2) == 0
+           and hidden_size //
+           (num_column_partitions * 2 * num_lanes) >= preferred_num_stages):
         num_column_partitions *= 2
     # Destination-major accumulation keeps a dense FP32 token block in VMEM.
     # For columns up to 1024, using one fewer column partition amortizes the
@@ -72,8 +68,7 @@ def _calculate_num_column_partitions(
     # enough room for the double-buffered indirect gather.  Wider columns stay
     # with the conservative partitioning selected above.
     if num_column_partitions >= 2 and hidden_size <= 1024 * (
-        num_column_partitions // 2
-    ):
+            num_column_partitions // 2):
         num_column_partitions //= 2
     return num_column_partitions
 
@@ -83,8 +78,7 @@ def partition_counts(hidden_size: int, tpu_info) -> tuple[int, int]:
     sc_info = tpu_info.sparse_core
     num_cores = sc_info.num_cores * sc_info.num_subcores
     num_column_partitions = _calculate_num_column_partitions(
-        hidden_size, num_cores, tpu_info.num_lanes
-    )
+        hidden_size, num_cores, tpu_info.num_lanes)
     return num_column_partitions, num_cores // num_column_partitions
 
 
@@ -125,21 +119,20 @@ def _main_kernel(
     out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
 
     def metadata_block_index(block_id):
-        return (row_partition_id * blocks_per_row_partition + block_id,)
+        return (row_partition_id * blocks_per_row_partition + block_id, )
 
     @functools.partial(
         pltpu.emit_pipeline,
-        grid=(blocks_per_row_partition,),
+        grid=(blocks_per_row_partition, ),
         in_specs=(
-            pl.BlockSpec((metadata_block_size,), metadata_block_index),
-            pl.BlockSpec((metadata_block_size,), metadata_block_index),
-            pl.BlockSpec((_TOKEN_SUBCHUNK,), metadata_block_index),
+            pl.BlockSpec((metadata_block_size, ), metadata_block_index),
+            pl.BlockSpec((metadata_block_size, ), metadata_block_index),
+            pl.BlockSpec((_TOKEN_SUBCHUNK, ), metadata_block_index),
         ),
         out_specs=(),
     )
-    def token_block_pipeline(
-        route_metadata_ref, route_weights_ref, route_counts_ref, output_sem_ref
-    ):
+    def token_block_pipeline(route_metadata_ref, route_weights_ref,
+                             route_counts_ref, output_sem_ref):
         block_id = pl.program_id(0)
         global_block_id = row_partition_id * blocks_per_row_partition + block_id
         valid_route_count = route_counts_ref[...][0]
@@ -151,7 +144,7 @@ def _main_kernel(
         # for tokens with no local route.
         def zero_column(col_offset):
             col_slice = pl.ds(col_offset, _TOKEN_SUBCHUNK)
-            zero = jnp.zeros((_TOKEN_SUBCHUNK,), jnp.float32)
+            zero = jnp.zeros((_TOKEN_SUBCHUNK, ), jnp.float32)
             for token_row in range(_TOKEN_BLOCK):
                 accum_vmem_ref[token_row, col_slice] = zero
 
@@ -164,7 +157,7 @@ def _main_kernel(
 
         @functools.partial(
             pltpu.emit_pipeline,
-            grid=(num_route_chunks,),
+            grid=(num_route_chunks, ),
             in_specs=pl.BlockSpec(
                 (pl.Indirect(_TOKEN_SUBCHUNK), col_size),
                 lambda route_chunk: (
@@ -184,24 +177,24 @@ def _main_kernel(
             route_metadata = route_metadata_ref[metadata_slice]
             source_indices = jnp.bitwise_and(route_metadata, _ROUTE_INDEX_MASK)
             route_destinations = jnp.bitwise_right_shift(
-                route_metadata, _ROUTE_INDEX_BITS
-            )
+                route_metadata, _ROUTE_INDEX_BITS)
             route_weights = route_weights_ref[metadata_slice]
 
             def fixed_two_route_column_loop(col_offset):
                 col_slice = pl.ds(col_offset, _TOKEN_SUBCHUNK)
-                feature_indices = col_offset + jnp.arange(
-                    _TOKEN_SUBCHUNK, dtype=jnp.int32
-                )
+                feature_indices = col_offset + jnp.arange(_TOKEN_SUBCHUNK,
+                                                          dtype=jnp.int32)
                 route_batch_size = 16
-                for route_batch_start in range(0, _TOKEN_SUBCHUNK, route_batch_size):
+                for route_batch_start in range(0, _TOKEN_SUBCHUNK,
+                                               route_batch_size):
                     weighted_values = []
                     for route_lane in range(
-                        route_batch_start, route_batch_start + route_batch_size
-                    ):
+                            route_batch_start,
+                            route_batch_start + route_batch_size):
                         value_i32 = gather_ref[route_lane, col_slice]
                         shift = jnp.where(
-                            jnp.bitwise_and(source_indices[route_lane], 1) == 0,
+                            jnp.bitwise_and(source_indices[route_lane],
+                                            1) == 0,
                             16,
                             0,
                         )
@@ -216,29 +209,29 @@ def _main_kernel(
                     for pair_start in range(0, route_batch_size, 2):
                         route_lane = route_batch_start + pair_start
                         destination_indices = jnp.full_like(
-                            feature_indices, route_destinations[route_lane]
-                        )
+                            feature_indices, route_destinations[route_lane])
                         plsc.addupdate_scatter(
                             accum_vmem_ref,
                             (destination_indices, feature_indices),
-                            weighted_values[pair_start]
-                            + weighted_values[pair_start + 1],
+                            weighted_values[pair_start] +
+                            weighted_values[pair_start + 1],
                         )
 
             def generic_column_loop(col_offset):
                 col_slice = pl.ds(col_offset, _TOKEN_SUBCHUNK)
-                feature_indices = col_offset + jnp.arange(
-                    _TOKEN_SUBCHUNK, dtype=jnp.int32
-                )
+                feature_indices = col_offset + jnp.arange(_TOKEN_SUBCHUNK,
+                                                          dtype=jnp.int32)
                 route_batch_size = 4
-                for route_batch_start in range(0, _TOKEN_SUBCHUNK, route_batch_size):
+                for route_batch_start in range(0, _TOKEN_SUBCHUNK,
+                                               route_batch_size):
                     weighted_values = []
                     for route_lane in range(
-                        route_batch_start, route_batch_start + route_batch_size
-                    ):
+                            route_batch_start,
+                            route_batch_start + route_batch_size):
                         value_i32 = gather_ref[route_lane, col_slice]
                         shift = jnp.where(
-                            jnp.bitwise_and(source_indices[route_lane], 1) == 0,
+                            jnp.bitwise_and(source_indices[route_lane],
+                                            1) == 0,
                             16,
                             0,
                         )
@@ -253,10 +246,10 @@ def _main_kernel(
                     for route_batch_lane in range(route_batch_size):
                         route_lane = route_batch_start + route_batch_lane
                         destination_indices = jnp.full_like(
-                            feature_indices, route_destinations[route_lane]
-                        )
+                            feature_indices, route_destinations[route_lane])
                         route_valid = metadata_start + route_lane < valid_route_count
-                        scatter_mask = jnp.broadcast_to(route_valid, (_TOKEN_SUBCHUNK,))
+                        scatter_mask = jnp.broadcast_to(
+                            route_valid, (_TOKEN_SUBCHUNK, ))
                         plsc.addupdate_scatter(
                             accum_vmem_ref,
                             (destination_indices, feature_indices),
@@ -266,15 +259,14 @@ def _main_kernel(
 
             @pl.when(fixed_two_routes)
             def run_fixed_two_route_path():
-                plsc.parallel_loop(0, col_size, step=_TOKEN_SUBCHUNK)(
-                    fixed_two_route_column_loop
-                )
+                plsc.parallel_loop(
+                    0, col_size,
+                    step=_TOKEN_SUBCHUNK)(fixed_two_route_column_loop)
 
             @pl.when(jnp.logical_not(fixed_two_routes))
             def run_generic_path():
-                plsc.parallel_loop(0, col_size, step=_TOKEN_SUBCHUNK)(
-                    generic_column_loop
-                )
+                plsc.parallel_loop(0, col_size,
+                                   step=_TOKEN_SUBCHUNK)(generic_column_loop)
 
         route_pipeline(x_32b_hbm_ref)
 
@@ -295,18 +287,17 @@ def _main_kernel(
                             accum_vmem_ref[accum_row + 1, col_slice],
                             format=plsc.PackFormat.INTERLEAVED,
                         )
-                        out_tile_vmem_ref[output_buffer, token_lane // 2, col_slice] = (
-                            plsc.bitcast(packed_bf16, jnp.uint32)
-                        )
+                        out_tile_vmem_ref[output_buffer, token_lane // 2,
+                                          col_slice] = (plsc.bitcast(
+                                              packed_bf16, jnp.uint32))
 
-                plsc.parallel_loop(0, col_size, step=_TOKEN_SUBCHUNK)(cast_column)
+                plsc.parallel_loop(0, col_size,
+                                   step=_TOKEN_SUBCHUNK)(cast_column)
 
-                output_row = (
-                    global_block_id * _TOKEN_BLOCK + token_subchunk * _TOKEN_SUBCHUNK
-                )
-                output_row_packed = pl.multiple_of(
-                    output_row // 2, _TOKEN_SUBCHUNK // 2
-                )
+                output_row = (global_block_id * _TOKEN_BLOCK +
+                              token_subchunk * _TOKEN_SUBCHUNK)
+                output_row_packed = pl.multiple_of(output_row // 2,
+                                                   _TOKEN_SUBCHUNK // 2)
                 copy = pltpu.make_async_copy(
                     out_tile_vmem_ref.at[output_buffer],
                     out_32b_hbm_ref.at[
@@ -324,11 +315,11 @@ def _main_kernel(
         route_metadata_hbm_ref,
         route_weights_hbm_ref,
         route_counts_hbm_ref,
-        scratches=(sem_ref,),
+        scratches=(sem_ref, ),
     )
 
 
-@functools.partial(jax.jit, static_argnames=("reduce_group_size",))
+@functools.partial(jax.jit, static_argnames=("reduce_group_size", ))
 def ragged_gather_reduce(
     x: jax.Array,
     indices: jax.Array,
@@ -338,11 +329,8 @@ def ragged_gather_reduce(
 ) -> jax.Array:
     """Destination-major prototype for MoE output combine."""
     sc_info = pltpu.get_tpu_info().sparse_core
-    if (
-        sc_info is None
-        or x.dtype != jnp.bfloat16
-        or x.shape[-1] % pltpu.get_tpu_info().num_lanes != 0
-    ):
+    if (sc_info is None or x.dtype != jnp.bfloat16
+            or x.shape[-1] % pltpu.get_tpu_info().num_lanes != 0):
         return _fallback_implementation(
             x,
             indices,
@@ -351,7 +339,8 @@ def ragged_gather_reduce(
             reduce_group_size,
         )
     dtype_bytes = jax.dtypes.itemsize_bits(x.dtype) // 8
-    if jnp.size(x) * dtype_bytes * 2 < pltpu.get_tpu_info().vmem_capacity_bytes * 0.6:
+    if jnp.size(x) * dtype_bytes * 2 < pltpu.get_tpu_info(
+    ).vmem_capacity_bytes * 0.6:
         return _fallback_implementation(
             x,
             indices,
@@ -362,7 +351,8 @@ def ragged_gather_reduce(
 
     input_size = indices.size
     if input_size % reduce_group_size != 0:
-        raise ValueError(f"{input_size=} must be divisible by {reduce_group_size=}")
+        raise ValueError(
+            f"{input_size=} must be divisible by {reduce_group_size=}")
     # SparseCore row-packing views BF16 as pairs of rows.
     if x.shape[0] % 2:
         x = jnp.pad(x, ((0, 1), (0, 0)))
@@ -370,12 +360,10 @@ def ragged_gather_reduce(
     hidden_size = x.shape[-1]
     if x.shape[0] > 1 << _ROUTE_INDEX_BITS:
         raise ValueError(
-            f"destination-major prototype supports at most "
-            f"{1 << _ROUTE_INDEX_BITS} source rows, got {x.shape[0]}"
-        )
+            f"destination-major kernel supports at most "
+            f"{1 << _ROUTE_INDEX_BITS} source rows, got {x.shape[0]}")
     num_column_partitions, num_row_partitions = partition_counts(
-        hidden_size, pltpu.get_tpu_info()
-    )
+        hidden_size, pltpu.get_tpu_info())
 
     token_alignment = num_row_partitions * _TOKEN_BLOCK
     padded_num_tokens = _align_to(num_tokens, token_alignment)
@@ -394,16 +382,18 @@ def ragged_gather_reduce(
     indices_blocks = indices_2d.reshape(num_blocks, metadata_block_size)
     valid_blocks = valid_2d.reshape(num_blocks, metadata_block_size)
     destination_template = jnp.repeat(
-        jnp.arange(_TOKEN_BLOCK, dtype=jnp.int32), reduce_group_size
-    )
-    destination_blocks = jnp.broadcast_to(destination_template, indices_blocks.shape)
+        jnp.arange(_TOKEN_BLOCK, dtype=jnp.int32), reduce_group_size)
+    destination_blocks = jnp.broadcast_to(destination_template,
+                                          indices_blocks.shape)
 
     # A stable boolean partition keeps routes for each destination adjacent
     # while placing the exact valid prefix first in every destination block.
     route_order = jnp.argsort(~valid_blocks, axis=1, stable=True)
     compact_valid = jnp.take_along_axis(valid_blocks, route_order, axis=1)
     route_indices = jnp.take_along_axis(indices_blocks, route_order, axis=1)
-    route_destinations = jnp.take_along_axis(destination_blocks, route_order, axis=1)
+    route_destinations = jnp.take_along_axis(destination_blocks,
+                                             route_order,
+                                             axis=1)
     weights_blocks = weights_2d.reshape(num_blocks, metadata_block_size)
     route_weights = jnp.take_along_axis(weights_blocks, route_order, axis=1)
     # Invalid (compacted-out) slots must not point at an arbitrary row: under
@@ -418,9 +408,8 @@ def ragged_gather_reduce(
     route_indices = route_indices.astype(jnp.int32)
     safe_source = route_indices[:, :1]
     route_indices = jnp.where(compact_valid, route_indices, safe_source)
-    route_destinations = jnp.where(compact_valid, route_destinations, 0).astype(
-        jnp.int32
-    )
+    route_destinations = jnp.where(compact_valid, route_destinations,
+                                   0).astype(jnp.int32)
     route_metadata = jnp.bitwise_or(
         route_indices,
         jnp.left_shift(route_destinations, _ROUTE_INDEX_BITS),
@@ -428,25 +417,29 @@ def ragged_gather_reduce(
     route_weights = jnp.where(compact_valid, route_weights, 0).reshape(-1)
     route_weights = route_weights.astype(jnp.float32)
     route_counts = jnp.sum(valid_blocks, axis=1, dtype=jnp.int32)
-    paired_destinations = route_destinations[:, : 2 * _TOKEN_BLOCK].reshape(
-        num_blocks, _TOKEN_BLOCK, 2
-    )
-    fixed_two_route_blocks = jnp.logical_and(
-        route_counts == 2 * _TOKEN_BLOCK,
-        jnp.all(paired_destinations[:, :, 0] == paired_destinations[:, :, 1], axis=1),
-    )
-    # Count 128 selects the adjacent-pair fast path in the SC kernel. If a full
-    # two-route block does not actually have adjacent equal destinations,
-    # expose one already-zero compacted slot as a harmless sentinel so the block
-    # takes the generic path instead.
-    needs_zero_weight_sentinel = jnp.logical_and(
-        route_counts == 2 * _TOKEN_BLOCK,
-        jnp.logical_not(fixed_two_route_blocks),
-    )
+    if metadata_block_size >= 2 * _TOKEN_BLOCK:
+        paired_destinations = route_destinations[:, :2 * _TOKEN_BLOCK].reshape(
+            num_blocks, _TOKEN_BLOCK, 2)
+        fixed_two_route_blocks = jnp.logical_and(
+            route_counts == 2 * _TOKEN_BLOCK,
+            jnp.all(
+                paired_destinations[:, :, 0] == paired_destinations[:, :, 1],
+                axis=1,
+            ),
+        )
+        # Count 128 selects the adjacent-pair fast path in the SC kernel. If a full
+        # two-route block does not actually have adjacent equal destinations,
+        # expose one already-zero compacted slot as a harmless sentinel so the block
+        # takes the generic path instead.
+        needs_zero_weight_sentinel = jnp.logical_and(
+            route_counts == 2 * _TOKEN_BLOCK,
+            jnp.logical_not(fixed_two_route_blocks),
+        )
+    else:
+        needs_zero_weight_sentinel = jnp.zeros((num_blocks, ), dtype=bool)
     route_counts += needs_zero_weight_sentinel.astype(jnp.int32)
-    route_counts = jnp.broadcast_to(
-        route_counts[:, None], (num_blocks, _TOKEN_SUBCHUNK)
-    ).reshape(-1)
+    route_counts = jnp.broadcast_to(route_counts[:, None],
+                                    (num_blocks, _TOKEN_SUBCHUNK)).reshape(-1)
 
     col_size = hidden_size // num_column_partitions
     blocks_per_row_partition = num_blocks // num_row_partitions
@@ -466,7 +459,8 @@ def ragged_gather_reduce(
             blocks_per_row_partition=blocks_per_row_partition,
             topk=reduce_group_size,
         ),
-        out_type=jax.ShapeDtypeStruct((padded_num_tokens, hidden_size), jnp.bfloat16),
+        out_type=jax.ShapeDtypeStruct((padded_num_tokens, hidden_size),
+                                      jnp.bfloat16),
         compiler_params=pltpu.CompilerParams(
             use_tc_tiling_on_sc=True,
             disable_bounds_checks=True,
@@ -475,7 +469,7 @@ def ragged_gather_reduce(
         scratch_types=(
             pltpu.VMEM((_TOKEN_BLOCK, col_size), jnp.float32),
             pltpu.VMEM((2, _TOKEN_SUBCHUNK // 2, col_size), jnp.uint32),
-            pltpu.SemaphoreType.DMA((2,)),
+            pltpu.SemaphoreType.DMA((2, )),
         ),
         mesh=vector_mesh,
         name="sc_ragged_gather_reduce_v3",

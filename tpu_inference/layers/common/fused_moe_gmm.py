@@ -18,12 +18,11 @@ from typing import Literal
 
 import jax
 import numpy as np
+import tpu_inference.envs as envs
 from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from tokamax._src.ops.gmm_v2.gmm_v2 import gmm_v2
-
-import tpu_inference.envs as envs
 from tpu_inference.kernels.collectives.hierrs_sc import wrapper as hier_rs_sc
 from tpu_inference.kernels.experimental.moe_lowtok import (can_use_moe_lowtok,
                                                            moe_lowtok)
@@ -32,12 +31,10 @@ from tpu_inference.kernels.experimental.moe_lowtok import \
 from tpu_inference.kernels.router_topk import router_topk
 from tpu_inference.kernels.sparse_core.dense_gather_reduce import \
     dense_gather_reduce
-from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v2 import (
-    ragged_gather_reduce as ragged_gather_reduce_v2,
-)
-from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v3 import (
-    ragged_gather_reduce as ragged_gather_reduce_v3,
-)
+from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v2 import \
+    ragged_gather_reduce as ragged_gather_reduce_v2
+from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v3 import \
+    ragged_gather_reduce as ragged_gather_reduce_v3
 from tpu_inference.kernels.sparse_core.ragged_gather_v2 import \
     ragged_gather_v2 as ragged_gather
 from tpu_inference.layers.common.linear import _safe_calculate_tiling
@@ -51,7 +48,7 @@ logger = init_logger(__name__)
 
 
 def _select_ragged_gather_reduce(version: str | None = None):
-    v = (version or envs.RAGGED_GATHER_REDUCE_VERSION or "v3").lower()
+    v = (version or envs.RAGGED_GATHER_REDUCE_VERSION).lower()
     if v == "v3":
         return ragged_gather_reduce_v3
     return ragged_gather_reduce_v2
@@ -644,30 +641,31 @@ def _tc_local_moe(tokens: jax.Array, topk_argsort_indices: jax.Array,
     return out.astype(tokens.dtype)
 
 
-def moe_gmm_local(x: jax.Array,
-                  w1: jax.Array,
-                  w1_scale: jax.Array | None,
-                  w1_bias: jax.Array | None,
-                  w2: jax.Array,
-                  w2_scale: jax.Array | None,
-                  w2_bias: jax.Array | None,
-                  group_sizes: jax.Array,
-                  group_offset: jax.Array,
-                  topk_argsort_revert_indices: jax.Array,
-                  topk_weights: jax.Array,
-                  topk_argsort_indices: jax.Array | None = None,
-                  *,
-                  activation: str,
-                  topk: int,
-                  parallelism: Literal["tp", "ep"],
-                  enable_rs_kernel: bool = False,
-                  onehot_moe_permute_threshold: int = 0,
-                  scatter_results: bool = False,
-                  moe_chunk_size: int = 0,
-                  defer_all_reduce: bool = False,
-                  hierarchical_collect: tuple | None = None,
-                  tc_capacity: int = 0,
-                  ragged_gather_reduce_version: str | None = None) -> jax.Array:
+def moe_gmm_local(
+        x: jax.Array,
+        w1: jax.Array,
+        w1_scale: jax.Array | None,
+        w1_bias: jax.Array | None,
+        w2: jax.Array,
+        w2_scale: jax.Array | None,
+        w2_bias: jax.Array | None,
+        group_sizes: jax.Array,
+        group_offset: jax.Array,
+        topk_argsort_revert_indices: jax.Array,
+        topk_weights: jax.Array,
+        topk_argsort_indices: jax.Array | None = None,
+        *,
+        activation: str,
+        topk: int,
+        parallelism: Literal["tp", "ep"],
+        enable_rs_kernel: bool = False,
+        onehot_moe_permute_threshold: int = 0,
+        scatter_results: bool = False,
+        moe_chunk_size: int = 0,
+        defer_all_reduce: bool = False,
+        hierarchical_collect: tuple | None = None,
+        tc_capacity: int = 0,
+        ragged_gather_reduce_version: str | None = None) -> jax.Array:
     """Main MoE logic on a local shard can run in TP or EP mode.
 
     Set parallelism for "tp" or "ep"
@@ -807,7 +805,8 @@ def moe_gmm_local(x: jax.Array,
                            cur_mask).sum(axis=1)
                 chunk_hidden = combine @ gmm2_res
             else:
-                rgr_fn = _select_ragged_gather_reduce(ragged_gather_reduce_version)
+                rgr_fn = _select_ragged_gather_reduce(
+                    ragged_gather_reduce_version)
                 chunk_hidden = rgr_fn(gmm2_res, cur_indices,
                                       cur_weights.reshape(-1),
                                       cur_mask.reshape(-1), topk)
