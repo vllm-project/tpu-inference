@@ -186,8 +186,12 @@ def _replicate_fused_moe_hash_indices_tables_and_e_score_correction_bias(
         table = getattr(module, "hash_indices_table", None)
         if table is not None:
             sharded = _shard_tensor_to_tpu_replicated(table, mesh)
-            module.hash_indices_table = torch.nn.Parameter(sharded,
-                                                           requires_grad=False)
+            # Upstream RoutedExperts keeps hash_indices_table as a plain
+            # attribute (the gate owns the Parameter), so bypass
+            # nn.Module.__setattr__: assigning an nn.Parameter over an
+            # existing non-parameter attribute would raise KeyError in
+            # register_parameter.
+            object.__setattr__(module, "hash_indices_table", sharded)
         e_score_correction_bias = getattr(module, "e_score_correction_bias",
                                           None)
         if e_score_correction_bias is not None:
