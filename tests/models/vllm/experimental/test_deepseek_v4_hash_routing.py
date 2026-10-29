@@ -92,10 +92,12 @@ def test_replicate_registers_tpu_buffer_and_keeps_bias_parameter():
     # HASH_TABLE_ROW_MAJOR in vllm_model_wrapper keys on this suffix.
     assert "tpu_hash_indices_table".endswith("hash_indices_table")
 
-    # e_score_correction_bias keeps upstream's registered-parameter semantics.
+    # e_score_correction_bias keeps upstream's registered-parameter semantics
+    # (re-wrapped as a new nn.Parameter around the replicated tensor).
     assert isinstance(module.e_score_correction_bias, nn.Parameter)
     assert params["e_score_correction_bias"] is module.e_score_correction_bias
-    assert module.e_score_correction_bias is replicated[id(bias)]
+    assert module.e_score_correction_bias is not bias
+    assert torch.equal(module.e_score_correction_bias, replicated[id(bias)])
 
 
 def test_replicate_is_idempotent():
