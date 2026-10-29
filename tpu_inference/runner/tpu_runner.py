@@ -87,8 +87,8 @@ from tpu_inference.runner.persistent_batch_manager import \
 from tpu_inference.runner.routed_experts import (RoutedExpertsStepEntry,
                                                  TPUAuxOutputWorker,
                                                  get_routed_experts_attn_gid)
-from tpu_inference.runner.sequence_classification import (
-    pool_sequence_classification, prewarm_sequence_classification)
+from tpu_inference.runner.sequence_classification import \
+    pool_sequence_classification
 from tpu_inference.runner.speculative_decoding_manager import (
     SpecDecodeMetadata, SpeculativeDecodingManager)
 from tpu_inference.runner.structured_decoding_manager import \
@@ -1349,8 +1349,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # program reservations (bytes_reserved) on TPU HBM.
         jax.clear_caches()
         logger.info("Cleared JIT caches after weight loading")
-        if isinstance(self.pooler_fn, NativeSequenceClassificationPooler):
-            prewarm_sequence_classification(self)
 
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")

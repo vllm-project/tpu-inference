@@ -334,7 +334,7 @@ def get_flax_model(
 ) -> ModelInterface:
     # Resolve the pooling head dtype while vLLM still has its torch dtype.
     allow_native_sequence_classification = (
-        not is_draft_model and envs.MODEL_IMPL_TYPE == "flax_nnx"
+        not is_draft_model
         and supports_native_sequence_classification(vllm_config, mesh))
     original_dtype = vllm_config.model_config.dtype
     model_dtype = to_jax_dtype(original_dtype)

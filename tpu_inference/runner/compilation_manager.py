@@ -40,10 +40,14 @@ from tpu_inference.layers.jax.sample.sampling_metadata import \
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
+from tpu_inference.models.jax.sequence_classification import \
+    NativeSequenceClassificationPooler
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.decode_loop import TpuSamplingState, continue_decode
 from tpu_inference.runner.pcp_utils import (pcp_page_order, pcp_seq_arrays,
                                             pcp_token_layout)
+from tpu_inference.runner.sequence_classification import \
+    prewarm_sequence_classification
 from tpu_inference.runner.utils import SpecDecodeMetadata
 from tpu_inference.spec_decode.jax.utils import (
     concat_last_sampled_tokens_and_draft_tokens, extend_logits_simple,
@@ -998,6 +1002,10 @@ class CompilationManager:
 
     def _precompile_compute_pooling(self) -> None:
         logger.info("Compiling compute_pooling with different input shapes.")
+        if isinstance(self.runner.pooler_fn,
+                      NativeSequenceClassificationPooler):
+            prewarm_sequence_classification(self.runner)
+            return
 
         # vLLM pooling layer design has complex and dynamic logic. There are
         # interoperate between tensors from host and accelerator.

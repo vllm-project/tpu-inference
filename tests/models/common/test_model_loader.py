@@ -669,3 +669,29 @@ class TestGetModel:
         mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh, False,
                                               None)
         assert result == "vllm_model_sentinel"
+
+    def test_get_model_auto_selects_native_sequence_classification(
+            self, monkeypatch, rng, mesh):
+        from tests.models.jax.test_gemma4_classification import \
+            _make_supported_vllm_config
+        from tpu_inference.models.jax.gemma4_classification import \
+            Gemma4ForSequenceClassification
+
+        monkeypatch.setattr(model_loader.envs, "MODEL_IMPL_TYPE", "auto")
+        cfg = _make_supported_vllm_config()
+        assert model_loader.resolve_model_impl_type(cfg) == "flax_nnx"
+
+        captured = []
+
+        class SentinelError(Exception):
+            pass
+
+        def fake_get_nnx_model(model_class, *args, **kwargs):
+            captured.append(model_class)
+            raise SentinelError
+
+        monkeypatch.setattr(model_loader, "_get_nnx_model", fake_get_nnx_model)
+        # Goes through get_model so the default "auto" resolution is covered.
+        with set_current_vllm_config(cfg), pytest.raises(SentinelError):
+            model_loader.get_model(cfg, rng, mesh)
+        assert captured == [Gemma4ForSequenceClassification]

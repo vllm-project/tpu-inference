@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import json
-import os
-
 import jax
 import jax.numpy as jnp
 import torch
@@ -59,7 +56,7 @@ def classify_rows(rows: jax.Array, weight: jax.Array) -> jax.Array:
         weight.astype(jnp.float32),
         precision=jax.lax.Precision.HIGHEST,
         preferred_element_type=jnp.float32,
-    ).astype(jnp.float32)
+    )
 
 
 class NativeSequenceClassificationPooler:
@@ -91,14 +88,9 @@ class NativeSequenceClassificationPooler:
                                f"be [{hidden_size}, {model.num_labels}]; "
                                f"got {weight.shape}")
 
-        self._logged_execution = False
         logger.info(
-            "Native JAX sequence-classification ready pid=%d "
-            "visible_devices=%s score=%s labels=%d", os.getpid(),
-            json.dumps(
-                sorted(f"{device.platform}:{device.id}"
-                       for device in jax.devices())), weight.shape,
-            weight.shape[1])
+            "Native JAX sequence classification enabled: score=%s labels=%d",
+            tuple(weight.shape), weight.shape[1])
 
     def __call__(self, logits_dev: jax.Array, pooling_metadata):
         import torchax
@@ -110,34 +102,10 @@ class NativeSequenceClassificationPooler:
         num_reqs = len(pooling_metadata.pooling_params)
         if not num_reqs:
             return []
-        if not self._logged_execution:
-            devices = logits_dev.devices()
-            logger.info(
-                "Native JAX sequence-classification engaged pid=%d "
-                "platforms=%s devices=%s", os.getpid(),
-                ",".join(sorted({device.platform
-                                 for device in devices})),
-                json.dumps(
-                    sorted(f"{device.platform}:{device.id}"
-                           for device in devices)))
-            self._logged_execution = True
         with torchax.default_env():
             logits = torch_view(logits_dev).to("cpu",
                                                non_blocking=True)[:num_reqs]
 
-        if self.head.logit_mean is not None:
-            logits = logits - self.head.logit_mean
-        if self.head.logit_sigma is not None:
-            logits = logits / self.head.logit_sigma
-        activation = self.head.activation
-        if activation is not None:
-            flags = [p.use_activation for p in pooling_metadata.pooling_params]
-            if len(set(flags)) == 1:
-                if flags[0]:
-                    logits = activation(logits)
-            else:
-                return [
-                    activation(row) if flag else row
-                    for row, flag in zip(logits, flags)
-                ]
-        return list(logits.unbind(0))
+        out = self.head(logits, pooling_metadata)
+        return list(out.unbind(0)) if isinstance(out,
+                                                 torch.Tensor) else list(out)
