@@ -331,3 +331,25 @@ def test_convert_torch_to_jax_with_view():
         assert jax_arr_mesh.dtype == jnp.bfloat16
         assert jax_arr_mesh.shape == (4, 4)
         assert jax_arr_mesh.device.platform == "cpu"
+
+
+def test_fused_params_only_keeps_packed_targets():
+    """The packed-weight router must not pin unrelated (e.g. MoE) params."""
+    from tpu_inference.models.jax.utils.weight_utils import \
+        JaxAutoWeightsLoader
+
+    module = MagicMock()
+    module.packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+    module.named_parameters.return_value = [
+        ("layers.0.mlp.gate_up_proj.weight", "fused"),
+        ("layers.0.experts.kernel_gating_EDF", "moe"),
+        ("layers.0.self_attn.q_proj.weight", "attn"),
+    ]
+    # Only the routing helpers are under test; skip the loader constructor.
+    loader = JaxAutoWeightsLoader.__new__(JaxAutoWeightsLoader)
+    loader.module = module
+    remap = loader._packed_remap()
+    assert ("gate_up_proj", "gate_proj", 0) in remap
+    assert loader._fused_params(remap) == {
+        "layers.0.mlp.gate_up_proj.weight": "fused"
+    }
