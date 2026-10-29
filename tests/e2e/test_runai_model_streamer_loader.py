@@ -73,18 +73,22 @@ def test_correctness_jax_uni_proc_executor(
                   max_model_len=128,
                   max_num_seqs=16,
                   max_num_batched_tokens=256)
-    gcs_outputs = gcs_llm.generate([prompt], sampling_config)
-    gcs_output_text = gcs_outputs[0].outputs[0].text
-    gcs_llm.llm_engine.engine_core.shutdown()
+    try:
+        gcs_outputs = gcs_llm.generate([prompt], sampling_config)
+        gcs_output_text = gcs_outputs[0].outputs[0].text
+    finally:
+        gcs_llm.llm_engine.engine_core.shutdown()
 
     # Test with Hugging Face model
     hf_llm = LLM(model=hf_model_name,
                  max_model_len=128,
                  max_num_seqs=16,
                  max_num_batched_tokens=256)
-    hf_outputs = hf_llm.generate([prompt], sampling_config)
-    hf_output_text = hf_outputs[0].outputs[0].text
-    hf_llm.llm_engine.engine_core.shutdown()
+    try:
+        hf_outputs = hf_llm.generate([prompt], sampling_config)
+        hf_output_text = hf_outputs[0].outputs[0].text
+    finally:
+        hf_llm.llm_engine.engine_core.shutdown()
 
     assert gcs_output_text == hf_output_text, (
         f"Outputs do not match! "
@@ -122,18 +126,22 @@ def test_correctness_torchax_uni_proc_executor(
                   max_model_len=128,
                   max_num_seqs=16,
                   max_num_batched_tokens=256)
-    gcs_outputs = gcs_llm.generate([prompt], sampling_config)
-    gcs_output_text = gcs_outputs[0].outputs[0].text
-    gcs_llm.llm_engine.engine_core.shutdown()
+    try:
+        gcs_outputs = gcs_llm.generate([prompt], sampling_config)
+        gcs_output_text = gcs_outputs[0].outputs[0].text
+    finally:
+        gcs_llm.llm_engine.engine_core.shutdown()
 
     # Test with Hugging Face model
     hf_llm = LLM(model=hf_model_name,
                  max_model_len=128,
                  max_num_seqs=16,
                  max_num_batched_tokens=256)
-    hf_outputs = hf_llm.generate([prompt], sampling_config)
-    hf_output_text = hf_outputs[0].outputs[0].text
-    hf_llm.llm_engine.engine_core.shutdown()
+    try:
+        hf_outputs = hf_llm.generate([prompt], sampling_config)
+        hf_output_text = hf_outputs[0].outputs[0].text
+    finally:
+        hf_llm.llm_engine.engine_core.shutdown()
 
     assert gcs_output_text == hf_output_text, (
         f"Outputs do not match! "
@@ -172,9 +180,11 @@ def test_correctness_torchax_ray_distributed_executor(
                   max_model_len=128,
                   max_num_seqs=16,
                   max_num_batched_tokens=256)
-    gcs_outputs = gcs_llm.generate([prompt], sampling_config)
-    gcs_output_text = gcs_outputs[0].outputs[0].text
-    gcs_llm.llm_engine.engine_core.shutdown(timeout=30)
+    try:
+        gcs_outputs = gcs_llm.generate([prompt], sampling_config)
+        gcs_output_text = gcs_outputs[0].outputs[0].text
+    finally:
+        gcs_llm.llm_engine.engine_core.shutdown(timeout=30)
 
     # Test with Hugging Face model
     hf_llm = LLM(model=hf_model_name,
@@ -182,9 +192,11 @@ def test_correctness_torchax_ray_distributed_executor(
                  max_model_len=128,
                  max_num_seqs=16,
                  max_num_batched_tokens=256)
-    hf_outputs = hf_llm.generate([prompt], sampling_config)
-    hf_output_text = hf_outputs[0].outputs[0].text
-    hf_llm.llm_engine.engine_core.shutdown(timeout=30)
+    try:
+        hf_outputs = hf_llm.generate([prompt], sampling_config)
+        hf_output_text = hf_outputs[0].outputs[0].text
+    finally:
+        hf_llm.llm_engine.engine_core.shutdown(timeout=30)
 
     assert gcs_output_text == hf_output_text, (
         f"Outputs do not match! "
