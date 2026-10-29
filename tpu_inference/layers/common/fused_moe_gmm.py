@@ -256,6 +256,11 @@ def _override_token_indices_for_random_routing(
     return topk_indices
 
 
+def _get_topk_weights_dtype(default_dtype: jnp.dtype) -> jnp.dtype:
+    """Returns float32 if TPU_MOE_TOPK_WEIGHTS_FLOAT32 is enabled, else default_dtype."""
+    return jnp.float32 if envs.TPU_MOE_TOPK_WEIGHTS_FLOAT32 else default_dtype
+
+
 def all_gather_topk_indices_and_weights(
         topk_indices: jax.Array, topk_weights: jax.Array, dtype: jnp.dtype,
         mesh: Mesh) -> tuple[jax.Array, jax.Array]:
@@ -278,7 +283,8 @@ def all_gather_topk_indices_and_weights(
     topk_weights = gathered_blob[1]
     topk_indices = topk_indices.reshape(-1, top_k)
     topk_weights = jax.lax.bitcast_convert_type(topk_weights, jnp.float32)
-    topk_weights = topk_weights.reshape(-1, top_k).astype(dtype)
+    topk_weights = topk_weights.reshape(-1, top_k).astype(
+        _get_topk_weights_dtype(dtype))
 
     return topk_indices, topk_weights
 
@@ -1496,7 +1502,7 @@ def fused_moe_func(
     elif get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA) > 1:
         topk_indices, topk_weights = all_gather_topk_indices_and_weights(
             topk_indices, topk_weights, dtype, mesh)
-    topk_weights = topk_weights.astype(dtype)
+    topk_weights = topk_weights.astype(_get_topk_weights_dtype(dtype))
     topk_weights = jax.lax.with_sharding_constraint(
         topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
 
