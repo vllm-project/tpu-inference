@@ -110,6 +110,7 @@ if TYPE_CHECKING:
     TPU_MOE_ROUTER_TOPK: str = "sort"
     TPU_MOE_LOWTOK: bool = False
     TPU_MOE_LOWTOK_MAX_TOKENS: int = 128
+    TPU_MOE_TOPK_WEIGHTS_FLOAT32: bool = False
 
 
 def env_with_choices(
@@ -694,6 +695,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("TPU_MOE_LOWTOK", default=False),
     "TPU_MOE_LOWTOK_MAX_TOKENS":
     lambda: int(os.getenv("TPU_MOE_LOWTOK_MAX_TOKENS", "128")),
+    # Keep FusedMoE top-k routing weights in float32 precision instead of casting
+    # to the activation dtype (e.g. bfloat16) in fused_moe_gmm. Improves numerical
+    # parity with training frameworks (e.g. MaxText) in RL and distillation workloads.
+    # The MOE_TOPK_WEIGHTS_FLOAT32 alias is supported for backward compatibility
+    # with the atwigg/mlperf branch and deployment configs.
+    "TPU_MOE_TOPK_WEIGHTS_FLOAT32":
+    lambda: (env_bool("TPU_MOE_TOPK_WEIGHTS_FLOAT32", default=False)
+             () or env_bool("MOE_TOPK_WEIGHTS_FLOAT32", default=False)()),
 }
 
 
