@@ -75,6 +75,8 @@ def main():
         "prompt":
         (f"Publish tpu-inference {version} from {branch}: the staged image "
          f"{staged} to Docker Hub as {dockerhub_repo}:v{version}. "
+         f"tpu-inference and vllm-tpu {version} to PyPI. "
+         "PyPI releases can't be replaced. "
          "Check that tpu-inference-ci passed on this commit first."),
         "fields": [
             {
@@ -135,9 +137,31 @@ def main():
         ))
     steps.append(
         command_step(
-            ":white_check_mark: Check the published image",
+            ":package: Publish tpu-inference to PyPI",
+            "publish_core",
+            ["approve_publish"],
+            ["bash .buildkite/scripts/publish_wheel.sh tpu-inference"],
+            env={"PUBLISH_PYPI": "tpu-inference"},
+            concurrency=1,
+            concurrency_group="tpu-inference-publish",
+        ))
+    # The combined wheel pins tpu-inference==<version>, so it goes up only
+    # once the core is installable.
+    steps.append(
+        command_step(
+            ":package: Publish vllm-tpu to PyPI",
+            "publish_vllm_tpu",
+            ["publish_core"],
+            ["bash .buildkite/scripts/publish_wheel.sh vllm-tpu"],
+            env={"PUBLISH_PYPI": "vllm-tpu"},
+            concurrency=1,
+            concurrency_group="vllm-tpu-publish",
+        ))
+    steps.append(
+        command_step(
+            ":white_check_mark: Check the published image and wheel",
             "verify_published",
-            ["publish_images"],
+            ["publish_images", "publish_vllm_tpu"],
             ["bash .buildkite/release/verify_published.sh"],
         ))
 
