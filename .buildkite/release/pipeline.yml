@@ -15,13 +15,15 @@
 # tpu-inference-release: builds the vllm/vllm-tpu image of a release once,
 # waits for approval, then publishes that same image to Docker Hub.
 #
-# The pipeline settings upload this file from the build's own checkout, for
-# releases/v* branches only, so a release branch runs the release tooling it
-# was cut with. plan_publish.py adds the approval and publish steps. README.md
-# has the how-to.
+# The pipeline's settings upload this file from the build's own checkout, for
+# builds of main and releases/v* only, so a release branch runs the release
+# tooling it was cut with. README.md has the how-to.
+#
+#   releases/vX.Y.Z   settle the version, build, wait for approval, then
+#                     publish (plan_publish.py)
 
 steps:
-  - label: ":clipboard: Preflight"
+  - label: ":clipboard: Preflight: version, PyPI"
     key: preflight
     if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
     agents: &queue
@@ -38,9 +40,42 @@ steps:
     commands:
       - bash .buildkite/release/build_images.sh
 
+  - label: ":package: Build the tpu-inference wheel"
+    key: build_tpu_inference_wheel
+    depends_on: preflight
+    if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
+    agents: *queue
+    env:
+      PUBLISH_PYPI: "tpu-inference"  # build_tpu_inference_wheel.sh fails early if it's on PyPI
+    commands:
+      - bash .buildkite/scripts/build_tpu_inference_wheel.sh
+
+  - label: ":package: Build the vllm-tpu wheel"
+    key: build_vllm_tpu_wheel
+    depends_on: build_tpu_inference_wheel
+    if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
+    agents: *queue
+    commands:
+      - |
+        set -euo pipefail
+        VERSION="$$(buildkite-agent meta-data get release-version)"
+        bash .buildkite/scripts/build_vllm_tpu_wheel.sh "$$VERSION"
+        buildkite-agent artifact upload "dist/vllm_tpu-*.whl"
+        buildkite-agent artifact upload "dist/vllm_tpu-*.tar.gz"
+
+  - label: ":mag: Check the wheels install from PyPI"
+    key: check_wheels
+    depends_on: build_vllm_tpu_wheel
+    if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
+    agents: *queue
+    commands:
+      - bash .buildkite/release/check_wheels.sh
+
   - label: ":pipeline: Plan the approval and publish"
     key: plan_publish
-    depends_on: build_images
+    depends_on:
+      - build_images
+      - check_wheels
     if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
     agents: *queue
     commands:

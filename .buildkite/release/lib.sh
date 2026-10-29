@@ -13,7 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Shared by the tpu-inference-release steps. Sourced, not run.
+# Shared by the tpu-inference-release steps and the wheel build and publish
+# scripts in .buildkite/scripts. Sourced, not run.
+
+# Newest manylinux tag (i.e. glibc) the release wheels may need: the release
+# queue runs on Ubuntu 24.04 (glibc 2.39), the vllm-tpu build fails on a wheel
+# tagged above this, and check_wheels.sh resolves for this platform.
+WHEEL_MAX_MANYLINUX="2_39"
 
 # Release branches and versions: public PEP 440 versions in normalized form
 # (no local +... part, no leading zeros).
@@ -59,7 +65,7 @@ resolve_release_version() {
 }
 
 # The version every step of the build agrees on, set once by preflight.sh
-# (or resolved on the spot when running a step standalone).
+# (or resolved on the spot when a step runs standalone).
 release_version() {
   local rc=0
   buildkite-agent meta-data exists release-version || rc=$?
@@ -68,6 +74,71 @@ release_version() {
     100) resolve_release_version ;;
     *) die "could not read meta-data release-version (exit ${rc})." ;;
   esac
+}
+
+# Fail if <project>==<version> is already on PyPI (or <index_base>): a version
+# can never be reused.
+check_not_published() {
+  local project="$1" version="$2" index_base="${3:-https://pypi.org}"
+  local url="${index_base%/}/pypi/${project}/${version}/json" code
+  code="$(curl -sL -o /dev/null -w '%{http_code}' --max-time 30 "${url}")" \
+    || die "could not reach ${url}."
+  case "${code}" in
+    404) echo "${project} ${version}: not on ${index_base%/} yet" ;;
+    200) die "${project} ${version} is already on ${index_base%/}; a release can't replace it." ;;
+    *) die "${index_base%/} answered ${code} for ${project} ${version}." ;;
+  esac
+}
+
+# Install uv into <dir> and print its binary path.
+install_uv() {
+  local dir="$1"
+  curl -LsSf --retry 3 https://astral.sh/uv/install.sh \
+    | env UV_INSTALL_DIR="${dir}" UV_NO_MODIFY_PATH=1 sh >/dev/null \
+    || die "could not install uv into ${dir}."
+  [[ -x "${dir}/uv" ]] || die "uv install finished but ${dir}/uv is missing."
+  echo "${dir}/uv"
+}
+
+# Platform tag of a wheel file, the last -separated part of its name:
+# manylinux_2_31_x86_64, or any for a pure-Python wheel.
+wheel_platform_tag() {
+  local name
+  name="$(basename "$1" .whl)"
+  echo "${name##*-}"
+}
+
+# Fail unless <wheel> is tagged manylinux_X_Y_x86_64 with X.Y no newer than
+# WHEEL_MAX_MANYLINUX. The tag is the newest glibc the wheel's binaries need.
+check_manylinux_tag() {
+  local wheel="$1" tag major minor max_major max_minor
+  tag="$(wheel_platform_tag "${wheel}")"
+  [[ "${tag}" =~ ^manylinux_([0-9]+)_([0-9]+)_x86_64$ ]] \
+    || die "$(basename "${wheel}") is tagged '${tag}'; expected manylinux_X_Y_x86_64."
+  major="${BASH_REMATCH[1]}"
+  minor="${BASH_REMATCH[2]}"
+  max_major="${WHEEL_MAX_MANYLINUX%_*}"
+  max_minor="${WHEEL_MAX_MANYLINUX#*_}"
+  if (( major > max_major || (major == max_major && minor > max_minor) )); then
+    die "$(basename "${wheel}") needs glibc ${major}.${minor}, newer than the" \
+      "${max_major}.${max_minor} the release supports (WHEEL_MAX_MANYLINUX in" \
+      ".buildkite/release/lib.sh). Build it on an older OS image."
+  fi
+}
+
+# Resolve vllm-tpu==<version> for the platform the wheels support (CPython
+# 3.12 on x86_64 Linux with the glibc of WHEEL_MAX_MANYLINUX) into <out_file>,
+# passing any extra uv flags (e.g. --find-links <dir>).
+resolve_vllm_tpu() {
+  local uv_bin="$1" version="$2" out_file="$3"
+  shift 3
+  local req_file
+  req_file="$(dirname "${out_file}")/req.in"
+  echo "vllm-tpu==${version}" > "${req_file}"
+  "${uv_bin}" pip compile "${req_file}" --no-config --quiet \
+    --python-version 3.12 --python-platform "x86_64-manylinux_${WHEEL_MAX_MANYLINUX}" \
+    --index-url https://pypi.org/simple \
+    "$@" -o "${out_file}"
 }
 
 # --- Docker image -------------------------------------------------------------
