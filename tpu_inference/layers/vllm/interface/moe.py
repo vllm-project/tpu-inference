@@ -141,9 +141,16 @@ def vllm_moe_apply(layer: RoutedExperts,
         runner = get_layer_from_name(layer.layer_name)
         extra_kwargs["defer_all_reduce"] = not runner._fused_output_is_reduced
 
-    if getattr(layer, "hash_indices_table", None) is not None:
+    # Upstream RoutedExperts keeps the gate-owned hash routing table as a plain
+    # attribute (`hash_indices_table`). cleanup_sharding registers the
+    # TPU-replicated copy as the `tpu_hash_indices_table` buffer so that it is
+    # passed into the jitted step through functional_call instead of being
+    # baked in as a compile-time constant; prefer it when present.
+    hash_table = getattr(layer, "tpu_hash_indices_table", None)
+    if hash_table is None:
+        hash_table = getattr(layer, "hash_indices_table", None)
+    if hash_table is not None:
         assert input_ids is not None, "input_ids must be provided when hash_indices_table is present in the layer"
-        hash_table = layer.hash_indices_table
         hash_based_topk_indices = jax_view(hash_table)[jax_view(input_ids)]
         extra_kwargs["hash_based_topk_indices"] = hash_based_topk_indices
 
