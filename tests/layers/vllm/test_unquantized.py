@@ -39,6 +39,8 @@ from vllm.model_executor.model_loader import get_model as vllm_get_model
 
 from tests.layers.common import utils as test_utils
 from tpu_inference.layers.common.moe import MoEBackend
+from tpu_inference.layers.common.process_weights.moe_weights import \
+    process_unquantized_moe_weights
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.vllm.custom_ops.fused_moe import _all_reduce_over_tp
 from tpu_inference.layers.vllm.interface.moe import FusedMoEFactory
@@ -1437,7 +1439,7 @@ def test_quantized_bf16_only_overrides_the_build_step():
 @pytest.mark.parametrize("use_ep", [True, False])
 @pytest.mark.parametrize("block_size", [None, 128])
 def test_fused_moe_requantize_stores_and_forwards_scales(
-        monkeypatch, use_ep, block_size):
+        monkeypatch, request, use_ep, block_size):
     """When MOE_REQUANTIZE_WEIGHT_DTYPE is set on an unquantized MoE layer,
     process_unquantized_moe_weights produces w13_weight_scale and
     w2_weight_scale; VllmUnquantizedFusedMoEMethod must store them on the layer
@@ -1447,6 +1449,12 @@ def test_fused_moe_requantize_stores_and_forwards_scales(
         monkeypatch.setenv("MOE_REQUANTIZE_BLOCK_SIZE", str(block_size))
     else:
         monkeypatch.delenv("MOE_REQUANTIZE_BLOCK_SIZE", raising=False)
+    # process_unquantized_moe_weights is jax.jit'ed and reads the requantize
+    # env vars only at trace time. Clear its cache so this parametrization
+    # re-traces with its own env, and again on teardown so the int8 trace does
+    # not leak into later tests that expect bf16.
+    process_unquantized_moe_weights.clear_cache()
+    request.addfinalizer(process_unquantized_moe_weights.clear_cache)
 
     mesh = test_utils.get_spmd_mesh(1, False)
     torch.manual_seed(42)

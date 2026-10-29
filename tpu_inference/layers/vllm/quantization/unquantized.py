@@ -760,6 +760,8 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
 
+        # Scales are set (possibly to None) by process_weights_after_loading;
+        # getattr only guards layers that were never processed.
         w13_scale = getattr(layer, "w13_weight_scale", None)
         w2_scale = getattr(layer, "w2_weight_scale", None)
         weights = FusedMoEWeights(
