@@ -29,7 +29,6 @@ from tpu_inference.kernels.experimental.moe_lowtok import (can_use_moe_lowtok,
                                                            moe_lowtok)
 from tpu_inference.kernels.experimental.moe_lowtok import \
     routing_table as moe_lowtok_routing_table
-from tpu_inference.kernels.router_topk import router_topk
 from tpu_inference.kernels.sparse_core.dense_gather_reduce import \
     dense_gather_reduce
 from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v2 import \
@@ -37,6 +36,7 @@ from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v2 import \
 from tpu_inference.kernels.sparse_core.ragged_gather_v2 import \
     ragged_gather_v2 as ragged_gather
 from tpu_inference.layers.common.linear import _safe_calculate_tiling
+from tpu_inference.layers.common.moe_router import select_experts
 from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import as_axes
@@ -281,19 +281,6 @@ def all_gather_topk_indices_and_weights(
     topk_weights = topk_weights.reshape(-1, top_k).astype(dtype)
 
     return topk_indices, topk_weights
-
-
-def apply_scoring_fn(scoring_fn: str, x: jax.Array) -> jax.Array:
-    match scoring_fn:
-        case "softmax":
-            return jax.nn.softmax(x, axis=-1)
-        case "sigmoid":
-            return jax.nn.sigmoid(x)
-        case "sqrtsoftplus":
-            return jnp.sqrt(jax.nn.softplus(x))
-        case _:
-            raise NotImplementedError(
-                f"FusedMoE does not support {scoring_fn} scoring function")
 
 
 def gmm_wrapper(lhs,
@@ -1444,38 +1431,14 @@ def fused_moe_func(
 
     assert gating_output.shape == (num_tokens, global_num_experts)
 
-    topk_weights = apply_scoring_fn(scoring_fn, gating_output)
-    if hash_based_topk_indices is not None:
-        topk_indices = hash_based_topk_indices
-        topk_weights = jnp.take_along_axis(topk_weights, topk_indices, axis=-1)
-    elif envs.MOE_APPROX_TOPK:
-        topk_weights, topk_indices = jax.lax.approx_max_k(
-            topk_weights,
-            k=topk,
-            recall_target=envs.MOE_APPROX_TOPK_RECALL_TARGET)
-    else:
-        # TPU_MOE_ROUTER_TOPK=rowmax: k row-max passes instead of a sort.
-        select_topk = (functools.partial(router_topk, k=topk)
-                       if envs.TPU_MOE_ROUTER_TOPK == "rowmax" else
-                       functools.partial(jax.lax.top_k, k=topk))
-        if expert_score_correction_bias is not None:
-            _, topk_indices = select_topk(
-                topk_weights + expert_score_correction_bias[None, :])
-            topk_weights = jnp.take_along_axis(topk_weights,
-                                               topk_indices,
-                                               axis=-1)
-        else:
-            topk_weights, topk_indices = select_topk(topk_weights)
-    if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
-    # Route padding tokens to expert 0 instead of picking a selected expert. This
-    # is especially useful when we have a low number of tokens (e.g. low
-    # concurrency), where padding tokens may activate unnecessary expert weights
-    # and slow down the gmm kernel.
-    if num_valid_tokens is not None:
-        token_valid = (jnp.arange(num_tokens) < num_valid_tokens)[:, None]
-        topk_indices = jnp.where(token_valid, topk_indices, 0)
-        topk_weights = jnp.where(token_valid, topk_weights, 0.0)
+    topk_weights, topk_indices = select_experts(
+        gating_output,
+        topk,
+        renormalize,
+        scoring_fn,
+        hash_based_topk_indices=hash_based_topk_indices,
+        expert_score_correction_bias=expert_score_correction_bias,
+        num_valid_tokens=num_valid_tokens)
     # All gathering topk_indices and topk_weights if attention dp is used.
     # MOE_FOLD_ROUTING_INTO_DISPATCH gathers them in the token all-gather.
     hierarchical = use_ep and envs.MOE_HIERARCHICAL_DISPATCH

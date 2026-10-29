@@ -131,11 +131,11 @@ def _rel_l2(a, want):
 
 
 def test_weights_like():
-    """FUSED_EP_MOE_V2 uses GMM_EP's weight layout; every other backend uses
-    its own."""
+    """FUSED_EP_MOE_V2 uses GMM_EP's weight layout; every backend that isn't
+    a GMM_EP-layout kernel uses its own."""
     assert MoEBackend.FUSED_EP_MOE_V2.weights_like() is MoEBackend.GMM_EP
     for backend in MoEBackend:
-        if backend is not MoEBackend.FUSED_EP_MOE_V2:
+        if backend not in (MoEBackend.FUSED_EP_MOE_V2, MoEBackend.ROUTING_MOE):
             assert backend.weights_like() is backend
     assert MoEBackend.FUSED_EP_MOE_V2 in MoEBackend.fused_moe_backends()
 

@@ -150,8 +150,8 @@ def rowmax_topk(scores: jax.Array, k: int) -> tuple[jax.Array, jax.Array]:
 def router_topk(scores: jax.Array, k: int) -> tuple[jax.Array, jax.Array]:
     """Sort-free router top-k: k row-max passes instead of a sort.
 
-    Pure JAX (`rowmax_topk`), not the Pallas `select` kernel: fused_moe_func
-    calls this on the gating scores before its shard_map, under auto-SPMD
+    Pure JAX (`rowmax_topk`), not the Pallas `select` kernel: select_experts
+    calls this on the gating scores outside any shard_map, under auto-SPMD
     partitioning, where a Mosaic kernel cannot be partitioned. `select`
     remains for callers that run it on a per-shard array.
     """
