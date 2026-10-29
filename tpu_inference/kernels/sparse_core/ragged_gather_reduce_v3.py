@@ -27,6 +27,7 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
+
 from tpu_inference.kernels.sparse_core import core_map_helper
 
 _TOKEN_SUBCHUNK = 16

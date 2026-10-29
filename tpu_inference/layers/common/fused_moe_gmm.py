@@ -18,11 +18,12 @@ from typing import Literal
 
 import jax
 import numpy as np
-import tpu_inference.envs as envs
 from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from tokamax._src.ops.gmm_v2.gmm_v2 import gmm_v2
+
+import tpu_inference.envs as envs
 from tpu_inference.kernels.collectives.hierrs_sc import wrapper as hier_rs_sc
 from tpu_inference.kernels.experimental.moe_lowtok import (can_use_moe_lowtok,
                                                            moe_lowtok)

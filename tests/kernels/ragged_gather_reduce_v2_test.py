@@ -21,6 +21,7 @@ import jax.numpy as jnp
 import numpy as np
 from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
+
 from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v2 import \
     ragged_gather_reduce as ragged_gather_reduce_v2
 from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v3 import \
