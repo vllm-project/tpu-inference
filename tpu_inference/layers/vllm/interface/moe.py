@@ -157,13 +157,31 @@ def vllm_moe_apply(layer: RoutedExperts,
     # where the shared and fused outputs are summed and reduced together in a
     # single collective downstream. This is the inverse of (and tied to)
     # ``VllmMoERunner._fused_output_is_reduced`` so the two never drift.
+    runner = None
     if is_forward_context_available():
         runner = get_layer_from_name(layer.layer_name)
         extra_kwargs["defer_all_reduce"] = not runner._fused_output_is_reduced
 
+    # Hash-MoE routing table (DeepSeek-V4): read it from the gate that owns it
+    # (`runner.gate.tid2eid`). That parameter is registered once in the model
+    # params, replicated to TPU and bound by `torch.func.functional_call`.
+    # Upstream `RoutedExperts.hash_indices_table` is only a plain
+    # (non-parameter) reference to the original CPU tensor
+    # (vllm-project/vllm#61930), so it is used only to detect hash routing and
+    # never as the table itself.
+    hash_table = None
     if getattr(layer, "hash_indices_table", None) is not None:
+        hash_table = getattr(getattr(runner, "gate", None), "tid2eid", None)
+        if hash_table is None:
+            raise RuntimeError(
+                f"{layer.layer_name}: hash-MoE routing requires the gate-owned "
+                "table runner.gate.tid2eid (needs a forward context and a "
+                "runner gate with `tid2eid`). RoutedExperts.hash_indices_table "
+                "is a non-parameter reference to the original CPU tensor and "
+                "is not used (see vllm-project/vllm#61930).")
+
+    if hash_table is not None:
         assert input_ids is not None, "input_ids must be provided when hash_indices_table is present in the layer"
-        hash_table = layer.hash_indices_table
         hash_based_topk_indices = jax_view(hash_table)[jax_view(input_ids)]
         extra_kwargs["hash_based_topk_indices"] = hash_based_topk_indices
 

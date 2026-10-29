@@ -80,7 +80,7 @@ def _to_row_major(arr: jax.Array, key: str) -> jax.Array:
 
     XLA:TPU picks the layout of a device array from its shape alone. For a
     narrow 2-D table -- the rope ``cos_sin_cache`` ([max_position, 64]), the
-    hash-MoE ``hash_indices_table`` ([vocab_size, 6]) -- the minor-most
+    hash-MoE routing table (``gate.tid2eid``, [vocab_size, 6]) -- the minor-most
     dimension would be padded out to a full 128-lane tile, so XLA prefers the
     transposed layout {0,1}, which needs no padding. Consumers of the table
     (the rope kernels and any other custom call, an XLA gather) want the
@@ -308,7 +308,7 @@ class VllmModelWrapper:
 
         if envs.HASH_TABLE_ROW_MAJOR:
             for key, val in list(params_and_buffers.items()):
-                if key.endswith("hash_indices_table"):
+                if key.endswith("gate.tid2eid"):
                     params_and_buffers[key] = torch_view(
                         _to_row_major(jax_view(val), key))
 
