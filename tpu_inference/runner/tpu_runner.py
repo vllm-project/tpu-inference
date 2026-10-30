@@ -179,6 +179,25 @@ def _extract_valid_lengths_host(
     return lengths, has_eos
 
 
+def _trim_to_row_decode_steps(
+    valid_lens: np.ndarray,
+    has_eos: np.ndarray,
+    row_decode_steps: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Caps the first len(row_decode_steps) rows at their own decode window.
+
+    A row's tokens past its window are padding, which may equal an EOS id,
+    so an EOS only counts when it is inside the window.
+    """
+    n = len(row_decode_steps)
+    steps = np.asarray(row_decode_steps, dtype=valid_lens.dtype)
+    valid_lens = valid_lens.copy()
+    has_eos = has_eos.copy()
+    has_eos[:n] &= valid_lens[:n] <= steps
+    valid_lens[:n] = np.minimum(valid_lens[:n], steps)
+    return valid_lens, has_eos
+
+
 REASON_EOS_HIT = "eos_hit"
 REASON_MAX_STEPS = "max_steps"
 REASON_MAX_DECODE_STEPS_LIMIT = "max_decode_steps_limit"
@@ -212,6 +231,92 @@ def _log_continue_decode_summary(
         num_eos_hits)
 
 
+def _check_gang_symmetric_decode_window(
+    *,
+    safe_steps: int,
+    static_max_decode_steps: int,
+    has_mamba_layers: bool,
+    mamba_cache_mode: str,
+) -> None:
+    """Fail closed where gang-symmetric continue_decode cannot stay exact.
+
+    Under GANG_SYMMETRIC_DISPATCH the fused decode loop runs
+    static_max_decode_steps iterations and each request decodes within its
+    own window; the iterations past a request's window are masked and repeat
+    its last in-window step. That keeps attention KV intact, but each repeat
+    runs the model on the request again, which would advance its recurrent
+    state. Reject models with Mamba layers whenever a window can be shorter
+    than static_max_decode_steps: always in align mode (every block boundary
+    shortens the window), otherwise whenever the smallest window bounded by
+    max_model_len (the stock safe window, `safe_steps`) is. For these models
+    the runner does not bound windows by max_tokens (see
+    _get_gang_row_decode_steps), so no request is ever masked.
+
+    Align mode is static config: _check_gang_symmetric_mamba_cache_mode
+    already rejects it at KV cache init, on every process alike, and it is
+    checked here again only as a backstop. The safe-window check depends on
+    this process's batch, so it runs per window and raises only on the
+    process whose requests shortened the window; the other processes of the
+    gang do not raise with it.
+    """
+    if not has_mamba_layers:
+        return
+    if mamba_cache_mode == "align" or safe_steps < static_max_decode_steps:
+        raise RuntimeError(
+            "GANG_SYMMETRIC_DISPATCH does not support models with Mamba "
+            "layers when the decode window can be shorter than "
+            f"max_decode_steps (mamba_cache_mode={mamba_cache_mode!r}, safe "
+            f"window {safe_steps} step(s), max_decode_steps "
+            f"{static_max_decode_steps}): the masked iterations that keep the "
+            "trip count gang-symmetric would advance the recurrent state of "
+            "the requests they mask. Disable GANG_SYMMETRIC_DISPATCH, or use a "
+            "mamba_cache_mode other than 'align' with max_model_len >= "
+            "longest prompt + generated tokens + max_decode_steps.")
+
+
+def _check_gang_symmetric_eos_check_interval(eos_check_interval: int) -> None:
+    """Fail closed at runner init where the gang's trip count would differ.
+
+    Under GANG_SYMMETRIC_DISPATCH the fused continue_decode loop is bounded by
+    static_max_decode_steps, but with an EOS check
+    (CONTINUE_DECODE_EOS_CHECK_INTERVAL > 0) it still stops at the first check
+    after any row of this process hit EOS, so processes with different data
+    would run different trip counts. Only an interval <= 0 (no EOS early
+    exit) keeps the trip count at static_max_decode_steps on every process.
+    """
+    if eos_check_interval > 0:
+        raise ValueError(
+            "GANG_SYMMETRIC_DISPATCH with enable_continue_decode requires "
+            "CONTINUE_DECODE_EOS_CHECK_INTERVAL <= 0, got "
+            f"{eos_check_interval}: the EOS early exit stops the fused decode "
+            "loop once any request of a process hits EOS, so the loop's trip "
+            "count would differ across the gang. Set "
+            "CONTINUE_DECODE_EOS_CHECK_INTERVAL=0 (requests still stop at "
+            "their own EOS), disable enable_continue_decode, or unset "
+            "GANG_SYMMETRIC_DISPATCH.")
+
+
+def _check_gang_symmetric_mamba_cache_mode(*, has_mamba_layers: bool,
+                                           mamba_cache_mode: str) -> None:
+    """Fail closed at KV cache init for Mamba models in mamba align mode.
+
+    In align mode every Mamba block boundary shortens the continue_decode
+    window, so the gang-symmetric loop keeps needing masked iterations, which
+    advance the recurrent state (see _check_gang_symmetric_decode_window).
+    The config alone decides this, so it is rejected before serving, on every
+    process of the gang alike, instead of at the first window.
+    """
+    if has_mamba_layers and mamba_cache_mode == "align":
+        raise ValueError(
+            "GANG_SYMMETRIC_DISPATCH with enable_continue_decode does not "
+            "support models with Mamba layers in mamba_cache_mode='align': "
+            "every Mamba block boundary shortens the decode window, and the "
+            "masked iterations that keep the trip count gang-symmetric would "
+            "advance the recurrent state of continuing requests. Disable "
+            "prefix caching (mamba_cache_mode='none'), disable "
+            "enable_continue_decode, or unset GANG_SYMMETRIC_DISPATCH.")
+
+
 def _process_continue_decode_outputs(
     generated_tokens: jax.Array,
     actual_steps: Union[jax.Array, int],
@@ -231,6 +336,7 @@ def _process_continue_decode_outputs(
     attn_metadata: Optional[Any] = None,
     is_async: bool = False,
     block_ids_by_req: Optional[Dict[str, List[int]]] = None,
+    row_decode_steps: Optional[np.ndarray] = None,
 ) -> Tuple[List[List[int]], Optional[Any], List[RoutedExpertsStepEntry], int,
            int]:
     """Process continue_decode TPU outputs into CPU data structures.
@@ -238,7 +344,9 @@ def _process_continue_decode_outputs(
     Performs host transfers, realigns physical rows by indices_selector, trims
     tokens at EOS, and builds LogprobsLists and per-request routed-experts
     step entries. Optionally updates input_batch, scheduler_output, and
-    attn_metadata for synchronous runs.
+    attn_metadata for synchronous runs. row_decode_steps (per request, in
+    req_ids order) additionally trims each request to its own decode window
+    (see continue_decode's row_decode_steps).
     """
     generated_tokens_cpu, actual_steps_cpu = common_utils.safe_device_get(
         (generated_tokens, actual_steps))
@@ -293,6 +401,9 @@ def _process_continue_decode_outputs(
     # below is then a slice + tolist instead of np.isin/np.where per row.
     valid_lens, has_eos = _extract_valid_lengths_host(generated_tokens_cpu,
                                                       eos_token_id)
+    if row_decode_steps is not None:
+        valid_lens, has_eos = _trim_to_row_decode_steps(
+            valid_lens, has_eos, row_decode_steps)
     num_eos_hits = int(has_eos.sum())
     requests_dict = requests if requests is not None and hasattr(
         requests, "get") else None
@@ -446,6 +557,7 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
             scheduler_output=self._scheduler_output,
             is_async=True,
             block_ids_by_req=self._routed_experts_block_ids,
+            row_decode_steps=getattr(self, "_row_decode_steps", None),
         )
 
         _log_continue_decode_summary(
@@ -546,6 +658,8 @@ class AsyncPreResults:
     continue_decode_actual_steps: Optional[jax.Array] = None
     continue_decode_max_steps: int = 0
     next_tokens_in_tpu: Optional[jax.Array] = None
+    # Per-request decode windows (req_ids order) under GANG_SYMMETRIC_DISPATCH.
+    continue_decode_row_steps: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -874,6 +988,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # every-step check.
         self.continue_decode_eos_check_interval = (
             envs.CONTINUE_DECODE_EOS_CHECK_INTERVAL)
+        if (envs.GANG_SYMMETRIC_DISPATCH
+                and self.enable_continue_decode is True):
+            _check_gang_symmetric_eos_check_interval(
+                self.continue_decode_eos_check_interval)
         self.static_max_decode_steps = self.vllm_config.additional_config.get(
             "max_decode_steps", DEFAULT_MAX_DECODE_STEPS)
         self.eos_token_id = runner_utils.get_eos_token_id(self.model_config)
@@ -1376,6 +1494,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def initialize_kv_cache(self,
                             kv_cache_config: KVCacheConfig,
                             topology_order_id: int = 0) -> None:
+        if (envs.GANG_SYMMETRIC_DISPATCH
+                and self.enable_continue_decode is True):
+            _check_gang_symmetric_mamba_cache_mode(
+                has_mamba_layers=kv_cache_config.has_mamba_layers,
+                mamba_cache_mode=getattr(self.cache_config, "mamba_cache_mode",
+                                         "none"))
         self.topology_order_id = topology_order_id
         self.kv_cache_config = kv_cache_config
         self.use_hybrid_kvcache = len(kv_cache_config.kv_cache_groups) > 1
@@ -1532,8 +1656,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 generated_tokens_cpu = generated_tokens_cpu[
                     pre_logits_indices_selector]
 
-            valid_lens, _ = _extract_valid_lengths_host(
+            valid_lens, has_eos = _extract_valid_lengths_host(
                 generated_tokens_cpu, self.eos_token_id)
+            row_steps = getattr(self._pre_async_results,
+                                "continue_decode_row_steps", None)
+            if row_steps is not None:
+                valid_lens, _ = _trim_to_row_decode_steps(
+                    valid_lens, has_eos, row_steps)
             for pre_req_idx, req_state, start_idx in pre_request_seq_lens:
                 req_id = pre_req_ids[pre_req_idx]
                 if req_id not in self.input_batch.req_id_to_index:
@@ -1898,6 +2027,35 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             min_remaining = min(min_remaining, int(np.min(steps_to_boundary)))
         return min_remaining
 
+    def _get_gang_row_decode_steps(self) -> np.ndarray:
+        """Per-request decode windows for GANG_SYMMETRIC_DISPATCH.
+
+        Returns, in input batch order, how many tokens each request may
+        decode in this continue_decode call: at most static_max_decode_steps,
+        no more than fit in max_model_len (as in _get_min_remaining_slots, but
+        per request), and, for models without Mamba layers, no more than its
+        max_tokens allows. At least 1, like the stock window. Models with
+        Mamba layers keep max_tokens to the scheduler, as the stock loop
+        does: _check_gang_symmetric_decode_window already guarantees that
+        their max_model_len windows are full, so none of their rows is ever
+        masked (mamba_cache_mode 'align' is rejected outright).
+        """
+        num_reqs = self.input_batch.num_reqs
+        num_tokens = self.input_batch.num_tokens[:num_reqs].astype(np.int64)
+        remaining = self.max_model_len - num_tokens
+        if not self.kv_cache_config.has_mamba_layers:
+            num_prompt = self.input_batch.num_prompt_tokens[:num_reqs]
+            num_output = num_tokens - num_prompt
+            for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+                params = getattr(self.requests[req_id], "sampling_params",
+                                 None)
+                max_tokens = getattr(params, "max_tokens", None)
+                if max_tokens is not None:
+                    remaining[i] = min(remaining[i],
+                                       max_tokens - num_output[i])
+        return np.clip(remaining, 1,
+                       self.static_max_decode_steps).astype(np.int32)
+
     def _can_use_continue_decode(
             self, scheduler_output: "VllmSchedulerOutput") -> bool:
         if self.enable_continue_decode is not True:
@@ -1957,6 +2115,40 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         max_decode_steps = min(self.static_max_decode_steps, min_remaining)
         if max_decode_steps <= 0:
             max_decode_steps = 1
+        # Gang-symmetric dispatch: min_remaining is data-dependent, and as the
+        # window of every request it would make the number of continue_decode
+        # calls follow the shortest request of each process, which desyncs the
+        # gang. Under the flag the window is static_max_decode_steps instead,
+        # and each request advances only within its own window (row_steps,
+        # bounded by max_model_len and its max_tokens) while the other
+        # requests keep decoding. The fused loop masks a request past its own
+        # window (see continue_decode's row_decode_steps) and always runs
+        # static_max_decode_steps iterations, because __init__ requires the
+        # EOS early exit to be off under this flag.
+        fixed_trip_count = envs.GANG_SYMMETRIC_DISPATCH
+        row_steps = None
+        row_decode_steps = None
+        if fixed_trip_count:
+            _check_gang_symmetric_decode_window(
+                safe_steps=max_decode_steps,
+                static_max_decode_steps=self.static_max_decode_steps,
+                has_mamba_layers=self.kv_cache_config.has_mamba_layers,
+                mamba_cache_mode=getattr(self.cache_config, "mamba_cache_mode",
+                                         "none"),
+            )
+            max_decode_steps = self.static_max_decode_steps
+            row_steps = self._get_gang_row_decode_steps()
+            # Padding rows keep the full window: they are inactive anyway.
+            device_rows = np.full(init_tokens.shape[0],
+                                  max_decode_steps,
+                                  dtype=np.int32)
+            device_rows[np.arange(len(row_steps)) if tokens_indices_selector is
+                        None else tokens_indices_selector] = row_steps
+            row_decode_steps = device_array(
+                self.mesh,
+                device_rows,
+                sharding=NamedSharding(
+                    self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA)))
         max_decode_steps_arr = jnp.array(max_decode_steps, dtype=jnp.int32)
 
         lora_metadata = self.lora_utils.extract_lora_metadata()
@@ -1999,6 +2191,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                  logprobs_mode=self.model_config.logprobs_mode,
                  continue_decode_eos_check_interval=self.
                  continue_decode_eos_check_interval,
+                 fixed_trip_count=fixed_trip_count,
+                 row_decode_steps=row_decode_steps,
              )
 
         if self.scheduler_config.async_scheduling:
@@ -2007,6 +2201,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             last_step_idx = jnp.clip(final_state.step_counter - 1, 0,
                                      self.static_max_decode_steps - 1)
+            if row_decode_steps is not None:
+                # A row's last token is at the end of its own window.
+                last_step_idx = jnp.minimum(last_step_idx,
+                                            row_decode_steps - 1)
             next_tokens_in_tpu = generated_tokens[
                 last_step_idx,
                 jnp.arange(generated_tokens.shape[1])]
@@ -2023,10 +2221,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 start_idx = self.input_batch.num_tokens_no_spec[i]
                 request_seq_lens.append((i, req_state, start_idx))
 
-                end_idx = start_idx + max_decode_steps
+                # Placeholders for the most a request can advance.
+                num_steps = (max_decode_steps
+                             if row_steps is None else int(row_steps[i]))
+                end_idx = start_idx + num_steps
                 self.input_batch.num_tokens_no_spec[i] = end_idx
                 self.input_batch.num_tokens[i] = end_idx
-                req_state.output_token_ids.extend([0] * max_decode_steps)
+                req_state.output_token_ids.extend([0] * num_steps)
                 placeholder_req_id_to_index[req_id] = (
                     i if tokens_indices_selector is None else
                     tokens_indices_selector[i])
@@ -2042,6 +2243,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 is_continue_decode=True,
                 continue_decode_actual_steps=actual_steps_async,
                 continue_decode_max_steps=max_decode_steps,
+                continue_decode_row_steps=row_steps,
             )
             self._pre_async_results.next_tokens_in_tpu = next_tokens_in_tpu
 
@@ -2076,6 +2278,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             async_output._actual_steps_future = actual_steps_async
             async_output._max_decode_steps = max_decode_steps
             async_output._min_remaining = min_remaining
+            async_output._row_decode_steps = row_steps
             self._continue_decode_output = async_output
             return None
 
@@ -2109,6 +2312,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
             attn_metadata=attn_metadata,
+            row_decode_steps=row_steps,
         )
 
         num_reqs = self.input_batch.num_reqs

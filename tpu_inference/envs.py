@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     MOE_STAGE_WEIGHTS_ON_HOST: bool = False
     ATTN_BUCKETIZED_NUM_REQS: bool = False
     ATTN_CUSTOM_NUM_REQS_BUCKETS: list[int] = []
+    GANG_SYMMETRIC_DISPATCH: bool = False
     LAYOUT_Q_PROJ_AS_NDH: bool = False
     USE_JAX_PROFILER_SERVER: bool = False
     JAX_PROFILER_SERVER_PORT: int = 9999
@@ -380,6 +381,28 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # separated by comma. The max_reqs will alwasy be added to the buckets
     "ATTN_CUSTOM_NUM_REQS_BUCKETS":
     env_int_list("ATTN_CUSTOM_NUM_REQS_BUCKETS"),
+    # Gang-symmetric dispatch (for bare-SPMD gangs where one logical batch is
+    # split across many independent runner processes that share a single libtpu
+    # coordinator domain, e.g. per-process-local rollout engines in an RL loop).
+    # When true, every runner emits a data-INDEPENDENT device-Execute sequence:
+    # the token/req padding buckets collapse to a single max bucket, so the HLO
+    # is identical across processes at every dispatch ordinal, and every
+    # continue_decode call gets the window static_max_decode_steps instead of
+    # the per-process safe window (the shortest request's), and runs that many
+    # loop iterations. That is the loop's trip count only without the EOS early
+    # exit, so with enable_continue_decode the runner refuses to start unless
+    # CONTINUE_DECODE_EOS_CHECK_INTERVAL <= 0 (requests still stop at their own
+    # EOS). Each request still decodes only within its own window (bounded by
+    # max_model_len and its max_tokens): past it, it is masked and only repeats
+    # its last in-window step, while the other requests keep decoding. So the
+    # number of calls follows the longest request, not the shortest. With
+    # enable_continue_decode, Mamba models are rejected at KV cache init in
+    # mamba_cache_mode 'align'; in other modes a window that max_model_len
+    # shortens raises, but only on the process whose batch holds the request.
+    # Costs compilation flexibility (one shape). Default false = stock
+    # per-process data-dependent dispatch.
+    "GANG_SYMMETRIC_DISPATCH":
+    env_bool("GANG_SYMMETRIC_DISPATCH"),
     # dictates whether to layout q-proj as NDH (q-heads, model dim, head dim)
     # or DNH (model dim, q-heads, head dim), which is the default (False)
     "LAYOUT_Q_PROJ_AS_NDH":

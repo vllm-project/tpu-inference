@@ -180,6 +180,8 @@ def _decode_core_impl(
     continue_decode_eos_check_interval: int = 1,
     padded_num_reqs: int = -1,
     layer_names_per_group: tuple[tuple[str, ...], ...] | None = None,
+    fixed_trip_count: bool = False,
+    row_decode_steps: jax.Array | None = None,
 ):
     has_logprobs = False if sampling_metadata is None else sampling_metadata.logprobs
     from tpu_inference.layers.jax.sample.sampling import \
@@ -389,10 +391,15 @@ def _decode_core_impl(
         eos = carry[idx]
         return i, ct, am, pos, sl, kvc, tb, eb, lp_ids, lp_val, lp_ranks, eos
 
+    # See fixed_trip_count below: the bound is then static, and it is the trip
+    # count when the EOS early exit is off.
+    loop_bound = (static_max_decode_steps
+                  if fixed_trip_count else max_decode_steps)
+
     def cond_fn(carry):
         i = carry[0]
         eos_flag = carry[-1]
-        not_done = i < max_decode_steps
+        not_done = i < loop_bound
         if continue_decode_eos_check_interval <= 0:
             return not_done
         should_check_eos = (i % continue_decode_eos_check_interval == 0)
@@ -439,10 +446,75 @@ def _decode_core_impl(
         selected_token_ranks_buffer,
         jnp.array(False),
     )
-    final_carry = jax.lax.while_loop(cond_fn, body_fn, init_carry)
+    if fixed_trip_count:
+        # Data-independent loop bound: run up to static_max_decode_steps
+        # iterations, exactly that many when continue_decode_eos_check_interval
+        # <= 0 (an EOS check still stops the loop early, as in the stock loop).
+        # Each row has its own window: row r may sample and advance only in
+        # the first row_window[r] iterations (row_decode_steps[r] capped at
+        # max_decode_steps, or max_decode_steps for every row when
+        # row_decode_steps is None). Each later iteration re-runs the row's
+        # inputs of its last in-window step with the row inactive (nothing
+        # recorded, no EOS hit, nothing advanced), so it rewrites the same KV
+        # values into the same slots and never touches a position past the
+        # row's window (e.g. past max_model_len). Rows inside their window
+        # step exactly as in the stock loop. Each row's loop state is kept as
+        # of the end of its window.
+        if row_decode_steps is None:
+            row_window = jnp.full(current_tokens.shape, max_decode_steps,
+                                  jnp.int32)
+        else:
+            row_window = jnp.minimum(row_decode_steps, max_decode_steps)
+
+        def seq_lens_layout(row_mask):
+            # Lay a per-row mask out like seq_lens, the way _update_loop_state
+            # lays out `increment`. Padding entries of seq_lens never change,
+            # so their mask value does not matter.
+            row_mask = row_mask.reshape(dp_size, -1)
+            if pad_len > 0:
+                row_mask = jnp.pad(row_mask, ((0, 0), (0, pad_len)),
+                                   constant_values=True)
+            else:
+                row_mask = row_mask[:, :seq_lens.shape[0] // dp_size]
+            return row_mask.ravel()
+
+        def fixed_cond_fn(carry):
+            return cond_fn(carry[0])
+
+        def fixed_body_fn(carry):
+            inner, replay = carry
+            i, ct, am, pos, sl = inner[:5]
+            in_window = i < row_window
+            in_window_sl = seq_lens_layout(in_window)
+
+            # Rows are the last axis of ct, am and pos (also for M-RoPE
+            # positions); seq_lens uses its own layout.
+            def pick(on, off, masks):
+                return tuple(
+                    jnp.where(m, a, b) for m, a, b in zip(masks, on, off))
+
+            step_masks = (in_window, in_window, in_window_sl)
+            step_ct, step_pos, step_sl = pick((ct, pos, sl), replay,
+                                              step_masks)
+            step_am = jnp.logical_and(am, in_window)
+            new_inner = body_fn((i, step_ct, step_am, step_pos, step_sl) +
+                                tuple(inner[5:]))
+            kept = pick(tuple(new_inner[1:5]), (ct, am, pos, sl),
+                        (in_window, in_window, in_window, in_window_sl))
+            new_inner = (new_inner[0], ) + kept + tuple(new_inner[5:])
+            return new_inner, pick((ct, pos, sl), replay, step_masks)
+
+        final_carry, _ = jax.lax.while_loop(
+            fixed_cond_fn, fixed_body_fn,
+            (init_carry, (current_tokens, input_positions, seq_lens)))
+    else:
+        final_carry = jax.lax.while_loop(cond_fn, body_fn, init_carry)
     (step_idx_final, current_tokens, active_mask, positions, seq_lens,
      kv_caches, token_buffer, expert_buffer, lp_ids_buffer, lp_val_buffer,
      lp_ranks_buffer, _) = _unpack(final_carry)
+    if fixed_trip_count:
+        # Report only the steps that could produce tokens.
+        step_idx_final = jnp.minimum(step_idx_final, max_decode_steps)
 
     return (step_idx_final, current_tokens, active_mask, positions, seq_lens,
             kv_caches, token_buffer, expert_buffer, lp_ids_buffer,
@@ -487,6 +559,7 @@ def _get_decode_core():
             "continue_decode_eos_check_interval",
             "padded_num_reqs",
             "layer_names_per_group",
+            "fixed_trip_count",
         ),
         donate_argnames=("kv_caches", ),
         compiler_options={
@@ -522,6 +595,8 @@ def continue_decode(
     max_logprobs: int = 0,
     logprobs_mode: str = "raw",
     continue_decode_eos_check_interval: int = 1,
+    fixed_trip_count: bool = False,
+    row_decode_steps: jax.Array | None = None,
 ) -> tuple[jax.Array, Any, TpuSamplingState, jax.Array, jax.Array | None,
            Optional["LogprobsTensors"]]:
     """Run the TPU decode loop as one fused, kv-cache-donating program.
@@ -537,8 +612,12 @@ def continue_decode(
         `sampling_metadata`.
       init_state: Initial TpuSamplingState.
       kv_caches: KV caches. Donated into the fused loop and returned updated.
-      max_decode_steps: Max steps to run (static loop bound).
-      static_max_decode_steps: Static maximum steps for RNG splitting.
+      max_decode_steps: Number of steps that may sample and advance requests
+        (the safe window). Traced, so one executable serves every window. It
+        bounds the loop unless fixed_trip_count is set.
+      static_max_decode_steps: Static maximum number of steps. Sizes the
+        per-step buffers and the RNG split, and bounds the loop when
+        fixed_trip_count is set.
       eos_token_id: EOS token ID(s).
       padding_token_id: Padding token ID.
       rng: RNG key.
@@ -560,18 +639,47 @@ def continue_decode(
       logprobs_mode: Logprobs mode from model config. The processed modes
         (see PROCESSED_LOGPROBS_MODES) read sample()'s transformed logits;
         the raw modes read compute_logits' output.
+      fixed_trip_count: If True, the loop is bounded by
+        static_max_decode_steps instead of max_decode_steps, but only the
+        first max_decode_steps iterations may sample or advance a request.
+        The trip count is data-independent (always static_max_decode_steps)
+        only with continue_decode_eos_check_interval <= 0: an EOS check still
+        stops the loop at the next check after any row hits EOS, as in the
+        stock loop. Each later iteration re-runs the model on exactly
+        the inputs of the last such step, so it writes the same KV values to
+        the same slots and touches no position the stock loop would not.
+        generated_tokens, the final state and step_counter equal those of a
+        fixed_trip_count=False run (rows past step_counter in the other
+        per-step buffers stay don't-care). Recurrent per-request state (e.g.
+        Mamba) is not preserved by the re-runs, so this must not be combined
+        with such models when max_decode_steps < static_max_decode_steps.
+      row_decode_steps: Optional (batch_size,) int32 array, laid out like
+        init_state.current_tokens; requires fixed_trip_count. Gives each row
+        its own window: row r may sample and advance only in the first
+        min(row_decode_steps[r], max_decode_steps) iterations, and is
+        re-run, as above, on the inputs of its own last in-window step
+        after that, while rows with a longer window keep stepping. Row r's
+        generated tokens, final state and KV writes then equal those of a
+        stock run whose window is that row's own window; its entries in
+        generated_tokens past that window are padding, so the caller must
+        trim each row to its own window. step_counter is unchanged (at most
+        max_decode_steps). The same recurrent-state caveat applies to rows
+        whose window is shorter than static_max_decode_steps.
 
     Returns:
       Tuple of (generated_tokens, final_kv_caches, final_state, final_rng,
       all_expert_indices, logprobs_tensors). generated_tokens is a fixed-size
-      (max_decode_steps, batch_size) array and all_expert_indices, when not
-      None, is (max_decode_steps, ...); rows beyond final_state.step_counter
-      are padding (early EOS exit may stop before max_decode_steps), so the
+      (static_max_decode_steps, batch_size) array and all_expert_indices, when
+      not None, is (static_max_decode_steps, ...); rows beyond
+      final_state.step_counter are padding (step_counter is at most
+      max_decode_steps, and an early EOS exit may stop before that), so the
       caller must trim with final_state.step_counter.
     """
     from tpu_inference.layers.jax.sample.sampling import sample
     if sample_fn is sample:
         sample_fn = sample.__wrapped__
+    if row_decode_steps is not None and not fixed_trip_count:
+        raise ValueError("row_decode_steps requires fixed_trip_count=True")
 
     first_attn, block_tables, layer_names_per_group = _unpack_attn_metadata(
         init_state.attn_metadata)
@@ -619,6 +727,8 @@ def continue_decode(
          continue_decode_eos_check_interval=continue_decode_eos_check_interval,
          padded_num_reqs=first_attn.padded_num_reqs,
          layer_names_per_group=layer_names_per_group,
+         fixed_trip_count=fixed_trip_count,
+         row_decode_steps=row_decode_steps,
      )
 
     final_state = TpuSamplingState(
