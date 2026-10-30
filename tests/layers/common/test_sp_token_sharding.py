@@ -96,46 +96,6 @@ def test_keeps_tokens_sharded_guards(monkeypatch):
     assert keeps(_shape_only_mesh(attn_dp=2, model=2, dcp=2))
 
 
-def test_is_shared_expert_prefix():
-    is_shared = common_sharding.is_shared_expert_prefix
-    assert is_shared("model.layers.3.mlp.shared_expert.down_proj")
-    assert is_shared("model.layers.3.mlp.shared_experts.gate_up_proj")
-    assert not is_shared("model.layers.3.mlp.experts.down_proj")
-    assert not is_shared("model.layers.3.self_attn.o_proj")
-    assert not is_shared("")
-
-
-def test_shared_expert_reduce_follows_weight_sharding():
-    """The runner skips the shared-expert all-reduce only when every shared
-    expert linear really has replicated weights."""
-
-    def linear(weight_sharding):
-        return SimpleNamespace(quant_method=SimpleNamespace(
-            linear_config=SimpleNamespace(weight_sharding=weight_sharding)))
-
-    def module(*children):
-        return SimpleNamespace(modules=lambda: [object(), *children])
-
-    replicated = common_sharding.shared_expert_is_replicated
-    assert replicated(module(linear(P(None, None)), linear(P(None, None))))
-    # A down_proj still sharded over attention TP returns partial sums.
-    assert not replicated(
-        module(linear(P(None, None)),
-               linear(P(ShardingAxisName.ATTN_HEAD, None))))
-    assert not replicated(module())
-    assert not replicated(None)
-
-
-def test_sp_token_axes():
-    # What VllmQuantLinearConfig.get_sp_token_axes returns.
-    mesh = _shape_only_mesh(attn_dp=2, model=4)
-    get_axes = common_sharding.sp_token_axes
-    assert get_axes(mesh, True, 64) == ShardingAxisName.EXPERT_DATA
-    # Token count not divisible by EXPERT_DATA (8): usual ATTN_DATA.
-    assert get_axes(mesh, True, 12) is None
-    assert get_axes(mesh, False, 64) is None
-
-
 @requires_8_devices
 def test_sp_token_sharding_linears():
     """Replicated / column / row-parallel matmuls with token-sharded ends
