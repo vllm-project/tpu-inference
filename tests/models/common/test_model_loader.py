@@ -681,6 +681,10 @@ class TestGetModel:
         cfg = _make_supported_vllm_config()
         assert model_loader.resolve_model_impl_type(cfg) == "flax_nnx"
 
+        unsupported_cfg = _make_supported_vllm_config()
+        unsupported_cfg.model_config.pooler_config.seq_pooling_type = "MEAN"
+        assert model_loader.resolve_model_impl_type(unsupported_cfg) == "vllm"
+
         captured = []
 
         class SentinelError(Exception):

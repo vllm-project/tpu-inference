@@ -22,6 +22,18 @@ from tpu_inference.models.jax.utils.weight_utils import (JaxAutoWeightsLoader,
                                                          StandardWeightLoader)
 
 
+def _resolve_num_labels(hf_config: Any) -> int:
+    text_config = getattr(hf_config, "text_config", None)
+    hf_dict = getattr(hf_config, "__dict__", {})
+    if ("num_labels" in hf_dict or "id2label" in hf_dict
+            or text_config is None):
+        return int(getattr(hf_config, "num_labels", 2))
+    text_dict = getattr(text_config, "__dict__", {})
+    if "num_labels" in text_dict or "id2label" in text_dict:
+        return int(getattr(text_config, "num_labels", 2))
+    return int(getattr(hf_config, "num_labels", 2))
+
+
 class Gemma4ForSequenceClassification(JaxModule, LoadableWithIterator,
                                       NativeSequenceClassificationModel):
     """Native JAX Gemma-4 sequence-classification model.
@@ -44,7 +56,6 @@ class Gemma4ForSequenceClassification(JaxModule, LoadableWithIterator,
                  mesh: Mesh) -> None:
         self.vllm_config = vllm_config
         rng = nnx.Rngs(rng_key)
-        self.mesh = mesh
 
         self.language_model = Gemma4Model(
             vllm_config=vllm_config,
@@ -56,10 +67,11 @@ class Gemma4ForSequenceClassification(JaxModule, LoadableWithIterator,
         model_config = vllm_config.model_config
         hf_config = model_config.hf_config
         hidden_size = hf_config.text_config.hidden_size
-        self.num_labels = int(getattr(hf_config, "num_labels", 2))
+        self.num_labels = _resolve_num_labels(hf_config)
 
         # Replicate the small head. The weight loader transposes the checkpoint
-        # score.weight from [labels, hidden] to [hidden, labels].
+        # score.weight from [labels, hidden] to [hidden, labels] and preserves
+        # its checkpoint dtype; classify_rows promotes both operands to FP32.
         self.score = JaxLinear(
             hidden_size,
             self.num_labels,
@@ -78,6 +90,7 @@ class Gemma4ForSequenceClassification(JaxModule, LoadableWithIterator,
         mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
         loader = JaxAutoWeightsLoader(
             self,
+            skip_prefixes=["lm_head"],
             skip_substrs=["vision", "audio", "multi_modal"],
         )
 

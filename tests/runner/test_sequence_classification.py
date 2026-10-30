@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
 from types import SimpleNamespace
 
 import jax
@@ -25,6 +26,13 @@ def test_pool_sequence_classification_chunked_completion():
     hidden = jnp.asarray([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
                          dtype=jnp.bfloat16)
     logits_indices = jnp.asarray([0, 2], dtype=jnp.int32)
+    forbid_entered = False
+
+    @contextlib.contextmanager
+    def track_forbid_compile():
+        nonlocal forbid_entered
+        forbid_entered = True
+        yield
 
     batch = SimpleNamespace(
         num_reqs=2,
@@ -40,6 +48,7 @@ def test_pool_sequence_classification_chunked_completion():
     runner = SimpleNamespace(
         input_batch=batch,
         mesh=mesh,
+        maybe_forbid_compile=track_forbid_compile(),
         vllm_config=SimpleNamespace(sharding_config=SimpleNamespace(
             prefill_cp_size=1)),
         state_leaves="leaves",
@@ -62,6 +71,7 @@ def test_pool_sequence_classification_chunked_completion():
         logits_indices_selector=None,
         scheduler_output=scheduler_output,
     )
+    assert forbid_entered
     assert len(out.pooler_output) == 2
     assert torch.equal(out.pooler_output[0], torch.tensor([1.0, 2.0]))
     assert out.pooler_output[1] is None

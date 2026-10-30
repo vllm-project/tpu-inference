@@ -335,7 +335,7 @@ def get_flax_model(
     # Resolve the pooling head dtype while vLLM still has its torch dtype.
     allow_native_sequence_classification = (
         not is_draft_model
-        and supports_native_sequence_classification(vllm_config, mesh))
+        and supports_native_sequence_classification(vllm_config))
     original_dtype = vllm_config.model_config.dtype
     model_dtype = to_jax_dtype(original_dtype)
     vllm_config.model_config.dtype = model_dtype
@@ -781,13 +781,19 @@ def resolve_model_architecture(vllm_config: VllmConfig,
         The model implementation type.
     """
 
+    allow_native_sequence_classification = (
+        not is_draft_model
+        and supports_native_sequence_classification(vllm_config))
     is_runai_streamer = getattr(getattr(vllm_config, 'load_config', None),
                                 'load_format', None) == 'runai_streamer'
     hf_config = vllm_config.speculative_config.draft_model_config.hf_config if is_draft_model else vllm_config.model_config.hf_config
     if is_runai_streamer:
         try:
             # Try to get the JAX model class
-            model_class = _get_model_architecture(hf_config)
+            model_class = _get_model_architecture(
+                hf_config,
+                allow_native_sequence_classification=
+                allow_native_sequence_classification)
 
             # If found, check for WeightLoader capability
             if not hasattr(model_class, "WeightLoader") or not issubclass(
@@ -808,6 +814,9 @@ def resolve_model_architecture(vllm_config: VllmConfig,
         f"Expected exactly one architecture, got {len(architectures)}: "
         f"{architectures}")
     arch = architectures[0]
+    if (arch == "Gemma4ForSequenceClassification"
+            and not allow_native_sequence_classification):
+        return "vllm"
     impl = "vllm" if arch in _VLLM_PREFERRED_ARCHITECTURES else "flax_nnx"
     return impl
 

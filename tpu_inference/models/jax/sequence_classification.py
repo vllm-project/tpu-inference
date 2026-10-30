@@ -3,7 +3,6 @@
 import jax
 import jax.numpy as jnp
 import torch
-from jax.sharding import Mesh
 
 from tpu_inference import envs
 from tpu_inference.logger import init_logger
@@ -15,35 +14,39 @@ class NativeSequenceClassificationModel:
     """Explicit capability for models with a native replicated score head."""
 
 
-def supports_native_sequence_classification(vllm_config, mesh: Mesh) -> bool:
+def supports_native_sequence_classification(vllm_config) -> bool:
     """Limit native selection to supported LAST classification configurations."""
     model_config = vllm_config.model_config
-    if getattr(model_config.hf_config, "architectures",
+    hf_config = model_config.hf_config
+    if getattr(hf_config, "architectures",
                []) != ["Gemma4ForSequenceClassification"]:
         return False
+    text_config = getattr(hf_config, "text_config", None)
     pooler_config = getattr(model_config, "pooler_config", None)
     sharding_config = getattr(vllm_config, "sharding_config", None)
-    return (
-        model_config.runner_type == "pooling"
-        and model_config.convert_type == "classify"
-        and model_config.dtype == torch.bfloat16
-        and model_config.head_dtype == torch.float32
-        and model_config.quantization is None
-        and not getattr(model_config.hf_config, "quantization_config", None)
-        and not getattr(getattr(model_config.hf_config, "text_config", None),
-                        "quantization_config", None)
-        and not vllm_config.additional_config.get("quantization")
-        and vllm_config.cache_config.cache_dtype in ("auto", "bfloat16")
-        and not envs.MOE_REQUANTIZE_WEIGHT_DTYPE
-        and not envs.BF16_LINEAR_REQUANTIZE_PATTERNS
-        and pooler_config is not None
-        and pooler_config.task in (None, "classify")
-        and pooler_config.seq_pooling_type == "LAST"
-        and vllm_config.lora_config is None
-        and vllm_config.speculative_config is None
-        and getattr(sharding_config, "total_dp_size", None) == 1
-        and getattr(sharding_config, "prefill_cp_size", None) == 1
-        and vllm_config.parallel_config.pipeline_parallel_size == 1)
+    return (model_config.runner_type == "pooling"
+            and model_config.convert_type == "classify"
+            and model_config.dtype == torch.bfloat16
+            and model_config.head_dtype == torch.float32
+            and model_config.quantization is None
+            and not getattr(hf_config, "quantization_config", None)
+            and not getattr(text_config, "quantization_config", None)
+            and not getattr(hf_config, "classifier_from_token", None)
+            and not getattr(text_config, "classifier_from_token", None)
+            and not getattr(hf_config, "method", None)
+            and not getattr(text_config, "method", None)
+            and not vllm_config.additional_config.get("quantization")
+            and vllm_config.cache_config.cache_dtype in ("auto", "bfloat16")
+            and not envs.MOE_REQUANTIZE_WEIGHT_DTYPE
+            and not envs.BF16_LINEAR_REQUANTIZE_PATTERNS
+            and pooler_config is not None
+            and pooler_config.task in (None, "classify")
+            and pooler_config.seq_pooling_type == "LAST"
+            and vllm_config.lora_config is None
+            and vllm_config.speculative_config is None
+            and getattr(sharding_config, "total_dp_size", None) == 1
+            and getattr(sharding_config, "prefill_cp_size", None) == 1
+            and vllm_config.parallel_config.pipeline_parallel_size == 1)
 
 
 def classify_rows(rows: jax.Array, weight: jax.Array) -> jax.Array:

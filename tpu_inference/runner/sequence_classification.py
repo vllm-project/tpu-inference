@@ -21,22 +21,16 @@ def prewarm_sequence_classification(runner: "TPUModelRunner") -> None:
 
     mesh = runner.mesh
     hidden_size = runner.model_config.get_hidden_size()
-    hidden_sharding = NamedSharding(
+    # Match the PartitionSpec(ATTN_DATA, None) sharding produced by
+    # _select_from_array_fn (already precompiled across all token/request
+    # bucket pairs by CompilationManager._precompile_select_from_array).
+    rows_sharding = NamedSharding(
         mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))
-    indices_sharding = NamedSharding(mesh,
-                                     PartitionSpec(ShardingAxisName.ATTN_DATA))
-    hidden = jax.device_put(
-        jnp.zeros((runner.num_tokens_paddings[-1], hidden_size),
-                  dtype=jnp.bfloat16), hidden_sharding)
-    pcp_size = runner.vllm_config.sharding_config.prefill_cp_size
-    # The compilation manager covers gather's other token/request bucket pairs.
     with torchax.default_env():
         for padded_reqs in runner.num_reqs_paddings:
-            indices = jax.device_put(
-                jnp.full((padded_reqs, ), -1, dtype=jnp.int32),
-                indices_sharding)
-            rows = runner._select_from_array_fn(hidden, indices, mesh,
-                                                pcp_size)
+            rows = jax.device_put(
+                jnp.zeros((padded_reqs, hidden_size), dtype=jnp.bfloat16),
+                rows_sharding)
             logits = runner.compute_logits_fn(runner.state_leaves, rows)
             torch_view(logits).to("cpu", non_blocking=False)
 
@@ -55,10 +49,11 @@ def pool_sequence_classification(
     batch = runner.input_batch
     num_reqs = batch.num_reqs
     metadata = batch.get_pooling_metadata()
-    rows = runner._select_from_array_fn(
-        hidden_states, logits_indices, runner.mesh,
-        runner.vllm_config.sharding_config.prefill_cp_size)
-    logits = runner.compute_logits_fn(runner.state_leaves, rows)
+    with runner.maybe_forbid_compile:
+        rows = runner._select_from_array_fn(
+            hidden_states, logits_indices, runner.mesh,
+            runner.vllm_config.sharding_config.prefill_cp_size)
+        logits = runner.compute_logits_fn(runner.state_leaves, rows)
     outputs = runner.pooler_fn(logits, metadata)
     scheduled = np.array([
         scheduler_output.num_scheduled_tokens[req_id]

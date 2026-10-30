@@ -128,14 +128,57 @@ class TestGemma4SequenceClassification:
                 False,
                 id="bad_cp_2",
             ),
+            pytest.param(
+                lambda cfg: setattr(cfg.model_config.hf_config,
+                                    "classifier_from_token", ["no", "yes"]),
+                False,
+                id="bad_online_classifier_from_token",
+            ),
+            pytest.param(
+                lambda cfg: setattr(cfg.model_config.hf_config.text_config,
+                                    "method", "from_2_way_softmax"),
+                False,
+                id="bad_online_method",
+            ),
         ],
     )
     def test_supports_native_sequence_classification_guards(
             self, mutation, expected):
-        mesh = _make_single_device_mesh()
         cfg = _make_supported_vllm_config()
         mutation(cfg)
-        assert supports_native_sequence_classification(cfg, mesh) is expected
+        assert supports_native_sequence_classification(cfg) is expected
+
+    def test_init_and_composite_num_labels_and_float32_weight_load(self):
+        mesh = _make_single_device_mesh()
+        cfg = _make_supported_vllm_config(hidden_size=4, num_labels=2)
+        cfg.model_config.dtype = jnp.bfloat16
+        # Simulate PretrainedConfig default num_labels=2 on hf_config (via
+        # property, not in __dict__) while text_config explicitly sets 3.
+        delattr(cfg.model_config.hf_config, "num_labels")
+        cfg.model_config.hf_config.text_config.num_labels = 3
+
+        with jax.set_mesh(mesh), patch(
+                "tpu_inference.models.jax.gemma4_classification.Gemma4Model",
+                return_value=nnx.Module(),
+        ):
+            model = Gemma4ForSequenceClassification(cfg, jax.random.key(0),
+                                                    mesh)
+            assert model.num_labels == 3
+            assert model.score.weight.get_value().shape == (4, 3)
+
+            score_f32 = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+            with set_current_vllm_config(cfg):
+                loaded = model.load_weights([
+                    ("score.weight", score_f32),
+                    ("lm_head.weight", torch.ones((8, 4),
+                                                  dtype=torch.bfloat16)),
+                ])
+            assert "score.weight" in loaded
+            assert model.score.weight.get_value().dtype == jnp.float32
+            rows = jnp.ones((2, 4), dtype=jnp.bfloat16)
+            logits = model.compute_logits(rows)
+            assert logits.dtype == jnp.float32
+            assert logits.shape == (2, 3)
 
     def test_classify_rows_fp32_projection(self):
         rows = jnp.asarray([[1.0, 2.0, 3.0, 4.0], [2.0, 1.0, 0.0, 3.0]],
@@ -162,7 +205,8 @@ class TestGemma4SequenceClassification:
 
         class FakeLoader:
 
-            def __init__(self, model, skip_substrs):
+            def __init__(self, model, skip_prefixes, skip_substrs):
+                assert skip_prefixes == ["lm_head"]
                 assert "vision" in skip_substrs
                 assert "audio" in skip_substrs
                 assert "multi_modal" in skip_substrs
@@ -188,8 +232,11 @@ class TestGemma4SequenceClassification:
                 "score.weight",
             ]
 
-            with pytest.raises(ValueError,
-                               match="score.weight must have shape"):
+            with pytest.raises(
+                    ValueError,
+                    match=
+                    r"score\.weight must have shape \(2, 4\); got \(3, 4\)",
+            ):
                 Gemma4ForSequenceClassification.load_weights(
                     dummy, [("score.weight", jnp.ones((3, 4)))])
 
