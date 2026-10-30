@@ -1,0 +1,39 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# TODO: create this pipeline in Buildkite, then replace <release-prep-pipeline>
+# here and in README.md with its name.
+#
+# <release-prep-pipeline>: updates the release support matrices of a release
+# branch (support_matrices/release/ and the release tables of README.md and
+# docs/includes) from its NIGHTLY=1 tpu-inference-ci runs, pushes them after
+# one approval, then, after a second approval, starts vllm-tpu-release on the
+# resulting commit. That pipeline builds and publishes the Docker image and the
+# PyPI wheels.
+#
+# The pipeline settings upload this file from the build's own checkout, for
+# releases/v* branches only. plan_prep.py adds the approval, push and trigger
+# steps. README.md has the how-to.
+
+steps:
+  - label: ":bar_chart: Update the release support matrices"
+    key: update_matrices
+    if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
+    agents:
+      queue: cpu
+    secrets:
+      - RELEASE_BUILDKITE_READ_TOKEN
+    commands:
+      - bash .buildkite/release/update_support_matrices.sh
+      - python3 .buildkite/release/plan_prep.py | buildkite-agent pipeline upload --no-interpolation

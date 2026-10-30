@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 import csv
 import datetime
 import os
@@ -793,12 +794,12 @@ def _process_quantization(file_sources):
     return generate_html_quantization_table(headers, all_data)
 
 
-def update_readme():
+def update_readme(type_keys=("release", "nightly")):
     """Finds markers in README_dual.md and replaces content with fresh tables."""
     with open(README_PATH, "r", encoding="utf-8") as f:
         content = f.read()
 
-    for type_key in ["release", "nightly"]:
+    for type_key in type_keys:
         type_map = CSV_MAP[type_key]
         for section_key, file_sources in type_map.items():
             if section_key == "model_support":
@@ -852,4 +853,13 @@ def update_readme():
 
 
 if __name__ == "__main__":
-    update_readme()
+    parser = argparse.ArgumentParser(
+        description="Update the support matrix tables in README.md and "
+        "docs/includes from the CSVs under support_matrices/.")
+    parser.add_argument(
+        "--only",
+        choices=["release", "nightly"],
+        help="Update only the release or only the nightly tables, leaving the "
+        "other untouched (default: both).")
+    args = parser.parse_args()
+    update_readme((args.only, ) if args.only else ("release", "nightly"))
