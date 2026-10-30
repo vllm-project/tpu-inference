@@ -11,6 +11,7 @@ import pytest
 import torch
 from flax import nnx
 from jax.sharding import Mesh
+from transformers import Gemma4Config
 from vllm.config import ModelConfig, PoolerConfig, set_current_vllm_config
 from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.pooler.seqwise import (ClassifierPoolerHead,
@@ -44,6 +45,13 @@ def _make_tp_mesh() -> Mesh:
     return Mesh(devices, MESH_AXIS_NAMES)
 
 
+def _make_hf_config(hidden_size: int = 4, **kwargs) -> Gemma4Config:
+    text_config = {"hidden_size": hidden_size, **kwargs.pop("text_config", {})}
+    return Gemma4Config(architectures=["Gemma4ForSequenceClassification"],
+                        text_config=text_config,
+                        **kwargs)
+
+
 def _make_supported_vllm_config(hidden_size: int = 4, num_labels: int = 2):
 
     class HeadConfig(SimpleNamespace):
@@ -51,11 +59,11 @@ def _make_supported_vllm_config(hidden_size: int = 4, num_labels: int = 2):
 
     return SimpleNamespace(
         model_config=HeadConfig(
-            hf_config=SimpleNamespace(
-                architectures=["Gemma4ForSequenceClassification"],
-                num_labels=num_labels,
+            hf_config=_make_hf_config(
+                hidden_size,
+                id2label={i: str(i)
+                          for i in range(num_labels)},
                 problem_type="single_label_classification",
-                text_config=SimpleNamespace(hidden_size=hidden_size),
             ),
             runner_type="pooling",
             convert_type="classify",
@@ -148,14 +156,43 @@ class TestGemma4SequenceClassification:
         mutation(cfg)
         assert supports_native_sequence_classification(cfg) is expected
 
-    def test_init_and_composite_num_labels_and_float32_weight_load(self):
+    @pytest.mark.parametrize(
+        ("hf_kwargs", "expected_labels"),
+        [
+            pytest.param({}, 2, id="default_id2label"),
+            pytest.param({"id2label": {
+                0: "a",
+                1: "b",
+                2: "c"
+            }},
+                         3,
+                         id="top_level_labels"),
+            pytest.param(
+                {"text_config": {
+                    "num_labels": 3
+                }}, 3, id="text_config_labels"),
+        ],
+    )
+    def test_init_resolves_num_labels_from_real_config(self, hf_kwargs,
+                                                       expected_labels):
         mesh = _make_single_device_mesh()
-        cfg = _make_supported_vllm_config(hidden_size=4, num_labels=2)
+        cfg = _make_supported_vllm_config(hidden_size=4)
         cfg.model_config.dtype = jnp.bfloat16
-        # Simulate PretrainedConfig default num_labels=2 on hf_config (via
-        # property, not in __dict__) while text_config explicitly sets 3.
-        delattr(cfg.model_config.hf_config, "num_labels")
-        cfg.model_config.hf_config.text_config.num_labels = 3
+        cfg.model_config.hf_config = _make_hf_config(4, **hf_kwargs)
+
+        with jax.set_mesh(mesh), patch(
+                "tpu_inference.models.jax.gemma4_classification.Gemma4Model",
+                return_value=nnx.Module(),
+        ):
+            model = Gemma4ForSequenceClassification(cfg, jax.random.key(0),
+                                                    mesh)
+        assert model.num_labels == expected_labels
+        assert model.score.weight.get_value().shape == (4, expected_labels)
+
+    def test_init_and_float32_weight_load(self):
+        mesh = _make_single_device_mesh()
+        cfg = _make_supported_vllm_config(hidden_size=4, num_labels=3)
+        cfg.model_config.dtype = jnp.bfloat16
 
         with jax.set_mesh(mesh), patch(
                 "tpu_inference.models.jax.gemma4_classification.Gemma4Model",

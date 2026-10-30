@@ -7,6 +7,7 @@ import jax
 from flax import nnx
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
+from vllm.model_executor.models.adapters import _resolve_num_labels
 from vllm.model_executor.models.utils import WeightsMapper
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
@@ -20,18 +21,6 @@ from tpu_inference.models.jax.sequence_classification import (
 from tpu_inference.models.jax.utils.weight_utils import (JaxAutoWeightsLoader,
                                                          LoadableWithIterator,
                                                          StandardWeightLoader)
-
-
-def _resolve_num_labels(hf_config: Any) -> int:
-    text_config = getattr(hf_config, "text_config", None)
-    hf_dict = getattr(hf_config, "__dict__", {})
-    if ("num_labels" in hf_dict or "id2label" in hf_dict
-            or text_config is None):
-        return int(getattr(hf_config, "num_labels", 2))
-    text_dict = getattr(text_config, "__dict__", {})
-    if "num_labels" in text_dict or "id2label" in text_dict:
-        return int(getattr(text_config, "num_labels", 2))
-    return int(getattr(hf_config, "num_labels", 2))
 
 
 class Gemma4ForSequenceClassification(JaxModule, LoadableWithIterator,
@@ -67,7 +56,10 @@ class Gemma4ForSequenceClassification(JaxModule, LoadableWithIterator,
         model_config = vllm_config.model_config
         hf_config = model_config.hf_config
         hidden_size = hf_config.text_config.hidden_size
-        self.num_labels = _resolve_num_labels(hf_config)
+        # Same resolution as vLLM's as_seq_cls_model: the top-level config
+        # wins when it declares its own label space, else the text config.
+        self.num_labels = _resolve_num_labels(hf_config,
+                                              hf_config.get_text_config())
 
         # Replicate the small head. The weight loader transposes the checkpoint
         # score.weight from [labels, hidden] to [hidden, labels] and preserves
