@@ -32,8 +32,9 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         # Basic DP configuration
         self.runner.dp_size = 2
-        # PCP off; a MagicMock auto-attribute would not be None.
+        # PCP / DCP off; a MagicMock auto-attribute would not be None.
         self.runner.vllm_config.sharding_config.prefill_cp_size = 1
+        self.runner.vllm_config.sharding_config.decode_cp_size = 1
         self.runner.pcp_preprocessor = None
         self.runner.max_num_tokens = 64
         self.runner.max_num_reqs = 8
