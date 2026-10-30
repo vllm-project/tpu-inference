@@ -34,8 +34,8 @@ def align_span(start, size, align):
 def cp_local_cache_len(global_kv_cache_len, cp_group_size, cp_rank, page_size):
     """Number of cache tokens owned by this CP rank.
 
-  Currently only support cp_kv_cache_interleave_size = page_size
-  """
+    Currently only support cp_kv_cache_interleave_size = page_size
+    """
     super_page = cp_group_size * page_size
     full_tokens = (global_kv_cache_len // super_page) * page_size
     rem_tokens = jnp.maximum(
