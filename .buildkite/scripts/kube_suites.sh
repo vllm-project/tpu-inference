@@ -70,11 +70,15 @@ KUBE_GROUP_FRAGMENTS=()
 upload_kube_group() {
     local group_label="$1"
     local group_key="$2"
+    local group_yaml
     [[ "${#KUBE_GROUP_FRAGMENTS[@]}" -gt 0 ]] || return 0
-    echo "--- :pipeline: Uploading group '${group_label}' (${group_key}) with priority ${JOB_PRIORITY:-PRIORITY_DEFAULT}"
+    echo "--- :pipeline: Uploading group '${group_label}' (${group_key}) with priority ${JOB_PRIORITY:-$PRIORITY_DEFAULT}"
+    # A regular file, not a pipe: upload_with_priority prepends the priority
+    # line, caps the TPU steps in the author's concurrency group, and may read
+    # the file twice (cap fallback).
+    group_yaml=$(mktemp)
     {
         cat <<EOF
-priority: ${JOB_PRIORITY:-PRIORITY_DEFAULT}
 x-shape-single: &shape_single "\${KUBE_SHAPE_SINGLE:-ct6e-standard-1t/1x1}"
 x-shape-multi: &shape_multi "\${KUBE_SHAPE_MULTI:-ct6e-standard-8t/2x4}"
 x-kube-plugin: &kube_plugin
@@ -87,7 +91,9 @@ steps:
     steps:
 EOF
         printf '%s\n' "${KUBE_GROUP_FRAGMENTS[@]}" | sed 's/^/      /'
-    } | buildkite-agent pipeline upload
+    } > "${group_yaml}"
+    upload_with_priority "${group_yaml}" "${JOB_PRIORITY:-}"
+    rm -f "${group_yaml}"
 }
 
 # Appends the step items for one kube lane (without the top-level 'steps:'

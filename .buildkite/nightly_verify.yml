@@ -22,6 +22,12 @@ steps:
        # Which fleet's suites to send up: bootstrap.sh's choice, which can come
        # from the commit message rather than the build's env.
        CI_FLEET: "${CI_FLEET:-bare}"
+       # Interpolated at upload time from bootstrap.sh's env, which this job
+       # does not otherwise see: the build's priority and the author's
+       # concurrency group that caps the suites' TPU steps the same way as the
+       # ones bootstrap.sh uploads itself.
+       JOB_PRIORITY: "${JOB_PRIORITY:-1}"
+       PR_TPU_CONCURRENCY_GROUP: "${PR_TPU_CONCURRENCY_GROUP:-}"
      agents:
        queue: cpu
      commands:
