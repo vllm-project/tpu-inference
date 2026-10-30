@@ -165,10 +165,18 @@ def vllm_moe_apply(layer: RoutedExperts,
     # attribute (`hash_indices_table`). cleanup_sharding registers the
     # TPU-replicated copy as the `tpu_hash_indices_table` buffer so that it is
     # passed into the jitted step through functional_call instead of being
-    # baked in as a compile-time constant; prefer it when present.
+    # baked in as a compile-time constant; it is the only table used.
     hash_table = getattr(layer, "tpu_hash_indices_table", None)
-    if hash_table is None:
-        hash_table = getattr(layer, "hash_indices_table", None)
+    if (hash_table is None
+            and getattr(layer, "hash_indices_table", None) is not None):
+        # The plain `hash_indices_table` is the original CPU tensor: using it
+        # here would bake a stale constant into the jitted step (or fail)
+        # instead of routing with the functional_call-bound TPU copy.
+        raise RuntimeError(
+            f"{layer.layer_name}: RoutedExperts has a hash_indices_table but "
+            "no TPU-replicated `tpu_hash_indices_table` buffer; it is "
+            "registered by cleanup_sharding (shard_model_to_tpu), which must "
+            "run before the forward pass.")
     if hash_table is not None:
         assert input_ids is not None, "input_ids must be provided when hash_indices_table is present in the layer"
         hash_based_topk_indices = jax_view(hash_table)[jax_view(input_ids)]
