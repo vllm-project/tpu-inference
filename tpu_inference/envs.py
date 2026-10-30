@@ -528,7 +528,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "ROPE_CACHE_ROW_MAJOR":
     env_bool("ROPE_CACHE_ROW_MAJOR", default=False),
     # similar to ROPE_CACHE_ROW_MAJOR, but for the hash-MoE routing table
-    # (`*.routed_experts.hash_indices_table`, [vocab_size, num_experts_per_tok]).
+    # (`*.routed_experts.tpu_hash_indices_table`, [vocab_size, num_experts_per_tok]).
     "HASH_TABLE_ROW_MAJOR":
     env_bool("HASH_TABLE_ROW_MAJOR", default=False),
     "MLA_TRANSPOSE_KV_CACHE":
