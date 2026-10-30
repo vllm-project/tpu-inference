@@ -62,7 +62,10 @@ def main():
     group, limit = sys.argv[1], int(sys.argv[2])
     pipeline = json.load(sys.stdin)
     cap(pipeline.get("steps") or [], group, limit)
-    json.dump(pipeline, sys.stdout)
+    # ensure_ascii=False: Go's YAML 1.2 parser in `buildkite-agent pipeline
+    # upload` rejects UTF-16 surrogate escapes (\ud83d\uded1 for 🛑 in
+    # nightly_verify.yml) with "found invalid Unicode character escape code".
+    json.dump(pipeline, sys.stdout, ensure_ascii=False)
 
 
 if __name__ == "__main__":
