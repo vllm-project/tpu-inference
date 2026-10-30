@@ -49,12 +49,16 @@ trap 'exit 143' TERM
 [[ -f "${HOME}/.docker/config.json" ]] && cp "${HOME}/.docker/config.json" "${DOCKER_CONFIG}/"
 dockerhub_login "${DOCKER_CONFIG}" "${RELEASE_DOCKERHUB_USERNAME}"
 
-TAGS=(--tag "${DEST}:${TAG}")
-[[ "${MOVE_LATEST}" == "yes" ]] && TAGS+=(--tag "${DEST}:latest")
-echo "--- :docker: Copying ${STAGED} to ${TAGS[*]//--tag /}"
+TAGS=("${DEST}:${TAG}")
+[[ "${MOVE_LATEST}" == "yes" ]] && TAGS+=("${DEST}:latest")
+TAG_ARGS=()
+for t in "${TAGS[@]}"; do
+  TAG_ARGS+=(--tag "${t}")
+done
+echo "--- :docker: Copying ${STAGED} to ${TAGS[*]}"
 # --prefer-index=false copies the manifest as it is, so the digest on Docker
 # Hub is the staged one.
-docker buildx imagetools create --prefer-index=false "${TAGS[@]}" "${STAGED}"
+docker buildx imagetools create --prefer-index=false "${TAG_ARGS[@]}" "${STAGED}"
 
 echo "--- :mag: Checking the digest on Docker Hub"
 got="$(docker buildx imagetools inspect "${DEST}:${TAG}" --format '{{json .Manifest}}' \
