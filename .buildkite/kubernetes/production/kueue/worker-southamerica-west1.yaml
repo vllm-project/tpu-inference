@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: buildkite
+  labels:
+    # Move enforcement to restricted after Agent Stack's generated checkout,
+    # agent, and command containers have compatible security contexts.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# Standard GKE node pools own topology, reservation affinity, and the profile
+# label. ResourceFlavors no longer need Autopilot ComputeClass or zone labels.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: v6e-1
+spec:
+  nodeLabels:
+    tpu-ci.google.com/profile: v6e-1
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: v6e-8
+spec:
+  nodeLabels:
+    tpu-ci.google.com/profile: v6e-8
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: v6e-1
+spec:
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: buildkite
+  resourceGroups:
+    - coveredResources:
+        - google.com/tpu
+      flavors:
+        - name: v6e-1
+          resources:
+            - name: google.com/tpu
+              nominalQuota: 7
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: v6e-8
+spec:
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: buildkite
+  resourceGroups:
+    - coveredResources:
+        - google.com/tpu
+      flavors:
+        - name: v6e-8
+          resources:
+            - name: google.com/tpu
+              nominalQuota: 8
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: v6e-1
+  namespace: buildkite
+spec:
+  clusterQueue: v6e-1
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: v6e-8
+  namespace: buildkite
+spec:
+  clusterQueue: v6e-8
