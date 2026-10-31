@@ -104,7 +104,10 @@ def test_replicas_tp_exceeds_kv_heads():
     # mesh ATTN_HEAD product = 8 > num_kv_heads=2 → replicate each KV head 4x.
     layer, parent_kv_heads = _build_qkv(mesh_shape={"model": 8},
                                         total_num_kv_heads=2)
-    assert layer.tp_size == 8
+    assert layer.mesh_tp_size == 8
+    # `tp_size` is left to `QKVParallelLinear.__init__` (1 on TPU); callers
+    # split the global fused output by `output_sizes // tp_size`.
+    assert "tp_size" not in vars(layer)
     assert layer.num_kv_head_replicas == 4
     # Inflated kv-heads passed to parent: 2 * 4 = 8.
     assert parent_kv_heads == [8]
@@ -114,7 +117,7 @@ def test_replicas_tp_equals_kv_heads():
     # mesh ATTN_HEAD product = 2 == num_kv_heads=2 → no replication.
     layer, parent_kv_heads = _build_qkv(mesh_shape={"model": 2},
                                         total_num_kv_heads=2)
-    assert layer.tp_size == 2
+    assert layer.mesh_tp_size == 2
     assert layer.num_kv_head_replicas == 1
     assert parent_kv_heads == [2]
 

@@ -104,6 +104,12 @@ def _to_row_major(arr: jax.Array, key: str) -> jax.Array:
     return out
 
 
+def _using_transformers_backend(model_config) -> bool:
+    """Whether vLLM resolves this model to its Transformers modeling backend."""
+    using_backend = getattr(model_config, "using_transformers_backend", None)
+    return bool(using_backend()) if callable(using_backend) else False
+
+
 class _VllmRunner(torch.nn.Module):
 
     def __init__(self, vllm_model: torch.nn.Module):
@@ -209,6 +215,21 @@ class VllmModelWrapper:
         # aware manner. Since tpu-inference has its own sharding logic, this
         # may casue errors. Therefore, we disable it during weight loading.
         vllm_config_for_load.parallel_config.enable_expert_parallel = False
+
+        # vLLM's Transformers modeling backend sizes attention heads (and some
+        # fusers) per rank from `parallel_config.tensor_parallel_size`.
+        # tpu-inference builds the torch model with global shapes
+        # (torch.distributed runs with world_size=1) and shards it with JAX
+        # afterwards, as it does for vLLM's native models. Present TP=1 to
+        # the backend so its head counts match the global tensors.
+        model_config_for_load = (
+            vllm_config_for_load.speculative_config.draft_model_config
+            if self.is_draft_model else vllm_config_for_load.model_config)
+        if _using_transformers_backend(model_config_for_load):
+            logger.info(
+                "Model uses vLLM's Transformers modeling backend; building it "
+                "with tensor_parallel_size=1 (global shapes) before sharding.")
+            vllm_config_for_load.parallel_config.tensor_parallel_size = 1
 
         use_random_weights = (
             vllm_config_for_load.load_config.load_format == "dummy")

@@ -119,7 +119,13 @@ class VllmQKVParallelLinear(QKVParallelLinear):
 
         self.total_num_kv_heads = total_num_kv_heads
         self.num_kv_head_replicas = replicas
-        self.tp_size = tp
+        # Keep the mesh TP size under its own name. `self.tp_size` stays at
+        # the value set by `super().__init__()` (1 on TPU), which matches the
+        # global (unsharded) output shape this layer produces under SPMD.
+        # Callers such as vLLM's Transformers modeling backend split the
+        # fused output as `output_sizes // qkv.tp_size`, so overwriting
+        # `tp_size` with the mesh size would shrink every split.
+        self.mesh_tp_size = tp
 
     def weight_loader(self,
                       param: Parameter,
@@ -168,13 +174,13 @@ class VllmQKVParallelLinear(QKVParallelLinear):
         out_jax = reorder_concatenated_tensor_for_sharding(
             out_jax,
             self.output_sizes,
-            self.tp_size,
+            self.mesh_tp_size,
             dim=-1,
         )
         q_jax, k_jax, v_jax = slice_sharded_tensor_for_concatenation(
             out_jax,
             self.output_sizes,
-            self.tp_size,
+            self.mesh_tp_size,
         )
 
         mesh = jax.sharding.get_abstract_mesh()
