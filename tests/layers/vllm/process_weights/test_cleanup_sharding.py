@@ -15,9 +15,12 @@
 from unittest.mock import MagicMock, patch
 
 import torch
+import torchax
 
-from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
-    shard_model_to_tpu
+from tpu_inference.layers.common import utils as common_utils
+from tpu_inference.layers.common.utils import local_cpu_devices
+from tpu_inference.layers.vllm.process_weights.cleanup_sharding import (
+    _tensor_is_in_cpu, shard_model_to_tpu)
 
 
 def test_shard_model_to_tpu_simplification():
@@ -80,3 +83,47 @@ def test_shard_model_to_tpu_simplification():
                     # Verify _shard_tensor_to_tpu_replicated was only called once
                     mock_shard_replicated.assert_called_once_with(
                         model.weight, dummy_mesh)
+
+
+def test_local_cpu_devices_scoping_and_mock_fallback():
+    fake_local_cpu = MagicMock(name="local_cpu_4")
+    fake_global_cpu = MagicMock(name="global_cpu_0")
+    with patch.object(common_utils.jax,
+                      "local_devices",
+                      return_value=[fake_local_cpu]) as mock_local:
+        assert local_cpu_devices(common_utils.jax) == [fake_local_cpu]
+        mock_local.assert_called_once_with(backend="cpu")
+
+    # When a unit test mocks jax.devices without mocking jax.local_devices,
+    # local_cpu_devices falls back to the mocked jax.devices("cpu").
+    with patch.object(common_utils.jax,
+                      "devices",
+                      return_value=[fake_global_cpu]) as mock_devices:
+        assert local_cpu_devices(common_utils.jax) == [fake_global_cpu]
+        mock_devices.assert_called_once_with("cpu")
+
+
+def test_tensor_is_in_cpu_multihost_non_zero_process():
+    fake_local_cpu = MagicMock(name="local_cpu_4")
+    fake_global_cpu = MagicMock(name="global_cpu_0")
+    fake_tpu_device = MagicMock(name="tpu_4")
+
+    cpu_torchax_tensor = MagicMock(spec=torchax.tensor.Tensor)
+    cpu_torchax_tensor.jax_device = fake_local_cpu
+
+    tpu_torchax_tensor = MagicMock(spec=torchax.tensor.Tensor)
+    tpu_torchax_tensor.jax_device = fake_tpu_device
+
+    with (
+            patch(
+                "tpu_inference.layers.vllm.process_weights.cleanup_sharding.jax.local_devices",
+                return_value=[fake_local_cpu],
+            ),
+            patch(
+                "tpu_inference.layers.vllm.process_weights.cleanup_sharding.jax.devices",
+                return_value=[fake_global_cpu, fake_local_cpu],
+            ),
+    ):
+        assert _tensor_is_in_cpu(cpu_torchax_tensor) is True
+        assert _tensor_is_in_cpu(tpu_torchax_tensor) is False
+        assert _tensor_is_in_cpu(torch.ones(4)) is True
