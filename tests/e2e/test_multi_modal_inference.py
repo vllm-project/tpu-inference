@@ -97,6 +97,16 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes):
     # in internal-LB mode. Drop it so the default (disabled) config is used.
     engine_args.pop("fault_tolerance_config", None)
 
+    # asdict() keeps EPLBConfig.num_redundant_experts=None (its "compute the
+    # minimum" default since vLLM #30614), and pydantic rejects an explicit
+    # None for that int field when LLM(**engine_args) rebuilds the config.
+    # Drop the None entries so EPLBConfig uses its own defaults.
+    eplb_config = engine_args.get("eplb_config") or {}
+    engine_args["eplb_config"] = {
+        k: v
+        for k, v in eplb_config.items() if v is not None
+    }
+
     llm = LLM(**engine_args)
 
     try:
