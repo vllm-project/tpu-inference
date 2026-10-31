@@ -32,8 +32,8 @@ from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.model_executor.models.qwen2_5_vl import \
     _pad_cumulative_seqlens_buffer
 from vllm.v1.worker.encoder_cudagraph_defs import (
-    EncoderCudaGraphCaptureInputs, EncoderCudaGraphConfig,
-    EncoderCudaGraphReplayBuffers)
+    ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG, EncoderCudaGraphCaptureInputs,
+    EncoderCudaGraphConfig, EncoderCudaGraphReplayBuffers, EncoderItemSpec)
 
 from tpu_inference.distributed.jax_parallel_state import \
     init_pp_distributed_environment
@@ -43,7 +43,8 @@ from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.models.vllm.vllm_model_wrapper import _VllmRunner
 from tpu_inference.runner.mm_encoder_jit_manager import (
-    MMEncoderJITManager, _TorchaxEncoderModelAdapter)
+    MMEncoderJITManager, _TorchaxEncoderModelAdapter,
+    maybe_create_mm_encoder_jit_manager)
 
 
 def _make_vllm_config(budgets=None, max_vision_items=0):
@@ -337,6 +338,179 @@ class TestMMEncoderJITManagerInit:
         """_jit_forward is a callable built once at init (not per-call)."""
         manager = _make_manager()
         assert callable(manager.model._jit_forward)
+
+
+class _DummyCaptureAxesModel(_DummyModel):
+    """SupportsEncoderCudaGraph model with one capture axis (row width).
+
+    Shaped like Gemma 4: ``pixel_values`` is ``(num_items, row_width,
+    feat)``, every item yields ``row_width`` output tokens, and
+    ``select_encoder_cudagraph_items`` reports the batch's row width under
+    ``ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG``. The capture inputs for
+    ``(budget, (row_width,))`` hold ``budget // row_width`` rows of exactly
+    that width, so a batch only fits the template of its own row width.
+    """
+
+    ROW_WIDTHS = (2, 4)
+    FEAT = 3
+
+    def __init__(self):
+        self.capture_calls = []
+
+    def get_encoder_cudagraph_config(self):
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=["pixel_values"],
+            out_hidden_size=64,
+            capture_axes=(self.ROW_WIDTHS, ),
+        )
+
+    def prepare_encoder_cudagraph_capture_inputs(self,
+                                                 token_budget,
+                                                 max_batch_size,
+                                                 max_frames_per_batch,
+                                                 device,
+                                                 dtype,
+                                                 path="default",
+                                                 axis_keys=None):
+        self.capture_calls.append((token_budget, path, axis_keys))
+        (row_width, ) = axis_keys
+        rows = min(max_batch_size, max(1, token_budget // row_width))
+        return EncoderCudaGraphCaptureInputs(values={
+            "pixel_values":
+            torch.zeros(rows, row_width, self.FEAT, dtype=dtype)
+        })
+
+    def get_encoder_cudagraph_item_specs(self, mm_kwargs):
+        pixel_values = mm_kwargs["pixel_values"]
+        return [
+            EncoderItemSpec(input_size=pixel_values.shape[1],
+                            output_tokens=pixel_values.shape[1])
+            for _ in range(pixel_values.shape[0])
+        ]
+
+    def select_encoder_cudagraph_items(self, mm_kwargs, indices):
+        pixel_values = mm_kwargs["pixel_values"]
+        return {
+            "pixel_values": pixel_values[list(indices)],
+            ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: (pixel_values.shape[1], ),
+        }
+
+    def prepare_encoder_cudagraph_replay_buffers(self, mm_kwargs,
+                                                 max_batch_size,
+                                                 max_frames_per_batch):
+        return EncoderCudaGraphReplayBuffers(
+            values={"pixel_values": mm_kwargs["pixel_values"]})
+
+
+def _make_capture_axes_manager():
+    """Manager over ``_DummyCaptureAxesModel`` with JIT forward stubbed out.
+
+    Budgets auto-infer to [128, 256, 512] with max_batch_size=4 (see
+    ``_DummyModel``). ``run_budget_forward`` is replaced with a recorder that
+    returns one row of ones per input token, so tests can check which
+    template-shaped inputs reached the JIT without compiling anything.
+    """
+    manager = MMEncoderJITManager(
+        vllm_config=_make_vllm_config(),
+        vllm_runner=MagicMock(spec=torch.nn.Module),
+        vllm_model=_DummyCaptureAxesModel(),
+        params_and_buffers={},
+    )
+    forward_inputs = []
+
+    def _fake_run_budget_forward(padded):
+        forward_inputs.append(padded)
+        rows, row_width, _ = padded["pixel_values"].shape
+        return jnp.ones((rows * row_width, 64), dtype=jnp.bfloat16)
+
+    manager.model.run_budget_forward = _fake_run_budget_forward
+    return manager, forward_inputs
+
+
+class TestMMEncoderJITManagerCaptureAxes:
+    """Models with ``EncoderCudaGraphConfig.capture_axes`` (Gemma 4 since vLLM
+    #61365) get one template per ``(token_budget, axis_keys)``, matching the
+    GPU manager's per-axis graphs, instead of falling back to eager."""
+
+    def test_templates_per_budget_and_axis_key(self):
+        manager, _ = _make_capture_axes_manager()
+        widths = _DummyCaptureAxesModel.ROW_WIDTHS
+        expected = {(b, (w, )) for b in manager.token_budgets for w in widths}
+        assert set(manager.budget_templates) == expected
+        for (budget, (width, )), tmpl in manager.budget_templates.items():
+            assert tmpl["pixel_values"].shape == (min(manager.max_batch_size,
+                                                      budget // width), width,
+                                                  _DummyCaptureAxesModel.FEAT)
+        # Capture inputs are requested with the axis keys, as on GPU.
+        calls = manager.model._model.capture_calls
+        assert {(b, k) for b, _, k in calls} == expected
+        assert {p for _, p, _ in calls} == {"default"}
+
+    def test_maybe_create_builds_manager_for_capture_axes(self):
+        vllm_config = _make_vllm_config()
+        vllm_config.compilation_config.cudagraph_mm_encoder = True
+        manager = maybe_create_mm_encoder_jit_manager(
+            vllm_config=vllm_config,
+            vllm_model=_DummyCaptureAxesModel(),
+            vllm_runner=MagicMock(spec=torch.nn.Module),
+            params_and_buffers={},
+        )
+        assert isinstance(manager, MMEncoderJITManager)
+
+    @pytest.mark.parametrize("row_width", [2, 4])
+    def test_execute_uses_template_of_batch_axis_key(self, row_width):
+        manager, forward_inputs = _make_capture_axes_manager()
+        num_items = 3
+        pixel_values = torch.randn(num_items,
+                                   row_width,
+                                   _DummyCaptureAxesModel.FEAT,
+                                   dtype=torch.bfloat16)
+
+        result = manager.execute({"pixel_values": pixel_values})
+
+        # 3 items x row_width tokens fit the smallest budget (128).
+        budget = manager.token_budgets[0]
+        template = manager.budget_templates[(budget, (row_width, ))]
+        assert len(forward_inputs) == 1
+        padded = forward_inputs[0]["pixel_values"]
+        assert padded.shape == template["pixel_values"].shape
+        torch.testing.assert_close(padded[:num_items], pixel_values)
+        assert torch.all(padded[num_items:] == 0)
+        assert manager.graph_hits == num_items
+        assert manager.graph_misses == 0
+        assert [r.shape for r in result] == [(row_width, 64)] * num_items
+
+    def test_unknown_axis_key_runs_eager(self):
+        manager, forward_inputs = _make_capture_axes_manager()
+        row_width = 8  # not in ROW_WIDTHS
+        pixel_values = torch.randn(2,
+                                   row_width,
+                                   _DummyCaptureAxesModel.FEAT,
+                                   dtype=torch.bfloat16)
+        eager_out = jnp.zeros((2 * row_width, 64), dtype=jnp.bfloat16)
+        manager.model.encoder_eager_forward = MagicMock(return_value=eager_out)
+
+        result = manager.execute({"pixel_values": pixel_values})
+
+        assert forward_inputs == []
+        manager.model.encoder_eager_forward.assert_called_once()
+        assert manager.graph_misses == 2
+        assert [r.shape for r in result] == [(row_width, 64)] * 2
+
+    def test_precompile_captures_every_axis_key(self):
+        manager, forward_inputs = _make_capture_axes_manager()
+        tasks = []
+
+        def _run_compilation(name, fn, *args, **kwargs):
+            tasks.append(kwargs)
+            fn(*args)
+
+        manager.precompile_vision_encoder(_run_compilation)
+
+        assert set(manager.budget_graphs) == set(manager.budget_templates)
+        assert len(forward_inputs) == len(manager.budget_templates)
+        assert all("budget" in t and "axis_keys" in t for t in tasks)
 
 
 def _image_mm_kwargs(t=1, h=4, w=4):
