@@ -59,7 +59,7 @@ class TPUSupportedSamplingMetadata:
         req_indices_dp: dict,
         sharding: Optional[jax.sharding.Sharding] = None,
     ) -> "TPUSupportedSamplingMetadata":
-        needs_logprobs = input_batch.max_num_logprobs > 0 if input_batch.max_num_logprobs else False
+        needs_logprobs = input_batch.max_num_logprobs is not None
 
         # Use a dummy tensor with a unique shape for each logprobs config.
         # This avoids persistent cache collisions.
