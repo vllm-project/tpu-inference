@@ -71,6 +71,8 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import get_model
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
+from tpu_inference.models.jax.sequence_classification import \
+    NativeSequenceClassificationPooler
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.compilation_manager import CompilationManager
 from tpu_inference.runner.decode_loop import TpuSamplingState, continue_decode
@@ -85,6 +87,8 @@ from tpu_inference.runner.persistent_batch_manager import \
 from tpu_inference.runner.routed_experts import (RoutedExpertsStepEntry,
                                                  TPUAuxOutputWorker,
                                                  get_routed_experts_attn_gid)
+from tpu_inference.runner.sequence_classification import \
+    pool_sequence_classification
 from tpu_inference.runner.speculative_decoding_manager import (
     SpecDecodeMetadata, SpeculativeDecodingManager)
 from tpu_inference.runner.structured_decoding_manager import \
@@ -1263,7 +1267,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             # Only pre-warm torchax for pooling tasks to prevent JIT during inference
             # while avoiding unnecessary overhead for standard generative models.
-            if self.is_pooling_model:
+            if (self.is_pooling_model and not isinstance(
+                    model.pooler_fn, NativeSequenceClassificationPooler)):
                 import torchax
                 from torchax.interop import torch_view
 
@@ -1799,6 +1804,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 return hidden_states
 
         if self.is_pooling_model:
+            if isinstance(self.pooler_fn, NativeSequenceClassificationPooler):
+                return pool_sequence_classification(self, hidden_states,
+                                                    logits_indices,
+                                                    logits_indices_selector,
+                                                    scheduler_output)
             num_reqs = self.input_batch.num_reqs
 
             # Retrieve sequence lengths

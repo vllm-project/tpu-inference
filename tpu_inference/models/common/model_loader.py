@@ -35,6 +35,9 @@ from tpu_inference.models.common.compiler_options import \
     get_step_fn_compiler_options
 from tpu_inference.models.common.interface import (ModelInterface,
                                                    MultiModalInterface)
+from tpu_inference.models.jax.sequence_classification import (
+    NativeSequenceClassificationModel, NativeSequenceClassificationPooler,
+    supports_native_sequence_classification)
 from tpu_inference.models.jax.utils.multi_modal_utils import \
     flatten_pad_mm_embeds
 from tpu_inference.models.jax.utils.qwix.qwix_utils import (
@@ -71,7 +74,11 @@ class UnsupportedArchitectureError(ValueError):
     pass
 
 
-def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
+def _get_model_architecture(
+    config: PretrainedConfig,
+    *,
+    allow_native_sequence_classification: bool = False,
+) -> nnx.Module:
     # NOTE: Use inline imports here, otherwise the normal imports
     # would cause JAX init failure when using multi hosts with Ray.
 
@@ -111,6 +118,11 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     for arch in architectures:
         if arch in _MODEL_REGISTRY:
             return _MODEL_REGISTRY[arch]
+    if (allow_native_sequence_classification
+            and architectures == ["Gemma4ForSequenceClassification"]):
+        from tpu_inference.models.jax.gemma4_classification import \
+            Gemma4ForSequenceClassification
+        return Gemma4ForSequenceClassification
     raise UnsupportedArchitectureError(
         f"Model architectures {architectures} not "
         "registered in tpu-inference. Falling back to vLLM-native "
@@ -320,6 +332,11 @@ def get_flax_model(
     mesh: Mesh,
     is_draft_model: bool = False,
 ) -> ModelInterface:
+    # Run the capability check before model_config.dtype is replaced with a
+    # JAX dtype below; it compares the torch dtypes vLLM resolved.
+    allow_native_sequence_classification = (
+        not is_draft_model
+        and supports_native_sequence_classification(vllm_config))
     original_dtype = vllm_config.model_config.dtype
     model_dtype = to_jax_dtype(original_dtype)
     vllm_config.model_config.dtype = model_dtype
@@ -334,7 +351,9 @@ def get_flax_model(
             vllm_config.speculative_config.draft_model_config.hf_config)
     else:
         model_class = _get_model_architecture(
-            vllm_config.model_config.hf_config)
+            vllm_config.model_config.hf_config,
+            allow_native_sequence_classification=
+            allow_native_sequence_classification)
 
     # Instantiate pooler if needed for Hybrid Path
     is_pooling = vllm_config.model_config.runner_type == "pooling"
@@ -344,7 +363,10 @@ def get_flax_model(
         pooler_config = getattr(vllm_config.model_config, "pooler_config",
                                 None)
         if pooler_config is not None:
-            pooler = DispatchPooler.for_embedding(pooler_config)
+            if issubclass(model_class, NativeSequenceClassificationModel):
+                pooler = DispatchPooler.for_seq_cls(pooler_config)
+            else:
+                pooler = DispatchPooler.for_embedding(pooler_config)
 
     jit_model = _get_nnx_model(model_class,
                                vllm_config,
@@ -441,9 +463,11 @@ def get_flax_model(
         model = nnx.merge(graphdef, state)
         return model(*args)
 
+    logits_col_axis = (None if issubclass(
+        model_class, NativeSequenceClassificationModel) else
+                       ShardingAxisName.MLP_TENSOR)
     logits_sharding = NamedSharding(
-        mesh,
-        PartitionSpec(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR))
+        mesh, PartitionSpec(ShardingAxisName.MLP_DATA, logits_col_axis))
 
     @jax.jit(out_shardings=(logits_sharding))
     def run_compute_logits(state_leaves, *args):
@@ -553,7 +577,10 @@ def get_flax_model(
         get_mrope_input_positions_fn=get_mrope_input_positions_fn,
     )
 
-    if pooler is not None:
+    if isinstance(jit_model, NativeSequenceClassificationModel):
+        pooler_fn = NativeSequenceClassificationPooler(
+            jit_model, pooler, vllm_config.model_config.get_hidden_size())
+    elif pooler is not None:
         import torchax
         from torchax.interop import torch_view
         from vllm.v1.pool.metadata import PoolingMetadata
@@ -755,13 +782,19 @@ def resolve_model_architecture(vllm_config: VllmConfig,
         The model implementation type.
     """
 
+    allow_native_sequence_classification = (
+        not is_draft_model
+        and supports_native_sequence_classification(vllm_config))
     is_runai_streamer = getattr(getattr(vllm_config, 'load_config', None),
                                 'load_format', None) == 'runai_streamer'
     hf_config = vllm_config.speculative_config.draft_model_config.hf_config if is_draft_model else vllm_config.model_config.hf_config
     if is_runai_streamer:
         try:
             # Try to get the JAX model class
-            model_class = _get_model_architecture(hf_config)
+            model_class = _get_model_architecture(
+                hf_config,
+                allow_native_sequence_classification=
+                allow_native_sequence_classification)
 
             # If found, check for WeightLoader capability
             if not hasattr(model_class, "WeightLoader") or not issubclass(
@@ -782,6 +815,9 @@ def resolve_model_architecture(vllm_config: VllmConfig,
         f"Expected exactly one architecture, got {len(architectures)}: "
         f"{architectures}")
     arch = architectures[0]
+    if (arch == "Gemma4ForSequenceClassification"
+            and not allow_native_sequence_classification):
+        return "vllm"
     impl = "vllm" if arch in _VLLM_PREFERRED_ARCHITECTURES else "flax_nnx"
     return impl
 
