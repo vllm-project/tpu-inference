@@ -28,7 +28,10 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from tpu_inference.layers.common.process_weights.linear_weights import \
     get_model_matmul_fusion_assignment
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
-from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.sharding import (ShardingAxisName,
+                                                  is_shared_expert_prefix,
+                                                  keeps_tokens_sharded,
+                                                  sp_token_axes)
 from tpu_inference.utils import TPU_SECOND_LAST_MINOR, get_mesh_shape_product
 
 # yapf: enable
@@ -52,13 +55,27 @@ class VllmQuantLinearConfig(QuantLinearConfig):
 
         self.n_shards = get_mesh_shape_product(self.mesh,
                                                self.weight_sharding[1])
+        # Sequence-parallel residual stream for attention DP + GMM_EP
+        # (see keeps_tokens_sharded): activations outside
+        # attention stay token-sharded over EXPERT_DATA, and the shared
+        # expert is replicated so it runs on the local token slice with no
+        # collective.
+        self.keep_tokens_sharded = keeps_tokens_sharded(
+            mesh,
+            self.enable_sp,
+            use_ep=vllm_config.parallel_config.enable_expert_parallel)
+        replicate_shared_expert = (self.keep_tokens_sharded
+                                   and is_shared_expert_prefix(
+                                       getattr(layer, "prefix", "")))
 
         if isinstance(layer, RowParallelLinear):
-            self.weight_sharding = P(ShardingAxisName.ATTN_HEAD, None)
+            self.weight_sharding = (P(None, None) if replicate_shared_expert
+                                    else P(ShardingAxisName.ATTN_HEAD, None))
             if self.enable_sp:
                 self.output_sharding = P(ShardingAxisName.MLP_TENSOR, None)
         elif isinstance(layer, ColumnParallelLinear):
-            self.weight_sharding = P(None, ShardingAxisName.ATTN_HEAD)
+            self.weight_sharding = (P(None, None) if replicate_shared_expert
+                                    else P(None, ShardingAxisName.ATTN_HEAD))
 
             if self.enable_sp:
                 self.input_sharding = P(ShardingAxisName.MLP_TENSOR, None)
@@ -86,12 +103,29 @@ class VllmQuantLinearConfig(QuantLinearConfig):
         else:
             self.num_proj = 1
 
+        if self.keep_tokens_sharded:
+            # Token-sharded ends match the shard_map specs of
+            # sharded_matmul / sharded_quantized_matmul (_sp_layout): input for
+            # column-parallel / replicated weights, output for row-parallel /
+            # replicated weights.
+            in_axis, out_axis = self.weight_sharding
+            token_sharding = P(ShardingAxisName.EXPERT_DATA, None)
+            self.input_sharding = token_sharding if in_axis is None else None
+            self.output_sharding = (token_sharding
+                                    if out_axis is None else None)
+
         self.bias_sharding = P(self.weight_sharding[1])
         self.n_shards = get_mesh_shape_product(self.mesh,
                                                self.weight_sharding[1])
 
+    def get_sp_token_axes(self, x):
+        """EXPERT_DATA when the residual stream stays token-sharded."""
+        return sp_token_axes(self.mesh, self.keep_tokens_sharded, x.shape[0])
+
     def get_input_sharding(self, x: torchax.tensor.Tensor):
         if not self.enable_sp:
+            return None
+        if self.keep_tokens_sharded and self.get_sp_token_axes(x) is None:
             return None
         token_num = x.shape[0]
         # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
@@ -101,6 +135,8 @@ class VllmQuantLinearConfig(QuantLinearConfig):
 
     def get_output_sharding(self, x: torchax.tensor.Tensor):
         if self.enable_sp:
+            if self.keep_tokens_sharded and self.get_sp_token_axes(x) is None:
+                return None
             token_num = x.shape[0]
             # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
             if token_num // self.tp_size < TPU_SECOND_LAST_MINOR:

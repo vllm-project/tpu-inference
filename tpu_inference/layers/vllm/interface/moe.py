@@ -31,7 +31,9 @@ from tpu_inference import envs
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.moe_weights import \
     FusedMoEWeights
-from tpu_inference.layers.common.sharding import is_attn_dp
+from tpu_inference.layers.common.sharding import (is_attn_dp,
+                                                  keeps_tokens_sharded,
+                                                  sp_token_axes)
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
@@ -151,6 +153,17 @@ def vllm_moe_apply(layer: RoutedExperts,
 
     extra_kwargs = dict(quant_method_instance.extra_backend_kwargs)
     extra_kwargs["scatter_results"] = is_dp
+    # Sequence-parallel residual stream: the linears around the MoE consume
+    # and produce tokens sharded over EXPERT_DATA, so the GMM_EP MoE output
+    # is not resharded back to ATTN_DATA.
+    enable_sp = bool(vllm_config
+                     and vllm_config.additional_config.get("enable_sp", False))
+    keep = keeps_tokens_sharded(
+        mesh,
+        enable_sp,
+        use_ep=quant_method_instance.moe_backend == MoEBackend.GMM_EP)
+    extra_kwargs["keep_token_sharding"] = (sp_token_axes(
+        mesh, keep, x.shape[0]) is not None)
 
     # Defer the tensor-parallel all-reduce inside the GMM kernel exactly when the
     # runner does NOT expect the fused output to be reduced -- the deferred path
