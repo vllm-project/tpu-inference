@@ -289,7 +289,6 @@ class BatchedRpaKernelTuner(KernelTunerBase):
             [8, 16, 32, 64, 128] if tuning_key.case == 'prefill' else [1],
             'bkv_sz':
             bkv_sz_list,
-            'n_buffer': [2, 3],
         }
 
     def generate_inputs(self, tuning_key: TuningKey):
