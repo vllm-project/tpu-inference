@@ -26,6 +26,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import torch
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -38,6 +39,7 @@ from tpu_inference.layers.common import sharding as common_sharding
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   ShardingAxisName,
                                                   ShardingAxisNameBase)
+from tpu_inference.layers.vllm.custom_ops import fused_moe as vllm_fused_moe
 from tpu_inference.layers.vllm.quantization.configs import \
     VllmQuantLinearConfig
 
@@ -207,6 +209,88 @@ def test_linear_config_deferred_all_reduce_not_token_sharded():
                          keep_tokens_sharded=True,
                          defer_all_reduce=True)
     assert rep.get_output_sharding(x) == P(ShardingAxisName.EXPERT_DATA, None)
+
+
+def _shared_expert_block(prefix, enable_sp):
+    """A shared-expert MLP (gate_up_proj + down_proj) whose linear configs are
+    built by the real VllmQuantLinearConfig.__init__ from the layer prefix, on
+    an attn_dp=2 x model=4 mesh with GMM_EP. The vLLM layers' own __init__
+    (weights, TP groups) is skipped."""
+    mesh = _shape_only_mesh(attn_dp=2, model=4)
+    vllm_config = SimpleNamespace(
+        additional_config={"enable_sp": enable_sp},
+        parallel_config=SimpleNamespace(enable_expert_parallel=True,
+                                        tensor_parallel_size=8),
+        model_config=SimpleNamespace(model="test-model"),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8192))
+
+    def linear(layer_cls, name):
+        layer = layer_cls.__new__(layer_cls)
+        torch.nn.Module.__init__(layer)
+        layer.prefix = f"model.layers.0{prefix}{name}"
+        layer.output_size = 128
+        layer.quant_method = SimpleNamespace(
+            linear_config=VllmQuantLinearConfig(vllm_config, mesh, layer))
+        return layer
+
+    block = torch.nn.Module()
+    block.gate_up_proj = linear(ColumnParallelLinear, "gate_up_proj")
+    block.down_proj = linear(RowParallelLinear, "down_proj")
+    # reduce_results=False, as set by VllmRowParallelLinear after __init__.
+    block.down_proj.quant_method.linear_config.defer_all_reduce = True
+    return mesh, block
+
+
+@pytest.mark.parametrize(
+    "prefix, enable_sp, replicated",
+    [
+        (".mlp.shared_expert.", True, True),  # Qwen naming
+        (".mlp.shared_experts.", True, True),  # DeepSeek V2/V3 naming
+        # Unmatched name: stays TP-sharded with deferred partial sums.
+        (".mlp.shared_mlp.", True, False),
+        # Token-sharded residual stream off: nothing is replicated.
+        (".mlp.shared_expert.", False, False),
+    ])
+def test_shared_expert_reduce_follows_linear_configs(monkeypatch, prefix,
+                                                     enable_sp, replicated):
+    """The MoE runner skips the shared-expert all-reduce exactly when the
+    linear configs replicated the shared expert, so it is never reduced twice
+    (replicated: already complete) or zero times (TP-sharded: partial sums)."""
+    mesh, block = _shared_expert_block(prefix, enable_sp)
+    gate_up = block.gate_up_proj.quant_method.linear_config
+    down = block.down_proj.quant_method.linear_config
+    row_ws, col_ws, rep_ws = _weight_specs()
+    assert gate_up.weight_sharding == (rep_ws if replicated else col_ws)
+    assert down.weight_sharding == (rep_ws if replicated else row_ws)
+
+    # A TP-sharded down_proj's deferred partial sums are never token-sharded
+    # over EXPERT_DATA; a replicated one's complete output is.
+    if enable_sp:
+        expected = P(ShardingAxisName.EXPERT_DATA,
+                     None) if replicated else None
+        assert down.get_output_sharding(_tokens(64)) == expected
+
+    reduced = object()
+    all_reduce = mock.Mock(return_value=reduced)
+    monkeypatch.setattr(vllm_fused_moe, "_get_mesh", lambda: mesh)
+    monkeypatch.setattr(vllm_fused_moe, "_all_reduce_over_tp", all_reduce)
+    runner = vllm_fused_moe.VllmMoERunner.__new__(vllm_fused_moe.VllmMoERunner)
+    # vLLM wraps the shared-expert module (SharedExperts); modules() still
+    # reaches its linears.
+    object.__setattr__(runner, "_shared_experts", block)
+    object.__setattr__(runner, "moe_config",
+                       SimpleNamespace(is_sequence_parallel=False))
+
+    shared_output = object()
+    out = runner._maybe_reduce_shared_expert_output(
+        shared_output, fused_output_is_reduced=True)
+    if replicated:
+        assert out is shared_output
+        all_reduce.assert_not_called()
+    else:
+        assert out is reduced
+        all_reduce.assert_called_once_with(shared_output, mesh,
+                                           ShardingAxisName.ATTN_HEAD)
 
 
 @requires_8_devices
