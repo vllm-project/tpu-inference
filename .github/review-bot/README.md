@@ -8,13 +8,16 @@ folder.
 The bot reads these files from `main`, so an edit takes effect once its PR
 merges. A PR that edits them is still reviewed with the settings on `main`.
 
+Each review ends with links to the instructions it followed (`REVIEW.md` and
+the code-rule files), at the commit it read them from.
+
 ## Files
 
 | File | What it does |
 | --- | --- |
 | `config.yaml` | Settings, listed below. A missing file or setting means the default. |
 | `REVIEW.md` | The review guide: what the bot checks and how it comments. See [REVIEW.md](#reviewmd). |
-| `AGENTS.md` | Code rules for people and coding agents. This repo has none yet. Once one exists, the bot checks changes against it. |
+| `AGENTS.md` | Code rules for people and coding agents, and the bot's code rules by default (see `code_review_instructions`). This repo has none yet. |
 
 Instructions that are only for reviews go in `REVIEW.md`. If the repo adds an
 `AGENTS.md`, it wins over `REVIEW.md` where the two disagree about a code rule.
@@ -30,9 +33,10 @@ The values in `config.yaml` today are the defaults.
 | `max_inline_comments` | Whole number, 0 to 30 | `15` | Most inline comments in one review, counting problems, nits and questions. Problems come first. Problems past the limit go to the summary under "More problems". `0` puts everything in the summary. |
 | `inline_labels` | `"blocking, should-fix"` or `blocking` | `"blocking, should-fix"` | Which problems get inline comments. A problem is labeled `blocking` (fix before merging) or `should-fix`. With only `blocking`, should-fix problems go to the summary under "More problems". |
 | `ignore_paths` | Glob patterns in double quotes, separated by commas, or empty | empty | Files the bot does not review. It leaves them out of the diff it reviews and drops nits and questions about them. A PR that changes only ignored files gets no automatic review. |
-| `cooldown_minutes` | Whole number, 15 to 1440 | `60` | Shortest time between two reviews of one PR. A request that comes sooner waits until the time is up. |
+| `cooldown_minutes` | Whole number, 15 to 1440 | `60` | Shortest time between two reviews of one PR. A request that comes sooner waits until the time is up, and the bot replies with how long. |
 | `automatic_reviews` | `on`, `off` | `on` | `on`: the bot reviews a PR once without being asked, when the PR is ready (see below). `off`: it reviews only when someone asks. |
 | `title_keywords_to_skip` | Words in double quotes, separated by commas, or empty | empty | More words that stop an automatic review when they appear anywhere in a PR title, ignoring case. They add to the built-in markers below. Asking for a review still works. |
+| `code_review_instructions` | File paths in double quotes, separated by commas, or empty | `AGENTS.md` | The files the bot treats as this repo's code rules and checks every change against. `AGENTS.md` means every AGENTS.md, at the root and in folders. Other paths replace it. Empty means no code rules, and the bot is told not to apply AGENTS.md, for a repo whose AGENTS.md holds instructions for other tools. Files these link to count too. |
 
 ### Format
 
