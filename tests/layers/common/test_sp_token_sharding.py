@@ -19,6 +19,7 @@ XLA_FLAGS=--xla_force_host_platform_device_count=8, or a TPU v7x-8). The guard
 tests use a stand-in mesh and run anywhere.
 """
 
+import itertools
 from types import SimpleNamespace
 from unittest import mock
 
@@ -35,11 +36,14 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 
 from tpu_inference.layers.common import fused_moe_gmm
 from tpu_inference.layers.common import linear as common_linear
+from tpu_inference.layers.common import quant_methods
 from tpu_inference.layers.common import sharding as common_sharding
+from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   ShardingAxisName,
                                                   ShardingAxisNameBase)
 from tpu_inference.layers.vllm.custom_ops import fused_moe as vllm_fused_moe
+from tpu_inference.layers.vllm.interface import moe as vllm_moe_interface
 from tpu_inference.layers.vllm.quantization.configs import \
     VllmQuantLinearConfig
 
@@ -70,29 +74,20 @@ def _shape_only_mesh(**sizes):
                            axis_names=MESH_AXIS_NAMES)
 
 
-def test_keeps_tokens_sharded_guards(monkeypatch):
+def test_keeps_tokens_sharded_guards():
 
-    def keeps(mesh, enable_sp=True, use_ep=True):
+    def keeps(mesh, enable_sp=True, gmm_ep=True):
         return common_sharding.keeps_tokens_sharded(mesh,
                                                     enable_sp,
-                                                    use_ep=use_ep)
+                                                    gmm_ep=gmm_ep)
 
     mesh = _shape_only_mesh(attn_dp=2, model=4)
-    # Enabled under attention DP + attention TP > 1 with GMM_EP (default).
+    # Enabled under attention DP + attention TP > 1 with GMM_EP.
     assert keeps(mesh)
     assert not keeps(mesh, enable_sp=False)
     assert not keeps(None)
-    # Expert parallelism off: the MoE runs GMM_TP, which ignores
-    # keep_token_sharding.
-    assert not keeps(mesh, use_ep=False)
-    # Disabled when another EP MoE backend is selected; they ignore
-    # keep_token_sharding.
-    for flag in ("USE_MOE_EP_KERNEL", "USE_FUSED_EP_MOE_V2",
-                 "USE_ROUTING_MOE"):
-        monkeypatch.setenv(flag, "1")
-        assert not keeps(mesh), flag
-        monkeypatch.delenv(flag, raising=False)
-    assert keeps(mesh)
+    # Any other MoE backend ignores keep_token_sharding.
+    assert not keeps(mesh, gmm_ep=False)
     # Only under attention DP with attention TP > 1.
     assert not keeps(_shape_only_mesh(model=8))
     assert not keeps(_shape_only_mesh(attn_dp=8))
@@ -101,6 +96,67 @@ def test_keeps_tokens_sharded_guards(monkeypatch):
     assert not keeps(_shape_only_mesh(attn_dp=2, model=2, expert=2))
     assert not keeps(_shape_only_mesh(attn_dp=2, model=2, pcp=2))
     assert keeps(_shape_only_mesh(attn_dp=2, model=2, dcp=2))
+
+
+_MOE_BACKEND_FLAGS = ("USE_MOE_EP_KERNEL", "USE_FUSED_EP_MOE_V2",
+                      "USE_ROUTING_MOE")
+
+
+@pytest.mark.parametrize("use_ep", [False, True])
+@pytest.mark.parametrize("flags", [
+    flags for r in range(len(_MOE_BACKEND_FLAGS) + 1)
+    for flags in itertools.combinations(_MOE_BACKEND_FLAGS, r)
+])
+def test_select_moe_backend_matches_fused_moe_config(monkeypatch, use_ep,
+                                                     flags):
+    """The env-only selection used by the SP gate and the backend the MoE
+    layers actually use are the same for every flag combination."""
+    for flag in flags:
+        monkeypatch.setenv(flag, "1")
+    expected = vllm_moe_interface.select_moe_backend_from_fused_moe_config(
+        SimpleNamespace(use_ep=use_ep))
+    assert vllm_moe_interface.select_moe_backend(use_ep) == expected
+    assert (expected == MoEBackend.GMM_EP) == (use_ep and not flags)
+
+
+def _vllm_config(*,
+                 quantization=quant_methods.FP8,
+                 enable_sp=True,
+                 enable_expert_parallel=True):
+    return SimpleNamespace(
+        additional_config={"enable_sp": enable_sp},
+        parallel_config=SimpleNamespace(
+            enable_expert_parallel=enable_expert_parallel,
+            tensor_parallel_size=8),
+        model_config=SimpleNamespace(model="test-model",
+                                     quantization=quantization),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8192))
+
+
+def test_vllm_keeps_tokens_sharded(monkeypatch):
+    """The one gate the linear configs and the MoE share: enable_sp, GMM_EP,
+    and a quantization method validated with the token-sharded stream (FP8
+    only)."""
+    keeps = vllm_moe_interface.vllm_keeps_tokens_sharded
+    mesh = _shape_only_mesh(attn_dp=2, model=4)
+    assert keeps(_vllm_config(quantization=quant_methods.FP8), mesh)
+    # Not validated with the token-sharded stream (some don't thread
+    # sp_token_axes through their linears): plain enable_sp behavior.
+    for quantization in (quant_methods.UNQUANTIZED,
+                         quant_methods.COMPRESSED_TENSORS, quant_methods.AWQ,
+                         quant_methods.NVFP4, quant_methods.MXFP4,
+                         quant_methods.DSV4_FP8):
+        assert not keeps(_vllm_config(quantization=quantization), mesh)
+    assert not keeps(_vllm_config(enable_sp=False), mesh)
+    assert not keeps(None, mesh)
+    # Expert parallelism off: GMM_TP.
+    assert not keeps(_vllm_config(enable_expert_parallel=False), mesh)
+    # Another EP backend selected.
+    for flag in _MOE_BACKEND_FLAGS:
+        monkeypatch.setenv(flag, "1")
+        assert not keeps(_vllm_config(), mesh), flag
+        monkeypatch.delenv(flag)
+    assert keeps(_vllm_config(), mesh)
 
 
 def _linear_config(layer_cls,
@@ -211,18 +267,13 @@ def test_linear_config_deferred_all_reduce_not_token_sharded():
     assert rep.get_output_sharding(x) == P(ShardingAxisName.EXPERT_DATA, None)
 
 
-def _shared_expert_block(prefix, enable_sp):
+def _shared_expert_block(prefix, enable_sp, quantization):
     """A shared-expert MLP (gate_up_proj + down_proj) whose linear configs are
     built by the real VllmQuantLinearConfig.__init__ from the layer prefix, on
     an attn_dp=2 x model=4 mesh with GMM_EP. The vLLM layers' own __init__
     (weights, TP groups) is skipped."""
     mesh = _shape_only_mesh(attn_dp=2, model=4)
-    vllm_config = SimpleNamespace(
-        additional_config={"enable_sp": enable_sp},
-        parallel_config=SimpleNamespace(enable_expert_parallel=True,
-                                        tensor_parallel_size=8),
-        model_config=SimpleNamespace(model="test-model"),
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=8192))
+    vllm_config = _vllm_config(quantization=quantization, enable_sp=enable_sp)
 
     def linear(layer_cls, name):
         layer = layer_cls.__new__(layer_cls)
@@ -242,21 +293,26 @@ def _shared_expert_block(prefix, enable_sp):
 
 
 @pytest.mark.parametrize(
-    "prefix, enable_sp, replicated",
+    "prefix, enable_sp, quantization, replicated",
     [
-        (".mlp.shared_expert.", True, True),  # Qwen naming
-        (".mlp.shared_experts.", True, True),  # DeepSeek V2/V3 naming
+        (".mlp.shared_expert.", True, quant_methods.FP8, True),  # Qwen naming
+        # DeepSeek V2/V3 naming.
+        (".mlp.shared_experts.", True, quant_methods.FP8, True),
         # Unmatched name: stays TP-sharded with deferred partial sums.
-        (".mlp.shared_mlp.", True, False),
+        (".mlp.shared_mlp.", True, quant_methods.FP8, False),
         # Token-sharded residual stream off: nothing is replicated.
-        (".mlp.shared_expert.", False, False),
+        (".mlp.shared_expert.", False, quant_methods.FP8, False),
+        # Quantization not validated for it: plain enable_sp, not replicated.
+        (".mlp.shared_expert.", True, quant_methods.COMPRESSED_TENSORS, False),
+        (".mlp.shared_expert.", True, quant_methods.UNQUANTIZED, False),
     ])
 def test_shared_expert_reduce_follows_linear_configs(monkeypatch, prefix,
-                                                     enable_sp, replicated):
+                                                     enable_sp, quantization,
+                                                     replicated):
     """The MoE runner skips the shared-expert all-reduce exactly when the
     linear configs replicated the shared expert, so it is never reduced twice
     (replicated: already complete) or zero times (TP-sharded: partial sums)."""
-    mesh, block = _shared_expert_block(prefix, enable_sp)
+    mesh, block = _shared_expert_block(prefix, enable_sp, quantization)
     gate_up = block.gate_up_proj.quant_method.linear_config
     down = block.down_proj.quant_method.linear_config
     row_ws, col_ws, rep_ws = _weight_specs()
@@ -265,7 +321,7 @@ def test_shared_expert_reduce_follows_linear_configs(monkeypatch, prefix,
 
     # A TP-sharded down_proj's deferred partial sums are never token-sharded
     # over EXPERT_DATA; a replicated one's complete output is.
-    if enable_sp:
+    if down.keep_tokens_sharded:
         expected = P(ShardingAxisName.EXPERT_DATA,
                      None) if replicated else None
         assert down.get_output_sharding(_tokens(64)) == expected
@@ -515,7 +571,7 @@ def test_sp_token_sharding_small_batch_fallback(monkeypatch, tc_permute):
     w2_s = jax.device_put(w2, ep_spec)
 
     assert common_sharding.sp_token_axes(
-        mesh, common_sharding.keeps_tokens_sharded(mesh, True, use_ep=True),
+        mesh, common_sharding.keeps_tokens_sharded(mesh, True, gmm_ep=True),
         num_tokens) is None
 
     def _run(keep_sharded):

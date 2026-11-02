@@ -30,8 +30,8 @@ from tpu_inference.layers.common.process_weights.linear_weights import \
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.common.sharding import (ShardingAxisName,
                                                   is_shared_expert_prefix,
-                                                  keeps_tokens_sharded,
                                                   sp_token_axes)
+from tpu_inference.layers.vllm.interface.moe import vllm_keeps_tokens_sharded
 from tpu_inference.utils import TPU_SECOND_LAST_MINOR, get_mesh_shape_product
 
 # yapf: enable
@@ -58,10 +58,7 @@ class VllmQuantLinearConfig(QuantLinearConfig):
         # attention stay token-sharded over EXPERT_DATA, and the shared
         # expert is replicated so it runs on the local token slice with no
         # collective.
-        self.keep_tokens_sharded = keeps_tokens_sharded(
-            mesh,
-            self.enable_sp,
-            use_ep=vllm_config.parallel_config.enable_expert_parallel)
+        self.keep_tokens_sharded = vllm_keeps_tokens_sharded(vllm_config, mesh)
         replicate_shared_expert = (self.keep_tokens_sharded
                                    and is_shared_expert_prefix(
                                        getattr(layer, "prefix", "")))

@@ -152,17 +152,6 @@ def is_attn_dp(mesh: Mesh) -> bool:
     return (attn_dp_size // dp_size) > 1
 
 
-def _non_gmm_ep_moe_backend_requested() -> bool:
-    """Whether an env flag selects an EP MoE backend other than GMM_EP.
-
-    Mirrors the priority in `select_moe_backend_from_fused_moe_config`: these
-    backends replace `expert_parallel_gmm` and don't honor
-    `keep_token_sharding`.
-    """
-    return bool(envs.USE_MOE_EP_KERNEL or envs.USE_FUSED_EP_MOE_V2
-                or envs.USE_ROUTING_MOE)
-
-
 def is_shared_expert_prefix(prefix: str) -> bool:
     """Whether a linear layer's prefix names a MoE shared expert.
 
@@ -193,7 +182,7 @@ def shared_expert_is_replicated(shared_experts) -> bool:
 
 
 def keeps_tokens_sharded(mesh: Mesh | None, enable_sp: bool, *,
-                         use_ep: bool) -> bool:
+                         gmm_ep: bool) -> bool:
     """Whether the residual stream stays token-sharded over EXPERT_DATA.
 
     Sequence parallelism (`enable_sp`) under attention DP with GMM_EP
@@ -207,18 +196,17 @@ def keeps_tokens_sharded(mesh: Mesh | None, enable_sp: bool, *,
     Only under attention DP with attention TP > 1 and GMM_EP; otherwise
     `enable_sp` keeps its MLP_TENSOR input / output sharding:
 
-    - `use_ep`: expert parallelism must be on. Without it the MoE runs GMM_TP,
-      which ignores `keep_token_sharding`.
-    - The other EP MoE backends (`USE_MOE_EP_KERNEL`, `USE_FUSED_EP_MOE_V2`,
-      `USE_ROUTING_MOE`) take priority over GMM_EP in backend selection and
-      ignore `keep_token_sharding`, so any of them disables this mode.
+    - `gmm_ep`: the MoE backend must be GMM_EP. GMM_TP (expert parallelism
+      off) and the other EP backends (USE_MOE_EP_KERNEL, USE_FUSED_EP_MOE_V2,
+      USE_ROUTING_MOE) ignore `keep_token_sharding`. vLLM callers decide this
+      with `select_moe_backend` via `vllm_keeps_tokens_sharded`.
     - The `expert` and `pcp` mesh axes must be size 1. The linears gather and
       reduce-scatter tokens over ATTN_HEAD (`model`, `expert`, `dcp`) inside
       each ATTN_DATA block, but EXPERT_DATA orders `expert` before `model` and
       puts `pcp` last, so with either axis > 1 the token rows would not line
       up with EXPERT_DATA.
     """
-    if not enable_sp or not use_ep or _non_gmm_ep_moe_backend_requested():
+    if not enable_sp or not gmm_ep:
         return False
     if mesh is None or not is_attn_dp(mesh):
         return False
