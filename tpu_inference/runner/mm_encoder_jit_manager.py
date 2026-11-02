@@ -51,7 +51,8 @@ this avoids).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable
+import itertools
+from typing import TYPE_CHECKING, Any, Callable, Hashable
 
 import jax
 import jax.numpy as jnp
@@ -61,8 +62,12 @@ from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.ir import enable_torch_wrap
 from vllm.model_executor.models.interfaces import supports_encoder_cudagraph
-from vllm.v1.worker.encoder_cudagraph import (CaptureAxisKeys,
-                                              EncoderCudaGraphManager)
+from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
+
+try:
+    from vllm.v1.worker.encoder_cudagraph import CaptureAxisKeys
+except ImportError:
+    CaptureAxisKeys = tuple[Hashable, ...]
 
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import to_torch_dtype
@@ -312,30 +317,79 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
             model=adapter,
         )
 
-        # Capture templates per budget — shape signature reference for
-        # host-side padding. The values inside templates are dummy; only
-        # tensor.shape / tensor.dtype matter (to us and to XLA's cache key).
+        # Capture templates per (budget, axis_keys) — shape signature
+        # reference for host-side padding. The values inside templates are
+        # dummy; only tensor.shape / tensor.dtype matter (to us and to XLA's
+        # cache key).
         capture_device = torch.device("cpu")
         capture_dtype = torch_dtype
-        self.budget_templates: dict[int, dict[str, torch.Tensor]] = {}
+        self.budget_templates: dict[tuple[int, CaptureAxisKeys],
+                                    dict[str, torch.Tensor]] = {}
         for budget in self.token_budgets:
-            capture = self.model.prepare_encoder_cudagraph_capture_inputs(
-                budget, self.max_batch_size, self.max_frames_per_batch,
-                capture_device, capture_dtype)
-            self.budget_templates[budget] = capture.values
+            for axis_keys in itertools.product(*self._capture_axes):
+                capture = self._call_prepare_capture_inputs(
+                    budget=budget,
+                    max_batch_size=self.max_batch_size,
+                    max_frames_per_batch=self.max_frames_per_batch,
+                    device=capture_device,
+                    dtype=capture_dtype,
+                    path="default",
+                    axis_keys=axis_keys,
+                )
+                self.budget_templates[(budget, axis_keys)] = capture.values
 
         logger.info(
-            "[mm_encoder_jit] budgets=%s max_batch_size=%d "
-            "max_frames_per_batch=%d template_keys=%s", self.token_budgets,
-            self.max_batch_size, self.max_frames_per_batch,
-            list(next(iter(self.budget_templates.values())).keys()))
+            "[mm_encoder_jit] budgets=%s capture_axes=%s max_batch_size=%d "
+            "max_frames_per_batch=%d template_count=%d", self.token_budgets,
+            self._capture_axes, self.max_batch_size, self.max_frames_per_batch,
+            len(self.budget_templates))
+
+    def _call_prepare_capture_inputs(self, budget: int, max_batch_size: int,
+                                     max_frames_per_batch: int,
+                                     device: torch.device, dtype: torch.dtype,
+                                     path: str, axis_keys: CaptureAxisKeys):
+        """Invoke prepare_encoder_cudagraph_capture_inputs on the model adapter,
+        tolerating older models whose signature accepts fewer arguments."""
+        fn = self.model.prepare_encoder_cudagraph_capture_inputs
+        try:
+            return fn(
+                budget,
+                max_batch_size,
+                max_frames_per_batch,
+                device,
+                dtype,
+                path,
+                axis_keys,
+            )
+        except TypeError:
+            try:
+                return fn(budget, max_batch_size, max_frames_per_batch, device,
+                          dtype, path)
+            except TypeError:
+                return fn(budget, max_batch_size, max_frames_per_batch, device,
+                          dtype)
+
+    def _get_template_for_budget(
+        self, token_budget: int, axis_keys: CaptureAxisKeys = ()
+    ) -> dict[str, torch.Tensor] | None:
+        key = (token_budget, tuple(axis_keys))
+        if key in self.budget_templates:
+            return self.budget_templates[key]
+        if token_budget in self.budget_templates:
+            return self.budget_templates[token_budget]
+        # If no exact axis_keys match, fall back to any template matching the budget
+        for (b, _), tmpl in self.budget_templates.items():
+            if b == token_budget:
+                return tmpl
+        return None
 
     # ----- Padding (per-key) -----
 
     def _pad_to_template(
-        self,
-        replay_values: dict[str, torch.Tensor],
-        budget: int,
+            self,
+            replay_values: dict[str, torch.Tensor],
+            budget: int,
+            axis_keys: CaptureAxisKeys = (),
     ) -> dict[str, torch.Tensor]:
         """Copy each replay tensor into a template-shaped buffer.
 
@@ -355,7 +409,11 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         garbage segment ids; the registered logic repeats the last cumulative
         offset instead, which represents empty trailing sequences.
         """
-        template = self.budget_templates[budget]
+        template = self._get_template_for_budget(budget, axis_keys)
+        if template is None:
+            raise KeyError(
+                f"[mm_encoder_jit] No template found for budget={budget} axis_keys={axis_keys}"
+            )
         padded: dict[str, torch.Tensor] = {}
         for key, tmpl in template.items():
             src = replay_values.get(key)
@@ -400,9 +458,10 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         return padded
 
     def _prepare_padded_torch(
-        self,
-        mm_kwargs: dict[str, Any],
-        token_budget: int,
+            self,
+            mm_kwargs: dict[str, Any],
+            token_budget: int,
+            axis_keys: CaptureAxisKeys = (),
     ) -> dict[str, torch.Tensor]:
         """Build the full padded (plain-torch) buffer dict for one batch.
 
@@ -420,7 +479,7 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         """
         replay = self.model.prepare_encoder_cudagraph_replay_buffers(
             mm_kwargs, self.max_batch_size, self.max_frames_per_batch)
-        return self._pad_to_template(replay.values, token_budget)
+        return self._pad_to_template(replay.values, token_budget, axis_keys)
 
     # ----- Overrides of the CUDA-graph device hooks -----
 
@@ -432,22 +491,22 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
     ) -> None:
         """XLA-cache analog of ``torch.cuda.graph`` capture.
 
-        Primes the ``jax.jit`` cache for ``token_budget`` by calling the
-        forward closure once on the budget's dummy template, so the first
-        runtime call is a cache hit instead of paying compile time. Invoked
-        by the inherited ``capture()`` loop (optional — the cache also fills
-        lazily on first ``execute``).
-
-        ``path`` and ``axis_keys`` mirror the base-class signature; the TPU
-        manager configures a single encoder path and no ``capture_axes``, so
-        both are always their defaults and the cache is keyed by
-        ``token_budget`` alone.
+        Primes the ``jax.jit`` cache for ``(token_budget, axis_keys)`` by
+        calling the forward closure once on the budget's dummy template, so
+        the first runtime call is a cache hit instead of paying compile time.
+        Invoked by the inherited ``capture()`` loop (optional — the cache also
+        fills lazily on first ``execute``).
         """
-        template = self.budget_templates[token_budget]
+        template = self._get_template_for_budget(token_budget, axis_keys)
+        if template is None:
+            return
         out = self.model.run_budget_forward(template)
         jax.block_until_ready(out)
         # Mark captured so inherited capture()/get_cumulative_stats count it.
+        # Support both int and tuple keys to remain compatible with tests and parent.
         self.budget_graphs[token_budget] = template
+        if axis_keys:
+            self.budget_graphs[(token_budget, tuple(axis_keys))] = template
 
     def _run_budget_graph(
             self,
@@ -463,22 +522,18 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         ``run_budget_forward``. Returns a **jax.Array** that the inherited
         ``_execute_local`` slices via the adapter's jax-friendly
         ``postprocess_encoder_output`` — no outer torchax env required.
-
-        ``path`` and ``axis_keys`` mirror the base-class signature (the
-        unified ``_execute_local`` always forwards both); the TPU manager
-        only configures the single default encoder path and no
-        ``capture_axes``, so budget templates are keyed by ``token_budget``
-        alone.
         """
         num_items = len(self._get_item_specs(mm_kwargs))
-        if token_budget not in self.budget_templates:
+        template = self._get_template_for_budget(token_budget, axis_keys)
+        if template is None:
             # No template for this budget (rarely happen — budget comes
             # from _find_smallest_fitting_budget over self.token_budgets).
             self.graph_misses += num_items
             return None
 
         # Prep in plain torch (touches model Parameters) — OUTSIDE the env.
-        padded_torch = self._prepare_padded_torch(mm_kwargs, token_budget)
+        padded_torch = self._prepare_padded_torch(mm_kwargs, token_budget,
+                                                  axis_keys)
         out_jax = self.model.run_budget_forward(padded_torch)
         self.graph_hits += num_items
         return out_jax
@@ -499,12 +554,14 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         return self._execute_local(mm_kwargs)
 
     def precompile_vision_encoder(self, run_compilation: Callable) -> None:
-        for budget in self.token_budgets:
+        for (budget, axis_keys) in self.budget_templates.keys():
             run_compilation(
                 "mm_encoder_jit",
                 self._capture_budget_graph,
                 budget,
+                axis_keys=axis_keys,
                 budget=budget,
+                axis_keys_tag=axis_keys,
             )
 
 
@@ -517,13 +574,6 @@ def maybe_create_mm_encoder_jit_manager(
     if not vllm_config.compilation_config.cudagraph_mm_encoder:
         return None
     if not supports_encoder_cudagraph(vllm_model):
-        return None
-    if vllm_model.get_encoder_cudagraph_config().capture_axes:
-        # Budget templates are keyed by token budget alone, so per-axis
-        # shapes would replay the wrong template.
-        logger.warning(
-            "MM encoder JIT does not support encoder capture axes yet; "
-            "running the vision encoder eagerly.")
         return None
     return MMEncoderJITManager(
         vllm_config=vllm_config,
