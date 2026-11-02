@@ -25,7 +25,8 @@ from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import \
 
 from tpu_inference.layers.common.attention_backend import (
     attention_backend_name, create_linear_attention_backend)
-from tpu_inference.layers.common.gdn_attention import run_jax_gdn_attention
+from tpu_inference.layers.common.gdn_attention import (resolve_gdn_state_slots,
+                                                       run_jax_gdn_attention)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import (
     reorder_concatenated_tensor_for_sharding, truncate_sharded_tensor)
@@ -71,7 +72,6 @@ def gdn_attention_core_tpu(
     request_distribution = attn_metadata.request_distribution
     query_start_loc = attn_metadata.query_start_loc
     seq_lens = attn_metadata.seq_lens
-    block_tables = attn_metadata.block_tables
 
     layer_module = fc.no_compile_layers[layer_name]
     vllm_context = get_vllm_model_wrapper_context()
@@ -121,56 +121,17 @@ def gdn_attention_core_tpu(
                                               dp_size)
 
     cache_config = vllm_context.vllm_config.cache_config
-    if cache_config.mamba_cache_mode == "align":
-        # Mamba prefix caching ("align" mode): derive read/write state slots
-        # from the mamba block table directly on TPU.
-        block_tables = block_tables.reshape(seq_lens.shape[0], -1)
-        max_num_reqs_per_dp = seq_lens.shape[0] // dp_size
-        block_tables_reshaped = block_tables.reshape(dp_size,
-                                                     max_num_reqs_per_dp, -1)
-        block_tables_sliced = block_tables_reshaped[:, :
-                                                    padded_num_reqs_per_dp, :].reshape(
-                                                        -1,
-                                                        block_tables.shape[-1])
-        mamba_block_size = cache_config.mamba_block_size
-        query_start_loc_reshaped = query_start_loc_sliced.reshape(
-            dp_size, padded_num_reqs_per_dp + 1)
-        query_lens = (query_start_loc_reshaped[:, 1:] -
-                      query_start_loc_reshaped[:, :-1]).reshape(-1)
-        num_computed = seq_lens_sliced - query_lens
-
-        read_col = jnp.maximum(num_computed - 1, 0) // mamba_block_size
-        write_col = jnp.maximum(seq_lens_sliced - 1, 0) // mamba_block_size
-
-        batch_idx = jnp.arange(seq_lens_sliced.shape[0])
-        # Slot ids are rank-local: each per-rank scheduler hands out ids in
-        # [0, mamba_num_blocks // dp_size), the shard size of the mamba arrays.
-        # The kernel DMAs these ids with bounds checks disabled, so clamp them
-        # here to keep an out-of-range id from halting the core.
-        local_rows = max(conv_state.shape[0] // dp_size, 1)
-        read_state_indices_sliced = jnp.clip(
-            block_tables_sliced[batch_idx, read_col], 0, local_rows - 1)
-        state_indices_sliced = jnp.clip(
-            block_tables_sliced[batch_idx, write_col], 0, local_rows - 1)
-    else:
-        # Index mamba state by the per-request slot id from
-        # `InputBatch.mamba_state_indices_cpu`, not by `block_tables[:, 0]`
-        # (vLLM's GPU convention). Two reasons:
-        #
-        #  1. `_maybe_set_compact_mamba_num_blocks_override` caps the mamba
-        #     pool at `max_num_seqs + 1` while the attention pool is much
-        #     larger; using `block_tables[:, 0]` (a value in the attention
-        #     range) would walk off the end of the mamba arrays.
-        #  2. When vLLM's input batch runs `condense` to compact the persistent
-        #     batch (https://github.com/vllm-project/vllm/blob/de3da0b/vllm/v1/worker/gpu_input_batch.py#L662 — moves
-        #     requests into lower-index slots after earlier ones finish), the
-        #     slot id moves with the request so the kernel still reads/writes
-        #     the slot that holds this request's real state.
-        state_indices = attn_metadata.mamba_state_indices.astype(jnp.int32)
-        state_indices_sliced = truncate_sharded_tensor(state_indices,
-                                                       padded_num_reqs_per_dp,
-                                                       dp_size)
-        read_state_indices_sliced = state_indices_sliced
+    mamba_block_size = (cache_config.mamba_block_size
+                        if cache_config.mamba_cache_mode == "align" else 0)
+    slots = resolve_gdn_state_slots(
+        attn_metadata,
+        seq_lens=seq_lens_sliced,
+        query_start_loc=query_start_loc_sliced,
+        padded_num_reqs_per_dp=padded_num_reqs_per_dp,
+        dp_size=dp_size,
+        num_local_rows=max(conv_state.shape[0] // dp_size, 1),
+        mamba_block_size=mamba_block_size,
+    )
 
     linear_attention_backend = layer_module.linear_attention_backend
     (new_conv_state_extracted,
@@ -184,7 +145,7 @@ def gdn_attention_core_tpu(
          j_conv_bias,
          j_A_log,
          j_dt_bias,
-         state_indices_sliced,
+         slots.state_indices,
          query_start_loc_sliced,
          request_distribution,
          seq_lens_sliced,
@@ -194,8 +155,8 @@ def gdn_attention_core_tpu(
          d_v,
          kernel_size,
          mesh=mesh,
-         read_state_indices=read_state_indices_sliced,
          conv1d_gdn_kernel=linear_attention_backend.conv1d_gdn_kernel(),
+         **slots.kernel_kwargs(),
      )
     if state_len > kernel_size - 1:
         remaining_old_state = conv_state[:, kernel_size - 1:, :]
@@ -203,6 +164,9 @@ def gdn_attention_core_tpu(
             [new_conv_state_extracted, remaining_old_state], axis=1)
     else:
         new_conv_state = new_conv_state_extracted
+
+    new_conv_state, new_recurrent_state = slots.apply_boundary_copies(
+        new_conv_state, new_recurrent_state, mesh)
 
     vllm_context.kv_caches[layer_idx] = (new_conv_state, new_recurrent_state)
 

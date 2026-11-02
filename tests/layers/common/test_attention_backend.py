@@ -331,3 +331,69 @@ def test_gdn_forwards_read_offsets_and_num_spec_tokens(mesh):
     assert captured["num_extra_args"] == 1
     assert captured["options"]["num_spec_tokens"] == 3
     np.testing.assert_array_equal(output.astype(jnp.float32), 2.0)
+
+
+def test_resolve_gdn_state_slots_align_spec_forwards_to_gdn_kernel(mesh):
+    captured = {}
+
+    def capturing_kernel(qkv, b, a, conv_state, recurrent_state, conv_weight,
+                         conv_bias, a_log, dt_bias, query_start_loc,
+                         state_indices, distribution, seq_lens,
+                         read_state_indices, *extra_args, **options):
+        captured["num_spec_tokens"] = options["num_spec_tokens"]
+        new_conv = conv_state.at[state_indices[0] + 1].set(conv_state[0] + 5.0)
+        new_rec = recurrent_state.at[state_indices[0] + 1].set(
+            recurrent_state[0] + 9.0)
+        output = jnp.zeros((qkv.shape[0], options["n_v"] * options["d_v"]),
+                           qkv.dtype)
+        trace_vals = jnp.stack([
+            state_indices[0],
+            read_state_indices[0],
+            extra_args[0][0],
+        ]).astype(qkv.dtype)
+        output = output.at[0, :3].set(trace_vals)
+        return (new_conv, new_rec), output
+
+    md = AttentionMetadata(
+        input_positions=jnp.arange(4, dtype=jnp.int32),
+        block_tables=jnp.array([[1, 2]], dtype=jnp.int32),
+        seq_lens=jnp.array([18], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 4], dtype=jnp.int32),
+        request_distribution=jnp.array([1, 1, 1], dtype=jnp.int32),
+        mamba_state_indices=jnp.array([4], dtype=jnp.int32),
+        gdn_read_offsets=jnp.array([2], dtype=jnp.int32),
+        num_spec_tokens=3,
+        padded_num_reqs=1,
+    )
+    slots = gdn_attention.resolve_gdn_state_slots(
+        md,
+        seq_lens=md.seq_lens,
+        query_start_loc=md.query_start_loc,
+        padded_num_reqs_per_dp=1,
+        dp_size=1,
+        num_local_rows=8,
+        mamba_block_size=16,
+    )
+    inputs = make_gdn_inputs(mesh)
+    inputs["conv_state"] = jnp.zeros((8, KERNEL_SIZE - 1, QKV_DIM),
+                                     jnp.bfloat16)
+    inputs["recurrent_state"] = jnp.zeros((8, NUM_HEADS, HEAD_DIM, HEAD_DIM),
+                                          jnp.float32)
+    inputs["state_indices"] = slots.state_indices
+    inputs["query_start_loc"] = md.query_start_loc
+    inputs["distribution"] = md.request_distribution
+    inputs["seq_lens"] = md.seq_lens
+    inputs.pop("read_state_indices")
+
+    (new_conv, new_rec), output = gdn_attention.run_jax_gdn_attention(
+        **inputs,
+        conv1d_gdn_kernel=capturing_kernel,
+        **slots.kernel_kwargs(),
+    )
+    new_conv, new_rec = slots.apply_boundary_copies(new_conv, new_rec, mesh)
+
+    np.testing.assert_array_equal(np.asarray(output[0, :3], np.float32),
+                                  [4.0, 6.0, 0.0])
+    assert captured["num_spec_tokens"] == 3
+    np.testing.assert_array_equal(np.asarray(new_conv[1], np.float32), 5.0)
+    np.testing.assert_array_equal(np.asarray(new_rec[1], np.float32), 9.0)

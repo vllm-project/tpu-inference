@@ -453,3 +453,180 @@ class TestVllmGatedDeltaNetAttention:
         np.testing.assert_array_equal(np.array(actual_state_indices), [3, 7])
         np.testing.assert_array_equal(np.array(actual_read_state_indices),
                                       [3, 7])
+
+    def test_compute_align_spec_state_indices(self):
+        from tpu_inference.layers.common.gdn_attention import \
+            compute_align_spec_state_indices
+
+        # 4 requests, block_size=16, 64 rows in the shard:
+        #   req 0: verify window (q=4, seq=18 -> n=14), crosses block 0 boundary
+        #          (16) at window pos 1, resumes from scratch offset 2.
+        #   req 1: verify window (q=4, seq=8 -> n=4), does NOT reach boundary
+        #          16, resumes from block table (-1 offset, right after prefill).
+        #   req 2: prefill chunk (q=16, seq=32 -> n=16), not a window.
+        #   req 3: padded dummy (q=0, seq=0).
+        block_tables = jax.numpy.array(
+            [[3, 4], [5, 0], [6, 7], [0, 0]],
+            dtype=jax.numpy.int32,
+        )
+        query_lens = jax.numpy.array([4, 4, 16, 0], dtype=jax.numpy.int32)
+        seq_lens = jax.numpy.array([18, 8, 32, 0], dtype=jax.numpy.int32)
+        is_window = jax.numpy.array([True, True, False, False])
+        scratch_bases = jax.numpy.array([40, 44, 48, 0], dtype=jax.numpy.int32)
+        read_offsets = jax.numpy.array([2, -1, -1, 0], dtype=jax.numpy.int32)
+
+        (state_indices, read_state_indices, copy_src, copy_dst,
+         copy_mask) = compute_align_spec_state_indices(
+             block_tables,
+             query_lens,
+             seq_lens,
+             is_window,
+             scratch_bases,
+             read_offsets,
+             mamba_block_size=16,
+             num_local_rows=64,
+         )
+
+        # Windows write to their scratch base; prefill writes to block 1 (id 7).
+        np.testing.assert_array_equal(np.asarray(state_indices),
+                                      [40, 44, 7, 0])
+        # req 0 reads scratch 40 + 2 = 42; req 1 reads block 0 (id 5);
+        # req 2 reads block 0 (id 6).
+        np.testing.assert_array_equal(np.asarray(read_state_indices),
+                                      [42, 5, 6, 0])
+        # Only req 0 crosses a block boundary (16 = 14 + 2 -> scratch pos 1 = 41
+        # copied into block 0 = id 3).
+        np.testing.assert_array_equal(np.asarray(copy_mask),
+                                      [True, False, False, False])
+        assert int(copy_src[0]) == 41
+        assert int(copy_dst[0]) == 3
+
+    def test_copy_gdn_state_slots(self, mesh):
+        from tpu_inference.layers.common.gdn_attention import \
+            copy_gdn_state_slots
+
+        conv = jax.numpy.arange(8 * 3 * 4,
+                                dtype=jax.numpy.float32).reshape(8, 3, 4)
+        rec = jax.numpy.arange(8 * 2 * 4 * 4,
+                               dtype=jax.numpy.float32).reshape(8, 2, 4, 4)
+        src = jax.numpy.array([5, 6, 0, 0], dtype=jax.numpy.int32)
+        dst = jax.numpy.array([1, 2, 3, 4], dtype=jax.numpy.int32)
+        mask = jax.numpy.array([False, True, False, False])
+
+        new_conv, new_rec = copy_gdn_state_slots(conv, rec, src, dst, mask,
+                                                 mesh)
+        # Slot 6 copied to slot 2; slot 1 (masked off) untouched.
+        np.testing.assert_array_equal(np.asarray(new_conv[2]),
+                                      np.asarray(conv[6]))
+        np.testing.assert_array_equal(np.asarray(new_rec[2]),
+                                      np.asarray(rec[6]))
+        np.testing.assert_array_equal(np.asarray(new_conv[1]),
+                                      np.asarray(conv[1]))
+
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.torch_view",
+        side_effect=lambda t: torch.as_tensor(np.array(t)),
+    )
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.jax_view",
+        side_effect=lambda t: jax.numpy.array(t.detach().cpu().numpy())
+        if isinstance(t, torch.Tensor) else t,
+    )
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.run_jax_gdn_attention"
+    )
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.get_forward_context"
+    )
+    def test_gdn_attention_core_tpu_align_mode_with_spec_decode(
+            self, mock_get_fc, mock_run_jax, mock_jax_v, mock_torch_v, mesh):
+        """Align mode + spec decode checkpoints verify windows into scratch
+        slots and copies block-boundary states into the scheduler's mamba
+        blocks after the kernel runs."""
+        from tpu_inference.layers.common.attention_metadata import \
+            AttentionMetadata
+        from tpu_inference.layers.vllm.custom_ops.gdn_attention_op import \
+            gdn_attention_core_tpu
+
+        layer_name = "test_layer"
+        num_tokens = 8
+        n_kq, n_v, d_k, d_v, kernel_size = 2, 4, 16, 16, 4
+        conv_dim = (n_kq * d_k) * 2 + n_v * d_v
+
+        layer_module = MagicMock()
+        layer_module.num_k_heads = n_kq
+        layer_module.num_v_heads = n_v
+        layer_module.head_k_dim = d_k
+        layer_module.head_v_dim = d_v
+        layer_module.conv_kernel_size = kernel_size
+        layer_module.conv1d.weight = torch.randn(conv_dim, 1, kernel_size)
+        layer_module.conv1d.bias = None
+        layer_module.A_log = torch.randn(n_v)
+        layer_module.dt_bias = torch.randn(n_v)
+
+        # 2 verify windows of 4 tokens (1 target + 3 drafts):
+        #   req 0: computed 14 -> seq_len 18, crosses block 0 boundary (16) at
+        #          window position 1 (scratch slot 20 + 1 = 21 -> block id 3),
+        #          resumes from scratch checkpoint 20 + 2 = 22.
+        #   req 1: computed 16 -> seq_len 20, resumes from block 0 (id 5) via
+        #          gdn_read_offsets = -1, does not cross block 1 boundary (32).
+        attn_metadata = AttentionMetadata(
+            input_positions=jax.numpy.zeros(num_tokens, dtype=jax.numpy.int32),
+            block_tables=jax.numpy.array([[3, 4], [5, 6]],
+                                         dtype=jax.numpy.int32),
+            seq_lens=jax.numpy.array([18, 20], dtype=jax.numpy.int32),
+            query_start_loc=jax.numpy.array([0, 4, 8], dtype=jax.numpy.int32),
+            request_distribution=jax.numpy.array([2, 2, 2],
+                                                 dtype=jax.numpy.int32),
+            mamba_state_indices=jax.numpy.array([20, 24],
+                                                dtype=jax.numpy.int32),
+            gdn_read_offsets=jax.numpy.array([2, -1], dtype=jax.numpy.int32),
+            num_spec_tokens=3,
+            padded_num_reqs=2,
+        )
+
+        fc = MagicMock()
+        fc.attn_metadata = {layer_name: attn_metadata}
+        fc.no_compile_layers = {layer_name: layer_module}
+        mock_get_fc.return_value = fc
+
+        conv_state = jax.numpy.zeros((30, kernel_size - 1, conv_dim))
+        recurrent_state = jax.numpy.zeros((30, n_v, d_k, d_v))
+        # Kernel writes checkpoints into scratch slots; put a distinctive value
+        # at req 0's boundary checkpoint (slot 21) and verify it lands in
+        # scheduler block 3.
+        kernel_conv = conv_state.at[21].set(7.0)
+        kernel_rec = recurrent_state.at[21].set(9.0)
+        mock_run_jax.return_value = (
+            (kernel_conv, kernel_rec),
+            jax.numpy.zeros((num_tokens, n_v * d_v)),
+        )
+
+        vllm_config = MagicMock()
+        vllm_config.cache_config.mamba_cache_mode = "align"
+        vllm_config.cache_config.mamba_block_size = 16
+
+        kv_caches = [(conv_state, recurrent_state)]
+        with set_vllm_model_wrapper_context(
+                kv_caches=kv_caches,
+                mesh=mesh,
+                layer_name_to_kvcache_index={layer_name: 0},
+                vllm_config=vllm_config,
+        ):
+            gdn_attention_core_tpu(torch.randn(num_tokens, conv_dim),
+                                   torch.randn(num_tokens, n_v),
+                                   torch.randn(num_tokens, n_v),
+                                   torch.zeros(num_tokens, n_v, d_v),
+                                   layer_name, mesh)
+
+        call_args, call_kwargs = mock_run_jax.call_args
+        np.testing.assert_array_equal(np.asarray(call_args[9]), [20, 24])
+        np.testing.assert_array_equal(
+            np.asarray(call_kwargs["read_state_indices"]), [22, 5])
+        np.testing.assert_array_equal(np.asarray(call_kwargs["read_offsets"]),
+                                      [0, 0])
+        assert call_kwargs["num_spec_tokens"] == 3
+
+        updated_conv, updated_rec = kv_caches[0]
+        assert np.all(np.asarray(updated_conv[3]) == 7.0)
+        assert np.all(np.asarray(updated_rec[3]) == 9.0)
