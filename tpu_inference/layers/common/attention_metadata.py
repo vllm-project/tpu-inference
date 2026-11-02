@@ -74,6 +74,7 @@ class PCPMetadata:
         "padded_num_reqs",
         "pcp_cache_pages",
         "use_causal_mask",
+        "is_decode",
     ],
 )
 @dataclass
@@ -113,6 +114,7 @@ class AttentionMetadata(object):
 
     # STATIC: controls JIT specialization without adding a runtime array.
     use_causal_mask: bool = True
+    is_decode: bool = False
 
     # The selected TPU attention backend's own metadata of this step, a pytree
     # of its own type (AttentionBackend.prepare_step); None for RPA.
@@ -128,7 +130,7 @@ class AttentionMetadata(object):
         "request_distribution",
         "mamba_state_indices",
     ],
-    meta_fields=["padded_num_reqs"],
+    meta_fields=["padded_num_reqs", "is_decode"],
 )
 @dataclass
 class SharedAttentionMetadata(object):
@@ -155,6 +157,7 @@ class SharedAttentionMetadata(object):
     # power of 2 between min and max requests.
     # Env var ATTN_CUSTOM_NUM_REQS_BUCKETS can manually override the buckets.
     padded_num_reqs: int = -1
+    is_decode: bool = False
 
 
 class GroupedAttentionMetadata(dict):
