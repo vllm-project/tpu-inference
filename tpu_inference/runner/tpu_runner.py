@@ -2201,7 +2201,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             bonus_token_ids, processed_bonus_logits = sample(
                 bonus_rng,
                 self.mesh,
-                bonus_logits,
+                bonus_logits.astype(jnp.float32),
                 tpu_sampling_metadata,
                 allow_distributed_sampling=allow_distributed_sampling,
             )

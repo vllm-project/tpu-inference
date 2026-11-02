@@ -1009,7 +1009,7 @@ class TestTPUJaxRunner:
         self.runner.speculative_decoding_manager.propose_draft_token_ids = (
             MagicMock(side_effect=fake_propose))
         self.runner._select_from_array_fn = MagicMock(
-            return_value=jnp.zeros((1, 16), dtype=jnp.float32))
+            return_value=jnp.zeros((1, 16), dtype=jnp.bfloat16))
         self.runner._extract_draft_token_ids = MagicMock(
             return_value=jnp.zeros((3, ), dtype=jnp.int32))
         self.runner.rejection_sampler = MagicMock(
@@ -1035,20 +1035,21 @@ class TestTPUJaxRunner:
                     jnp.array([70], dtype=jnp.int32),
                     jnp.zeros((1, 16), dtype=jnp.float32),
                 ),
-        ):
+        ) as mock_sample:
             self.runner._sample_from_logits(
                 scheduler_output=scheduler_output,
                 attn_metadata=MagicMock(),
                 tpu_sampling_metadata=tpu_sampling_metadata,
                 input_ids=jnp.zeros((4, ), dtype=jnp.int32),
                 hidden_states=jnp.zeros((4, 8), dtype=jnp.float32),
-                logits=jnp.zeros((4, 16), dtype=jnp.float32),
+                logits=jnp.zeros((4, 16), dtype=jnp.bfloat16),
                 aux_hidden_states=None,
                 spec_decode_metadata=spec_decode_metadata,
                 kv_connector_output=None,
                 padded_num_reqs=1,
             )
 
+        assert mock_sample.call_args[0][2].dtype == jnp.float32
         assert observed_in_propose["num_tokens_no_spec"] == 7
         assert observed_in_propose["tokens"] == [10, 20, 30, 40, 50, 60, 70]
         assert observed_in_propose["mamba_read_offset"] == 2

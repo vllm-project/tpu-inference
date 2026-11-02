@@ -30,13 +30,16 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
+from tpu_inference import envs
 from tpu_inference.kernels.gdn.v3 import wrapper as v3_gdn
 from tpu_inference.layers.common import (attention_backend,
                                          attention_interface, gdn_attention)
 from tpu_inference.layers.common.attention_backend import (
     GDNLinearAttentionBackend, RPAAttentionBackend)
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.attention_metadata import (
+    AttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import MESH_AXIS_NAMES
+from tpu_inference.layers.vllm.backends import flash_attn
 from tpu_inference.layers.vllm.backends.flash_attn import (
     PallasAttentionBackend, PallasAttentionBackendImpl)
 from tpu_inference.layers.vllm.custom_ops.gdn_attention_op import \
@@ -230,6 +233,55 @@ def test_platform_selects_the_vllm_backend(backend, expected):
 
 def test_default_impl_runs_rpa():
     assert PallasAttentionBackendImpl.attention_backend == "rpa"
+
+
+@pytest.mark.parametrize(
+    ("use_batched_rpa", "num_spec_tokens", "expected_decode_query_size"),
+    [
+        (True, 3, 4),
+        (False, 3, 1),
+        (True, 0, 1),
+    ],
+)
+def test_jax_attn_func_passes_decode_query_size(mesh, monkeypatch,
+                                                use_batched_rpa,
+                                                num_spec_tokens,
+                                                expected_decode_query_size):
+    captured = {}
+
+    class CapturingAttentionBackend(FakeAttentionBackend):
+
+        def attention(self, kv_cache, q, k, v, md, shared_md, mesh, **kwargs):
+            captured["decode_query_size"] = kwargs["decode_query_size"]
+            return super().attention(kv_cache, q, k, v, md, shared_md, mesh,
+                                     **kwargs)
+
+    monkeypatch.setattr(flash_attn, "create_attention_backend",
+                        lambda _: CapturingAttentionBackend())
+    monkeypatch.setattr(envs, "USE_BATCHED_RPA_KERNEL", use_batched_rpa)
+
+    q = jnp.ones((NUM_TOKENS, NUM_HEADS * HEAD_DIM), jnp.bfloat16)
+    k = v = jnp.ones((NUM_TOKENS, HEAD_DIM), jnp.bfloat16)
+    kv_cache = jnp.zeros((2, 16, 2, HEAD_DIM), jnp.bfloat16)
+    positions = jnp.arange(NUM_TOKENS)
+
+    flash_attn._jax_attn_func.__wrapped__(
+        kv_cache,
+        q,
+        k,
+        v,
+        None,
+        AttentionMetadata(input_positions=positions,
+                          num_spec_tokens=num_spec_tokens),
+        SharedAttentionMetadata(input_positions=positions),
+        mesh,
+        scale=1.0,
+        head_size=HEAD_DIM,
+        num_heads=NUM_HEADS,
+        num_kv_heads=1,
+    )
+
+    assert captured["decode_query_size"] == expected_decode_query_size
 
 
 def test_default_backend_skips_the_process_check(monkeypatch):
