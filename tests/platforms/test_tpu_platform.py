@@ -548,6 +548,50 @@ class TestTpuPlatform:
         ):
             TpuPlatform.update_block_size_for_backend(vllm_config)
 
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    def test_align_mode_kept_for_ngram_spec_decode_disabled_for_others(
+            self, mock_dp_update, mock_sharding, vllm_config):
+        """Mamba prefix caching (align mode) is supported with n-gram spec
+        decode when USE_BATCHED_RPA_KERNEL=1, and disabled when
+        USE_BATCHED_RPA_KERNEL=0 or for other speculative proposers."""
+        vllm_config.cache_config.enable_prefix_caching = True
+        vllm_config.cache_config.mamba_cache_mode = "align"
+        vllm_config.cache_config.mamba_block_size = 16
+        vllm_config.cache_config.user_specified_mamba_block_size = False
+        vllm_config.cache_config.prefix_match_unit = None
+        vllm_config.speculative_config = MagicMock(method="ngram",
+                                                   num_speculative_tokens=3)
+
+        with patch(
+                "tpu_inference.platforms.tpu_platform.envs.USE_BATCHED_RPA_KERNEL",
+                True):
+            TpuPlatform.check_and_update_config(vllm_config)
+        assert vllm_config.cache_config.enable_prefix_caching is True
+        assert vllm_config.cache_config.mamba_cache_mode == "align"
+        assert vllm_config.cache_config.mamba_block_size == 16
+
+        with patch(
+                "tpu_inference.platforms.tpu_platform.envs.USE_BATCHED_RPA_KERNEL",
+                False):
+            TpuPlatform.check_and_update_config(vllm_config)
+        assert vllm_config.cache_config.enable_prefix_caching is False
+        assert vllm_config.cache_config.mamba_cache_mode == "none"
+
+        vllm_config.cache_config.enable_prefix_caching = True
+        vllm_config.cache_config.mamba_cache_mode = "align"
+        vllm_config.cache_config.mamba_block_size = 16
+        vllm_config.speculative_config = MagicMock(method="eagle3",
+                                                   num_speculative_tokens=3)
+        with patch(
+                "tpu_inference.platforms.tpu_platform.envs.USE_BATCHED_RPA_KERNEL",
+                True):
+            TpuPlatform.check_and_update_config(vllm_config)
+        assert vllm_config.cache_config.enable_prefix_caching is False
+        assert vllm_config.cache_config.mamba_cache_mode == "none"
+
     def test_check_and_update_config_mla_checks(self):
         vllm_config = MagicMock()
         vllm_config.model_config.use_mla = True

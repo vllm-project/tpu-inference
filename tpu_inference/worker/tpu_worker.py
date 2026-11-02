@@ -699,9 +699,15 @@ class TPUWorker(WorkerBase):
         return self.model_runner.get_kv_cache_spec()
 
     def get_mamba_num_blocks(self) -> int | None:
-        """Rows in the mamba state pool this worker allocated (None without
-        mamba layers). Read by the engine core over `collective_rpc`."""
-        return self.model_runner.kv_cache_manager.actual_mamba_num_blocks
+        """Rows in the mamba state pool this worker allocated for the
+        scheduler (None without mamba layers). Read by the engine core over
+        `collective_rpc`. Excludes the runner-owned speculative decoding
+        scratch rows in align mode."""
+        kv_cache_manager = self.model_runner.kv_cache_manager
+        if kv_cache_manager.actual_mamba_num_blocks is None:
+            return None
+        return kv_cache_manager.scheduler_mamba_num_blocks(
+            kv_cache_manager.actual_mamba_num_blocks)
 
     def get_kv_connector_handshake_metadata(self) -> dict | None:
         """Get KV connector metadata from this worker if available."""

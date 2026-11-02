@@ -398,15 +398,25 @@ class TpuPlatform(Platform):
                 "pool is sized for resident state only. Use 'align' (the "
                 "default when prefix caching is enabled) or 'none'.")
 
-        # Hybrid (mamba/linear-attention) models cannot use prefix caching with
-        # speculative decoding because verify windows need consecutive state slots.
+        # Hybrid (mamba/linear-attention) models support prefix caching with
+        # model-free speculative decoding (n-gram) when USE_BATCHED_RPA_KERNEL=1
+        # places verify windows in the decode segment: verify windows checkpoint
+        # into runner-owned scratch slots and block-boundary states are copied
+        # into the scheduler's mamba blocks. Other proposers or non-batched RPA
+        # keep prefix caching off.
         if (cache_config and getattr(cache_config, "mamba_cache_mode", "none")
                 == "align"):
-            if vllm_config.speculative_config is not None:
+            speculative_config = vllm_config.speculative_config
+            spec_method = getattr(speculative_config, "method", None)
+            if speculative_config is not None and (
+                    spec_method != "ngram" or not envs.USE_BATCHED_RPA_KERNEL):
                 logger.warning(
                     "[tpu_platform] Disabling prefix caching: hybrid "
-                    "(mamba/linear-attention) models do not support cached "
-                    "prefixes with speculative decoding on TPU.")
+                    "(mamba/linear-attention) models only support cached "
+                    "prefixes with n-gram speculative decoding and "
+                    "USE_BATCHED_RPA_KERNEL=1 on TPU "
+                    "(got method=%r, USE_BATCHED_RPA_KERNEL=%s).", spec_method,
+                    envs.USE_BATCHED_RPA_KERNEL)
                 cache_config.enable_prefix_caching = False
                 cache_config.mamba_cache_mode = "none"
                 if (getattr(cache_config, "mamba_block_size", None) is not None

@@ -754,3 +754,70 @@ def test_dp_mamba_slot_groups_partitioned_by_rank(
             assert dp_spec_input_batch.is_valid_mamba_slot_base(slot)
             # The whole group fits inside this rank's shard.
             assert slot + SLOT_STRIDE - 1 < rank_base + local_slots
+
+
+def test_mamba_scratch_pool_at_top_of_each_shard():
+    """With `scratch_slots_per_rank` set (align mode + spec decode), request
+    slot groups come from the top of each rank's shard so the rows below stay
+    free for the scheduler's mamba block pool."""
+    # 2 DP ranks, 2 requests/rank, stride 4 (3 spec tokens) -> 8 scratch rows
+    # per rank. Physical pool has 40 rows/rank (80 total): rows [0, 32) belong
+    # to the scheduler, rows [32, 40) hold the 2 scratch groups at 32 and 36.
+    dp_size = 2
+    batch = InputBatch(
+        max_num_reqs=4,
+        max_model_len=MAX_MODEL_LEN,
+        max_num_batched_tokens=MAX_NUM_BATCHED_TOKENS,
+        pin_memory=False,
+        vocab_size=VOCAB_SIZE,
+        block_sizes=BLOCK_SIZES,
+        is_spec_decode=True,
+        num_speculative_tokens=3,
+        dp_size=dp_size,
+    )
+    batch.has_mamba_layers = True
+    batch.init_mamba_pools(80, scratch_slots_per_rank=8)
+
+    local_rows = 40
+    first_local = 32
+    assert batch._mamba_local_slots == local_rows
+    assert batch._mamba_first_group_local == first_local
+
+    for rank in range(dp_size):
+        rank_base = rank * local_rows
+        pool = batch._free_mamba_slots_per_rank[rank]
+        assert sorted(pool) == [rank_base + 32, rank_base + 36]
+        # Scheduler rows below `first_local` are NOT valid group bases.
+        assert not batch.is_valid_mamba_slot_base(rank_base + 1)
+        assert not batch.is_valid_mamba_slot_base(rank_base + 31)
+        for slot in pool:
+            assert batch.is_valid_mamba_slot_base(slot)
+
+    for rank in range(dp_size):
+        req = create_dummy_request(f"req-scratch-{rank}")
+        batch.add_request(req, dp_rank=rank)
+        slot = int(batch.mamba_state_indices_cpu[batch.req_id_to_index[
+            req.req_id]])
+        assert slot - rank * local_rows == first_local
+    batch.assert_mamba_state_invariants()
+    batch.remove_request("req-scratch-0")
+    assert first_local in batch._free_mamba_slots_per_rank[0]
+
+
+def test_mamba_scratch_pool_reset_without_scratch():
+    """Re-initializing without a scratch region restores the default layout
+    (groups right after the null block)."""
+    batch = InputBatch(
+        max_num_reqs=4,
+        max_model_len=MAX_MODEL_LEN,
+        max_num_batched_tokens=MAX_NUM_BATCHED_TOKENS,
+        pin_memory=False,
+        vocab_size=VOCAB_SIZE,
+        block_sizes=BLOCK_SIZES,
+        is_spec_decode=True,
+        num_speculative_tokens=1,
+    )
+    batch.init_mamba_pools(40, scratch_slots_per_rank=8)
+    assert min(batch._free_mamba_slots_per_rank[0]) == 32
+    batch.init_mamba_pools(40)
+    assert min(batch._free_mamba_slots_per_rank[0]) == 1

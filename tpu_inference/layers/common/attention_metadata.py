@@ -176,7 +176,7 @@ class SharedAttentionMetadata(object):
     # Env var ATTN_CUSTOM_NUM_REQS_BUCKETS can manually override the buckets.
     padded_num_reqs: int = -1
 
-    # (max_num_seqs,) int32 — per-request offset ∈ [0, num_spec_tokens] into the
+    # (max_num_seqs,) int32 — per-request offset ∈ [-1, num_spec_tokens] into the
     # strided mamba/GDN state slot group.
     gdn_read_offsets: jax.Array | None = None
 

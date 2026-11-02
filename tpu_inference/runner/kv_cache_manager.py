@@ -39,8 +39,9 @@ from tpu_inference import envs as tpu_envs
 from tpu_inference import utils
 from tpu_inference import utils as common_utils
 from tpu_inference.core.hybrid_coordinator import (  # noqa: F401
-    DEFAULT_MAMBA_CACHE_MULTIPLIER, is_mamba_group, mamba_blocks_per_request,
-    mamba_pool_size, set_mamba_num_blocks)
+    DEFAULT_MAMBA_CACHE_MULTIPLIER, gdn_spec_scratch_slots_per_rank,
+    is_mamba_group, mamba_blocks_per_request, mamba_pool_size,
+    set_mamba_num_blocks, uses_gdn_spec_scratch)
 from tpu_inference.core.runner_slot_mamba import maybe_runner_slot_mamba_spec
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
@@ -105,6 +106,17 @@ class KVCacheManager:
         # `[0, max_num_reqs]`) so it stays in-bounds for the smaller arrays.
         self._mamba_num_blocks: int | None = None
         self.actual_mamba_num_blocks: int | None = None
+
+    def scheduler_mamba_num_blocks(self, physical_num_blocks: int) -> int:
+        """Mamba blocks the scheduler may use out of `physical_num_blocks`
+        allocated rows. Align mode with spec decode keeps the top
+        `gdn_spec_scratch_slots_per_rank` rows of every DP rank's shard for
+        the runner's verify-window scratch groups."""
+        scratch_per_rank = gdn_spec_scratch_slots_per_rank(
+            self.runner.vllm_config, self.runner.max_num_reqs,
+            self.runner.dp_size)
+        return physical_num_blocks - scratch_per_rank * max(
+            self.runner.dp_size, 1)
 
     def _create_attention_spec(
             self,
@@ -460,8 +472,12 @@ class KVCacheManager:
             cache_config.num_gpu_blocks_override = int(attn_num_blocks)
 
         self._mamba_num_blocks = int(mamba_num_blocks)
-        cache_config.mamba_num_blocks = int(mamba_num_blocks)
-        set_mamba_num_blocks(int(mamba_num_blocks))
+        # The scheduler only sees the rows outside the runner-owned spec
+        # decode scratch region (all of them without align + spec decode).
+        sched_mamba_num_blocks = self.scheduler_mamba_num_blocks(
+            int(mamba_num_blocks))
+        cache_config.mamba_num_blocks = sched_mamba_num_blocks
+        set_mamba_num_blocks(sched_mamba_num_blocks)
 
         attn_bytes = num_attn_layers * attn_num_blocks * attn_page_size_bytes
         mamba_bytes = (num_mamba_layers * mamba_num_blocks *
@@ -653,6 +669,15 @@ class KVCacheManager:
                 if isinstance(attn_module, MambaBase):
                     spec = attn_module.get_kv_cache_spec(
                         self.runner.vllm_config)
+                    if (isinstance(spec, MambaSpec) and uses_gdn_spec_scratch(
+                            self.runner.vllm_config)
+                            and spec.num_speculative_blocks > 0):
+                        # Verify windows checkpoint into runner-owned scratch
+                        # slots, so the scheduler must not reserve (or
+                        # relocate) speculative blocks in the mamba block
+                        # table; it keeps one block per mamba_block_size.
+                        spec = dataclasses.replace(spec,
+                                                   num_speculative_blocks=0)
                     if spec is not None:
                         kv_cache_spec[
                             layer_name] = maybe_runner_slot_mamba_spec(
@@ -909,7 +934,8 @@ class KVCacheManager:
                     self.runner.max_num_reqs, mamba_slot_stride, divisor)
             if self.actual_mamba_num_blocks is None:
                 self.actual_mamba_num_blocks = mamba_num_blocks
-            kv_cache_config.mamba_num_blocks = int(mamba_num_blocks)
+            kv_cache_config.mamba_num_blocks = (
+                self.scheduler_mamba_num_blocks(int(mamba_num_blocks)))
 
             offset = getattr(kv_cache_tensor, 'offset', 0)
             layer_stride = getattr(kv_cache_tensor, 'layer_stride', 0)

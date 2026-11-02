@@ -36,7 +36,11 @@ class CachedRequestState(NewRequestData):
     # [num_prompt_tokens-1, ...]. Set to None when prefill completes.
     in_progress_prompt_logprobs_cpu: Optional[tuple] = None
     mamba_state_slot: Optional[int] = None
-    mamba_read_offset: int = 0
+    # Verify-window checkpoint offset (0..num_spec_tokens) written by the
+    # previous decode/verify step, or -1 before the first verify window /
+    # after a prefill chunk (in align mode: resume from the mamba block table;
+    # in none mode: clamped to 0).
+    mamba_read_offset: int = -1
 
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)
@@ -182,6 +186,12 @@ class InputBatch:
         max_num_reqs_per_rank = (max_num_reqs + dp_size - 1) // dp_size
         self._mamba_local_slots = (
             max_num_reqs_per_rank * self.mamba_slot_stride + 1)
+        # Rank-local id of the first group base. Slot 0 is the null block, so
+        # groups normally start at 1. Mamba prefix caching (align mode) with
+        # spec decode shares the arrays with the scheduler's block pool, so
+        # the groups then live in a scratch region at the top of each shard
+        # (see `init_mamba_pools`).
+        self._mamba_first_group_local = 1
         self._free_mamba_slots_per_rank: list[list[int]] = []
         self._build_mamba_pools()
 
@@ -194,32 +204,55 @@ class InputBatch:
         """Build the per-rank free pools of slot-group base ids.
 
         Within each rank's `_mamba_local_slots` shard, slot 0 is the null
-        block and groups of `mamba_slot_stride` consecutive slots follow.
+        block and groups of `mamba_slot_stride` consecutive slots follow,
+        starting at `_mamba_first_group_local`.
         The pool holds group *bases*; `.pop()` returns the lowest free base
         first (matching the original ascending hand-out order).
         """
         stride = self.mamba_slot_stride
-        num_groups = (self._mamba_local_slots - 1) // stride
+        first = self._mamba_first_group_local
+        num_groups = (self._mamba_local_slots - first) // stride
         self._free_mamba_slots_per_rank = []
         for k in range(self.dp_size):
             base = k * self._mamba_local_slots
-            self._free_mamba_slots_per_rank.append(
-                [base + 1 + g * stride for g in reversed(range(num_groups))])
+            self._free_mamba_slots_per_rank.append([
+                base + first + g * stride for g in reversed(range(num_groups))
+            ])
 
-    def init_mamba_pools(self, mamba_num_blocks: int) -> None:
+    def init_mamba_pools(self,
+                         mamba_num_blocks: int,
+                         scratch_slots_per_rank: int = 0) -> None:
         """Reinitialize mamba slot pools with the actual device block count.
 
         Called after KV cache init, when the true mamba_num_blocks is known
         (compact-mamba may have been skipped, giving fewer blocks than the
         default estimate based on max_num_reqs).
+
+        Args:
+            mamba_num_blocks: Rows allocated per mamba state array, across all
+                DP ranks.
+            scratch_slots_per_rank: When non-zero (mamba prefix caching with
+                spec decode), only the top `scratch_slots_per_rank` rows of
+                each rank's shard hold the request slot groups; the rows below
+                belong to the scheduler's mamba block pool.
         """
         self._mamba_local_slots = mamba_num_blocks // self.dp_size
+        if scratch_slots_per_rank > 0:
+            first = self._mamba_local_slots - scratch_slots_per_rank
+            assert first > 0, (
+                f"Mamba scratch region ({scratch_slots_per_rank} rows) does "
+                f"not fit in a {self._mamba_local_slots}-row shard")
+            self._mamba_first_group_local = first
+        else:
+            self._mamba_first_group_local = 1
         self._build_mamba_pools()
 
     def is_valid_mamba_slot_base(self, slot: int) -> bool:
         """True iff `slot` is a valid group base (not a null block)."""
         local = slot % self._mamba_local_slots
-        return local != 0 and (local - 1) % self.mamba_slot_stride == 0
+        first = self._mamba_first_group_local
+        return (local != 0 and local >= first
+                and (local - first) % self.mamba_slot_stride == 0)
 
     def release_mamba_slot(self, slot: Optional[int]) -> None:
         if slot is None:
