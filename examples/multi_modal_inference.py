@@ -21,7 +21,6 @@ python examples/multi_modal_inference.py \
 """
 
 from contextlib import contextmanager
-from dataclasses import asdict
 from typing import NamedTuple, Optional
 
 from vllm import LLM, EngineArgs, SamplingParams
@@ -268,17 +267,10 @@ def main(args):
     req_data.engine_args.limit_mm_per_prompt = default_limits | dict(
         req_data.engine_args.limit_mm_per_prompt or {})
 
-    engine_args = asdict(req_data.engine_args)
+    req_data.engine_args.compilation_config.cudagraph_capture_sizes = []
+    engine_args = vars(req_data.engine_args)
     if args.seed is not None:
         engine_args["seed"] = args.seed
-
-    if engine_args.get("compilation_config") is None:
-        engine_args["compilation_config"] = {}
-    engine_args["compilation_config"]["cudagraph_capture_sizes"] = []
-    # Fix for pydantic validation error in recent vLLM versions
-    engine_args["compilation_config"]["pass_config"] = {
-        "fuse_minimax_qk_norm": False
-    }
 
     llm = LLM(**engine_args)
 

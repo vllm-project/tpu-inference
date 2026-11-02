@@ -8,10 +8,9 @@ import difflib
 import gc
 import os
 import traceback
-from dataclasses import asdict
 
 import pytest
-from vllm import LLM, EngineArgs, SamplingParams
+from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.multimodal.image import convert_image_mode
 
@@ -61,7 +60,7 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes):
               "<|im_start|>assistant\n")
 
     # --- Setup vLLM Engine ---
-    engine_args = EngineArgs(
+    llm = LLM(
         model=model,
         max_model_len=max_model_len,
         tensor_parallel_size=tensor_parallel_size,
@@ -75,29 +74,13 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes):
             "fps": 1,
         },
         limit_mm_per_prompt={modality: 1},
+        additional_config={
+            "enable_dynamic_image_sizes": enable_dynamic_image_sizes,
+        },
+        compilation_config={
+            "cudagraph_capture_sizes": [],
+        },
     )
-    engine_args = asdict(engine_args)
-    if engine_args.get("additional_config") is None:
-        engine_args["additional_config"] = {}
-
-    engine_args["additional_config"][
-        "enable_dynamic_image_sizes"] = enable_dynamic_image_sizes
-    engine_args["compilation_config"]["cudagraph_capture_sizes"] = []
-
-    # asdict() leaves pass_config fields as None; LLM(**engine_args) re-validates
-    # the dict and pydantic rejects None for some of them. Drop the None entries
-    # so PassConfig uses its own defaults.
-    pass_config = engine_args["compilation_config"].get("pass_config") or {}
-    pass_config = {k: v for k, v in pass_config.items() if v is not None}
-    engine_args["compilation_config"]["pass_config"] = pass_config
-
-    # asdict() turns the default FaultToleranceConfig into a plain dict, and
-    # EngineArgs.__post_init__ treats a dict fault_tolerance_config as an
-    # explicit opt-in, force-enabling fault tolerance — which is then rejected
-    # in internal-LB mode. Drop it so the default (disabled) config is used.
-    engine_args.pop("fault_tolerance_config", None)
-
-    llm = LLM(**engine_args)
 
     try:
         sampling_params = SamplingParams(
