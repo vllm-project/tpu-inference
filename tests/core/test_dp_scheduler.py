@@ -491,7 +491,6 @@ class TestDPScheduler:
         )
         mock_output_0.scheduled_spec_decode_tokens = {}
         mock_output_0.scheduled_encoder_inputs = {}
-        mock_output_0.num_common_prefix_blocks = []
         mock_output_0.aux_output_connector_metadata = None
 
         mock_output_1 = MagicMock(spec=SchedulerOutput)
@@ -510,7 +509,6 @@ class TestDPScheduler:
         )
         mock_output_1.scheduled_spec_decode_tokens = {}
         mock_output_1.scheduled_encoder_inputs = {}
-        mock_output_1.num_common_prefix_blocks = []
         mock_output_1.aux_output_connector_metadata = None
 
         # Mock _send_command and _collect_results_unordered
@@ -563,7 +561,6 @@ class TestDPScheduler:
         )
         mock_output_0.scheduled_spec_decode_tokens = {}
         mock_output_0.scheduled_encoder_inputs = {}
-        mock_output_0.num_common_prefix_blocks = []
         mock_output_0.aux_output_connector_metadata = None
 
         mock_output_1 = MagicMock(spec=SchedulerOutput)
@@ -582,7 +579,6 @@ class TestDPScheduler:
         )
         mock_output_1.scheduled_spec_decode_tokens = {}
         mock_output_1.scheduled_encoder_inputs = {}
-        mock_output_1.num_common_prefix_blocks = []
         mock_output_1.aux_output_connector_metadata = None
 
         scheduler._send_command = MagicMock()
@@ -1037,7 +1033,6 @@ class TestDPScheduler:
         output_0.scheduled_cached_reqs.new_block_ids = [None]
         output_0.scheduled_cached_reqs.num_computed_tokens = [10]
         output_0.scheduled_cached_reqs.num_output_tokens = [1]
-        output_0.num_common_prefix_blocks = []
 
         output_1 = MagicMock(spec=SchedulerOutput)
         output_1.num_scheduled_tokens = {"req2": 20}
@@ -1054,7 +1049,6 @@ class TestDPScheduler:
         output_1.scheduled_cached_reqs.new_block_ids = [None]
         output_1.scheduled_cached_reqs.num_computed_tokens = [20]
         output_1.scheduled_cached_reqs.num_output_tokens = [2]
-        output_1.num_common_prefix_blocks = []
 
         scheduler.assigned_dp_rank = {"req1": 0, "req2": 1}
 
@@ -1118,7 +1112,6 @@ class TestDPScheduler:
             total_num_scheduled_tokens=18,
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=[],
             finished_req_ids=set(),
             free_encoder_mm_hashes=set(),
             assigned_dp_rank={
@@ -1203,7 +1196,6 @@ class TestDPScheduler:
             total_num_scheduled_tokens=15,
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=[],
             finished_req_ids=set(),
             free_encoder_mm_hashes=set(),
             assigned_dp_rank={

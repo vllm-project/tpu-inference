@@ -17,11 +17,12 @@ import jax
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.tasks import POOLING_TASKS, SupportedTask
+from vllm.v1.core import kv_cache_utils
 from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
                                          init_none_hash)
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
-                            EngineCoreRequestType, UtilityOutput,
-                            UtilityResult)
+                            EngineCoreRequestType, PrefixHashConfig,
+                            UtilityOutput, UtilityResult)
 from vllm.v1.engine.core import EngineCore as vLLMEngineCore
 from vllm.v1.engine.core import EngineCoreProc as vLLMEngineCoreProc
 from vllm.v1.executor.abstract import Executor
@@ -499,6 +500,7 @@ class DisaggEngineCore(vLLMEngineCore):
         self.batch_queue = None
 
         self.request_block_hasher = None
+        self.prefix_hash_config = None
         if (self.vllm_config.cache_config.enable_prefix_caching
                 or self._prefill_engines[0].scheduler.get_kv_connector()
                 is not None):
@@ -508,8 +510,16 @@ class DisaggEngineCore(vLLMEngineCore):
                 vllm_config.cache_config.prefix_caching_hash_algo)
             init_none_hash(caching_hash_fn)
 
+            num_lookahead = getattr(vllm_config, 'num_hash_lookahead_tokens',
+                                    0)
             self.request_block_hasher = get_request_block_hasher(
-                block_size, caching_hash_fn)
+                block_size, caching_hash_fn, num_lookahead)
+            self.prefix_hash_config = PrefixHashConfig(
+                hash_algo=vllm_config.cache_config.prefix_caching_hash_algo,
+                hash_block_size=block_size,
+                none_hash=kv_cache_utils.NONE_HASH,
+                num_lookahead_tokens=num_lookahead,
+            )
 
         self.step_fn = (self.step if self.batch_queue is None else
                         self.step_with_batch_queue)
@@ -729,6 +739,7 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
                     logger.info(
                         "Waiting for READY message from DP Coordinator...")
         self.request_block_hasher = None
+        self.prefix_hash_config = None
         if (self.vllm_config.cache_config.enable_prefix_caching
                 or self._prefill_engines[0].scheduler.get_kv_connector()
                 is not None):
@@ -738,8 +749,16 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
                 vllm_config.cache_config.prefix_caching_hash_algo)
             init_none_hash(caching_hash_fn)
 
+            num_lookahead = getattr(vllm_config, 'num_hash_lookahead_tokens',
+                                    0)
             self.request_block_hasher = get_request_block_hasher(
-                block_size, caching_hash_fn)
+                block_size, caching_hash_fn, num_lookahead)
+            self.prefix_hash_config = PrefixHashConfig(
+                hash_algo=vllm_config.cache_config.prefix_caching_hash_algo,
+                hash_block_size=block_size,
+                none_hash=kv_cache_utils.NONE_HASH,
+                num_lookahead_tokens=num_lookahead,
+            )
 
         self.mm_receiver_cache = None
         self._orchestrator = _DisaggOrchestrator(

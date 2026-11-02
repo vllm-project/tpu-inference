@@ -51,6 +51,9 @@ class TestDisaggEngineCore(unittest.TestCase):
         self.mock_vllm_config.cache_config = MagicMock()
         self.mock_vllm_config.cache_config.prefix_caching_hash_algo = "builtin"
         self.mock_vllm_config.cache_config.block_size = 5
+        self.mock_vllm_config.cache_config.enable_prefix_caching = False
+        self.mock_vllm_config.cache_config.resolved_gpu_memory_utilization = 0.9
+        self.mock_vllm_config.num_hash_lookahead_tokens = 0
         self.mock_vllm_config.__post_init__ = MagicMock()
 
     def test_initialization(self):
@@ -183,6 +186,9 @@ class TestDisaggEngineCoreProc(unittest.TestCase):
         self.mock_vllm_config.cache_config = MagicMock()
         self.mock_vllm_config.cache_config.prefix_caching_hash_algo = "builtin"
         self.mock_vllm_config.cache_config.block_size = 5
+        self.mock_vllm_config.cache_config.enable_prefix_caching = False
+        self.mock_vllm_config.cache_config.resolved_gpu_memory_utilization = 0.9
+        self.mock_vllm_config.num_hash_lookahead_tokens = 0
         self.mock_vllm_config.__post_init__ = MagicMock()
 
     def test_initialization(self):
