@@ -524,6 +524,30 @@ def sharded_ragged_paged_attention(
                 # RPA_V3_*_BLOCK_SIZES are v3-kernel knobs; the experimental
                 # batched kernel takes its own BlockSizes configs instead.
                 kwargs.update(rpa_block_size_kwargs())
+        local_kv_cache = args[3]
+        if not use_hd64 and len(local_kv_cache.shape) == 5:
+            local_k = args[1]
+            orig_kv_shape = local_kv_cache.shape
+            local_num_kv_heads = local_k.shape[1]
+            local_head_dim = local_k.shape[2]
+            token_kv_shape = get_kv_cache_shape(1, 1, local_num_kv_heads,
+                                                local_head_dim,
+                                                local_kv_cache.dtype)
+            elems_per_token = math.prod(token_kv_shape[1:])
+            block_elems = math.prod(orig_kv_shape[1:])
+            expected_page_size = block_elems // elems_per_token
+            expected_kv_shape = get_kv_cache_shape(
+                orig_kv_shape[0],
+                expected_page_size,
+                local_num_kv_heads,
+                local_head_dim,
+                local_kv_cache.dtype,
+            )
+            if orig_kv_shape != expected_kv_shape:
+                reshaped_kv_cache = local_kv_cache.reshape(expected_kv_shape)
+                call_args = (*args[:3], reshaped_kv_cache, *args[4:])
+                out_q, out_kv_cache = func(*call_args, **kwargs)
+                return out_q, out_kv_cache.reshape(orig_kv_shape)
         return func(*args, **kwargs)
 
     return jax.shard_map(
