@@ -18,7 +18,7 @@ from vllm.v1.attention.backends.registry import (AttentionBackendEnum,
                                                  register_backend)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-from tpu_inference import utils
+from tpu_inference import envs, utils
 from tpu_inference.layers.common.attention_backend import (
     RPAAttentionBackend, create_attention_backend)
 from tpu_inference.layers.common.attention_interface import (
@@ -386,6 +386,17 @@ def _jax_attn_func(
                           dtype=kv_cache.dtype)
     q, k, v = _prepare_qkv_layout(q, k, v, num_heads, num_kv_heads, head_size)
 
+    # Speculative verify windows (up to `num_spec_tokens + 1` query tokens) sit
+    # in the decode segment of `request_distribution` with the batched RPA
+    # kernel (see `InputBatch.max_decode_tokens`). `decode_query_size` sets the
+    # static decode query tile upper bound; sequences with fewer query tokens
+    # (e.g. partial verify windows or 1-token Eagle3/MTP draft steps reusing
+    # the target's metadata) are sliced/masked to their actual `q_len` from
+    # `query_start_loc`.
+    num_spec_tokens = attention_metadata.num_spec_tokens
+    decode_query_size = (num_spec_tokens + 1 if envs.USE_BATCHED_RPA_KERNEL
+                         and num_spec_tokens > 0 else 1)
+
     new_kv_cache, outputs = attention(
         kv_cache,
         q,
@@ -403,6 +414,7 @@ def _jax_attn_func(
         update_kv_cache=update_kv_cache,
         shared_attention_metadata=shared_attention_metadata,
         attention_backend=create_attention_backend(attention_backend),
+        decode_query_size=decode_query_size,
     )
 
     formatted_outputs = _format_attention_output(outputs, q_len, num_heads,
