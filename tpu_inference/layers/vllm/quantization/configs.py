@@ -53,8 +53,6 @@ class VllmQuantLinearConfig(QuantLinearConfig):
         self.tp_size = get_mesh_shape_product(self.mesh,
                                               ShardingAxisName.MLP_TENSOR)
 
-        self.n_shards = get_mesh_shape_product(self.mesh,
-                                               self.weight_sharding[1])
         # Sequence-parallel residual stream for attention DP + GMM_EP
         # (see keeps_tokens_sharded): activations outside
         # attention stay token-sharded over EXPERT_DATA, and the shared
@@ -71,14 +69,9 @@ class VllmQuantLinearConfig(QuantLinearConfig):
         if isinstance(layer, RowParallelLinear):
             self.weight_sharding = (P(None, None) if replicate_shared_expert
                                     else P(ShardingAxisName.ATTN_HEAD, None))
-            if self.enable_sp:
-                self.output_sharding = P(ShardingAxisName.MLP_TENSOR, None)
         elif isinstance(layer, ColumnParallelLinear):
             self.weight_sharding = (P(None, None) if replicate_shared_expert
                                     else P(None, ShardingAxisName.ATTN_HEAD))
-
-            if self.enable_sp:
-                self.input_sharding = P(ShardingAxisName.MLP_TENSOR, None)
 
             if isinstance(layer, MergedColumnParallelLinear) or isinstance(
                     layer, QKVParallelLinear):
@@ -103,45 +96,67 @@ class VllmQuantLinearConfig(QuantLinearConfig):
         else:
             self.num_proj = 1
 
-        if self.keep_tokens_sharded:
-            # Token-sharded ends match the shard_map specs of
-            # sharded_matmul / sharded_quantized_matmul (_sp_layout): input for
-            # column-parallel / replicated weights, output for row-parallel /
-            # replicated weights.
-            in_axis, out_axis = self.weight_sharding
-            token_sharding = P(ShardingAxisName.EXPERT_DATA, None)
-            self.input_sharding = token_sharding if in_axis is None else None
-            self.output_sharding = (token_sharding
-                                    if out_axis is None else None)
-
+        self.input_sharding, self.output_sharding = self._sp_shardings(layer)
         self.bias_sharding = P(self.weight_sharding[1])
         self.n_shards = get_mesh_shape_product(self.mesh,
                                                self.weight_sharding[1])
+
+    def _sp_shardings(self, layer: LinearBase):
+        """The (input, output) token shardings under `enable_sp`.
+
+        With the token-sharded residual stream (`keep_tokens_sharded`) they
+        match the shard_map specs of sharded_matmul /
+        sharded_quantized_matmul (`_sp_layout`): EXPERT_DATA on the input of
+        column-parallel / replicated weights and on the output of
+        row-parallel / replicated weights. Otherwise `enable_sp` shards the
+        input of column-parallel and the output of row-parallel linears over
+        MLP_TENSOR.
+        """
+        if not self.enable_sp:
+            return None, None
+        if self.keep_tokens_sharded:
+            in_axis, out_axis = self.weight_sharding
+            token_sharding = P(ShardingAxisName.EXPERT_DATA, None)
+            return (token_sharding if in_axis is None else None,
+                    token_sharding if out_axis is None else None)
+        if isinstance(layer, RowParallelLinear):
+            return None, P(ShardingAxisName.MLP_TENSOR, None)
+        if isinstance(layer, ColumnParallelLinear):
+            return P(ShardingAxisName.MLP_TENSOR, None), None
+        return None, None
 
     def get_sp_token_axes(self, x):
         """EXPERT_DATA when the residual stream stays token-sharded."""
         return sp_token_axes(self.mesh, self.keep_tokens_sharded, x.shape[0])
 
-    def get_input_sharding(self, x: torchax.tensor.Tensor):
-        if not self.enable_sp:
+    def _resolve_sp_sharding(self, x, sharding):
+        """`sharding` if it applies to this call's token count, else None."""
+        if not self.enable_sp or sharding is None:
             return None
-        if self.keep_tokens_sharded and self.get_sp_token_axes(x) is None:
-            return None
+        if self.keep_tokens_sharded:
+            # Same condition as the shard_map specs in sharded_matmul /
+            # sharded_quantized_matmul, so the two always agree.
+            return sharding if self.get_sp_token_axes(x) is not None else None
         token_num = x.shape[0]
         # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
         if token_num // self.tp_size < TPU_SECOND_LAST_MINOR:
             return None
-        return self.input_sharding
+        return sharding
+
+    def get_input_sharding(self, x: torchax.tensor.Tensor):
+        return self._resolve_sp_sharding(x, self.input_sharding)
 
     def get_output_sharding(self, x: torchax.tensor.Tensor):
-        if self.enable_sp:
-            if self.keep_tokens_sharded and self.get_sp_token_axes(x) is None:
-                return None
-            token_num = x.shape[0]
-            # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
-            if token_num // self.tp_size < TPU_SECOND_LAST_MINOR:
-                return None
-        return self.output_sharding
+        # A row-parallel matmul with a deferred all-reduce
+        # (`defer_all_reduce`, set after __init__ from reduce_results=False)
+        # returns per-shard partial sums, which sharded_matmul keeps on
+        # ATTN_DATA (`_sp_layout`). Token-sharding them over EXPERT_DATA
+        # would drop the other ranks' partial sums before the caller's
+        # all-reduce.
+        if (self.keep_tokens_sharded and self.defer_all_reduce
+                and self.weight_sharding[0] is not None):
+            return None
+        return self._resolve_sp_sharding(x, self.output_sharding)
 
 
 class VllmQuantConfig:

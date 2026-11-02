@@ -28,6 +28,9 @@ import numpy as np
 import pytest
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               ReplicatedLinear,
+                                               RowParallelLinear)
 
 from tpu_inference.layers.common import fused_moe_gmm
 from tpu_inference.layers.common import linear as common_linear
@@ -35,6 +38,8 @@ from tpu_inference.layers.common import sharding as common_sharding
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   ShardingAxisName,
                                                   ShardingAxisNameBase)
+from tpu_inference.layers.vllm.quantization.configs import \
+    VllmQuantLinearConfig
 
 requires_8_devices = pytest.mark.skipif(len(jax.devices()) < 8,
                                         reason="needs 8 devices")
@@ -94,6 +99,114 @@ def test_keeps_tokens_sharded_guards(monkeypatch):
     assert not keeps(_shape_only_mesh(attn_dp=2, model=2, expert=2))
     assert not keeps(_shape_only_mesh(attn_dp=2, model=2, pcp=2))
     assert keeps(_shape_only_mesh(attn_dp=2, model=2, dcp=2))
+
+
+def _linear_config(layer_cls,
+                   weight_sharding,
+                   *,
+                   keep_tokens_sharded,
+                   enable_sp=True,
+                   defer_all_reduce=False):
+    """A VllmQuantLinearConfig without a vLLM layer / VllmConfig: only the
+    fields the SP sharding logic reads, on an attn_dp=2 x model=4 mesh
+    (EXPERT_DATA and MLP_TENSOR both 8)."""
+    cfg = VllmQuantLinearConfig.__new__(VllmQuantLinearConfig)
+    cfg.mesh = _shape_only_mesh(attn_dp=2, model=4)
+    cfg.enable_sp = enable_sp
+    cfg.tp_size = 8
+    cfg.keep_tokens_sharded = keep_tokens_sharded
+    cfg.weight_sharding = weight_sharding
+    cfg.input_sharding, cfg.output_sharding = cfg._sp_shardings(
+        layer_cls.__new__(layer_cls))
+    # Set after __init__ in practice (VllmRowParallelLinear).
+    cfg.defer_all_reduce = defer_all_reduce
+    return cfg
+
+
+def _tokens(n):
+    return SimpleNamespace(shape=(n, 128))
+
+
+def _weight_specs():
+    """(row, column, replicated) weight shardings. Built inside the tests,
+    after the fixture has set the multi-axis sharding names."""
+    return (P(ShardingAxisName.ATTN_HEAD,
+              None), P(None, ShardingAxisName.ATTN_HEAD), P(None, None))
+
+
+def test_linear_config_sp_shardings():
+    row_ws, col_ws, rep_ws = _weight_specs()
+    tok = P(ShardingAxisName.EXPERT_DATA, None)
+    mlp = P(ShardingAxisName.MLP_TENSOR, None)
+
+    # Token-sharded residual stream: the ends follow _sp_layout.
+    row = _linear_config(RowParallelLinear, row_ws, keep_tokens_sharded=True)
+    col = _linear_config(ColumnParallelLinear,
+                         col_ws,
+                         keep_tokens_sharded=True)
+    # A replicated shared expert (row- or column-parallel layer type).
+    rep = _linear_config(RowParallelLinear, rep_ws, keep_tokens_sharded=True)
+    for n in (8, 64):
+        # 8 tokens: one per device. Still token-sharded, like the shard_map
+        # specs (no MLP_TENSOR row-count threshold in this mode).
+        x = _tokens(n)
+        assert (row.get_input_sharding(x),
+                row.get_output_sharding(x)) == (None, tok)
+        assert (col.get_input_sharding(x),
+                col.get_output_sharding(x)) == (tok, None)
+        assert (rep.get_input_sharding(x), rep.get_output_sharding(x)) == (tok,
+                                                                           tok)
+    # Token count not divisible by EXPERT_DATA: ATTN_DATA fallback, no
+    # constraint (sp_token_axes is None, as in sharded_matmul).
+    for cfg in (row, col, rep):
+        assert cfg.get_input_sharding(_tokens(4)) is None
+        assert cfg.get_output_sharding(_tokens(4)) is None
+
+    # Plain enable_sp (no token-sharded residual stream): MLP_TENSOR ends
+    # above the TPU_SECOND_LAST_MINOR row threshold.
+    row = _linear_config(RowParallelLinear, row_ws, keep_tokens_sharded=False)
+    col = _linear_config(ColumnParallelLinear,
+                         col_ws,
+                         keep_tokens_sharded=False)
+    rep = _linear_config(ReplicatedLinear, rep_ws, keep_tokens_sharded=False)
+    x = _tokens(64)
+    assert (row.get_input_sharding(x), row.get_output_sharding(x)) == (None,
+                                                                       mlp)
+    assert (col.get_input_sharding(x), col.get_output_sharding(x)) == (mlp,
+                                                                       None)
+    assert (rep.get_input_sharding(x), rep.get_output_sharding(x)) == (None,
+                                                                       None)
+    assert row.get_output_sharding(_tokens(8)) is None
+    assert col.get_input_sharding(_tokens(8)) is None
+
+    # enable_sp off: no constraints.
+    for layer_cls, ws in ((RowParallelLinear, row_ws), (ColumnParallelLinear,
+                                                        col_ws)):
+        cfg = _linear_config(layer_cls,
+                             ws,
+                             keep_tokens_sharded=False,
+                             enable_sp=False)
+        assert cfg.get_input_sharding(x) is None
+        assert cfg.get_output_sharding(x) is None
+
+
+def test_linear_config_deferred_all_reduce_not_token_sharded():
+    """A TP-sharded row-parallel linear with reduce_results=False returns
+    partial sums on ATTN_DATA; its output must not be token-sharded."""
+    row_ws, _, rep_ws = _weight_specs()
+    x = _tokens(64)
+    row = _linear_config(RowParallelLinear,
+                         row_ws,
+                         keep_tokens_sharded=True,
+                         defer_all_reduce=True)
+    assert row.get_output_sharding(x) is None
+    # A replicated (shared-expert) weight has no partial sums, so its output
+    # stays token-sharded even with reduce_results=False.
+    rep = _linear_config(RowParallelLinear,
+                         rep_ws,
+                         keep_tokens_sharded=True,
+                         defer_all_reduce=True)
+    assert rep.get_output_sharding(x) == P(ShardingAxisName.EXPERT_DATA, None)
 
 
 @requires_8_devices
