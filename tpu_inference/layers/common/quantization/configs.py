@@ -60,6 +60,11 @@ class QuantLinearConfig:
         None (default) keeps the usual ATTN_DATA token sharding in
         sharded_matmul / sharded_quantized_matmul. VllmQuantLinearConfig
         returns EXPERT_DATA when the sequence-parallel residual stream is on.
+
+        The default is needed: the common linear methods (quantization/fp8.py,
+        quantization/unquantized.py) call this unconditionally, and they are
+        also used with the JAX-path QuantLinearConfig
+        (layers/jax/quantization/configs.py), which doesn't override it.
         """
         del x
         return None

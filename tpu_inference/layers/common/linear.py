@@ -163,8 +163,12 @@ def _sp_layout(in_axis, out_axis, sp_token_axes, defer_all_reduce: bool):
     * replicated weight (in=None, out=None): token-sharded in and out, no
       collective;
     * column-parallel (in=None, out=TP): token-sharded in; the tokens are
-      all-gathered over the TP (out) axis inside the shard_map (after FP8
-      quantization for quantized weights), output `ATTN_DATA` x TP as usual;
+      all-gathered over the TP (out) axis inside the shard_map, output
+      `ATTN_DATA` x TP as usual. On the xla_quantized_matmul path the
+      activation is gathered after FP8 quantization; with
+      ENABLE_QUANTIZED_MATMUL_KERNEL (gmm_v2) it is gathered in bf16, because
+      gmm_v2 quantizes the LHS itself. Small weights may instead be gathered
+      (`_sp_gather_weight_is_cheaper`);
     * row-parallel (in=TP, out=None): `ATTN_DATA` in; `psum_scatter`
       (reduce-scatter) over the TP axis instead of `psum`, output
       token-sharded.
@@ -376,6 +380,9 @@ def sharded_quantized_matmul(x: jax.Array,
     def wrapper(x, w_q, w_s):
         if enable_quantized_matmul_kernel:
             if sp_col_parallel:
+                # gmm_v2 quantizes the LHS itself, so on this path the tokens
+                # are gathered in bf16 (2x the bytes of the FP8 gather in
+                # xla_quantized_matmul below).
                 x = jax.lax.all_gather(x,
                                        axis_name=out_axis,
                                        axis=0,
