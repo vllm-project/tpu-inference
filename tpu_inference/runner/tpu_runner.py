@@ -50,6 +50,8 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 import tpu_inference.envs as envs
 from tpu_inference import utils as common_utils
+from tpu_inference.core.hybrid_coordinator import (
+    gdn_spec_scratch_slots_per_rank, uses_gdn_spec_scratch)
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_backend import (
     HostStepInputs, attention_backend_name, create_attention_backend)
@@ -630,6 +632,21 @@ def _subtract_num_rejected_tokens_fn(seq_lens: jax.Array, positions: jax.Array,
         pos_subtract = jnp.expand_dims(pos_subtract, axis=0)
     positions = positions - pos_subtract
     return seq_lens, positions
+
+
+@jax.jit
+def _subtract_gdn_read_offsets_fn(gdn_read_offsets: jax.Array,
+                                  num_rejected_tokens: jax.Array,
+                                  subtract_indices: jax.Array) -> jax.Array:
+    """Subtract the previous step's rejected-token counts from the GDN state
+    read offsets (async scheduling). Negative offsets (-1: resume from the
+    mamba block table) are left alone.
+    """
+    valid = (subtract_indices >= 0) & (gdn_read_offsets >= 0)
+    subtract = jnp.where(valid,
+                         num_rejected_tokens[jnp.maximum(subtract_indices,
+                                                         0)], 0)
+    return gdn_read_offsets - subtract.astype(gdn_read_offsets.dtype)
 
 
 def _jax_logprobs_materialize(
@@ -1417,9 +1434,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _wire_input_batch_mamba_state(self,
                                       kv_cache_config: KVCacheConfig) -> None:
         self.input_batch.has_mamba_layers = kv_cache_config.has_mamba_layers
+        if uses_gdn_spec_scratch(self.vllm_config):
+            num_spec_tokens = self.speculative_config.num_speculative_tokens
+            if self.input_batch.max_decode_tokens < num_spec_tokens + 1:
+                raise ValueError(
+                    "Speculative decoding with linear-attention (GDN/mamba) "
+                    "prefix caching (mamba_cache_mode='align') requires "
+                    "USE_BATCHED_RPA_KERNEL=1 so verify windows run in the "
+                    "decode segment.")
         if self.kv_cache_manager.actual_mamba_num_blocks is not None:
             self.input_batch.init_mamba_pools(
-                self.kv_cache_manager.actual_mamba_num_blocks)
+                self.kv_cache_manager.actual_mamba_num_blocks,
+                scratch_slots_per_rank=gdn_spec_scratch_slots_per_rank(
+                    self.vllm_config, self.max_num_reqs, self.dp_size))
 
     def delete_kv_cache(self) -> None:
         self.kv_cache_manager.delete_kv_cache()
@@ -1575,9 +1602,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             if not sampled_ids:
                 continue
 
-            # If request not active in the *current* batch (e.g. finished or evicted), skip it.
+            # If request not active in the *current* batch (e.g. finished,
+            # preempted, or temporarily unscheduled), skip input_batch updates.
+            # A paused request that is still in self.requests keeps its mamba
+            # slot and verify-window offset; subtract rejected drafts here since
+            # next step's on-device subtraction will no longer see it in
+            # _pre_async_results.
             req_id = pre_req_ids[pre_req_idx]
             if req_id not in self.input_batch.req_id_to_index:
+                if (self.speculative_config is not None
+                        and pre_scheduler_output is not None
+                        and req_state is self.requests.get(req_id)
+                        and req_state.mamba_read_offset >= 0):
+                    num_drafts = len(
+                        pre_scheduler_output.scheduled_spec_decode_tokens.get(
+                            req_id, ()))
+                    if num_drafts > 0:
+                        req_state.mamba_read_offset -= (num_drafts + 1 -
+                                                        len(sampled_ids))
                 continue
 
             req_idx = self.input_batch.req_id_to_index[req_id]
@@ -2342,6 +2384,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             # Save the previous results
             next_tokens = jax.copy_to_host_async(next_tokens)
+            # The acceptance counts are still on TPU: assume every draft is
+            # accepted here, `_prepare_inputs` subtracts the actual rejections
+            # on TPU (like `seq_lens`).
+            self._update_mamba_read_state(req_ids,
+                                          scheduler_output,
+                                          discard_sampled_tokens_req_indices,
+                                          valid_sampled_token_ids=None)
             self._pre_async_results = AsyncPreResults(
                 req_ids=req_ids,
                 next_tokens=next_tokens,
@@ -2395,23 +2444,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self, spec_decode_metadata, next_tokens, logits_indices_selector,
             discard_sampled_tokens_req_indices, num_reqs)
 
-        if self.speculative_config:
-            num_spec_tokens = self.speculative_config.num_speculative_tokens
-            discard_set = set(discard_sampled_tokens_req_indices)
-            for req_idx, req_id in enumerate(req_ids):
-                req_state = self.requests[req_id]
-                q_len = scheduler_output.num_scheduled_tokens[req_id]
-                if q_len <= num_spec_tokens + 1:
-                    num_drafts = len(
-                        scheduler_output.scheduled_spec_decode_tokens.get(
-                            req_id, ()))
-                    num_sampled = len(valid_sampled_token_ids[req_idx])
-                    num_rejected = (0 if
-                                    (req_idx in discard_set or num_drafts == 0)
-                                    else num_drafts + 1 - num_sampled)
-                    req_state.mamba_read_offset = q_len - 1 - num_rejected
-                else:
-                    req_state.mamba_read_offset = 0
+        self._update_mamba_read_state(req_ids, scheduler_output,
+                                      discard_sampled_tokens_req_indices,
+                                      valid_sampled_token_ids)
 
         # Append sampled tokens
         for req_idx, req_state, _ in request_seq_lens:
@@ -2811,14 +2846,61 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 next_tokens_in_tpu, placeholder_num)
         return input
 
-    def _subtract_num_rejected_tokens(self, seq_lens, positions, req_ids_dp,
-                                      scheduled_tokens_per_dp_rank):
+    def _update_mamba_read_state(
+        self,
+        req_ids: list[str],
+        scheduler_output: "VllmSchedulerOutput",
+        discard_sampled_tokens_req_indices: list[int],
+        valid_sampled_token_ids: Optional[list[list[int]]],
+    ) -> None:
+        """Record where each request's GDN state lands after this step.
+
+        Requests in the decode segment (`q_len <= max_decode_tokens`) ran as
+        verify windows that write one state checkpoint per window position;
+        the next step resumes from the checkpoint of the last accepted token
+        (`mamba_read_offset >= 0`). Prefill chunks write a single final state
+        (`mamba_read_offset = -1`, which resumes from the block table in align
+        mode and clamps to 0 in none mode).
+
+        `valid_sampled_token_ids` is None under async scheduling, where the
+        acceptance counts are still on TPU: the offsets then assume every
+        draft was accepted and `_prepare_inputs` subtracts the rejections on
+        TPU (see `_subtract_num_rejected_tokens`).
+        """
+        if not self.speculative_config:
+            return
+        num_spec_tokens = self.speculative_config.num_speculative_tokens
+        discard_set = set(discard_sampled_tokens_req_indices)
+        for req_idx, req_id in enumerate(req_ids):
+            req_state = self.requests[req_id]
+            q_len = scheduler_output.num_scheduled_tokens[req_id]
+            if q_len <= num_spec_tokens + 1:
+                num_drafts = len(
+                    scheduler_output.scheduled_spec_decode_tokens.get(
+                        req_id, ()))
+                num_rejected = 0
+                if (valid_sampled_token_ids is not None
+                        and req_idx not in discard_set and num_drafts > 0):
+                    num_rejected = (num_drafts + 1 -
+                                    len(valid_sampled_token_ids[req_idx]))
+                req_state.mamba_read_offset = q_len - 1 - num_rejected
+            else:
+                req_state.mamba_read_offset = -1
+
+    def _subtract_num_rejected_tokens(self,
+                                      seq_lens,
+                                      positions,
+                                      req_ids_dp,
+                                      scheduled_tokens_per_dp_rank,
+                                      gdn_read_offsets=None):
         """Apply rejection-count subtraction to seq_lens and positions if needed.
 
         `num_computed_tokens_cpu` was advanced on the host assuming every
         speculatively proposed token from the previous step was accepted. Here
         we subtract the actual rejection counts on TPU for the requests that
-        ran spec decoding in the previous step.
+        ran spec decoding in the previous step. `gdn_read_offsets` (GDN state
+        checkpoint to resume from, see `_update_mamba_read_state`) made the
+        same assumption and is corrected the same way when given.
         """
         assert self._pre_async_results is not None
         assert self._pre_async_results.spec_decode_num_rejected_tokens is not None
@@ -2856,7 +2938,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 seq_lens, positions,
                 self._pre_async_results.spec_decode_num_rejected_tokens,
                 seq_lens_subtract_indices, positions_subtract_indices)
-        return seq_lens, positions
+            if gdn_read_offsets is not None:
+                gdn_read_offsets = _subtract_gdn_read_offsets_fn(
+                    gdn_read_offsets,
+                    self._pre_async_results.spec_decode_num_rejected_tokens,
+                    seq_lens_subtract_indices)
+        return seq_lens, positions, gdn_read_offsets
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -3187,9 +3274,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # byte-identical to the pre-compact-mamba layout (so the model_fn
         # signature on those models is unchanged).
         # In align mode (prefix caching), mamba state indices are derived on-device
-        # from the block tables, so mamba_state_indices is None.
-        if (self.kv_cache_config.has_mamba_layers and getattr(
-                self.cache_config, "mamba_cache_mode", "none") != "align"):
+        # from the block tables, so mamba_state_indices is None -- except with
+        # spec decode, where they carry each request's verify-window scratch
+        # group base (see `uses_gdn_spec_scratch`).
+        if self.kv_cache_config.has_mamba_layers and (getattr(
+                self.cache_config, "mamba_cache_mode",
+                "none") != "align" or uses_gdn_spec_scratch(self.vllm_config)):
             # Reorder mamba_state_indices per DP rank (like block_tables)
             # and convert global slot ids to rank-local indices so they
             # index correctly into the per-rank shard of the mamba state.
@@ -3246,8 +3336,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # proposed tokens from the previous step were accepted. Subtract the
         # actual rejection counts from `seq_lens` and `positions` on TPU.
         if self.speculative_config and self.scheduler_config.async_scheduling and self._pre_async_results is not None:
-            seq_lens, positions = self._subtract_num_rejected_tokens(
-                seq_lens, positions, req_ids_dp, scheduled_tokens_per_dp_rank)
+            seq_lens, positions, gdn_read_offsets = (
+                self._subtract_num_rejected_tokens(
+                    seq_lens,
+                    positions,
+                    req_ids_dp,
+                    scheduled_tokens_per_dp_rank,
+                    gdn_read_offsets=gdn_read_offsets))
 
         def build_attn(block_tables: jax.Array | None,
                        gid: int) -> AttentionMetadata:

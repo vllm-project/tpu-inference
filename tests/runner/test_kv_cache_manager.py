@@ -1084,6 +1084,39 @@ class TestKVCacheManager:
         expected_cls = RunnerSlotMambaSpec if flag else MambaSpec
         assert type(kv_cache_spec['layer.0']) is expected_cls
 
+    def test_get_kv_cache_spec_align_spec_decode_zeroes_num_speculative_blocks(
+            self):
+        """When mamba_cache_mode='align' and speculative decoding are both active,
+        MambaSpec.num_speculative_blocks must be forced to 0 so the scheduler
+        does not allocate per-draft mamba blocks (drafts use scratch slots)."""
+        gdn_spec = MambaSpec(shapes=((3, 64), (8, 64, 16)),
+                             dtypes=(torch.bfloat16, torch.float32),
+                             block_size=16,
+                             num_speculative_blocks=3,
+                             mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+                             mamba_cache_mode="align")
+        mock_gdn_module = MagicMock(spec=MambaBase)
+        mock_gdn_module.get_kv_cache_spec.return_value = gdn_spec
+
+        def get_layers_side_effect(vllm_config, attn_cls):
+            if MambaBase in attn_cls:
+                return {'layer.0': mock_gdn_module}
+            return {}
+
+        self.runner.vllm_config.compilation_config.static_forward_context = {
+            'layer.0': mock_gdn_module
+        }
+        self.runner.vllm_config.cache_config.mamba_cache_mode = "align"
+        self.runner.vllm_config.speculative_config = MagicMock(
+            num_speculative_tokens=3)
+
+        with patch(
+                'tpu_inference.runner.kv_cache_manager.get_layers_from_vllm_config',
+                side_effect=get_layers_side_effect):
+            kv_cache_spec = self.runner.get_kv_cache_spec()
+
+        assert kv_cache_spec['layer.0'].num_speculative_blocks == 0
+
     def test_initialize_kv_cache_mamba(self):
         num_blocks = 100
         page_size_bytes = 16 * 1024

@@ -231,7 +231,7 @@ class TestPersistentBatchManager(unittest.TestCase):
             _make_scheduler_output(preempted_req_ids={req.req_id}), None)
 
         self.assertIsNone(req.mamba_state_slot)
-        self.assertEqual(req.mamba_read_offset, 0)
+        self.assertEqual(req.mamba_read_offset, -1)
         self.assertTrue(
             any(slot in pool
                 for pool in input_batch._free_mamba_slots_per_rank))
@@ -269,7 +269,7 @@ class TestPersistentBatchManager(unittest.TestCase):
             _make_scheduler_output(preempted_req_ids={req.req_id}), None)
 
         self.assertIsNone(req.mamba_state_slot)
-        self.assertEqual(req.mamba_read_offset, 0)
+        self.assertEqual(req.mamba_read_offset, -1)
         self.assertTrue(
             any(slot in pool
                 for pool in input_batch._free_mamba_slots_per_rank))

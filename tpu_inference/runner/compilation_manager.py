@@ -28,6 +28,7 @@ from vllm.utils.math_utils import round_down
 
 import tpu_inference.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
+from tpu_inference.core.hybrid_coordinator import uses_gdn_spec_scratch
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, GroupedAttentionMetadata, SharedAttentionMetadata)
@@ -479,10 +480,11 @@ class CompilationManager:
         # Dummy mamba_state_indices for compile-cache pre-tracing. Only
         # populate for hybrid attn+mamba models without align mode — for pure-attention models
         # and mamba align mode we pass None at runtime (see `_prepare_inputs`), and the precompile
-        # primer must match that shape so the cached HLO is reused.
-        if (self.runner.kv_cache_config.has_mamba_layers
-                and getattr(self.runner.cache_config, "mamba_cache_mode",
-                            "none") != "align"):
+        # primer must match that shape so the cached HLO is reused. Align mode
+        # with spec decode passes the scratch group bases, so populate those.
+        if self.runner.kv_cache_config.has_mamba_layers and (
+                getattr(self.runner.cache_config, "mamba_cache_mode", "none")
+                != "align" or uses_gdn_spec_scratch(self.runner.vllm_config)):
             mamba_state_indices = device_array(self.runner.mesh,
                                                np.zeros(
                                                    self.runner.max_num_reqs,
@@ -708,6 +710,22 @@ class CompilationManager:
                 seq_lens_subtract_indices,
                 positions_subtract_indices,
                 num_tokens=num_tokens,
+            )
+
+        if self.runner.kv_cache_config.has_mamba_layers:
+            from tpu_inference.runner.tpu_runner import \
+                _subtract_gdn_read_offsets_fn
+            metadata_sharding = NamedSharding(
+                self.runner.mesh, PartitionSpec(ShardingAxisName.BATCH))
+            self._run_compilation(
+                "_subtract_gdn_read_offsets_fn",
+                _subtract_gdn_read_offsets_fn,
+                self._create_dummy_tensor((self.runner.max_num_reqs, ),
+                                          jnp.int32, metadata_sharding),
+                self._create_dummy_tensor((self.runner.max_num_reqs, ),
+                                          jnp.int32, dp_sharding),
+                self._create_dummy_tensor((self.runner.max_num_reqs, ),
+                                          jnp.int32, replicated_sharding),
             )
 
     def _precompile_concat_last_sampled_tokens_and_draft_tokens(self) -> None:
