@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import dataclasses
+import math
 
 import jax
 import jax.numpy as jnp
@@ -184,6 +185,40 @@ def _sp_layout(in_axis, out_axis, sp_token_axes, defer_all_reduce: bool):
     return x_axes, out_axes, col_parallel, row_parallel
 
 
+# Largest all-gathered weight ([K, N]) for the sequence-parallel
+# column-parallel weight-gather path (`_sp_gather_weight_is_cheaper`). That
+# path reads the full weight from HBM and holds it as a temporary on every
+# device, which the collective byte count doesn't see; the cap keeps it to
+# genuinely small projections (e.g. a GDN in_proj_ba).
+_SP_WEIGHT_GATHER_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _sp_gather_weight_is_cheaper(x_shape, x_dtype, w_shape, w_dtype,
+                                 tp_size: int) -> bool:
+    """Whether a sequence-parallel column-parallel matmul all-gathers the
+    weight (then all_to_alls the output) instead of the token rows.
+
+    Shapes are the local shards inside the shard_map: x [m, ..., K] with m
+    token rows (1 / TP of the ATTN_DATA block) and w [K, n] with n = N / TP
+    columns. Bytes each device receives:
+
+      token gather : (TP - 1) * m * K * x_bytes
+      weight gather: (TP - 1) * (K * n * w_bytes + m * n * out_bytes)
+
+    The weight gather is used only if it receives fewer bytes and the full
+    weight is at most `_SP_WEIGHT_GATHER_MAX_BYTES`.
+    """
+    k, n = w_shape
+    rows = math.prod(x_shape) // k
+    w_bytes = jnp.dtype(w_dtype).itemsize
+    if tp_size * k * n * w_bytes > _SP_WEIGHT_GATHER_MAX_BYTES:
+        return False
+    out_bytes = jnp.result_type(x_dtype, w_dtype).itemsize
+    token_gather = rows * k * jnp.dtype(x_dtype).itemsize
+    weight_gather = k * n * w_bytes + rows * n * out_bytes
+    return weight_gather < token_gather
+
+
 def sharded_matmul(x: jax.Array,
                    w: jax.Array,
                    weight_sharding: P | NamedSharding,
@@ -209,6 +244,8 @@ def sharded_matmul(x: jax.Array,
     x_axes, out_axes, sp_col_parallel, sp_row_parallel = _sp_layout(
         in_axis, out_axis, sp_token_axes, defer_all_reduce)
     x_spec = P(x_axes, *batch_dims, in_axis)
+    tp_size = (get_mesh_shape_product(mesh, out_axis)
+               if sp_col_parallel else 1)
 
     x, orig_len = _pad_sharded_activation(x, mesh, x_spec[0], axis_idx=0)
 
@@ -218,22 +255,21 @@ def sharded_matmul(x: jax.Array,
 
     def wrapper(x, w):
         if sp_col_parallel:
-            if w.size < x.size:
+            if _sp_gather_weight_is_cheaper(x.shape, x.dtype, w.shape, w.dtype,
+                                            tp_size):
                 # Small weight (e.g. a few output columns): gather the weight
-                # and the (smaller) outputs instead of the token rows.
+                # instead of the token rows. Each device then holds its token
+                # rows x all N columns; all_to_all swaps the TP tiles so it
+                # ends with all rows x its N / TP columns.
                 w_full = jax.lax.all_gather(w,
                                             axis_name=out_axis,
                                             axis=1,
                                             tiled=True)
-                out_full = jax.lax.all_gather(x @ w_full,
-                                              axis_name=out_axis,
-                                              axis=0,
-                                              tiled=True)
-                tp_idx = jax.lax.axis_index(out_axis)
-                out = jax.lax.dynamic_slice_in_dim(out_full,
-                                                   tp_idx * w.shape[1],
-                                                   w.shape[1],
-                                                   axis=out_full.ndim - 1)
+                out = jax.lax.all_to_all(x @ w_full,
+                                         axis_name=out_axis,
+                                         split_axis=x.ndim - 1,
+                                         concat_axis=0,
+                                         tiled=True)
             else:
                 x_full = jax.lax.all_gather(x,
                                             axis_name=out_axis,

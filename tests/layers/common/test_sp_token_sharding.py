@@ -293,11 +293,35 @@ def test_shared_expert_reduce_follows_linear_configs(monkeypatch, prefix,
                                            ShardingAxisName.ATTN_HEAD)
 
 
+def test_sp_gather_weight_selection():
+    """The column-parallel weight-gather path is taken only for small weights
+    that also receive fewer bytes than the token all-gather."""
+    pick = common_linear._sp_gather_weight_is_cheaper
+    bf16 = jnp.bfloat16
+    # Tiny projection (in_proj_ba-like), prefill: M=8192, K=8192, N=128,
+    # TP=8. Full weight 2 MiB; ~0.3 MB vs 16.8 MB received.
+    assert pick((1024, 8192), bf16, (8192, 16), bf16, 8)
+    # Normal projection, prefill: M=8192, K=8192, N=6144, TP=8. Fewer bytes
+    # with all_to_all (~14 MB vs 16.8 MB), but the full weight is ~100 MB:
+    # over the cap, so tokens are gathered.
+    assert not pick((1024, 8192), bf16, (8192, 768), bf16, 8)
+    # Tiny projection, decode: M=16, TP=2. Gathering 16 token rows is cheaper.
+    assert not pick((8, 8192), bf16, (8192, 64), bf16, 2)
+    # Extra leading batch dims count as token rows.
+    assert pick((512, 2, 8192), bf16, (8192, 16), bf16, 8)
+
+
 @requires_8_devices
-def test_sp_token_sharding_linears():
+@pytest.mark.parametrize("mesh_sizes", [
+    dict(attn_dp=2, model=4),
+    dict(attn_dp=2, model=2, dcp=2),
+],
+                         ids=["model4", "model2_dcp2"])
+def test_sp_token_sharding_linears(mesh_sizes):
     """Replicated / column / row-parallel matmuls with token-sharded ends
-    match the ATTN_DATA path; bf16 and FP8 (FP8 all-gather) weights."""
-    mesh = _make_mesh(attn_dp=2, model=4)
+    match the ATTN_DATA path; bf16 and FP8 (FP8 all-gather) weights. The
+    model2_dcp2 mesh makes ATTN_HEAD a multi-axis TP group (model, dcp)."""
+    mesh = _make_mesh(**mesh_sizes)
     t, h, qkv_out, ba_out = 64, 128, 256, 8
     keys = jax.random.split(jax.random.PRNGKey(42), 6)
     x = jax.random.normal(keys[0], (t, h), jnp.bfloat16)
@@ -321,7 +345,7 @@ def test_sp_token_sharding_linears():
         def run_block(x_in):
             kw = {"mesh": mesh, "sp_token_axes": sp_token_axes}
             y_rep = common_linear.sharded_matmul(x_in, w_rep, rep_spec, **kw)
-            # ba_out / TP = 2 columns per shard: small-weight path.
+            # ba_out / TP = 2 columns per shard: weight-gather + all_to_all.
             y_ba = common_linear.sharded_matmul(x_in, w_ba, col_spec, **kw)
             y_qkv = common_linear.sharded_quantized_matmul(
                 x_in, w_qkv, s_qkv, col_spec, **kw)
