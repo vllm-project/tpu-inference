@@ -20,16 +20,17 @@ from tpu_inference.kernels.experimental.batched_rpa import configs, utils
 
 
 def flash_attention_qk_softmax(
-    q: jax.Array,  # [B, KV, TQ, H]
-    k: jax.Array,  # [B, KV, S, H] or [B, KV, H, S]
-    m_prev: jax.Array,  # [B, KV, TQ, 128]
-    l_prev: jax.Array,  # [B, KV, TQ, 128]
-    *,
-    processed_q_len: list[jax.Array],  # [B]
-    processed_kv_len: list[jax.Array],  # [B]
-    effective_kv_len: list[jax.Array],  # [B]
-    cfgs: configs.RpaConfigs,
-    bq_start: int,
+        step: jax.Array,
+        q: jax.Array,  # [B, KV, TQ, H]
+        k: jax.Array,  # [B, KV, S, H] or [B, KV, H, S]
+        m_prev: jax.Array,  # [KV, TQ, 128]
+        l_prev: jax.Array,  # [KV, TQ, 128]
+        is_last_k: jax.Ref,  # [B]
+        *,
+        custom_mask: jax.Array,
+        cfgs: configs.RpaConfigs,
+        bq_start: int,
+        k_scale: jax.Array | float | None = None,  # [B, KV, S]
 ):
     """Flash attention kernel."""
     b, k_heads, tq, h_size = q.shape
@@ -59,59 +60,78 @@ def flash_attention_qk_softmax(
             dimension_numbers=(([2], [2]), ([0], [0])),
             preferred_element_type=jnp.float32,
         )
-    qk = qk.astype(cfgs.serve.dtype_out).reshape(b, k_heads, tq, s)
+    qk = qk.reshape(b, k_heads, tq, s)
 
     qk *= cfgs.model.sm_scale
-    if cfgs.serve.scale_k is not None:
-        qk *= cfgs.serve.scale_k
     if cfgs.serve.scale_q is not None:
         qk *= cfgs.serve.scale_q
+    if k_scale is not None:
+        qk *= k_scale
+
+    # We convert to the output dtype after scaling, because especially for very
+    # low precision, we want to have 32-bit scale factors and do scaling in fp32.
+    qk = qk.astype(cfgs.serve.dtype_out)
 
     if cfgs.model.soft_cap is not None:
         qk = cfgs.model.soft_cap * jnp.tanh(qk / cfgs.model.soft_cap)
 
     qk_masked = []
-
-    int_ty = cfgs.serve.int_ty
-
     for b_idx in range(cfgs.block.batch_size):
-        kv_idx_b = (lax.broadcasted_iota(int_ty, (k_heads, tq, s), 2) +
-                    processed_kv_len[b_idx])
-        q_idx_b = (lax.broadcasted_iota(jnp.int32, (k_heads, tq, s), 1) //
-                   cfgs.aligned_num_q_heads_per_kv_head +
-                   bq_start).astype(int_ty) + processed_q_len[b_idx]
-
-        eff_kv_len_b = effective_kv_len[b_idx]
-        mask_b = q_idx_b < eff_kv_len_b
-        mask_b = jnp.logical_and(mask_b, q_idx_b >= kv_idx_b)
-
-        if (sliding_window := cfgs.model.sliding_window) is not None:
-            mask_b = jnp.logical_and(mask_b, q_idx_b
-                                     < kv_idx_b + sliding_window)
-
+        mask_b = custom_mask[b_idx]
         qk_masked.append(jnp.where(mask_b, qk[b_idx], cfgs.model.mask_value))
     qk = jnp.stack(qk_masked, axis=0)
 
     m_curr = jnp.max(qk, axis=-1, keepdims=True)
-    m_next = jnp.maximum(m_prev, m_curr)
+
+    alpha_list = []
+    m_next_list = []
+
+    for b_idx in range(cfgs.block.batch_size):
+        m_curr_b = m_curr[b_idx]
+        m_next_b = jnp.maximum(m_prev, m_curr_b)
+        alpha_b = jnp.where(m_prev == -jnp.inf, 0.0,
+                            jnp.exp(m_prev - m_next_b))
+        alpha_list.append(alpha_b)
+        m_next_list.append(m_next_b)
+        m_prev = jnp.where(is_last_k[step, b_idx], -jnp.inf, m_next_b)
+
+    m_next = jnp.stack(m_next_list, axis=0)
     p = jnp.exp(qk - utils.broadcast_minor(m_next, qk.shape))
     p_rowsum = jnp.sum(p, axis=-1, keepdims=True, dtype=cfgs.serve.dtype_out)
 
-    alpha = jnp.exp(m_prev - m_next)
-    l_next = alpha * l_prev + p_rowsum
+    l_next_list = []
+    for b_idx in range(cfgs.block.batch_size):
+        term_prev = jnp.where(alpha_list[b_idx] == 0.0, 0.0,
+                              alpha_list[b_idx] * l_prev)
+        l_next_b = term_prev + p_rowsum[b_idx]
+        l_next_list.append(l_next_b)
+        l_prev = l_next_b
 
-    return p, alpha, m_next, l_next
+    l_next = jnp.stack(l_next_list, axis=0)
+
+    return p, alpha_list, m_next, l_next, m_prev
 
 
 def flash_attention_pv(
-    p: jax.Array,  # [B, KV, TQ, S]
-    v: jax.Array,  # [B, KV, S, H] or [B, KV, H, S]
-    alpha: jax.Array,  # [B, KV, TQ, 128]
-    o_prev: jax.Array,  # [B, KV, TQ, H]
-    cfgs: configs.RpaConfigs,
+        p: jax.Array,  # [B, KV, TQ, S]
+        v: jax.Array,  # [B, KV, S, H] or [B, KV, H, S]
+        alpha_list: list[jax.Array],  # B * [KV, TQ, 128]
+        o_prev: jax.Array,  # [KV, TQ, H]
+        cfgs: configs.RpaConfigs,
+        v_scale: jax.Array | None = None,  # [B, KV, S]
 ):
     """Flash attention kernel."""
     b, k_heads, tq, s = p.shape
+
+    # Because we sum along the sequence dimension in this matmul, we must do the
+    # per-token scaling before the matmul. Therefore, there is separate logic
+    # here for per-token and per-tensor scaling, unlike the qk matmul.
+    if cfgs.serve.per_token_scale:
+        assert v_scale is not None
+        v_sc = v_scale[:, :, jnp.newaxis, :]
+        # We can scale p or v, and because p will be smaller especially for decode
+        # workflows, we scale p to save some time.
+        p = p.astype(v_sc.dtype) * v_sc
 
     if cfgs.serve.kv_layout == configs.KVLayout.SEQ_ALONG_LANE:
         h_size = v.shape[-2]
@@ -131,9 +151,16 @@ def flash_attention_pv(
         )
     pv = pv.astype(cfgs.serve.dtype_out).reshape(b, k_heads, tq, h_size)
 
-    if cfgs.serve.scale_v is not None:
+    if not cfgs.serve.per_token_scale and cfgs.serve.scale_v is not None:
         pv *= cfgs.serve.scale_v
 
-    o_next = utils.broadcast_minor(alpha, o_prev.shape) * o_prev + pv
+    o_next_list = []
+    for b_idx in range(cfgs.block.batch_size):
+        alpha_b = utils.broadcast_minor(alpha_list[b_idx], o_prev.shape)
+        term_prev = jnp.where(alpha_b == 0.0, 0.0, alpha_b * o_prev)
+        o_next_b = term_prev + pv[b_idx]
+        o_next_list.append(o_next_b)
+        o_prev = o_next_b
+    o_next = jnp.stack(o_next_list, axis=0)
 
     return o_next

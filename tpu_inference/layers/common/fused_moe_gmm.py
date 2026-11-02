@@ -32,7 +32,9 @@ from tpu_inference.kernels.experimental.moe_lowtok import \
 from tpu_inference.kernels.sparse_core.dense_gather_reduce import \
     dense_gather_reduce
 from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v2 import \
-    ragged_gather_reduce
+    ragged_gather_reduce as ragged_gather_reduce_v2
+from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v3 import \
+    ragged_gather_reduce as ragged_gather_reduce_v3
 from tpu_inference.kernels.sparse_core.ragged_gather_v2 import \
     ragged_gather_v2 as ragged_gather
 from tpu_inference.layers.common.linear import _safe_calculate_tiling
@@ -44,6 +46,14 @@ from tpu_inference.logger import init_logger
 from tpu_inference.utils import align_to, get_mesh_shape_product
 
 logger = init_logger(__name__)
+
+
+def _select_ragged_gather_reduce(version: str | None = None):
+    v = (version or envs.RAGGED_GATHER_REDUCE_VERSION).lower()
+    if v == "v3":
+        return ragged_gather_reduce_v3
+    return ragged_gather_reduce_v2
+
 
 # Above 2,048 routed rows, the inverse-permutation scatter costs more than
 # the two sorts it replaces.
@@ -275,6 +285,11 @@ def _override_token_indices_for_random_routing(
     return topk_indices
 
 
+def _get_topk_weights_dtype(default_dtype: jnp.dtype) -> jnp.dtype:
+    """Returns float32 if TPU_MOE_TOPK_WEIGHTS_FLOAT32 is enabled, else default_dtype."""
+    return jnp.float32 if envs.TPU_MOE_TOPK_WEIGHTS_FLOAT32 else default_dtype
+
+
 def all_gather_topk_indices_and_weights(
         topk_indices: jax.Array, topk_weights: jax.Array, dtype: jnp.dtype,
         mesh: Mesh) -> tuple[jax.Array, jax.Array]:
@@ -297,7 +312,8 @@ def all_gather_topk_indices_and_weights(
     topk_weights = gathered_blob[1]
     topk_indices = topk_indices.reshape(-1, top_k)
     topk_weights = jax.lax.bitcast_convert_type(topk_weights, jnp.float32)
-    topk_weights = topk_weights.reshape(-1, top_k).astype(dtype)
+    topk_weights = topk_weights.reshape(-1, top_k).astype(
+        _get_topk_weights_dtype(dtype))
 
     return topk_indices, topk_weights
 
@@ -638,29 +654,31 @@ def _tc_local_moe(tokens: jax.Array, topk_argsort_indices: jax.Array,
     return out.astype(tokens.dtype)
 
 
-def moe_gmm_local(x: jax.Array,
-                  w1: jax.Array,
-                  w1_scale: jax.Array | None,
-                  w1_bias: jax.Array | None,
-                  w2: jax.Array,
-                  w2_scale: jax.Array | None,
-                  w2_bias: jax.Array | None,
-                  group_sizes: jax.Array,
-                  group_offset: jax.Array,
-                  topk_argsort_revert_indices: jax.Array,
-                  topk_weights: jax.Array,
-                  topk_argsort_indices: jax.Array | None = None,
-                  *,
-                  activation: str,
-                  topk: int,
-                  parallelism: Literal["tp", "ep"],
-                  enable_rs_kernel: bool = False,
-                  onehot_moe_permute_threshold: int = 0,
-                  out_token_axes=None,
-                  moe_chunk_size: int = 0,
-                  defer_all_reduce: bool = False,
-                  hierarchical_collect: tuple | None = None,
-                  tc_capacity: int = 0) -> jax.Array:
+def moe_gmm_local(
+        x: jax.Array,
+        w1: jax.Array,
+        w1_scale: jax.Array | None,
+        w1_bias: jax.Array | None,
+        w2: jax.Array,
+        w2_scale: jax.Array | None,
+        w2_bias: jax.Array | None,
+        group_sizes: jax.Array,
+        group_offset: jax.Array,
+        topk_argsort_revert_indices: jax.Array,
+        topk_weights: jax.Array,
+        topk_argsort_indices: jax.Array | None = None,
+        *,
+        activation: str,
+        topk: int,
+        parallelism: Literal["tp", "ep"],
+        enable_rs_kernel: bool = False,
+        onehot_moe_permute_threshold: int = 0,
+        out_token_axes=None,
+        moe_chunk_size: int = 0,
+        defer_all_reduce: bool = False,
+        hierarchical_collect: tuple | None = None,
+        tc_capacity: int = 0,
+        ragged_gather_reduce_version: str | None = None) -> jax.Array:
     """Main MoE logic on a local shard can run in TP or EP mode.
 
     Set parallelism for "tp" or "ep"
@@ -804,9 +822,11 @@ def moe_gmm_local(x: jax.Array,
                            cur_mask).sum(axis=1)
                 chunk_hidden = combine @ gmm2_res
             else:
-                chunk_hidden = ragged_gather_reduce(gmm2_res, cur_indices,
-                                                    cur_weights.reshape(-1),
-                                                    cur_mask.reshape(-1), topk)
+                rgr_fn = _select_ragged_gather_reduce(
+                    ragged_gather_reduce_version)
+                chunk_hidden = rgr_fn(gmm2_res, cur_indices,
+                                      cur_weights.reshape(-1),
+                                      cur_mask.reshape(-1), topk)
         else:
             chunk_hidden = dense_gather_reduce(
                 gmm2_res,
@@ -857,6 +877,7 @@ def tensor_parallel_gmm(
     scatter_results: bool = False,
     moe_chunk_size: int = 0,
     defer_all_reduce: bool = False,
+    ragged_gather_reduce_version: str | None = None,
 ) -> jax.Array:
     data_p_spec = P(ShardingAxisName.MLP_DATA)
     attn_data_p_spec = P(ShardingAxisName.ATTN_DATA)
@@ -891,6 +912,7 @@ def tensor_parallel_gmm(
             out_token_axes=_out_token_axes(scatter_results, False),
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
+            ragged_gather_reduce_version=ragged_gather_reduce_version,
         ),
         mesh=mesh,
         in_specs=(
@@ -944,6 +966,7 @@ def expert_parallel_gmm(
     out_token_axes=None,
     defer_all_reduce: bool = False,
     topk_argsort_indices: jax.Array | None = None,
+    ragged_gather_reduce_version: str | None = None,
 ) -> jax.Array:
     """Runs the MoE experts with expert parallelism (see moe_gmm_local).
 
@@ -1009,6 +1032,7 @@ def expert_parallel_gmm(
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
             hierarchical_collect=hierarchical_collect,
+            ragged_gather_reduce_version=ragged_gather_reduce_version,
         ),
         mesh=mesh,
         in_specs=(
@@ -1381,6 +1405,7 @@ def _apply_hierarchical_dispatch_gather(hidden_states: jax.Array,
     "moe_chunk_size",
     "defer_all_reduce",
     "keep_token_sharding",
+    "ragged_gather_reduce_version",
 ))
 def fused_moe_func(
     hidden_states: jax.Array,
@@ -1408,6 +1433,7 @@ def fused_moe_func(
     moe_chunk_size: int = 0,
     num_valid_tokens: jax.Array | None = None,
     keep_token_sharding: bool = False,
+    ragged_gather_reduce_version: str | None = None,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -1513,7 +1539,7 @@ def fused_moe_func(
     elif get_mesh_shape_product(mesh, token_axes) > 1:
         topk_indices, topk_weights = all_gather_topk_indices_and_weights(
             topk_indices, topk_weights, dtype, mesh)
-    topk_weights = topk_weights.astype(dtype)
+    topk_weights = topk_weights.astype(_get_topk_weights_dtype(dtype))
     topk_weights = jax.lax.with_sharding_constraint(
         topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
 
@@ -1687,6 +1713,7 @@ def fused_moe_func(
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
             topk_argsort_indices=topk_argsort_indices,
+            ragged_gather_reduce_version=ragged_gather_reduce_version,
         )
     else:
         x = tensor_parallel_gmm(
@@ -1708,6 +1735,7 @@ def fused_moe_func(
             scatter_results=scatter_results,
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
+            ragged_gather_reduce_version=ragged_gather_reduce_version,
         )
 
     return x[:num_tokens, :hidden_size]

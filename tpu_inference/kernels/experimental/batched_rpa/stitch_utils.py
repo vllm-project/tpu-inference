@@ -17,13 +17,13 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from tpu_inference.kernels.experimental.batched_rpa import configs
+from tpu_inference.kernels.experimental.batched_rpa import configs, utils
 
 
 def _stitch_decode_lane(
     vmem_u32_ref: jax.Array,
     bkv_sz_cache: jax.Array,
-    cache_pages: jax.Array,
+    cache_end: jax.Array,
     new_tok_offset: jax.Array,
     v_len: int,
 ):
@@ -33,18 +33,26 @@ def _stitch_decode_lane(
     strided_vmem_ref = vmem_u32_ref.reshape(-1, num_lanes)
     outer_dim = strided_vmem_ref.shape[0] // lanes_per_col
 
+    # Destination: VREG row (`dst_chunk_idx`) and lane offset (`dst_rel`) for new token insertion.
     dst_chunk_idx = bkv_sz_cache // num_lanes
-
-    # Load just the destination and source chunks.
-    dst_vreg = strided_vmem_ref[pl.ds(dst_chunk_idx, outer_dim, lanes_per_col)]
-    src_vreg = strided_vmem_ref[pl.ds(cache_pages, outer_dim, lanes_per_col)]
-
     dst_rel = bkv_sz_cache % num_lanes
-    rolled_src_vreg = pltpu.roll(src_vreg, dst_rel - new_tok_offset, axis=1)
+
+    # Source: VREG row (`src_chunk_idx`) and lane offset (`src_rel`) of fetched token in VMEM.
+    src_tok_idx = cache_end + new_tok_offset
+    src_chunk_idx = src_tok_idx // num_lanes
+    src_rel = src_tok_idx % num_lanes
+
+    dst_vreg = strided_vmem_ref[pl.ds(dst_chunk_idx, outer_dim, lanes_per_col)]
+    src_vreg = strided_vmem_ref[pl.ds(src_chunk_idx, outer_dim, lanes_per_col)]
+
+    rolled_src_vreg = pltpu.roll(src_vreg, dst_rel - src_rel, axis=1)
 
     lane_idx = jax.lax.broadcasted_iota(jnp.int32, dst_vreg.shape, 1)
-    merged_dst_vreg = jax.lax.select(lane_idx >= dst_rel, rolled_src_vreg,
-                                     dst_vreg)
+    merged_dst_vreg = jax.lax.select(
+        lane_idx == dst_rel,
+        rolled_src_vreg,
+        jnp.where(lane_idx < dst_rel, dst_vreg, 0),
+    )
 
     return dst_chunk_idx, outer_dim, lanes_per_col, merged_dst_vreg
 
@@ -52,7 +60,7 @@ def _stitch_decode_lane(
 def _stitch_prefill_lane(
     vmem_u32_ref: jax.Array,
     bkv_sz_cache: jax.Array,
-    cache_pages: jax.Array,
+    cache_end: jax.Array,
     new_tok_offset: jax.Array,
     v_len: int,
     *,
@@ -66,9 +74,7 @@ def _stitch_prefill_lane(
     vmem_u32_reshaped = vmem_u32_ref.reshape(words_per_sublane, num_sublanes,
                                              v_len)
 
-    roll_shift = (
-        bkv_sz_cache -
-        (cache_pages * cfgs.serve.page_size + new_tok_offset)) % v_len
+    roll_shift = (bkv_sz_cache - (cache_end + new_tok_offset)) % v_len
     rolled_u32 = pltpu.roll(vmem_u32_reshaped[...], roll_shift, axis=2)
 
     lane_idx = jax.lax.broadcasted_iota(jnp.int32,
@@ -90,7 +96,7 @@ def store_new_kv_lane(
     cfgs: configs.RpaConfigs,
 ):
     """Stores the result of stitch_new_kv_lane back into memory."""
-    v_len = cfgs.bkv_sz + 2 * cfgs.serve.page_size
+    v_len = cfgs.kv_vmem_lanes
     vmem_u32_ref = vmem_ref.at[b_idx].bitcast(jnp.uint32)
 
     if cfgs.block.bq_sz == 1:
@@ -98,7 +104,6 @@ def store_new_kv_lane(
         num_lanes = pltpu.get_tpu_info().num_lanes
         strided_vmem_ref = vmem_u32_ref.reshape(-1, num_lanes)
 
-        # Store the merged chunk directly back into memory.
         strided_vmem_ref[pl.ds(dst_chunk_idx, outer_dim,
                                lanes_per_col)] = (merged_dst_vreg)
 
@@ -125,28 +130,31 @@ def stitch_new_kv_lane(
 ):
     """Fetches and computes stitched KV tokens (separated to avoid RAW hazards).
 
-    Expects vmem_ref shape: [batch, 2*kv, head_dim / packing, packing, bkv_sz + 2
-    * page_size]
-    """
+  Expects vmem_ref shape: [batch, 2*kv, head_dim / packing, packing,
+  cfgs.kv_vmem_lanes]
+  """
     bkv_sz_cache = bkv_sz_frm_cache.astype(jnp.int32)
-    new_tok_offset = (new_kv_len_start.astype(jnp.int32) %
-                      cfgs.serve.page_size)
-    cache_pages = pl.cdiv(bkv_sz_cache, cfgs.serve.page_size)
+    new_tok_offset = new_kv_len_start.astype(jnp.int32) % cfgs.kv_token_align
+    cache_end = utils.align_to(bkv_sz_cache, cfgs.kv_token_align)
 
-    v_len = cfgs.bkv_sz + 2 * cfgs.serve.page_size
     vmem_u32_ref = vmem_ref.at[b_idx].bitcast(jnp.uint32)
 
     # If bq_sz == 1, there is only 1 kv token from new, so we only need one 128
     # sized register to be rolled (compared to rolling the entire bkv_sz).
     if cfgs.block.bq_sz == 1:
-        return _stitch_decode_lane(vmem_u32_ref, bkv_sz_cache, cache_pages,
-                                   new_tok_offset, v_len)
+        return _stitch_decode_lane(
+            vmem_u32_ref,
+            bkv_sz_cache,
+            cache_end,
+            new_tok_offset,
+            cfgs.kv_vmem_lanes,
+        )
     else:
         return _stitch_prefill_lane(
             vmem_u32_ref,
             bkv_sz_cache,
-            cache_pages,
+            cache_end,
             new_tok_offset,
-            v_len,
+            cfgs.kv_vmem_lanes,
             cfgs=cfgs,
         )

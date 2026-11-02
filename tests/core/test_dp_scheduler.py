@@ -29,7 +29,7 @@ from vllm.v1.request import Request
 
 from tpu_inference.core.sched.dp_scheduler import (
     DPScheduler, DPSchedulerOutput, SchedulerCommand,
-    update_vllm_config_for_dp_scheduler)
+    _get_max_cache_hit_length, update_vllm_config_for_dp_scheduler)
 
 
 def _make_mock_mp_context():
@@ -1529,6 +1529,43 @@ class TestUpdateVllmConfigForDPScheduler:
 
         # Verify config was NOT changed
         assert mock_config.scheduler_config.scheduler_cls == original_scheduler_cls
+
+
+class TestGetMaxCacheHitLength:
+    """PROBE_COMPUTED_BLOCKS must follow the same prefix-cache bound as vLLM's
+    Scheduler. Newer vLLM exposes Request.get_max_cache_hit_length(); older
+    vLLM only had the Request.skip_reading_prefix_cache flag."""
+
+    def test_real_request_matches_upstream(self):
+        from vllm.sampling_params import SamplingParams
+        req = Request(request_id="r",
+                      prompt_token_ids=list(range(10)),
+                      sampling_params=SamplingParams(max_tokens=4),
+                      pooling_params=None,
+                      block_hasher=None)
+        if hasattr(req, "get_max_cache_hit_length"):
+            assert _get_max_cache_hit_length(req) == \
+                req.get_max_cache_hit_length()
+        # Last token is always recomputed.
+        assert _get_max_cache_hit_length(req) == 9
+
+    def test_skip_reading_prefix_cache_disables_hit(self):
+        from vllm.sampling_params import SamplingParams
+        req = Request(request_id="r",
+                      prompt_token_ids=list(range(10)),
+                      sampling_params=SamplingParams(
+                          max_tokens=4, skip_reading_prefix_cache=True),
+                      pooling_params=None,
+                      block_hasher=None)
+        assert _get_max_cache_hit_length(req) == 0
+
+    def test_legacy_request_without_new_api(self):
+        legacy = MagicMock(spec=["num_tokens", "skip_reading_prefix_cache"])
+        legacy.num_tokens = 10
+        legacy.skip_reading_prefix_cache = False
+        assert _get_max_cache_hit_length(legacy) == 9
+        legacy.skip_reading_prefix_cache = True
+        assert _get_max_cache_hit_length(legacy) == 0
 
 
 if __name__ == "__main__":

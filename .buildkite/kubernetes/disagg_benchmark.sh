@@ -123,6 +123,34 @@ run_cell() {
   wait "$bench_pid"
 }
 
+# Restores an artifact already uploaded by an earlier attempt of this same
+# Buildkite job (e.g. before a Kueue preemption or JobSet restart), so a
+# re-admitted run resumes from the first unfinished cell instead of repeating
+# hours of completed work and uploading duplicate artifacts.
+restore_result() {
+  local path=$1
+  local name
+  name=$(basename "$path")
+  if [ -e "$path" ]; then
+    echo "WARNING: local file $path already exists before restore; removing stale file."
+    rm -f "$path"
+  fi
+  if [ -z "${BUILDKITE_JOB_ID:-}" ]; then
+    return 1
+  fi
+  if ! buildkite-agent artifact download "$name" "$(dirname "$path")" --step "$BUILDKITE_JOB_ID" >/dev/null 2>&1; then
+    return 1
+  fi
+  if [ ! -s "$path" ] \
+    || ! grep -q -E '"completed": *[1-9]' "$path" \
+    || grep -q -E '"failed": *[1-9]' "$path"; then
+    echo "WARNING: downloaded artifact $name is empty, incomplete, or recorded failed requests; discarding and re-running."
+    rm -f "$path"
+    return 1
+  fi
+  return 0
+}
+
 # Each cell writes its own file and is then appended to the file for the whole
 # input shape, <I>_<O>.json, which is the name parse_gke_results.py reads its
 # lengths from. Cells are published as they finish, so a sweep cut short still
@@ -132,22 +160,37 @@ run_sweep() {
   local input_len=$1 output_len=$2 num_prompts=$3
   local combined="/tmp/benchmark_results/${input_len}_${output_len}.json"
 
+  if restore_result "$combined"; then
+    echo "Restored completed sweep from artifact: $(basename "$combined"); skipping (${input_len}/${output_len})."
+    return 0
+  fi
+
   for concurrency in ${DISAGG_CONCURRENCIES:-1 4 16 32 64 128 256}; do
-    # Nearly serial at low concurrency, where the full count would dominate.
+    # Nearly serial at low concurrency, where the full count and 10 serial
+    # warmups would dominate runtime.
     local effective=$num_prompts
+    local warmups=10
     if [ "$concurrency" -eq 1 ]; then
       effective=32
+      warmups=2
     elif [ "$concurrency" -eq 4 ]; then
       effective=64
+      warmups=4
     fi
 
     local cell="/tmp/benchmark_results/pd_disagg_c${concurrency}_i${input_len}_o${output_len}.json"
 
-    echo "Starting benchmark cell: c=$concurrency, i=$input_len, o=$output_len, n=$effective"
+    if restore_result "$cell"; then
+      echo "Restored completed benchmark cell from artifact: $(basename "$cell"); skipping c=$concurrency, i=$input_len, o=$output_len"
+      awk 1 "$cell" >> "$combined"
+      continue
+    fi
+
+    echo "Starting benchmark cell: c=$concurrency, i=$input_len, o=$output_len, n=$effective, warmups=$warmups"
     run_cell vllm bench serve \
       --model="$model" \
       --dataset-name=random \
-      --num-warmups 10 \
+      --num-warmups "$warmups" \
       --random-input-len="$input_len" \
       --random-output-len="$output_len" \
       --num-prompts="$effective" \
@@ -162,8 +205,10 @@ run_sweep() {
 
     publish_result "$cell"
 
-    # Appended here so each cell stays a file of its own to publish.
-    cat "$cell" >> "$combined"
+    # Appended here so each cell stays a file of its own to publish. awk 1
+    # ensures a trailing newline: vllm bench serve's json.dump omits it on a
+    # new file.
+    awk 1 "$cell" >> "$combined"
     sleep 30
   done
 
