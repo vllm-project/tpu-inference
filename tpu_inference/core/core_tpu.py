@@ -462,7 +462,8 @@ class DisaggEngineCore(vLLMEngineCore):
         device_kind = self.devices[0].device_kind
         if device_kind != 'TPU7x':
             self.vllm_config.cache_config.gpu_memory_utilization = (
-                self.vllm_config.cache_config.gpu_memory_utilization - 0.1)
+                self.vllm_config.cache_config.resolved_gpu_memory_utilization -
+                0.1)
         prefill_slice_sizes, decode_slice_sizes, slice_sizes = _get_slice_sizes(
             self.devices)
 
@@ -634,7 +635,8 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
         device_kind = self.devices[0].device_kind
         if device_kind != 'TPU7x':
             self.vllm_config.cache_config.gpu_memory_utilization = (
-                self.vllm_config.cache_config.gpu_memory_utilization - 0.1)
+                self.vllm_config.cache_config.resolved_gpu_memory_utilization -
+                0.1)
         prefill_slice_sizes, decode_slice_sizes, slice_sizes = _get_slice_sizes(
             self.devices)
 

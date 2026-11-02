@@ -510,7 +510,7 @@ class TPUWorker(WorkerBase):
                                    self.rank - 1)
 
     def determine_available_memory(self) -> int:
-        gpu_memory_utilization = self.cache_config.gpu_memory_utilization
+        gpu_memory_utilization = self.cache_config.resolved_gpu_memory_utilization
         hbm_usage = utils.hbm_usage_bytes(self.devices)
         total_hbm_limit = total_hbm_used = 0
         for used, limit in hbm_usage:

@@ -32,6 +32,7 @@ def mock_vllm_config():
     # Create mocks for the nested config objects first
     mock_cache_conf = MagicMock()
     mock_cache_conf.gpu_memory_utilization = 0.9
+    mock_cache_conf.resolved_gpu_memory_utilization = 0.9
     mock_cache_conf.num_gpu_blocks = 0
     mock_cache_conf.num_cpu_blocks = 0
 
@@ -352,6 +353,30 @@ class TestTPUWorker:
         # Total used: 100 + 200 = 300 GiB
         # Total free = 1800 - 300 = 1500 GiB
         expected_mem = 1500 * 1024**3
+        assert available_mem == expected_mem
+
+    @patch('tpu_inference.worker.tpu_worker.utils')
+    def test_determine_available_memory_none_utilization(
+            self, mock_utils, mock_vllm_config):
+        """Tests available HBM memory calculation when gpu_memory_utilization is None (vLLM >= 0.33.0)."""
+        mock_utils.hbm_usage_bytes.return_value = [
+            (100 * 1024**3, 1000 * 1024**3), (200 * 1024**3, 1000 * 1024**3)
+        ]
+        mock_devices = ['tpu:0', 'tpu:1']
+        mock_vllm_config.cache_config.gpu_memory_utilization = None
+        mock_vllm_config.cache_config.resolved_gpu_memory_utilization = 0.92
+        worker = TPUWorker(vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test_method",
+                           devices=mock_devices)
+
+        available_mem = worker.determine_available_memory()
+        # Total limit: 2000 GiB
+        # Total cap: 2000 * 0.92 = 1840 GiB
+        # Total used: 300 GiB
+        # Total free = 1840 - 300 = 1540 GiB
+        expected_mem = int(2000 * 1024**3 * 0.92 - 300 * 1024**3)
         assert available_mem == expected_mem
 
     #
