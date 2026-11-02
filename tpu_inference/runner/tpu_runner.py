@@ -865,6 +865,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.is_pooling_model: bool = self.model_config.runner_type == "pooling"
         """Generative model or pooling model select different computations."""
+        # Pooling models never sample: with TPU_POOLING_FAST_PATH, skip
+        # building (and uploading) sampling metadata for them every step.
+        self.skip_sampling_metadata: bool = (self.is_pooling_model
+                                             and envs.TPU_POOLING_FAST_PATH)
         self.enable_continue_decode = self.vllm_config.additional_config.get(
             "enable_continue_decode", False)
         # continue_decode EOS-check interval: how often the fused decode loop
@@ -1815,13 +1819,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             ],
                                             dtype=np.int32)
 
-            # Call the pooler with the decoupled interface
-            pooler_output = self.pooler_fn(
-                hidden_states,
-                pooling_metadata,
-                seq_lens,
-                num_scheduled_tokens,
-            )
+            # Call the pooler with the decoupled interface. A device pooler
+            # (JinaBert) also takes the pooled outputs fused into run_model.
+            if getattr(self.pooler_fn, "device_mean_pooler", None) is not None:
+                pooler_output = self.pooler_fn(
+                    hidden_states,
+                    pooling_metadata,
+                    seq_lens,
+                    num_scheduled_tokens,
+                    aux_hidden_states=aux_hidden_states,
+                )
+            else:
+                pooler_output = self.pooler_fn(
+                    hidden_states,
+                    pooling_metadata,
+                    seq_lens,
+                    num_scheduled_tokens,
+                )
 
             return ModelRunnerOutput(
                 req_ids=self.input_batch.req_ids,
@@ -3070,13 +3084,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logits_indices_view[:] = spec_decode_metadata.final_logits_indices
 
         # Put to device
-        sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
-            self.mesh,
-            self.input_batch,
-            padded_num_reqs,
-            sharding=data_parallel_attn_sharding,
-            req_indices_dp=req_indices_dp,
-        )
+        if self.skip_sampling_metadata:
+            # Unused by the pooling branch of _execute_model.
+            sampling_metadata = TPUSupportedSamplingMetadata()
+        else:
+            sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
+                self.mesh,
+                self.input_batch,
+                padded_num_reqs,
+                sharding=data_parallel_attn_sharding,
+                req_indices_dp=req_indices_dp,
+            )
 
         if self.uses_mrope:
             # M-RoPE positions are of the shape (3, max_num_tokens).

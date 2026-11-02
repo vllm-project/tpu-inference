@@ -326,6 +326,48 @@ def test_model_impl_type_choices(monkeypatch: pytest.MonkeyPatch):
     assert envs.DRAFT_MODEL_IMPL_TYPE == "vllm"
 
 
+def test_jina_bert_megakernel_env_vars(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("USE_JINA_BERT_MEGAKERNEL", raising=False)
+    monkeypatch.delenv("JINA_BERT_MEGAKERNEL_PRECISION", raising=False)
+    assert envs.USE_JINA_BERT_MEGAKERNEL is True
+    assert envs.JINA_BERT_MEGAKERNEL_PRECISION == "default"
+
+    monkeypatch.setenv("USE_JINA_BERT_MEGAKERNEL", "0")
+    assert envs.USE_JINA_BERT_MEGAKERNEL is False
+    monkeypatch.setenv("USE_JINA_BERT_MEGAKERNEL", "true")
+    assert envs.USE_JINA_BERT_MEGAKERNEL is True
+
+    monkeypatch.setenv("JINA_BERT_MEGAKERNEL_PRECISION", "highest")
+    assert envs.JINA_BERT_MEGAKERNEL_PRECISION == "highest"
+    monkeypatch.setenv("JINA_BERT_MEGAKERNEL_PRECISION", "bf16")
+    with pytest.raises(ValueError, match="JINA_BERT_MEGAKERNEL_PRECISION"):
+        _ = envs.JINA_BERT_MEGAKERNEL_PRECISION
+
+
+def test_jina_bert_optimization_env_vars(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("JINA_BERT_MEGAKERNEL_VERSION", raising=False)
+    monkeypatch.delenv("JINA_BERT_DEVICE_POOLING", raising=False)
+    monkeypatch.delenv("JINA_BERT_FUSED_POOLING", raising=False)
+    monkeypatch.delenv("TPU_POOLING_FAST_PATH", raising=False)
+    assert envs.JINA_BERT_MEGAKERNEL_VERSION == "v2"
+    assert envs.JINA_BERT_DEVICE_POOLING is True
+    assert envs.JINA_BERT_FUSED_POOLING is True
+    assert envs.TPU_POOLING_FAST_PATH is True
+
+    monkeypatch.setenv("JINA_BERT_MEGAKERNEL_VERSION", "v1")
+    assert envs.JINA_BERT_MEGAKERNEL_VERSION == "v1"
+    monkeypatch.setenv("JINA_BERT_MEGAKERNEL_VERSION", "v3")
+    with pytest.raises(ValueError, match="JINA_BERT_MEGAKERNEL_VERSION"):
+        _ = envs.JINA_BERT_MEGAKERNEL_VERSION
+
+    monkeypatch.setenv("JINA_BERT_DEVICE_POOLING", "0")
+    assert envs.JINA_BERT_DEVICE_POOLING is False
+    monkeypatch.setenv("JINA_BERT_FUSED_POOLING", "0")
+    assert envs.JINA_BERT_FUSED_POOLING is False
+    monkeypatch.setenv("TPU_POOLING_FAST_PATH", "0")
+    assert envs.TPU_POOLING_FAST_PATH is False
+
+
 def test_string_env_vars_defaults(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("JAX_PLATFORMS", raising=False)
     monkeypatch.delenv("PREFILL_SLICES", raising=False)

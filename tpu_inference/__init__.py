@@ -81,3 +81,35 @@ else:
         logger.error(
             f"Error occurred while logging TPU info: {e}. Are you running on CPU?"
         )
+
+
+def _register_vllm_compat_archs():
+    """Register TPU-only architectures with vLLM's ModelRegistry.
+
+    The `vllm.general_plugins` entrypoint (register_layers) fires before
+    engine-config creation in the offline LLM path, but NOT in the API-server
+    process — which still validates ModelConfig against the registry. This
+    module is imported in every vLLM process via platform resolution (before
+    config creation), so registering here covers the API server too. Lazy
+    string references keep the import cost negligible.
+    """
+    try:
+        from vllm import ModelRegistry
+        compat_archs = {
+            "JinaBertForMaskedLM":
+            "tpu_inference.models.vllm.jina_bert_compat:JinaBertForMaskedLM",
+            "JinaBertModel":
+            "tpu_inference.models.vllm.jina_bert_compat:JinaBertForMaskedLM",
+            "JinaBertForSequenceClassification":
+            "tpu_inference.models.vllm.jina_bert_compat:"
+            "JinaBertForSequenceClassification",
+        }
+        existing = set(ModelRegistry.get_supported_archs())
+        for arch, qualname in compat_archs.items():
+            if arch not in existing:
+                ModelRegistry.register_model(arch, qualname)
+    except Exception as e:  # pragma: no cover - best effort, plugin path
+        logger.debug(f"Skipping vLLM compat arch registration: {e}")
+
+
+_register_vllm_compat_archs()

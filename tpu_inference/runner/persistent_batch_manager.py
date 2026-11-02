@@ -49,6 +49,9 @@ class PersistentBatchManager:
         swap_cnt = 0
         if num_reqs <= 0:
             return swap_cnt
+        if getattr(self.model_config, "runner_type", None) == "pooling":
+            self.input_batch.request_distribution = [0, 0, num_reqs]
+            return swap_cnt
         max_decode_tokens = self.input_batch.max_decode_tokens
 
         if (max_decode_tokens == 1

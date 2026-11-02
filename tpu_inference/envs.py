@@ -112,6 +112,12 @@ if TYPE_CHECKING:
     TPU_MOE_LOWTOK: bool = False
     TPU_MOE_LOWTOK_MAX_TOKENS: int = 128
     TPU_MOE_TOPK_WEIGHTS_FLOAT32: bool = False
+    USE_JINA_BERT_MEGAKERNEL: bool = True
+    JINA_BERT_MEGAKERNEL_PRECISION: str = "default"
+    JINA_BERT_MEGAKERNEL_VERSION: str = "v2"
+    JINA_BERT_DEVICE_POOLING: bool = True
+    JINA_BERT_FUSED_POOLING: bool = True
+    TPU_POOLING_FAST_PATH: bool = True
 
 
 def env_with_choices(
@@ -708,6 +714,45 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "TPU_MOE_TOPK_WEIGHTS_FLOAT32":
     lambda: (env_bool("TPU_MOE_TOPK_WEIGHTS_FLOAT32", default=False)
              () or env_bool("MOE_TOPK_WEIGHTS_FLOAT32", default=False)()),
+    # JinaBert (jina-embeddings-v2) encoder: run all encoder layers as one
+    # Pallas TPU megakernel (tpu_inference/kernels/jina_bert_megakernel).
+    # Set to 0 to use the per-layer XLA + flash-attention path instead.
+    "USE_JINA_BERT_MEGAKERNEL":
+    env_bool("USE_JINA_BERT_MEGAKERNEL", default=True),
+    # Matmul precision of the JinaBert megakernel. "default": bf16 MXU
+    # operands, one pass, fp32 accumulation (what lax.Precision.DEFAULT does
+    # to float32 matmuls on TPU, i.e. the XLA path's precision). "highest":
+    # full-fp32 matmuls (lax.Precision.HIGHEST). Everything else (params,
+    # activations, softmax, LayerNorm, GELU, accumulation) is float32 in both.
+    "JINA_BERT_MEGAKERNEL_PRECISION":
+    env_with_choices("JINA_BERT_MEGAKERNEL_PRECISION", "default",
+                     ["default", "highest"]),
+    # JinaBert megakernel implementation. "v2" (default): the ALiBi bias
+    # tables built once per step instead of in every (layer, tile pair)
+    # step, no mask work on tile pairs inside a single request, the two heads
+    # of a 128-lane pair stacked so they share each K/V MXU weight load, the
+    # softmax in the exp2 domain and a cheaper GELU. "v1": the first
+    # megakernel, unchanged. v2 falls back to v1 where it does not fit.
+    "JINA_BERT_MEGAKERNEL_VERSION":
+    env_with_choices("JINA_BERT_MEGAKERNEL_VERSION", "v2", ["v1", "v2"]),
+    # JinaBert mean pooling on the TPU: per-request mean (and L2
+    # normalization) on the device, then only [num_reqs, hidden] (instead of
+    # [num_tokens, hidden]) is copied to the host. Set to 0 to run pooling
+    # entirely in vLLM's CPU pooler.
+    "JINA_BERT_DEVICE_POOLING":
+    env_bool("JINA_BERT_DEVICE_POOLING", default=True),
+    # Fuse JinaBert on-device mean pooling and L2 normalization into the
+    # primary model forward JIT (`run_model`) so the step executes in a
+    # single TPU dispatch with no separate pooling kernel launch or bounds
+    # H2D transfer. Set to 0 to run device pooling as a separate JIT call.
+    "JINA_BERT_FUSED_POOLING":
+    env_bool("JINA_BERT_FUSED_POOLING", default=True),
+    # Pooling runner host fast path: skip the sampling metadata (unused by
+    # pooling models) and run vLLM's CPU pooler with plain torch instead of
+    # under torchax's dispatch modes (same ops, bitwise-identical output).
+    # Set to 0 for the previous behaviour.
+    "TPU_POOLING_FAST_PATH":
+    env_bool("TPU_POOLING_FAST_PATH", default=True),
 }
 
 
