@@ -131,9 +131,9 @@ class TestVllmTPUMLAAttention:
                 "vllm.model_executor.layers.attention.mla_attention.MLAAttention.process_weights_after_loading"
         ) as mock_super_process:
             with torchax.default_env():
-                attn.process_weights_after_loading(torch.float32)
+                attn.process_weights_after_loading()
 
-            mock_super_process.assert_called_once_with(torch.float32)
+            mock_super_process.assert_called_once_with()
 
             # W_UK_T and W_UV should now be un-grad Parameters
             assert isinstance(attn.W_UK_T, torch.nn.Parameter)
