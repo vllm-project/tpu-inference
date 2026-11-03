@@ -323,7 +323,7 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         # cache key).
         capture_device = torch.device("cpu")
         capture_dtype = torch_dtype
-        self.budget_templates: dict[tuple[int, CaptureAxisKeys],
+        self.budget_templates: dict[int | tuple[int, CaptureAxisKeys],
                                     dict[str, torch.Tensor]] = {}
         for budget in self.token_budgets:
             for axis_keys in itertools.product(*self._capture_axes):
@@ -337,6 +337,8 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
                     axis_keys=axis_keys,
                 )
                 self.budget_templates[(budget, axis_keys)] = capture.values
+                if budget not in self.budget_templates:
+                    self.budget_templates[budget] = capture.values
 
         logger.info(
             "[mm_encoder_jit] budgets=%s capture_axes=%s max_batch_size=%d "
@@ -378,7 +380,8 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         if token_budget in self.budget_templates:
             return self.budget_templates[token_budget]
         # If no exact axis_keys match, fall back to any template matching the budget
-        for (b, _), tmpl in self.budget_templates.items():
+        for k, tmpl in self.budget_templates.items():
+            b = k[0] if isinstance(k, tuple) else k
             if b == token_budget:
                 return tmpl
         return None
@@ -554,7 +557,15 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         return self._execute_local(mm_kwargs)
 
     def precompile_vision_encoder(self, run_compilation: Callable) -> None:
-        for (budget, axis_keys) in self.budget_templates.keys():
+        seen = set()
+        for k in self.budget_templates.keys():
+            if isinstance(k, tuple):
+                budget, axis_keys = k
+            else:
+                budget, axis_keys = k, ()
+            if (budget, axis_keys) in seen:
+                continue
+            seen.add((budget, axis_keys))
             run_compilation(
                 "mm_encoder_jit",
                 self._capture_budget_graph,
