@@ -97,6 +97,11 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes):
     # in internal-LB mode. Drop it so the default (disabled) config is used.
     engine_args.pop("fault_tolerance_config", None)
 
+    # asdict() turns the default EPLBConfig into a plain dict with
+    # num_redundant_experts=None, which fails Pydantic int validation in
+    # EngineArgs.__post_init__. Drop it so the default config is used.
+    engine_args.pop("eplb_config", None)
+
     llm = LLM(**engine_args)
 
     try:
