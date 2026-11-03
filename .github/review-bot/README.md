@@ -99,7 +99,9 @@ Later reviews happen only on request.
 ## Other controls
 
 - **Ask for a review:** comment `@cbs-oss-review-bot` in the PR's
-  Conversation tab. Repo members, collaborators and allowlisted Google
+  Conversation tab, or request it under Reviewers (its re-request button
+  works too). To get an answer on one of its inline comments, tag it in
+  your reply there. Repo members, collaborators and allowlisted Google
   accounts can ask.
 - **Skip a PR:** add the `skip-review-bot` label. The bot skips the PR, even
   when someone asks.
