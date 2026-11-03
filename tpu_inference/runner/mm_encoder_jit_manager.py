@@ -560,6 +560,7 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
                 self._capture_budget_graph,
                 budget,
                 axis_keys=axis_keys,
+                call_kwargs={"axis_keys": axis_keys},
                 budget=budget,
                 axis_keys_tag=axis_keys,
             )
