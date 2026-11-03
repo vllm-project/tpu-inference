@@ -30,11 +30,11 @@ from tpu_inference.kernels.experimental.batched_rpa import configs, utils
 class FieldOffset:
     """A Python descriptor that generates the `.at[pos + offset]` lazy lookup.
 
-  This is necessary because JAX does not support dynamically slicing a
-  range (e.g. `data.at[pos:pos+4]`) using traced indices inside a loop,
-  but it natively supports retrieving/updating single dynamically-indexed
-  elements (e.g. `data.at[pos+1]`).
-  """
+    This is necessary because JAX does not support dynamically slicing a
+    range (e.g. `data.at[pos:pos+4]`) using traced indices inside a loop,
+    but it natively supports retrieving/updating single dynamically-indexed
+    elements (e.g. `data.at[pos+1]`).
+    """
 
     def __init__(self, offset: int | None = None, is_abstract: bool = False):
         if offset is None:
@@ -52,15 +52,16 @@ class DmaNew(ABC):
     data: Any
     pos: Any
 
-    # HBM address to fetch new KV tokens from
+    # New-KV fetch. The new tokens are contiguous in HBM and in VMEM, so a
+    # single DMA covers them all: copy_in takes the addresses from entry 0 and
+    # the length from the sum of fetch_val over all entries.
     fetch_hbm = FieldOffset(is_abstract=True)
-    # VMEM offset within the block where new tokens are placed
     fetch_vmem = FieldOffset(is_abstract=True)
-    # HBM address to write the updated KV cache block back to
+    # Writeback, which stays per-entry because page_indices scatters the
+    # destinations. wb_hbm packs them as (page_idx << page_size_log2) | p_off.
     wb_hbm = FieldOffset(is_abstract=True)
-    # VMEM offset of the cache block to write back
     wb_vmem = FieldOffset(is_abstract=True)
-    # Bitpacked: Flags for whether to fetch or write back new tokens.
+    # Fetch/writeback token counts, packed per the subclass's field layout.
     _flags = FieldOffset(is_abstract=True)
 
     @staticmethod
@@ -113,6 +114,8 @@ class SeqAlongLaneDmaNew(DmaNew):
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
 class HeadAlongSublaneDmaNew(DmaNew):
+    # Each page writes back exactly the tokens it fetched, from the offset it
+    # fetched them into, so vmem offsets and token counts alias down to 4 slots.
     wb_hbm = FieldOffset(0)
     fetch_hbm = FieldOffset(1)
     fetch_vmem = FieldOffset(2)
@@ -175,7 +178,8 @@ class SmemArrayOfStructs(SmemWrapper):
     struct_size: int = dataclasses.field(metadata=dict(static=True))
 
     @classmethod
-    def create_shape_dtype(cls, shape, struct_cls, struct_size):  # pytype: disable=bad-override
+    def create_shape_dtype(cls, shape, struct_cls,
+                           struct_size):  # pyrefly: ignore[bad-override]
         assert struct_size == struct_cls.num_fields()
         return cls(
             data=jax.ShapeDtypeStruct((np.prod(shape) * struct_size, ),
@@ -360,7 +364,8 @@ def _write_schedule_to_hbm(
     cfgs: configs.RpaConfigs,
 ):
     """Writes `num_steps` of metadata from `schedule_smem` to `schedule_hbm` at `hbm_offset`."""
-    hbm_offset_aligned = pl.multiple_of(hbm_offset, 128)  # pytype: disable=bad-argument-type
+    hbm_offset_aligned = pl.multiple_of(
+        hbm_offset, 128)  # pyrefly: ignore[bad-argument-type]
     flat_hbm = jax.tree_util.tree_leaves(schedule_hbm)
     flat_smem = jax.tree_util.tree_leaves(schedule_smem)
     dma_list = []
@@ -447,10 +452,10 @@ def _compute_waits(
 
         # LSE OUT
         lse_bytes_per_token = (cfgs.model.num_kv_heads *
-                               cfgs.lse_rows_per_token * 128 *
+                               cfgs.aligned_num_q_heads_per_kv_head * 128 *
                                jnp.dtype(cfgs.serve.dtype_out).itemsize)
-        schedule.total_wait_lse_out[step] = pl.cdiv(
-            o_out_tokens * lse_bytes_per_token, dma_chunk_size)
+        schedule.total_wait_lse_out[step] = (
+            o_out_tokens * lse_bytes_per_token) // dma_chunk_size
 
     jax.lax.fori_loop(start_step, end_step, body, None)
 
@@ -540,11 +545,6 @@ class BaseMetadataComputer:
         kv_cache_len,
         kv_new_len,
         end_k_idx,
-        update_kv_cache,
-        kv_new_start=0,
-        num_k=0,
-        num_q=0,
-        **kwargs,
     ) -> LoopCarry:
         cfgs = self.cfgs
         schedule = self.schedule
@@ -591,10 +591,9 @@ class BaseMetadataComputer:
 
         # Writeback logic: each new k block is written back by the first q block
         # that attends to it.
-        q_wb = jnp.maximum(0, kv_len_start - kv_cache_len) // cfgs.bq_sz
+        q_wb = jnp.maximum(0, (kv_len_start - kv_cache_len)) // cfgs.bq_sz
 
-        do_writeback = jnp.where(
-            (new_sz > 0) & (q_idx == q_wb) & update_kv_cache, 1, 0)
+        do_writeback = jnp.where((new_sz > 0) & (q_idx == q_wb), 1, 0)
         schedule.do_writeback[step, target_lane] = do_writeback
         src_hbm = q_end - kv_left_frm_new
 
@@ -641,7 +640,6 @@ class BaseMetadataComputer:
                 dma_entry.fetch_hbm[...] = src_hbm
                 dma_entry.fetch_vmem[...] = dst_vmem
                 dma_entry.wb_hbm[...] = dst_hbm
-                dma_entry.wb_vmem[...] = dst_vmem
                 dma_entry.set_flags(dma_sz, dma_sz)
 
         if cfgs.bkv_p_new < cfgs.bkv_p:
@@ -704,12 +702,10 @@ class BaseMetadataComputer:
         s_idx,
         q_start,
         q_end,
-        q_position,
-        global_kv_cache_len,
+        q_offset,
+        kv_cache_len,
         kv_new_len,
         num_k,
-        num_q,
-        update_kv_cache,
     ) -> LoopCarry:
         cfgs = self.cfgs
         q_src = q_start + q_idx * cfgs.bq_sz
@@ -717,16 +713,15 @@ class BaseMetadataComputer:
 
         start_k_idx = 0
         if (sliding_window := cfgs.model.sliding_window) is not None:
-            sw_start_idx = q_position + q_idx * cfgs.bq_sz - sliding_window + 1
+            sw_start_idx = q_offset + q_idx * cfgs.bq_sz - sliding_window + 1
             start_k_idx = jnp.maximum(0, sw_start_idx) // cfgs.bkv_sz
 
-        end_k_idx_causal = (q_position + q_idx * cfgs.bq_sz + q_sz_task -
+        end_k_idx_causal = (q_offset + q_idx * cfgs.bq_sz + q_sz_task -
                             1) // cfgs.bkv_sz + 1
         end_k_idx = jnp.minimum(num_k, end_k_idx_causal)
 
         if cfgs.serve.attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
-            start_k_idx = jnp.maximum(start_k_idx,
-                                      global_kv_cache_len // cfgs.bkv_sz)
+            start_k_idx = jnp.maximum(start_k_idx, kv_cache_len // cfgs.bkv_sz)
 
         k_loop_fn = functools.partial(
             self.k_loop,
@@ -735,10 +730,9 @@ class BaseMetadataComputer:
             q_end=q_end,
             q_src=q_src,
             q_sz_task=q_sz_task,
-            kv_cache_len=global_kv_cache_len,
+            kv_cache_len=kv_cache_len,
             kv_new_len=kv_new_len,
             end_k_idx=end_k_idx,
-            update_kv_cache=update_kv_cache,
         )
 
         return jax.lax.fori_loop(start_k_idx, end_k_idx, k_loop_fn, carry)
@@ -750,19 +744,17 @@ class BaseMetadataComputer:
         carry: LoopCarry,
         *,
         cu_q_lens_ref,
-        q_positions_ref,
-        global_kv_cache_lens_ref,
+        q_offsets_ref,
+        kv_cache_lens_ref,
         kv_new_lens_ref,
-        update_kv_cache_ref,
     ) -> LoopCarry:
         q_start = cu_q_lens_ref[s_idx]
         q_end = cu_q_lens_ref[s_idx + 1]
         q_len = q_end - q_start
-        q_position = q_positions_ref[s_idx]
-        global_kv_cache_len = global_kv_cache_lens_ref[s_idx]
+        q_offset = q_offsets_ref[s_idx]
+        kv_cache_len = kv_cache_lens_ref[s_idx]
         kv_new_len = kv_new_lens_ref[s_idx]
-        k_len = global_kv_cache_len + kv_new_len
-        update_kv_cache = update_kv_cache_ref[s_idx]
+        k_len = kv_cache_len + kv_new_len
 
         num_q = pl.cdiv(q_len, self.cfgs.bq_sz)
         num_k = pl.cdiv(k_len, self.cfgs.bkv_sz)
@@ -772,12 +764,10 @@ class BaseMetadataComputer:
             s_idx=s_idx,
             q_start=q_start,
             q_end=q_end,
-            q_position=q_position,
-            global_kv_cache_len=global_kv_cache_len,
+            q_offset=q_offset,
+            kv_cache_len=kv_cache_len,
             kv_new_len=kv_new_len,
             num_k=num_k,
-            num_q=num_q,
-            update_kv_cache=update_kv_cache,
         )
 
         return jax.lax.fori_loop(0, num_q, q_loop_fn, carry)
@@ -785,22 +775,21 @@ class BaseMetadataComputer:
     def compute(
         self,
         cu_q_lens_ref: jax.Ref,
-        q_positions_ref: jax.Ref,
-        global_kv_cache_lens_ref: jax.Ref,
+        q_offsets_ref: jax.Ref,
+        kv_cache_lens_ref: jax.Ref,
         kv_new_lens_ref: jax.Ref,
-        update_kv_cache_ref: jax.Ref,
         distribution_ref: jax.Ref,
     ) -> LoopCarry:
         """Generates the metadata schedule across all sequences."""
         seq_loop_fn = functools.partial(
             self.seq_loop,
             cu_q_lens_ref=cu_q_lens_ref,
-            q_positions_ref=q_positions_ref,
-            global_kv_cache_lens_ref=global_kv_cache_lens_ref,
+            q_offsets_ref=q_offsets_ref,
+            kv_cache_lens_ref=kv_cache_lens_ref,
             kv_new_lens_ref=kv_new_lens_ref,
-            update_kv_cache_ref=update_kv_cache_ref,
         )
-        start_seq_idx, end_seq_idx = self.cfgs.seq_range(distribution_ref)  # pytype: disable=bad-argument-type
+        start_seq_idx, end_seq_idx = self.cfgs.seq_range(
+            distribution_ref)  # pyrefly: ignore[bad-argument-type]
         init_carry = LoopCarry(0, 0)
         return jax.lax.fori_loop(start_seq_idx, end_seq_idx, seq_loop_fn,
                                  init_carry)
@@ -809,10 +798,9 @@ class BaseMetadataComputer:
 def rpa_metadata_schedule_kernel(
     ## Scalar prefetch.
     cu_q_lens_ref: jax.Ref,
-    q_positions_ref: jax.Ref,
-    global_kv_cache_lens_ref: jax.Ref,
+    q_offsets_ref: jax.Ref,
+    kv_cache_lens_ref: jax.Ref,
     kv_new_lens_ref: jax.Ref,
-    update_kv_cache_ref: jax.Ref,
     distribution_ref: jax.Ref,
     extra_scalars_ref: Sequence[jax.Ref],
     # Outputs.
@@ -826,40 +814,35 @@ def rpa_metadata_schedule_kernel(
 ):
     """Generates the HBM-to-VMEM DMA schedule.
 
-  This kernel:
-  1. Iterates through each (potentially ragged) sequence
-  2. Breaks Queries (Q) and Key-Values (KV) into blocks (bq_sz, bkv_sz).
-  3. Assigns tasks to 'lanes' (TPU batch items) based on current lane occupancy
-    to ensure balanced execution across the batch dimension.
-  4. Encodes DMA offsets:
-    - dma_q: HBM start index and size for Query blocks.
-    - dma_kv_cache: Paged indices for existing KV tokens.
-    - dma_kv_new: offsets for new tokens being added to the cache.
-    - do_writeback: boolean flag indicating if a block should be flushed to
-      HBM (ie does this block contain new tokens to add to KV cache).
+    This kernel:
+    1. Iterates through each (potentially ragged) sequence
+    2. Breaks Queries (Q) and Key-Values (KV) into blocks (bq_sz, bkv_sz).
+    3. Assigns tasks to 'lanes' (TPU batch items) based on current lane occupancy
+        to ensure balanced execution across the batch dimension.
+    4. Encodes DMA offsets:
+        - dma_q: HBM start index and size for Query blocks.
+        - dma_kv_cache: Paged indices for existing KV tokens.
+        - dma_kv_new: offsets for new tokens being added to the cache.
+        - do_writeback: boolean flag indicating if a block should be flushed to
+            HBM (ie does this block contain new tokens to add to KV cache).
 
-  Args:
-    cu_q_lens_ref: [max_num_seqs + 1]. Cumulative sum of each sequence's query
-      length. queries[a:b], keys[a:b], and values[a:b] where a=cu_q_lens[i] and
-      b=cu_q_lens[i+1] represents q/k/v of sequence i.
-    q_positions_ref: [max_num_seqs]. Position of each sequence's first query
-      token in the sequence's KV index space (cache tokens followed by new
-      tokens); the causal mask is relative to it.
-    global_kv_cache_lens_ref: [max_num_seqs]. Cache length of each sequence
-      before CP sharding; `RpaConfigs.local_kv_cache_len` narrows it to this
-      call's share.
-    kv_new_lens_ref: [max_num_seqs]. New kv length of each sequence.
-    update_kv_cache_ref: [max_num_seqs]. 1 if this sequence writes its new KV
-      back to the paged cache.
-    distribution_ref: [3]. Cumulative sum of number of decode, prefill, and
-      mixed
-    extra_scalars_ref: Additional scalar refs for custom metadata computers.
-    schedule_hbm_ref: HBM memory that will store output of the kernel.
-    schedule_ref: Scratch memory where schedule results gets written.
-    dma_sem: Semaphore used for writing scheduler output to HBM.
-    cfgs: Configuration of the kernel.
-    computer_cls: Metadata computer class to use for schedule generation.
-  """
+    Args:
+        cu_q_lens_ref: [max_num_seqs + 1]. Cumulative sum of each sequence's query
+            length. queries[a:b], keys[a:b], and values[a:b] where a=cu_q_lens[i] and
+            b=cu_q_lens[i+1] represents q/k/v of sequence i.
+        q_offsets_ref: [max_num_seqs]. Starting Q index for each sequence.
+        kv_cache_lens_ref: [max_num_seqs]. Existing kv cache length of each
+            sequence.
+        kv_new_lens_ref: [max_num_seqs]. New kv length of each sequence.
+        distribution_ref: [3]. Cumulative sum of number of decode, prefill, and
+            mixed
+        extra_scalars_ref: Additional scalar refs for custom metadata computers.
+        schedule_hbm_ref: HBM memory that will store output of the kernel.
+        schedule_ref: Scratch memory where schedule results gets written.
+        dma_sem: Semaphore used for writing scheduler output to HBM.
+        cfgs: Configuration of the kernel.
+        computer_cls: Metadata computer class to use for schedule generation.
+    """
     # Step 1: Compute and fill scheduler metadata.
     computer = computer_cls(
         schedule=schedule_ref,
@@ -870,10 +853,9 @@ def rpa_metadata_schedule_kernel(
     )
     loop_carry = computer.compute(
         cu_q_lens_ref=cu_q_lens_ref,
-        q_positions_ref=q_positions_ref,
-        global_kv_cache_lens_ref=global_kv_cache_lens_ref,
+        q_offsets_ref=q_offsets_ref,
+        kv_cache_lens_ref=kv_cache_lens_ref,
         kv_new_lens_ref=kv_new_lens_ref,
-        update_kv_cache_ref=update_kv_cache_ref,
         distribution_ref=distribution_ref,
     )
     count = loop_carry.count
@@ -894,10 +876,9 @@ def rpa_metadata_schedule_kernel(
 
 def generate_rpa_metadata(
         cu_q_lens: jax.Array,
-        q_positions: jax.Array,
-        global_kv_cache_lens: jax.Array,
+        q_offsets: jax.Array,
+        kv_cache_lens: jax.Array,
         kv_new_lens: jax.Array,
-        update_kv_cache: jax.Array,
         distribution: jax.Array,
         cfgs: configs.RpaConfigs,
         *,
@@ -918,7 +899,7 @@ def generate_rpa_metadata(
         ),
         out_shape=schedule_hbm,
         grid_spec=pltpu.PrefetchScalarGridSpec(
-            num_scalar_prefetch=7,
+            num_scalar_prefetch=6,
             in_specs=[],
             out_specs=schedule_hbm.out_specs(),
             scratch_shapes=[
@@ -930,10 +911,9 @@ def generate_rpa_metadata(
         name="rpa_metadata_schedule",
     )(
         cu_q_lens,
-        q_positions,
-        global_kv_cache_lens,
+        q_offsets,
+        kv_cache_lens,
         kv_new_lens,
-        update_kv_cache,
         distribution,
         extra_scalars,
     )

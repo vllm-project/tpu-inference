@@ -18,7 +18,8 @@ from unittest.mock import MagicMock, patch
 import jax.numpy as jnp
 import pytest
 
-from tpu_inference.kernels.experimental.batched_rpa import configs, wrapper
+from tpu_inference.kernels.experimental.batched_rpa import (configs,
+                                                            tuned_params)
 
 
 def _create_mock_tpu_info(
@@ -77,39 +78,7 @@ def test_calculate_block_sizes_generation(generation, chip_version, is_8bit,
             return_value=_create_mock_tpu_info(generation,
                                                chip_version=chip_version),
     ):
-        decode_blocks, prefill_blocks = wrapper.calculate_block_sizes(
+        decode_blocks, prefill_blocks = tuned_params.calculate_block_sizes(
             model_cfg, serve_cfg, vmem_limit)
         assert decode_blocks.bq_sz >= decode_blocks.bq_c_sz >= expected_bq_c_min
         assert prefill_blocks.bq_sz >= prefill_blocks.bq_c_sz >= expected_bq_c_min
-
-
-def test_calculate_block_sizes_cp_pcp():
-    model_cfg = configs.ModelConfigs(
-        num_q_heads=32,
-        num_kv_heads=8,
-        head_dim=128,
-        mask_value=-1e9,
-    )
-    serve_cfg = configs.ServingConfigs(
-        num_seqs=2,
-        page_size=128,
-        total_q_tokens=1024,
-        num_page_indices=128,
-        dtype_q=jnp.bfloat16,
-        dtype_kv=jnp.bfloat16,
-        dtype_out=jnp.bfloat16,
-        cp_group_size=4,
-        pcp_ring_axis_name="pcp",
-        return_lse=True,
-    )
-    vmem_limit = 64 * 1024 * 1024
-    with patch(
-            "jax.experimental.pallas.tpu.get_tpu_info",
-            return_value=_create_mock_tpu_info(7, chip_version="v7x"),
-    ):
-        decode_blocks, prefill_blocks = wrapper.calculate_block_sizes(
-            model_cfg, serve_cfg, vmem_limit)
-        assert prefill_blocks.n_buffer == 3
-        assert prefill_blocks.batch_size == 1
-        assert prefill_blocks.bq_sz >= 128
-        assert prefill_blocks.bkv_sz >= 128

@@ -39,23 +39,23 @@ def run_manual_triple_buffer(
 ) -> None:
     """Executes an explicit triple-buffered pipeline over `total_steps`.
 
-  Inputs rotate over `configs.NUM_INPUT_SLOTS` physical slots:
-  - comp_slot = step % NUM_INPUT_SLOTS       (slot being computed on)
-  - comm_slot = (step + 2) % NUM_INPUT_SLOTS (slot fetched two steps ahead)
+    Inputs rotate over `configs.NUM_INPUT_SLOTS` physical slots:
+    - comp_slot = step % NUM_INPUT_SLOTS       (slot being computed on)
+    - comm_slot = (step + 2) % NUM_INPUT_SLOTS (slot fetched two steps ahead)
 
-  Outputs rotate independently over `configs.NUM_OUTPUT_SLOTS` slots:
-  - out_slot = step % NUM_OUTPUT_SLOTS            (slot being written)
-  - wait_out_slot = (step - 2) % NUM_OUTPUT_SLOTS (slot whose writeback is
-  awaited before it is reused)
+    Outputs rotate independently over `configs.NUM_OUTPUT_SLOTS` slots:
+    - out_slot = step % NUM_OUTPUT_SLOTS            (slot being written)
+    - wait_out_slot = (step - 2) % NUM_OUTPUT_SLOTS (slot whose writeback is
+    awaited before it is reused)
 
-  Args:
-    total_steps: Total number of pipeline steps to execute.
-    compute_fn: Callable of the main kernel function.
-    q_bref: Fetch-only ref for the Q blocks.
-    o_bref: Writeback-only ref for the attention output.
-    kv_bref: Input/output ref for the KV cache.
-    lse_bref: Optional writeback-only ref for the log-sum-exp values.
-  """
+    Args:
+        total_steps: Total number of pipeline steps to execute.
+        compute_fn: Callable of the main kernel function.
+        q_bref: Fetch-only ref for the Q blocks.
+        o_bref: Writeback-only ref for the attention output.
+        kv_bref: Input/output ref for the KV cache.
+        lse_bref: Optional writeback-only ref for the log-sum-exp values.
+    """
     with jax.named_scope("ep_initialize"):
         q_bref.copy_in(0, 0, total_steps)
         kv_bref.copy_in(0, 0, total_steps)
