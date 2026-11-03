@@ -71,6 +71,32 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
+# TODO: Use custom op with overriding weight loading class so we will have a better
+# and cleaner interface.
+def _free_torch_storage(tensor: Optional[torch.Tensor]) -> None:
+    """Safely frees the underlying CPU memory storage of a PyTorch tensor.
+
+    Tries `untyped_storage().resize_(0)` first, with fallback to `set_(torch.storage.UntypedStorage())`
+    for 0-dim scalars or float8 dtypes that cannot be resized in-place.
+
+    The fallback also covers storage that numpy has been handed a view of, which
+    torch marks non-resizable for good. torchax's `t2j` exports the parameter's
+    own storage that way whenever numpy has a matching scalar type -- float32
+    and float16 do, so an fp32 run frees through `set_()` on every weight, while
+    bf16 and the fp8 formats only ever reach numpy through a widened or
+    bit-cast copy and still resize in place.
+    """
+    if tensor is None:
+        return
+    try:
+        tensor.untyped_storage().resize_(0)
+    except Exception:
+        # `set_` is an in-place op, which torch refuses on a leaf that still
+        # requires grad -- vLLM leaves `requires_grad` on for most parameters.
+        with torch.no_grad():
+            tensor.set_(torch.storage.UntypedStorage())
+
+
 def _host_numpy_view(tensor: torch.Tensor) -> Optional[np.ndarray]:
     """Zero-copy numpy view of a CPU torch tensor, or None if there isn't one.
 
