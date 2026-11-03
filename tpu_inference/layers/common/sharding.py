@@ -170,10 +170,11 @@ def shared_expert_is_replicated(shared_experts) -> bool:
     Reads the linears' actual weight sharding, so it can't disagree with the
     linear configs.
     """
-    if shared_experts is None:
+    modules_fn = getattr(shared_experts, "modules", None)
+    if not callable(modules_fn):
         return False
     configs = [
-        m.quant_method.linear_config for m in shared_experts.modules()
+        m.quant_method.linear_config for m in modules_fn()
         if getattr(getattr(m, "quant_method", None), "linear_config", None)
         is not None
     ]

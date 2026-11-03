@@ -15,11 +15,18 @@
 attention DP with the GMM_EP MoE (USE_MOE_EP_KERNEL=0).
 
 The sharded-matmul and MoE tests need 8 devices (e.g. CPU with
-XLA_FLAGS=--xla_force_host_platform_device_count=8, or a TPU v7x-8). The guard
-tests use a stand-in mesh and run anywhere.
+XLA_FLAGS=--xla_force_host_platform_device_count=8, or a TPU v7x-8). On hosts
+with fewer than 8 devices, `test_sp_8_device_suite_on_cpu` runs them in a
+subprocess with 8 virtual CPU devices; the guard tests use a stand-in mesh and
+run in-process anywhere.
 """
 
 import itertools
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -348,6 +355,9 @@ def test_shared_expert_reduce_follows_linear_configs(monkeypatch, prefix,
         all_reduce.assert_called_once_with(shared_output, mesh,
                                            ShardingAxisName.ATTN_HEAD)
 
+    assert not common_sharding.shared_expert_is_replicated(None)
+    assert not common_sharding.shared_expert_is_replicated(object())
+
 
 def test_sp_gather_weight_selection():
     """The column-parallel weight-gather path is taken only for small weights
@@ -606,3 +616,45 @@ def test_sp_token_sharding_small_batch_fallback(monkeypatch, tc_permute):
                                np.asarray(ref, np.float32),
                                rtol=1e-2,
                                atol=1e-2)
+
+
+@pytest.mark.skipif(len(jax.devices()) >= 8,
+                    reason="8 devices already available in-process")
+def test_sp_8_device_suite_on_cpu():
+    """On single-chip CI hosts (< 8 devices), run the @requires_8_devices tests
+    in a child process with 8 virtual CPU devices so they are never silently
+    skipped."""
+    repo_root = str(Path(__file__).resolve().parents[3])
+    env = os.environ.copy()
+    for var in ("COVERAGE_FILE", "COVERAGE_PROCESS_START",
+                "BUILDKITE_ANALYTICS_TOKEN", "JAX_PLATFORM_NAME",
+                "JAX_COMPILATION_CACHE_DIR", "BVT_ONLY"):
+        env.pop(var, None)
+    env["VLLM_DISABLE_COMPILE_CACHE"] = "1"
+    py_path = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{repo_root}:{py_path}" if py_path else repo_root
+    env["JAX_PLATFORMS"] = "cpu"
+    env["PJRT_DEVICE"] = "CPU"
+    xla_flags = re.sub(r"--xla_force_host_platform_device_count=\S+", "",
+                       env.get("XLA_FLAGS", "")).strip()
+    env["XLA_FLAGS"] = (
+        f"{xla_flags} --xla_force_host_platform_device_count=8".strip())
+    expr = ("test_sp_token_sharding_linears or "
+            "test_sp_row_parallel_defer_all_reduce_keeps_attn_data or "
+            "test_sp_token_sharding_standard_gmm_ep or "
+            "test_sp_token_sharding_small_batch_fallback")
+    proc = subprocess.run(
+        [
+            sys.executable, "-m", "pytest", "-v", "-o", "addopts=", __file__,
+            "-k", expr
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, (
+        f"8-device CPU suite failed (rc={proc.returncode}):\n"
+        f"{proc.stdout}\n{proc.stderr}")
+    assert re.search(r"\b13 passed\b", proc.stdout), proc.stdout
+    assert not re.search(r"\b\d+ skipped\b", proc.stdout), proc.stdout
