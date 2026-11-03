@@ -42,14 +42,16 @@ def _safe_calculate_tiling(
     rhs_cfgs,
     vmem_limit_bytes: int,
     fuse_act: str | None = None,
+    has_partial_sum: bool = False,
 ):
     tiles = calculate_tiling(dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes,
-                             fuse_act)
+                             fuse_act, has_partial_sum)
     if getattr(tiles, "lhs_buffer_count", 2) > 2:
         conservative_limit = max(
             1, vmem_limit_bytes - _GMM_TILING_VMEM_HEADROOM_BYTES)
         conservative_tiles = calculate_tiling(dims, lhs_cfgs, rhs_cfgs,
-                                              conservative_limit, fuse_act)
+                                              conservative_limit, fuse_act,
+                                              has_partial_sum)
         if conservative_tiles != tiles:
             tiles = dataclasses.replace(tiles, lhs_buffer_count=2)
     return tiles

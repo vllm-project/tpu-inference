@@ -339,7 +339,12 @@ class TestShardedMatmulPadding(unittest.TestCase):
         # at full limit, but with 1 MiB headroom it would shrink tn to 1920.
         # _safe_calculate_tiling should preserve (tm=48, tk=8192, tn=2304) and
         # fall back to lhs_buffer_count=2.
-        def fake_calc_tight(dims, lhs_cfgs, rhs_cfgs, limit, fuse_act=None):
+        def fake_calc_tight(dims,
+                            lhs_cfgs,
+                            rhs_cfgs,
+                            limit,
+                            fuse_act=None,
+                            has_partial_sum=False):
             if limit >= vmem_limit:
                 return FakeTileSizes(48, 8192, 2304, 48, lhs_buffer_count=3)
             return FakeTileSizes(48, 8192, 1920, 48, lhs_buffer_count=3)
@@ -351,7 +356,12 @@ class TestShardedMatmulPadding(unittest.TestCase):
                 tiles, FakeTileSizes(48, 8192, 2304, 48, lhs_buffer_count=2))
 
         # Case 2: lhs_buffer_count=3 still fits comfortably with headroom -> keep 3.
-        def fake_calc_roomy(dims, lhs_cfgs, rhs_cfgs, limit, fuse_act=None):
+        def fake_calc_roomy(dims,
+                            lhs_cfgs,
+                            rhs_cfgs,
+                            limit,
+                            fuse_act=None,
+                            has_partial_sum=False):
             self.assertGreaterEqual(
                 limit, vmem_limit - _GMM_TILING_VMEM_HEADROOM_BYTES)
             return FakeTileSizes(48, 8192, 1024, 48, lhs_buffer_count=3)
