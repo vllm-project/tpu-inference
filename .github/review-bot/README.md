@@ -118,7 +118,7 @@ lists them. Edit it to change how the bot reviews.
   guide for its own review.
 - If it defines a review format and a verdict line, the bot uses them.
   Otherwise the bot keeps its own format, which starts a clean review with
-  "Looks good.".
+  "✅ Ready for human review".
 - If the file is deleted, the bot falls back to a built-in guide kept in its
   own code.
 
