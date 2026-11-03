@@ -86,6 +86,8 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     from tpu_inference.models.jax.llama4 import Llama4ForCausalLM
     from tpu_inference.models.jax.llama_eagle3 import EagleLlama3ForCausalLM
     from tpu_inference.models.jax.llama_guard_4 import LlamaGuard4ForCausalLM
+    from tpu_inference.models.jax.muse_glimmer import \
+        MuseGlimmerForConditionalGeneration
     from tpu_inference.models.jax.qwen2 import Qwen2ForCausalLM
     from tpu_inference.models.jax.qwen2_5_vl import \
         Qwen2_5_VLForConditionalGeneration
@@ -102,6 +104,10 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
     _MODEL_REGISTRY[
         "Gemma4ForConditionalGeneration"] = Gemma4ForConditionalGeneration
+    _MODEL_REGISTRY[
+        "MuseGlimmerForConditionalGeneration"] = MuseGlimmerForConditionalGeneration
+    _MODEL_REGISTRY[
+        "MuseGlimmerForCausalLM"] = MuseGlimmerForConditionalGeneration
     _MODEL_REGISTRY["Gemma4ForCausalLM"] = Gemma4ForCausalLM
     _MODEL_REGISTRY["Gemma4MTPModel"] = Gemma4MTPForCausalLM
     _MODEL_REGISTRY["DFlashForCausalLM"] = DFlashForCausalLM
