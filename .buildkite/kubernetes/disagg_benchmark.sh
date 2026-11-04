@@ -24,12 +24,21 @@ prefill_host=${WORKLOAD_NAME}-prefill-0-0.${WORKLOAD_NAME}
 decode_host=${WORKLOAD_NAME}-decode-0-0.${WORKLOAD_NAME}
 
 # Every result leaves this pod through this binary, so prove a real upload works
-# before spending hours on results it could not deliver.
+# before spending hours on results it could not deliver. Retried because a
+# re-admitted pod starting during a brief Buildkite 503 ("envoy overloaded")
+# would otherwise fail the whole JobSet before restore_result can run.
 echo "${WORKLOAD_NAME} $(date -u +%FT%TZ)" > /tmp/disagg-preflight.txt
-if ! (cd /tmp && buildkite-agent artifact upload disagg-preflight.txt); then
-  echo "ERROR: this pod cannot publish artifacts; the benchmark's results would be lost."
-  exit 1
-fi
+for ((attempt = 1; ; attempt++)); do
+  if (cd /tmp && buildkite-agent artifact upload disagg-preflight.txt); then
+    break
+  fi
+  if [ "$attempt" -ge 3 ]; then
+    echo "ERROR: this pod cannot publish artifacts; the benchmark's results would be lost."
+    exit 1
+  fi
+  echo "WARNING: preflight artifact upload failed (attempt $attempt/3); retrying in $((attempt * 60))s"
+  sleep $((attempt * 60))
+done
 
 echo "Starting proxy server..."
 python3 /opt/kube/toy_proxy_server.py \
@@ -154,8 +163,9 @@ run_cell() {
 # hours of completed work and uploading duplicate artifacts.
 restore_result() {
   local path=$1
-  local name
+  local name dir attempt out
   name=$(basename "$path")
+  dir=$(dirname "$path")
   if [ -e "$path" ]; then
     echo "WARNING: local file $path already exists before restore; removing stale file."
     rm -f "$path"
@@ -163,9 +173,22 @@ restore_result() {
   if [ -z "${BUILDKITE_JOB_ID:-}" ]; then
     return 1
   fi
-  if ! buildkite-agent artifact download "$name" "$(dirname "$path")" --step "$BUILDKITE_JOB_ID" >/dev/null 2>&1; then
-    return 1
-  fi
+  for ((attempt = 1; ; attempt++)); do
+    if out=$(buildkite-agent artifact download "$name" "$dir" --step "$BUILDKITE_JOB_ID" 2>&1); then
+      break
+    fi
+    if [[ "$out" == *"no artifacts found"* ]]; then
+      return 1
+    fi
+    if [ "$attempt" -ge 3 ]; then
+      echo "WARNING: could not download artifact $name: $out"
+      rm -f "$path"
+      return 1
+    fi
+    echo "WARNING: download of $name failed (attempt $attempt/3); retrying in $((attempt * 60))s"
+    rm -f "$path"
+    sleep $((attempt * 60))
+  done
   if [ ! -s "$path" ] \
     || ! grep -q -E '"completed": *[1-9]' "$path" \
     || grep -q -E '"failed": *[1-9]' "$path"; then
