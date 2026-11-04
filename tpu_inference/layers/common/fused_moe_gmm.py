@@ -78,10 +78,27 @@ def _single_sort_permutation(
     return sorted_indices, revert, sorted_indices // topk
 
 
-def _split_reduce_scatter_axes(reduction_axis) -> tuple[tuple, tuple]:
-    """Splits `reduction_axis` for scatter_results: the axes to psum over and
-    the attention-DP axes to psum_scatter the tokens back over."""
-    dp_axes = ShardingAxisName.ATTN_DATA
+def _out_token_axes(scatter_results: bool, keep_token_sharding: bool):
+    """The axes the routed-MoE output tokens are reduce-scattered over.
+
+    Resolved once in fused_moe_func and passed down as `out_token_axes`:
+    EXPERT_DATA with keep_token_sharding (sequence-parallel residual stream,
+    see sharding.keeps_tokens_sharded), ATTN_DATA with scatter_results
+    (attention DP), else None (reduce without scattering).
+    """
+    if keep_token_sharding:
+        return ShardingAxisName.EXPERT_DATA
+    if scatter_results:
+        return ShardingAxisName.ATTN_DATA
+    return None
+
+
+def _split_reduce_scatter_axes(reduction_axis,
+                               out_token_axes) -> tuple[tuple, tuple]:
+    """Splits `reduction_axis` into the axes to psum over and the axes to
+    psum_scatter the tokens back over: those in `out_token_axes` (ATTN_DATA,
+    or EXPERT_DATA for the sequence-parallel residual stream)."""
+    dp_axes = out_token_axes
     if not isinstance(dp_axes, tuple):
         dp_axes = (dp_axes, )
     if isinstance(reduction_axis, tuple):
@@ -94,18 +111,20 @@ def _split_reduce_scatter_axes(reduction_axis) -> tuple[tuple, tuple]:
 
 
 def _reduce_local_moe_output(local_out: jax.Array, reduction_axis, *,
-                             scatter_results: bool, defer_all_reduce: bool,
+                             out_token_axes, defer_all_reduce: bool,
                              dtype: jnp.dtype) -> jax.Array:
     """The collective that follows one shard's routed-MoE partial sum.
 
-    Inside shard_map. With scatter_results the partial sums are reduced over
-    `reduction_axis` and the tokens scattered back over the attention-DP
-    axes; with defer_all_reduce the partial sum is returned as is, because
-    the caller folds this all-reduce into the one it runs over the shared
-    expert (VllmMoERunner._fused_output_is_reduced); otherwise psum.
+    Inside shard_map. With `out_token_axes` (see `_out_token_axes`) the
+    partial sums are reduced over `reduction_axis` and the tokens scattered
+    back over those axes; with defer_all_reduce the partial sum is returned
+    as is, because the caller folds this all-reduce into the one it runs over
+    the shared expert (VllmMoERunner._fused_output_is_reduced); otherwise
+    psum.
     """
-    if scatter_results:
-        reduce_axes, scatter_axes = _split_reduce_scatter_axes(reduction_axis)
+    if out_token_axes is not None:
+        reduce_axes, scatter_axes = _split_reduce_scatter_axes(
+            reduction_axis, out_token_axes)
         if reduce_axes:
             local_out = jax.lax.psum(local_out, axis_name=reduce_axes)
         if scatter_axes:
@@ -129,7 +148,7 @@ def _ep_kernel_local(
     *,
     kernel_mode: str,
     local_num_experts: int,
-    scatter_results: bool,
+    out_token_axes,
     defer_all_reduce: bool,
 ):
     """One EP shard's MoE through moe_lowtok.
@@ -154,7 +173,7 @@ def _ep_kernel_local(
 
     return _reduce_local_moe_output(local_out,
                                     ShardingAxisName.EXPERT,
-                                    scatter_results=scatter_results,
+                                    out_token_axes=out_token_axes,
                                     defer_all_reduce=defer_all_reduce,
                                     dtype=hidden_local.dtype)
 
@@ -200,23 +219,23 @@ def _ep_dispatch_kernel(
     mesh: Mesh,
     kernel_mode: str,
     local_num_experts: int,
-    scatter_results: bool,
+    out_token_axes,
     defer_all_reduce: bool,
 ):
     ep_p_spec = P(ShardingAxisName.EXPERT)
     data_p_spec = P(ShardingAxisName.MLP_DATA)
-    attn_data_p_spec = P(ShardingAxisName.ATTN_DATA)
     w1_scale_spec = None if w1_scale is None else ep_p_spec
     w2_scale_spec = None if w2_scale is None else ep_p_spec
 
-    final_out_specs = attn_data_p_spec if scatter_results else data_p_spec
+    final_out_specs = (data_p_spec
+                       if out_token_axes is None else P(out_token_axes))
 
     return jax.shard_map(
         functools.partial(
             _ep_kernel_local,
             kernel_mode=kernel_mode,
             local_num_experts=local_num_experts,
-            scatter_results=scatter_results,
+            out_token_axes=out_token_axes,
             defer_all_reduce=defer_all_reduce,
         ),
         mesh=mesh,
@@ -654,7 +673,7 @@ def moe_gmm_local(
         parallelism: Literal["tp", "ep"],
         enable_rs_kernel: bool = False,
         onehot_moe_permute_threshold: int = 0,
-        scatter_results: bool = False,
+        out_token_axes=None,
         moe_chunk_size: int = 0,
         defer_all_reduce: bool = False,
         hierarchical_collect: tuple | None = None,
@@ -667,6 +686,9 @@ def moe_gmm_local(
     With MOE_TC_PERMUTE (EP only), topk_argsort_indices is given and x holds
     the tokens before the permute, [tokens, hidden]; _tc_local_moe then does
     the gather, the GMMs and the combine.
+
+    out_token_axes: the axes the output tokens are reduce-scattered over
+    (see `_out_token_axes`); None reduces without scattering.
     """
 
     assert parallelism in ["tp", "ep"]
@@ -713,8 +735,9 @@ def moe_gmm_local(
             reduction_axis, tuple) else (reduction_axis, )
         for axis in reduction_axes:
             scatter_axis_size *= jax.lax.axis_size(axis)
-    elif scatter_results:
-        reduce_axes, scatter_axes = _split_reduce_scatter_axes(reduction_axis)
+    elif out_token_axes is not None:
+        reduce_axes, scatter_axes = _split_reduce_scatter_axes(
+            reduction_axis, out_token_axes)
         for a in scatter_axes:
             scatter_axis_size *= jax.lax.axis_size(a)
 
@@ -817,15 +840,15 @@ def moe_gmm_local(
                 num_devices=scatter_axis_size,
                 axis_name=reduction_axis)
             out = rs_out.astype(x.dtype)
-        elif (scatter_results and hierarchical_collect is not None
-              and scatter_axes and hierarchical_collect[0] in reduce_axes):
+        elif (hierarchical_collect is not None and scatter_axes
+              and hierarchical_collect[0] in reduce_axes):
             out = _hierarchical_collect(chunk_hidden, *hierarchical_collect,
                                         reduce_axes,
                                         scatter_axes).astype(x.dtype)
         else:
             out = _reduce_local_moe_output(chunk_hidden,
                                            reduction_axis,
-                                           scatter_results=scatter_results,
+                                           out_token_axes=out_token_axes,
                                            defer_all_reduce=defer_all_reduce,
                                            dtype=x.dtype)
         out_list.append(out)
@@ -886,7 +909,7 @@ def tensor_parallel_gmm(
             parallelism="tp",
             enable_rs_kernel=False,
             onehot_moe_permute_threshold=onehot_moe_permute_threshold,
-            scatter_results=scatter_results,
+            out_token_axes=_out_token_axes(scatter_results, False),
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
             ragged_gather_reduce_version=ragged_gather_reduce_version,
@@ -940,7 +963,7 @@ def expert_parallel_gmm(
     enable_rs_kernel: bool = False,
     onehot_moe_permute_threshold: int = 0,
     moe_chunk_size: int = 0,
-    scatter_results: bool = False,
+    out_token_axes=None,
     defer_all_reduce: bool = False,
     topk_argsort_indices: jax.Array | None = None,
     ragged_gather_reduce_version: str | None = None,
@@ -948,13 +971,14 @@ def expert_parallel_gmm(
     """Runs the MoE experts with expert parallelism (see moe_gmm_local).
 
     topk_argsort_indices is given only with MOE_TC_PERMUTE; x then holds the
-    tokens before the permute.
+    tokens before the permute. out_token_axes: the axes the output tokens are
+    reduce-scattered over (see `_out_token_axes`); None reduces without
+    scattering.
     """
     ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
     ep_p_spec = P(ShardingAxisName.EXPERT)
     data_p_spec = P(ShardingAxisName.MLP_DATA)
     ep_data_p_spec = P(ShardingAxisName.EXPERT_DATA)
-    attn_data_p_spec = P(ShardingAxisName.ATTN_DATA)
     num_experts = w1.shape[0]
     num_experts_per_shard = num_experts // ep_size
     group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
@@ -965,12 +989,13 @@ def expert_parallel_gmm(
     w2_bias_spec = None if w2_bias is None else ep_p_spec
 
     hierarchical_collect = None
-    if (scatter_results and not enable_rs_kernel
+    # The hierarchical collect replaces the ATTN_DATA reduce-scatter only.
+    if (out_token_axes == ShardingAxisName.ATTN_DATA and not enable_rs_kernel
             and envs.MOE_HIERARCHICAL_COLLECT):
         hierarchical_collect = _hierarchical_collect_plan(mesh, x.shape[-1])
 
-    if scatter_results:
-        final_out_specs = attn_data_p_spec
+    if out_token_axes is not None:
+        final_out_specs = P(out_token_axes)
     elif enable_rs_kernel:
         final_out_specs = ep_data_p_spec
     else:
@@ -1003,7 +1028,7 @@ def expert_parallel_gmm(
             tc_capacity=tc_capacity,
             onehot_moe_permute_threshold=onehot_moe_permute_threshold,
             enable_rs_kernel=enable_rs_kernel,
-            scatter_results=scatter_results,
+            out_token_axes=out_token_axes,
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
             hierarchical_collect=hierarchical_collect,
@@ -1070,16 +1095,19 @@ def _split_bits(row: jax.Array, like) -> list[jax.Array]:
     return out
 
 
-def _one_step_all_gather_as_bits(arrays, mesh: Mesh, unit: jnp.dtype) -> tuple:
+def _one_step_all_gather_as_bits(arrays,
+                                 mesh: Mesh,
+                                 unit: jnp.dtype,
+                                 token_axes=None) -> tuple:
     """All-gather `arrays` in one collective.
 
-    The arrays come row-sharded over MLP-data and the attention-only axes. Each
+    The arrays come row-sharded over MLP-data and the token-only axes. Each
     row's values are concatenated as raw `unit` bits, so one all-gather over the
-    attention-only axes moves them all, bitwise unchanged. Returns the arrays
+    token-only axes moves them all, bitwise unchanged. Returns the arrays
     with rows split only over MLP-data (the model replicas) and replicated over
     every other axis.
     """
-    axes = _attn_only_axes(mesh)
+    axes = _dispatch_gather_axes(mesh, token_axes)
     mlp = as_axes(ShardingAxisName.MLP_DATA)
 
     def _gather(*local):
@@ -1106,7 +1134,8 @@ def _dequantize_fp8(q: jax.Array, scale: jax.Array,
 
 def _apply_all_gather_fp8(hidden_states: jax.Array,
                           mesh: Mesh,
-                          routing: tuple = ()):
+                          routing: tuple = (),
+                          token_axes=None):
     """One-step fp8 all-gather of the tokens.
 
     Returns the gathered hidden_states. With routing=(int32 ids, f32 weights),
@@ -1127,7 +1156,10 @@ def _apply_all_gather_fp8(hidden_states: jax.Array,
         hidden_states_q, scale = jax.lax.optimization_barrier(
             (hidden_states_q, scale))
         hidden_states_q, scale, *routing = _one_step_all_gather_as_bits(
-            (hidden_states_q, scale, *routing), mesh, jnp.uint8)
+            (hidden_states_q, scale, *routing),
+            mesh,
+            jnp.uint8,
+            token_axes=token_axes)
         return (_dequantize_fp8(hidden_states_q, scale,
                                 hidden_states.dtype), *routing)
 
@@ -1146,7 +1178,8 @@ def _apply_all_gather_fp8(hidden_states: jax.Array,
 def _apply_one_step_dispatch_gather(hidden_states: jax.Array,
                                     mesh: Mesh,
                                     fp8: bool,
-                                    routing: tuple = ()):
+                                    routing: tuple = (),
+                                    token_axes=None):
     """Hidden states for the one-step dispatch.
 
     Without routing: with fp8=True the output of _apply_all_gather_fp8,
@@ -1156,10 +1189,15 @@ def _apply_one_step_dispatch_gather(hidden_states: jax.Array,
     the routing and returns (hidden_states, ids, weights).
     """
     if fp8:
-        return _apply_all_gather_fp8(hidden_states, mesh, routing)
+        return _apply_all_gather_fp8(hidden_states,
+                                     mesh,
+                                     routing,
+                                     token_axes=token_axes)
     if routing:
-        return _one_step_all_gather_as_bits((hidden_states, *routing), mesh,
-                                            jnp.uint16)
+        return _one_step_all_gather_as_bits((hidden_states, *routing),
+                                            mesh,
+                                            jnp.uint16,
+                                            token_axes=token_axes)
     return hidden_states
 
 
@@ -1169,11 +1207,13 @@ def _apply_one_step_dispatch_gather(hidden_states: jax.Array,
 _HIERARCHICAL_HIDDEN_ALIGN = 2 * 128
 
 
-def _attn_only_axes(mesh: Mesh) -> tuple[str, ...]:
-    """The sharded attention-data axes that are not MLP-data axes: the axes
+def _dispatch_gather_axes(mesh: Mesh, token_axes=None) -> tuple[str, ...]:
+    """The sharded token-data axes that are not MLP-data axes: the axes
     the MoE dispatch gathers token rows over."""
+    if token_axes is None:
+        token_axes = ShardingAxisName.ATTN_DATA
     mlp = set(as_axes(ShardingAxisName.MLP_DATA))
-    return tuple(a for a in as_axes(ShardingAxisName.ATTN_DATA)
+    return tuple(a for a in as_axes(token_axes)
                  if a not in mlp and mesh.shape.get(a, 1) > 1)
 
 
@@ -1364,6 +1404,7 @@ def _apply_hierarchical_dispatch_gather(hidden_states: jax.Array,
     "scatter_results",
     "moe_chunk_size",
     "defer_all_reduce",
+    "keep_token_sharding",
     "ragged_gather_reduce_version",
 ))
 def fused_moe_func(
@@ -1391,6 +1432,7 @@ def fused_moe_func(
     expert_score_correction_bias: jax.Array | None = None,
     moe_chunk_size: int = 0,
     num_valid_tokens: jax.Array | None = None,
+    keep_token_sharding: bool = False,
     ragged_gather_reduce_version: str | None = None,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
@@ -1412,6 +1454,10 @@ def fused_moe_func(
         scoring_fn: scoring function to apply on gating_output.
         enable_rs_kernel: enable custom Hierarchical Reduce-Scatter kernel.
         use_gmm_fused_rs_kernel: enable fused GMM reduce-scatter kernel.
+        keep_token_sharding: return the output token-sharded over EXPERT_DATA
+            (sequence-parallel residual stream, see
+            sharding.keeps_tokens_sharded) instead of resharding it to
+            ATTN_DATA / MLP_DATA.
 
     Returns:
         Output of moe operation [num_tokens, hidden_size]
@@ -1465,13 +1511,21 @@ def fused_moe_func(
         hash_based_topk_indices=hash_based_topk_indices,
         expert_score_correction_bias=expert_score_correction_bias,
         num_valid_tokens=num_valid_tokens)
+    if keep_token_sharding and (num_tokens % get_mesh_shape_product(
+            mesh, ShardingAxisName.EXPERT_DATA)):
+        keep_token_sharding = False
+    out_token_axes = _out_token_axes(scatter_results, keep_token_sharding)
     # All gathering topk_indices and topk_weights if attention dp is used.
     # MOE_FOLD_ROUTING_INTO_DISPATCH gathers them in the token all-gather.
-    hierarchical = use_ep and envs.MOE_HIERARCHICAL_DISPATCH
-    dispatch_gather = (_apply_hierarchical_dispatch_gather
-                       if hierarchical else _apply_one_step_dispatch_gather)
+    token_axes = (ShardingAxisName.EXPERT_DATA
+                  if keep_token_sharding else ShardingAxisName.ATTN_DATA)
+    hierarchical = (use_ep and envs.MOE_HIERARCHICAL_DISPATCH
+                    and not keep_token_sharding)
+    dispatch_gather = (_apply_hierarchical_dispatch_gather if hierarchical else
+                       functools.partial(_apply_one_step_dispatch_gather,
+                                         token_axes=token_axes))
     fold_routing = (envs.MOE_FOLD_ROUTING_INTO_DISPATCH
-                    and bool(_attn_only_axes(mesh)))
+                    and bool(_dispatch_gather_axes(mesh, token_axes)))
     if fold_routing:
         logger.info_once(
             "MOE_FOLD_ROUTING_INTO_DISPATCH: the top-k ids and weights ride "
@@ -1482,7 +1536,7 @@ def fused_moe_func(
                    topk_weights.astype(jnp.float32))
         hidden_states, topk_indices, topk_weights = dispatch_gather(
             hidden_states, mesh, fp8=all_gather_fp8, routing=routing)
-    elif get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA) > 1:
+    elif get_mesh_shape_product(mesh, token_axes) > 1:
         topk_indices, topk_weights = all_gather_topk_indices_and_weights(
             topk_indices, topk_weights, dtype, mesh)
     topk_weights = topk_weights.astype(_get_topk_weights_dtype(dtype))
@@ -1520,7 +1574,7 @@ def fused_moe_func(
                 mesh=mesh,
                 kernel_mode=ep_kernel,
                 local_num_experts=local_num_experts,
-                scatter_results=scatter_results,
+                out_token_axes=out_token_axes,
                 defer_all_reduce=defer_all_reduce,
             )
 
@@ -1655,7 +1709,7 @@ def fused_moe_func(
             mesh=mesh,
             enable_rs_kernel=actual_enable_rs_kernel,
             onehot_moe_permute_threshold=onehot_moe_permute_threshold,
-            scatter_results=scatter_results,
+            out_token_axes=out_token_axes,
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
             topk_argsort_indices=topk_argsort_indices,

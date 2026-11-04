@@ -108,6 +108,10 @@ def moe_apply(
     # and return per-shard partial sums, so the reduction can be deferred and
     # fused with a later collective (e.g. a shared-expert all-reduce).
     defer_all_reduce = extra_backend_kwargs.pop("defer_all_reduce", False)
+    # GMM_EP only: keep the output token-sharded over
+    # EXPERT_DATA (sequence-parallel residual stream).
+    keep_token_sharding = extra_backend_kwargs.pop("keep_token_sharding",
+                                                   False)
 
     if defer_all_reduce and moe_backend not in {
             MoEBackend.GMM_EP, MoEBackend.GMM_TP
@@ -198,6 +202,7 @@ def moe_apply(
                     moe_chunk_size=moe_chunk_size,
                     num_valid_tokens=extra_backend_kwargs.get(
                         "num_valid_tokens", None),
+                    keep_token_sharding=keep_token_sharding,
                 )
             case MoEBackend.FUSED_EP_MOE_V2:
                 reason = fused_ep_moe_v2.unsupported_reason(
