@@ -57,26 +57,47 @@ require_proxy() {
   exit 1
 }
 
-echo "Waiting for prefill ($prefill_host) and decode ($decode_host) servers..."
 # -f so an error status is not read as healthy, -m so a hung connection cannot
-# stretch the 10s iteration this count assumes.
-health_tries=0
-until curl -fsS -m 10 "http://$prefill_host:8000/health" && curl -fsS -m 10 "http://$decode_host:8000/health"; do
-  require_proxy
-  health_tries=$((health_tries+1))
-  if [ "$health_tries" -gt 1080 ]; then
-    echo "ERROR: servers not healthy after 3h; failing the benchmark."
-    exit 1
-  fi
-  echo "Waiting for prefill and decode health checks..."
-  sleep 10
-done
+# stretch the 10s iteration wait_for_engines assumes.
+engines_healthy() {
+  curl -fsS -m 10 "http://$prefill_host:8000/health" >/dev/null 2>&1 \
+    && curl -fsS -m 10 "http://$decode_host:8000/health" >/dev/null 2>&1
+}
 
+# 360 * 10s = 1h, matching the 1h startupProbe ceiling on prefill/decode in
+# qwen3-coder-480b-1p1d.yaml: long enough for GKE to replace an evicted TPU pod
+# and reload/compile the 480B model (~15-40m), without holding 8 chips for 3h
+# if an engine wedges.
+wait_for_engines() {
+  local health_tries=0
+  until engines_healthy; do
+    require_proxy
+    health_tries=$((health_tries+1))
+    if [ "$health_tries" -gt 360 ]; then
+      echo "ERROR: servers not healthy after 1h; failing the benchmark."
+      exit 1
+    fi
+    echo "Waiting for prefill ($prefill_host) and decode ($decode_host) health checks..."
+    sleep 10
+  done
+}
+
+echo "Waiting for prefill ($prefill_host) and decode ($decode_host) servers..."
+wait_for_engines
 echo "Both prefill and decode servers are HEALTHY!"
 
 mkdir -p /tmp/benchmark_results
 model="Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"
 publish_failed=0
+
+# True when a result file is non-empty, recorded completed requests, and had no
+# failed requests.
+valid_result() {
+  local path=$1
+  [ -s "$path" ] \
+    && grep -q -E '"completed": *[1-9]' "$path" \
+    && ! grep -q -E '"failed": *[1-9]' "$path"
+}
 
 # The pod is deleted the moment the JobSet finishes, so results leave from here.
 #
@@ -94,6 +115,14 @@ publish_result() {
   dir=$(dirname "$path")
   if [ "$required" -eq 1 ]; then
     attempts=3
+  fi
+
+  # A cell with failed requests describes a broken serving path, not a
+  # measurement; check before uploading so a broken JSON is never published as
+  # a valid checkpoint artifact.
+  if ! valid_result "$path"; then
+    echo "ERROR: $name is incomplete or recorded failed requests: $(grep -oE '"(completed|failed)": *[0-9]+' "$path" 2>/dev/null | tr '\n' ' ')"
+    exit 1
   fi
 
   # Buildkite adds a second artifact rather than replacing one of the same
@@ -114,13 +143,6 @@ publish_result() {
     echo "WARNING: upload of $name failed (attempt $attempt/$attempts); retrying in $((attempt * 60))s"
     sleep $((attempt * 60))
   done
-
-  # A cell with failed requests describes a broken serving path, not a
-  # measurement; stop rather than spend the remaining hours on it.
-  if grep -q -E '"failed": *[1-9]' "$path"; then
-    echo "ERROR: $name recorded failed requests: $(grep -oE '"(completed|failed)": *[0-9]+' "$path" | tr '\n' ' ')"
-    exit 1
-  fi
 }
 
 # Tokens decode has generated so far, summed over its engines; empty when its
@@ -154,7 +176,10 @@ run_cell() {
       exit 1
     fi
   done
-  wait "$bench_pid"
+  # Let the caller inspect valid_result and engines_healthy: vllm bench serve
+  # exits non-zero when a warmup request fails because an engine was just
+  # evicted.
+  wait "$bench_pid" || true
 }
 
 # Restores an artifact already uploaded by an earlier attempt of this same
@@ -189,9 +214,7 @@ restore_result() {
     rm -f "$path"
     sleep $((attempt * 60))
   done
-  if [ ! -s "$path" ] \
-    || ! grep -q -E '"completed": *[1-9]' "$path" \
-    || grep -q -E '"failed": *[1-9]' "$path"; then
+  if ! valid_result "$path"; then
     echo "WARNING: downloaded artifact $name is empty, incomplete, or recorded failed requests; discarding and re-running."
     rm -f "$path"
     return 1
@@ -234,22 +257,48 @@ run_sweep() {
       continue
     fi
 
-    echo "Starting benchmark cell: c=$concurrency, i=$input_len, o=$output_len, n=$effective, warmups=$warmups"
-    run_cell vllm bench serve \
-      --model="$model" \
-      --dataset-name=random \
-      --num-warmups "$warmups" \
-      --random-input-len="$input_len" \
-      --random-output-len="$output_len" \
-      --num-prompts="$effective" \
-      --ignore-eos \
-      --host=localhost \
-      --port=10000 \
-      --max-concurrency="$concurrency" \
-      --request-rate=inf \
-      --metric-percentiles 90,99 \
-      --append-result \
-      --result-file="$cell"
+    # An engine pod can be evicted on its own (node maintenance/Spot reclaim,
+    # where the Job replaces the pod under DisruptionTarget) or a few seconds
+    # before this CPU pod during a Kueue preemption. Verify both engines are
+    # up before starting, and if a cell records failed requests because an
+    # engine went down, wait for the replacement pod (or our own SIGTERM)
+    # rather than exiting 1 and triggering FailJobSet.
+    local cell_attempt
+    for ((cell_attempt = 1; ; cell_attempt++)); do
+      wait_for_engines
+      rm -f "$cell"
+      echo "Starting benchmark cell: c=$concurrency, i=$input_len, o=$output_len, n=$effective, warmups=$warmups (attempt $cell_attempt/3)"
+      run_cell vllm bench serve \
+        --model="$model" \
+        --dataset-name=random \
+        --num-warmups "$warmups" \
+        --random-input-len="$input_len" \
+        --random-output-len="$output_len" \
+        --num-prompts="$effective" \
+        --ignore-eos \
+        --host=localhost \
+        --port=10000 \
+        --max-concurrency="$concurrency" \
+        --request-rate=inf \
+        --metric-percentiles 90,99 \
+        --append-result \
+        --result-file="$cell"
+
+      if valid_result "$cell"; then
+        break
+      fi
+
+      # Give an engine in the middle of SIGTERM shutdown (or our own pod during
+      # a Kueue preemption) a 15s window before checking /health.
+      sleep 15
+      if engines_healthy || [ "$cell_attempt" -ge 3 ]; then
+        echo "ERROR: $(basename "$cell") is incomplete or recorded failed requests (attempt $cell_attempt/3): $(grep -oE '"(completed|failed)": *[0-9]+' "$cell" 2>/dev/null | tr '\n' ' ')"
+        rm -f "$cell"
+        exit 1
+      fi
+      echo "WARNING: $(basename "$cell") is incomplete or recorded failed requests while an engine was unreachable (attempt $cell_attempt/3); discarding and waiting for engines to recover."
+      rm -f "$cell"
+    done
 
     publish_result "$cell"
 
