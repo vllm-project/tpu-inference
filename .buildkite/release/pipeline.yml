@@ -71,11 +71,26 @@ steps:
     commands:
       - bash .buildkite/release/check_wheels.sh
 
+  # The wheels' first run: install them into a fresh venv on a TPU, serve
+  # Llama-3.1-8B-Instruct and bench it, as done by hand before a release.
+  # TODO: release-tpu-inference-tpu-placeholder does not exist yet. It has to be a queue in
+  # the TPU Release cluster whose agent runs the job on a host with a TPU chip
+  # (one v6e chip is enough).
+  - label: ":test_tube: Serve the wheels on a TPU"
+    key: serve_wheels
+    depends_on: check_wheels
+    if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
+    agents:
+      queue: release-tpu-inference-tpu-placeholder
+    timeout_in_minutes: 60
+    commands:
+      - bash .buildkite/release/serve_wheels.sh
+
   - label: ":pipeline: Plan the approval and publish"
     key: plan_publish
     depends_on:
       - build_images
-      - check_wheels
+      - serve_wheels
     if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
     agents: *queue
     commands:
