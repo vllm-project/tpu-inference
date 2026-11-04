@@ -74,6 +74,8 @@ nav:
     - 'Code Examples':
       - 'Multi Modal Inference': api_and_code_examples/multi_modal_inference.md
       - 'Offline LoRA': api_and_code_examples/offline_lora_inference.md
+    - 'Model Guides':
+      - 'jina-embeddings-v2 (JinaBert)': models/jina_embeddings_v2.md
     - 'Out-of-Tree Usage': getting_started/out-of-tree.md
   - 'Developers Guides':
     - 'Contributing to vLLM JAX': developers_guide/contributing.md
@@ -81,6 +83,7 @@ nav:
     - 'JAX Model Development': developers_guide/jax_model_development.md
     - 'Torchax Model Development': developers_guide/torchax_model_development.md
     - 'Profiling' : developers_guide/profiling.md
+    - 'Encoder ALiBi Flash Attention': developers_guide/encoder_alibi_kernel.md
 
 plugins:
   - search
