@@ -70,16 +70,41 @@ model="Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"
 publish_failed=0
 
 # The pod is deleted the moment the JobSet finishes, so results leave from here.
+#
+# Pass required=1 for a shape's combined file. That file is what
+# parse_gke_results.py reads and it holds every cell, so it is the only upload
+# that must arrive: it is retried, and if it still fails the step fails. A
+# cell's own artifact only lets a re-admitted run skip the cell and keeps the
+# results of a sweep cut short, so losing one (e.g. to a Buildkite 503 "envoy
+# overloaded" that outlasts the agent's own retries) is just a warning.
 publish_result() {
-  local path=$1
+  local path=$1 required=${2:-0}
   [ -f "$path" ] || return 0
-  local name
+  local name dir attempt attempts=1
   name=$(basename "$path")
+  dir=$(dirname "$path")
+  if [ "$required" -eq 1 ]; then
+    attempts=3
+  fi
 
-  # Uploaded once - Buildkite adds a second artifact rather than replacing one
-  # of the same name, so a retry pass shows up as a duplicate, not a correction.
-  (cd "$(dirname "$path")" && buildkite-agent artifact upload "$name") \
-    || { echo "WARNING: could not upload $name"; publish_failed=1; }
+  # Buildkite adds a second artifact rather than replacing one of the same
+  # name, so a retried upload can show up as a duplicate; that is why only the
+  # required file is retried. buildkite-agent already retries for ~35s, so the
+  # pauses here are long enough to outlast a short outage.
+  for ((attempt = 1; ; attempt++)); do
+    if (cd "$dir" && buildkite-agent artifact upload "$name"); then
+      break
+    fi
+    if [ "$attempt" -ge "$attempts" ]; then
+      echo "WARNING: could not upload $name"
+      if [ "$required" -eq 1 ]; then
+        publish_failed=1
+      fi
+      break
+    fi
+    echo "WARNING: upload of $name failed (attempt $attempt/$attempts); retrying in $((attempt * 60))s"
+    sleep $((attempt * 60))
+  done
 
   # A cell with failed requests describes a broken serving path, not a
   # measurement; stop rather than spend the remaining hours on it.
@@ -212,7 +237,7 @@ run_sweep() {
     sleep 30
   done
 
-  publish_result "$combined"
+  publish_result "$combined" 1
 }
 
 run_sweep 1024 8192 256
@@ -221,6 +246,6 @@ run_sweep 8192 1024 256
 echo "Benchmark complete! Results saved in /tmp/benchmark_results."
 
 if [ "$publish_failed" -ne 0 ]; then
-  echo "ERROR: the benchmark completed but at least one result was not published."
+  echo "ERROR: the benchmark completed but at least one combined result was not published."
   exit 1
 fi
