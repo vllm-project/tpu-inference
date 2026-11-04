@@ -103,7 +103,9 @@ class VllmMLAAttention(MLAAttention):
             self.kv_cache_quantized_dtype = utils.to_jax_dtype(
                 self.kv_cache_dtype)
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype):
+    def process_weights_after_loading(self,
+                                      act_dtype: torch.dtype | None = None
+                                      ) -> None:
         with torchax.default_env():
             # tpu-inference's linear methods store layer.weight in [in_features,
             # out_features] layout. Upstream MLA's process_weights_after_loading reads
@@ -116,7 +118,7 @@ class VllmMLAAttention(MLAAttention):
                     self.kv_b_proj.weight.transpose(0, 1).contiguous(),
                     requires_grad=False,
                 )
-            super().process_weights_after_loading(act_dtype)
+            super().process_weights_after_loading()
 
             # NOTE: vLLM dequantizes kv_b_proj weights which causes more memory
             # usage than expected.

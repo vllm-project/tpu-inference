@@ -962,10 +962,6 @@ class DPScheduler(SchedulerInterface):
         for output in rank_outputs:
             combined_finished_req_ids.update(output.finished_req_ids)
 
-        # Combine other fields (take from first non-empty or use defaults)
-        num_common_prefix_blocks = rank_outputs[
-            0].num_common_prefix_blocks if rank_outputs else []
-
         # Create DP rank assignment mapping for scheduled requests
         assigned_dp_rank = {}
         for req_id in combined_num_scheduled_tokens.keys():
@@ -1039,7 +1035,6 @@ class DPScheduler(SchedulerInterface):
             total_num_scheduled_tokens=total_scheduled_tokens,
             scheduled_spec_decode_tokens=combined_spec_decode_tokens,
             scheduled_encoder_inputs=combined_encoder_inputs,
-            num_common_prefix_blocks=num_common_prefix_blocks,
             finished_req_ids=combined_finished_req_ids,
             free_encoder_mm_hashes=set(),
             assigned_dp_rank=assigned_dp_rank,

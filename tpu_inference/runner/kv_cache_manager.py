@@ -349,7 +349,7 @@ class KVCacheManager:
 
         total_limit = sum(limit for _, limit in hbm_usage)
         total_used = sum(used for used, _ in hbm_usage)
-        gpu_mem_util = cache_config.gpu_memory_utilization
+        gpu_mem_util = cache_config.resolved_gpu_memory_utilization
         avail = int(total_limit * gpu_mem_util - total_used)
         if avail <= 0:
             return
