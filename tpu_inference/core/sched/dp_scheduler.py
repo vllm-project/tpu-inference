@@ -161,6 +161,57 @@ def _disable_cloudpickle():
     multiprocessing.reduction.ForkingPickler.loads = _original_loads
 
 
+# Module globals of vllm.v1.core.kv_cache_utils written by init_none_hash().
+_NONE_HASH_GLOBALS = ("NONE_HASH", "_NONE_HASH_SEED")
+
+
+def _get_none_hash_state() -> Dict[str, Any]:
+    """Return the NONE_HASH globals initialized in this process, if any."""
+    from vllm.v1.core import kv_cache_utils
+    return {
+        name: getattr(kv_cache_utils, name)
+        for name in _NONE_HASH_GLOBALS if hasattr(kv_cache_utils, name)
+    }
+
+
+def _set_none_hash_state(state: Dict[str, Any]) -> None:
+    """Install NONE_HASH globals captured by _get_none_hash_state()."""
+    from vllm.v1.core import kv_cache_utils
+    for name, value in state.items():
+        setattr(kv_cache_utils, name, value)
+
+
+def _scheduler_worker_trampoline(
+    rank: int,
+    input_conn: Connection,
+    output_conn: Connection,
+    payload: bytes,
+) -> None:
+    """Entry point of scheduler workers started with the "spawn" method.
+
+    Spawn pickles the Process arguments with the standard pickler, which
+    cannot serialize the vLLM config (it holds local functions). The parent
+    therefore passes only the pipe connections as regular arguments and
+    everything else as cloudpickle bytes, unpacked here.
+
+    The StructuredOutputManager owns thread pools and cannot be pickled, so
+    a fresh one is built from the config. This matches what a forked worker
+    gets: workers start before any request is added, so the parent's manager
+    has no grammar backend or other request state to inherit yet.
+
+    A spawned worker also does not inherit module globals, so the parent's
+    NONE_HASH (the parent hash of every request's first block) is installed
+    explicitly; otherwise block hashes computed in the worker (e.g. when
+    decoding completes a request's first block) would fail or diverge from
+    the ones computed in the engine process.
+    """
+    worker_kwargs, none_hash_state = cloudpickle.loads(payload)
+    _set_none_hash_state(none_hash_state)
+    worker_kwargs["structured_output_manager"] = StructuredOutputManager(
+        worker_kwargs["vllm_config"])
+    _scheduler_worker_process(rank, input_conn, output_conn, **worker_kwargs)
+
+
 def _scheduler_worker_process(
     rank: int,
     input_conn: Connection,
@@ -487,8 +538,9 @@ class DPScheduler(SchedulerInterface):
         self._round_robin_next_rank: int = 0
         self._last_dp_balance_log_time: float = 0.0
 
-        # Initialize NONE_HASH global before forking worker processes
-        # This ensures all workers inherit the initialized value
+        # Initialize NONE_HASH global before starting worker processes.
+        # Forked workers inherit the initialized value; spawned workers
+        # receive it explicitly (see _scheduler_worker_trampoline).
         if vllm_config.cache_config.enable_prefix_caching:
             from vllm.utils.hashing import get_hash_fn_by_name
             from vllm.v1.core.kv_cache_utils import init_none_hash
@@ -506,7 +558,11 @@ class DPScheduler(SchedulerInterface):
         # multiprocessing.Queue uses background feeder threads for put(),
         # which causes GIL contention and thread convoy effects at high DP
         # sizes. Using raw Pipe connections eliminates all background threads.
-        ctx = multiprocessing.get_context('fork')
+        # The start method is configurable (envs.DP_SCHED_START_METHOD):
+        # "spawn" avoids forking the engine process after the TPU runtime has
+        # started threads, which can deadlock the forked child.
+        self._start_method: str = envs.DP_SCHED_START_METHOD.lower()
+        ctx = multiprocessing.get_context(self._start_method)
         self.input_conns: List[Connection] = []  # parent writes, child reads
         self.output_conns: List[Connection] = []  # child writes, parent reads
         self.processes: List[Process] = []
@@ -540,23 +596,44 @@ class DPScheduler(SchedulerInterface):
                 self.input_conns.append(input_parent_conn)
                 self.output_conns.append(output_parent_conn)
 
-                process = ctx.Process(
-                    target=_scheduler_worker_process,
-                    args=(
-                        rank,
-                        input_child_conn,
-                        output_child_conn,
-                        self.vllm_config,
-                        self.per_rank_kv_cache_configs[rank],
-                        structured_output_manager,
-                        block_size,
-                        self.hash_block_size,
-                        mm_registry,
-                        include_finished_set,
-                        log_stats,
-                        original_scheduler_cls,
-                    ),
-                )
+                if self._start_method == "spawn":
+                    # Only the connections go through the standard pickler;
+                    # see _scheduler_worker_trampoline.
+                    worker_kwargs = dict(
+                        vllm_config=self.vllm_config,
+                        kv_cache_config=self.per_rank_kv_cache_configs[rank],
+                        block_size=block_size,
+                        hash_block_size=self.hash_block_size,
+                        mm_registry=mm_registry,
+                        include_finished_set=include_finished_set,
+                        log_stats=log_stats,
+                        original_scheduler_cls=original_scheduler_cls,
+                    )
+                    payload = cloudpickle.dumps(
+                        (worker_kwargs, _get_none_hash_state()))
+                    process = ctx.Process(
+                        target=_scheduler_worker_trampoline,
+                        args=(rank, input_child_conn, output_child_conn,
+                              payload),
+                    )
+                else:
+                    process = ctx.Process(
+                        target=_scheduler_worker_process,
+                        args=(
+                            rank,
+                            input_child_conn,
+                            output_child_conn,
+                            self.vllm_config,
+                            self.per_rank_kv_cache_configs[rank],
+                            structured_output_manager,
+                            block_size,
+                            self.hash_block_size,
+                            mm_registry,
+                            include_finished_set,
+                            log_stats,
+                            original_scheduler_cls,
+                        ),
+                    )
                 process.start()
                 # Close child ends in parent process
                 input_child_conn.close()
@@ -580,7 +657,8 @@ class DPScheduler(SchedulerInterface):
         global_max_tokens = per_rank_max_tokens * self.dp_size
         logger.info(
             f"DPScheduler (Async = {self.vllm_config.scheduler_config.async_scheduling}) "
-            f"started {self.dp_size} worker processes with cloudpickle. "
+            f"started {self.dp_size} worker processes "
+            f"(start method: {self._start_method}). "
             f"Per-rank limits: max_seqs={self.vllm_config.scheduler_config.max_num_seqs}, "
             f"max_tokens={per_rank_max_tokens}; "
             f"global max_tokens across dp={self.dp_size}: {global_max_tokens}")
