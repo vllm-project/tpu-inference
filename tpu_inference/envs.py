@@ -108,6 +108,7 @@ if TYPE_CHECKING:
     ENABLE_TOPK_PREFILTER: bool = False
     RAIDEN_H2D_SETTLE: bool = True
     SKIP_MAMBA_SCHEDULER_BLOCKS: bool = False
+    MIXED_HEAD_DIM_SLIDING_WINDOW: bool = True
     TPU_MOE_SINGLE_SORT: bool = False
     TPU_MOE_ROUTER_TOPK: str = "sort"
     TPU_MOE_LOWTOK: bool = False
@@ -690,6 +691,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # See core/runner_slot_mamba.py.
     "SKIP_MAMBA_SCHEDULER_BLOCKS":
     env_bool("SKIP_MAMBA_SCHEDULER_BLOCKS", default=False),
+    # Keep sliding-window KV cache specs for models whose attention layers have
+    # different padded head dims (e.g. Gemma 4), so sliding-window layers only
+    # keep their window of KV. Every attention page is padded to the sum of the
+    # distinct per-shape page sizes so vLLM's block budget matches what the TPU
+    # allocates. Set to 0 to fall back to treating all layers as full attention.
+    # Read by the model runner; TpuPlatform.additional_env_vars carries it to
+    # Ray workers on other hosts.
+    "MIXED_HEAD_DIM_SLIDING_WINDOW":
+    env_bool("MIXED_HEAD_DIM_SLIDING_WINDOW", default=True),
     # Build the MoE permutation, its inverse, and the sorted token ids from
     # one packed sort instead of three.
     "TPU_MOE_SINGLE_SORT":

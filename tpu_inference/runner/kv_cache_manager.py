@@ -485,6 +485,83 @@ class KVCacheManager:
             avail / (2**30), self.runner.model_config.max_model_len, attn_reqs,
             attn_blocks_per_req, mamba_reqs, max_num_reqs)
 
+    def _maybe_pad_pages_for_mixed_head_dims(
+            self, layers: dict[str, AttentionLayerBase]) -> bool:
+        """Pad attention page sizes so sliding window works with mixed dims.
+
+        Models such as Gemma 4 mix sliding-window layers and full-attention
+        layers with different (padded) KV head counts and head dims. vLLM
+        puts each attention type into its own KV cache groups and lets slot j
+        of every group share the same bytes, sized by one uniform page size.
+        TPU KV caches are typed arrays, so `initialize_kv_cache` dedupes each
+        slot by `(offset, num_kv_heads, head_size, dtype)`: groups with the
+        same shape share one array, and every other shape gets its own array
+        with the same number of blocks.
+
+        To keep vLLM's `num_blocks` equal to what is allocated, every
+        attention spec reports the sum of the TPU page sizes of all distinct
+        KV cache shapes as its `page_size_padded`. The HBM held per block is
+        unchanged compared to placing all layers into one full-attention
+        group, but sliding-window groups now only hold their window of
+        tokens, so far more blocks are left for full-attention layers.
+
+        Args:
+            layers: A dictionary mapping layer names to their corresponding
+                attention module instances.
+
+        Returns:
+            True if sliding-window specs can be kept, in which case
+            `_hybrid_uniform_page_size_bytes` has been set. False if the
+            caller should disable sliding window instead.
+        """
+        if not tpu_envs.MIXED_HEAD_DIM_SLIDING_WINDOW:
+            return False
+        # MLA and mamba hybrids have their own page size handling, and with
+        # the hybrid KV cache manager disabled vLLM converts sliding-window
+        # specs to full attention anyway, which would only waste the padding.
+        if (self.use_mla or self.runner.vllm_config.scheduler_config.
+                disable_hybrid_kv_cache_manager):
+            return False
+        if any(isinstance(module, MambaBase) for module in layers.values()):
+            return False
+
+        # Only decoder layers that own their KV cache get a spec.
+        attn_modules = [
+            module for module in layers.values()
+            if isinstance(module, Attention) and not is_cache_for_ds_v4(module)
+            and module.attn_type == AttentionType.DECODER
+            and module.kv_sharing_target_layer_name is None
+        ]
+        if not any(module.sliding_window is not None
+                   for module in attn_modules):
+            return False
+
+        block_size = self.runner.cache_config.block_size
+        tp_size = self.runner.mesh.shape["model"]
+        shapes = sorted({
+            (common_utils.get_padded_num_heads(module.num_kv_heads, tp_size),
+             common_utils.get_padded_head_dim(module.head_size))
+            for module in attn_modules
+        })
+        page_sizes = {}
+        for num_kv_heads, head_size in shapes:
+            page_sizes[(num_kv_heads, head_size)] = int(
+                get_attention_page_size_bytes(self.runner.mesh, block_size,
+                                              num_kv_heads, head_size,
+                                              self.runner.kv_cache_dtype,
+                                              False,
+                                              self.runner.attention_backend))
+        self._hybrid_uniform_page_size_bytes = sum(page_sizes.values())
+        logger.info_once(
+            "Keeping sliding-window KV cache specs for attention layers with "
+            "mixed head dims: padding every attention page to %d bytes, the "
+            "sum of the page sizes of each (num_kv_heads, head_dim) shape: %s. "
+            "Set MIXED_HEAD_DIM_SLIDING_WINDOW=0 to disable.",
+            self._hybrid_uniform_page_size_bytes,
+            ", ".join(f"{heads}x{dim}: {size}"
+                      for (heads, dim), size in page_sizes.items()))
+        return True
+
     def get_kv_cache_spec(self):
         # TODO(xiang): this hack tricks engine core to init successfully
 
@@ -631,13 +708,15 @@ class KVCacheManager:
                 # be unified.
                 self.update_mamba_page_size_padded(layers)
 
-            # TODO(yuyanpeng): enable sliding windows once mixed dims support
-            # Currently, with sliding windows, there is
-            # shared_kv_cache_layers among each group.
-            # The shared kv_cache_layers do not support mixed dims for
-            # TPU for now. If share kv_cache, the attention kernel would
-            # throw exception for non-matched dimension between kv_cache
-            # and actual dims. Disable sliding window for workaround.
+            # With sliding window, vLLM puts sliding-window and full-attention
+            # layers in separate KV cache groups and lets slot j of every group
+            # share one tensor. TPU KV caches are typed arrays and the
+            # attention kernel rejects a cache whose dims differ from the
+            # layer's, so layers with different padded head dims cannot share
+            # one array. Either pad every attention page so that each slot can
+            # hold one array per distinct shape (see
+            # `_maybe_pad_pages_for_mixed_head_dims`), or disable sliding
+            # window so that all layers fall into a single group.
             head_size_set = {
                 common_utils.get_padded_head_dim(
                     getattr(attn_module, "head_size", 0))
@@ -645,6 +724,9 @@ class KVCacheManager:
                 if not isinstance(attn_module, MambaBase)
             }
             disable_sliding_window = len(head_size_set) > 1
+            if disable_sliding_window:
+                disable_sliding_window = (
+                    not self._maybe_pad_pages_for_mixed_head_dims(layers))
 
             logger.warning(f"Compilation num_layers = {len(layers)}")
 
