@@ -1512,7 +1512,7 @@ class TestDPScheduler:
         mock_kv_cache_config,
         mock_structured_output_manager,
     ):
-        """Test that workers are forked with direct args by default."""
+        """Test that workers are forked with keyword args by default."""
         monkeypatch.delenv("DP_SCHED_START_METHOD", raising=False)
 
         with patch(
@@ -1535,9 +1535,24 @@ class TestDPScheduler:
         for rank, process_call in enumerate(mock_ctx.Process.call_args_list):
             assert process_call.kwargs["target"] is mock_worker
             args = process_call.kwargs["args"]
+            assert len(args) == 3
             assert args[0] == rank
-            assert args[3] is mock_vllm_config
-            assert args[5] is mock_structured_output_manager
+            worker_kwargs = process_call.kwargs["kwargs"]
+            assert set(worker_kwargs) == {
+                "vllm_config",
+                "kv_cache_config",
+                "structured_output_manager",
+                "block_size",
+                "hash_block_size",
+                "mm_registry",
+                "include_finished_set",
+                "log_stats",
+                "original_scheduler_cls",
+            }
+            assert worker_kwargs["vllm_config"] is mock_vllm_config
+            assert (worker_kwargs["structured_output_manager"]
+                    is mock_structured_output_manager)
+            assert worker_kwargs["block_size"] == 16
 
     def test_init_spawn_passes_cloudpickled_payload(
         self,

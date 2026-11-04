@@ -596,19 +596,20 @@ class DPScheduler(SchedulerInterface):
                 self.input_conns.append(input_parent_conn)
                 self.output_conns.append(output_parent_conn)
 
+                worker_kwargs = dict(
+                    vllm_config=self.vllm_config,
+                    kv_cache_config=self.per_rank_kv_cache_configs[rank],
+                    block_size=block_size,
+                    hash_block_size=self.hash_block_size,
+                    mm_registry=mm_registry,
+                    include_finished_set=include_finished_set,
+                    log_stats=log_stats,
+                    original_scheduler_cls=original_scheduler_cls,
+                )
                 if self._start_method == "spawn":
                     # Only the connections go through the standard pickler;
-                    # see _scheduler_worker_trampoline.
-                    worker_kwargs = dict(
-                        vllm_config=self.vllm_config,
-                        kv_cache_config=self.per_rank_kv_cache_configs[rank],
-                        block_size=block_size,
-                        hash_block_size=self.hash_block_size,
-                        mm_registry=mm_registry,
-                        include_finished_set=include_finished_set,
-                        log_stats=log_stats,
-                        original_scheduler_cls=original_scheduler_cls,
-                    )
+                    # the structured output manager is rebuilt in the child.
+                    # See _scheduler_worker_trampoline.
                     payload = cloudpickle.dumps(
                         (worker_kwargs, _get_none_hash_state()))
                     process = ctx.Process(
@@ -619,20 +620,12 @@ class DPScheduler(SchedulerInterface):
                 else:
                     process = ctx.Process(
                         target=_scheduler_worker_process,
-                        args=(
-                            rank,
-                            input_child_conn,
-                            output_child_conn,
-                            self.vllm_config,
-                            self.per_rank_kv_cache_configs[rank],
+                        args=(rank, input_child_conn, output_child_conn),
+                        kwargs={
+                            **worker_kwargs,
+                            "structured_output_manager":
                             structured_output_manager,
-                            block_size,
-                            self.hash_block_size,
-                            mm_registry,
-                            include_finished_set,
-                            log_stats,
-                            original_scheduler_cls,
-                        ),
+                        },
                     )
                 process.start()
                 # Close child ends in parent process
