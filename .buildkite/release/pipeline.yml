@@ -40,6 +40,28 @@ steps:
     commands:
       - bash .buildkite/release/build_images.sh
 
+  # Serves the staged image on one v6e chip through the kube launcher, so a
+  # release that can't serve never reaches the publish block.
+  # TODO: the TPU Release cluster has no kube queue yet, so this step is skipped
+  # unless a build sets RELEASE_SMOKE_SKIP to an empty value. Drop the skip line
+  # once the queue exists.
+  - label: ":kubernetes: Smoke test: serve the staged image on TPU"
+    key: smoke_test
+    depends_on: build_images
+    if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
+    skip: "${RELEASE_SMOKE_SKIP-No kube queue in the TPU Release cluster yet}"
+    agents:
+      queue: kube
+    # Covers waiting for a chip as well as the model download and compile.
+    timeout_in_minutes: 180
+    env:
+      SHAPE: "ct6e-standard-1t/1x1"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - bash .buildkite/release/smoke_test.sh
+
   - label: ":package: Build the tpu-inference wheel"
     key: build_tpu_inference_wheel
     depends_on: preflight
@@ -75,6 +97,7 @@ steps:
     key: plan_publish
     depends_on:
       - build_images
+      - smoke_test
       - check_wheels
     if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
     agents: *queue

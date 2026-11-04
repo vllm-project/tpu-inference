@@ -6,7 +6,8 @@ release. It builds the image and both wheels once from the release branch,
 stages the image in GAR and checks the wheels, waits for approval, then
 publishes those same bytes to Docker Hub and PyPI, so users get exactly what
 was built and approved. It runs only in the **TPU Release** cluster, on the
-`release-tpu-inference` queue.
+`release-tpu-inference` queue, and its smoke test on that cluster's `kube`
+queue.
 
 The pipeline's settings upload [`pipeline.yml`](pipeline.yml) from the build's
 own checkout, and only for builds of `releases/v*`. A release branch runs the
@@ -34,7 +35,11 @@ branch.
      are `<commit>-<vllm commit>-<tpu>`, so the two never collide), and both
      wheels (`tpu-inference` and `vllm-tpu`);
    - **checks**: the wheels resolve together from pypi.org for CPython 3.12
-     on x86_64 Linux (`check_wheels.sh`).
+     on x86_64 Linux (`check_wheels.sh`);
+   - **smoke test**: serves `meta-llama/Llama-3.1-8B-Instruct` from the staged
+     image on one v6e chip and runs a 30-prompt `vllm bench serve` against it;
+     every request must complete (`smoke_test.sh`, `smoke_bench.sh`). Skipped
+     until the cluster's `kube` queue exists (see below).
 4. **Approve** the publish block. It names the staged digest and asks whether
    to move `latest` (never for a pre-release; no default) and whether an
    existing Docker Hub tag may be replaced. PyPI releases can't be replaced.
@@ -54,6 +59,8 @@ Build env knobs:
 |---|---|
 | `RELEASE_VERSION=vX.Y.Zrc1` | publish a pre-release under that version |
 | `RELEASE_APPROVER_TEAMS=a,b` | only these Buildkite teams can approve |
+| `RELEASE_SMOKE_SKIP=` (empty) | run the smoke test, skipped by default |
+| `SMOKE_MODEL=org/name` | model the smoke test serves |
 
 ## Pipeline settings (Buildkite, made by hand)
 
@@ -80,3 +87,8 @@ Build env knobs:
 - PyPI: a Google Trusted Publisher on both `tpu-inference` and `vllm-tpu` for
   the service account of the agents on the `release-tpu-inference` queue.
   Without it, `publish_wheel.sh` can't mint a token and uploads nothing.
+- A `kube` queue in the TPU Release cluster on the same TPU fleet as
+  tpu-inference-ci's (the `tpu-launcher` pod template). Its pods pull the
+  staged image from GAR and inherit an `HF_TOKEN` with access to
+  `meta-llama/Llama-3.1-8B-Instruct`. TODO: until it exists, `pipeline.yml`
+  skips the smoke test.
