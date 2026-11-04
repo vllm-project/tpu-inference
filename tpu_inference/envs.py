@@ -1,4 +1,17 @@
-# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # SPDX-FileCopyrightText: Copyright contributors to the tpu-inference project
 
 import functools
@@ -52,6 +65,15 @@ if TYPE_CHECKING:
     RPA_V3_DECODE_BLOCK_SIZES: list[int] = []
     RPA_V3_PREFILL_BLOCK_SIZES: list[int] = []
     RPA_V3_MIXED_BLOCK_SIZES: list[int] = []
+    # Optional operator override for the experimental batched RPA kernel block
+    # sizes, per case. Each is a comma-separated 5-tuple
+    # (bq_sz, bq_c_sz, bkv_sz, batch_size, n_buffer). Empty (default) = use the
+    # kernel's VMEM-based heuristic (tuned_params.calculate_block_sizes).
+    BATCHED_RPA_DECODE_BLOCK_SIZES: list[int] = []
+    BATCHED_RPA_PREFILL_BLOCK_SIZES: list[int] = []
+    # Optional VMEM limit (bytes) passed to the batched RPA kernel. 0 (default)
+    # = use pltpu.get_tpu_info().vmem_capacity_bytes.
+    BATCHED_RPA_VMEM_LIMIT_BYTES: int = 0
     FORCE_MOE_RANDOM_ROUTING: bool = False
     JITTED_MM_MODULE_KEYS: list[str] = []
     REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
@@ -108,6 +130,8 @@ if TYPE_CHECKING:
     TPU_MOE_ROUTER_TOPK: str = "sort"
     TPU_MOE_LOWTOK: bool = False
     TPU_MOE_LOWTOK_MAX_TOKENS: int = 128
+    USE_FUSED_RMSNORM_QUANT: bool = False
+    FUSED_RMSNORM_BLOCK_M: int = 512
 
 
 def env_with_choices(
@@ -405,6 +429,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_int_list("RPA_V3_PREFILL_BLOCK_SIZES"),
     "RPA_V3_MIXED_BLOCK_SIZES":
     env_int_list("RPA_V3_MIXED_BLOCK_SIZES"),
+    # Optional operator override for the experimental batched RPA kernel block
+    # sizes. Comma-separated 5-tuple: bq_sz,bq_c_sz,bkv_sz,batch_size,n_buffer.
+    "BATCHED_RPA_DECODE_BLOCK_SIZES":
+    env_int_list("BATCHED_RPA_DECODE_BLOCK_SIZES"),
+    "BATCHED_RPA_PREFILL_BLOCK_SIZES":
+    env_int_list("BATCHED_RPA_PREFILL_BLOCK_SIZES"),
+    "BATCHED_RPA_VMEM_LIMIT_BYTES":
+    lambda: int(os.getenv("BATCHED_RPA_VMEM_LIMIT_BYTES") or "0"),
     # Force random expert routing in MoE layers (for testing purposes only)
     "FORCE_MOE_RANDOM_ROUTING":
     env_bool("FORCE_MOE_RANDOM_ROUTING", default=False),
@@ -681,6 +713,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("TPU_MOE_LOWTOK", default=False),
     "TPU_MOE_LOWTOK_MAX_TOKENS":
     lambda: int(os.getenv("TPU_MOE_LOWTOK_MAX_TOKENS", "128")),
+    # Fuse RMSNorm and dynamic FP8 activation quantization into a single
+    # Pallas TPU VPU kernel pass when Qwix dynamic FP8 quantization is active.
+    "USE_FUSED_RMSNORM_QUANT":
+    env_bool("USE_FUSED_RMSNORM_QUANT", default=False),
+    "FUSED_RMSNORM_BLOCK_M":
+    lambda: int(os.getenv("FUSED_RMSNORM_BLOCK_M") or "512"),
 }
 
 
