@@ -33,6 +33,12 @@ experts are picked by moe_router.select_experts, as on the GMM path.
 ROUTING_MOE_REMOTE_SCATTER=0 selects tokamax's local mode instead of the remote
 scatter above: each device sums its experts' rows into a partial result for
 every token, and a reduce-scatter combines the partial results.
+
+With the sequence-parallel residual stream (`enable_sp`, see
+sharding.keeps_tokens_sharded) the tokens arrive already sharded over
+EXPERT_DATA, one share per device, so the replica split and the all-gather
+back to the attention-data layout are skipped and the output stays
+token-sharded.
 """
 
 import jax
@@ -131,23 +137,38 @@ def _from_ep_rows(out: jax.Array, mesh: Mesh, replica: tuple[str, ...],
                          check_vma=False)(out)
 
 
-def routing_moe_func(
-        hidden_states: jax.Array,
-        w1: jax.Array,
-        w2: jax.Array,
-        w1_scale: jax.Array | None,
-        w2_scale: jax.Array | None,
-        gating_output: jax.Array,
-        *,
-        topk: int,
-        renormalize: bool,
-        mesh: Mesh,
-        activation: str,
-        scoring_fn: str,
-        w1_bias: jax.Array | None = None,
-        w2_bias: jax.Array | None = None,
-        hash_based_topk_indices: jax.Array | None = None,
-        expert_score_correction_bias: jax.Array | None = None) -> jax.Array:
+def _reshard_rows(x: jax.Array, mesh: Mesh, src, dst) -> jax.Array:
+    """Relabel the row sharding of x from `src` to `dst` axes.
+
+    Only for axes that rank the devices the same way (EXPERT_DATA and EXPERT
+    when the `data` axis has size 1), so each device keeps its rows and
+    nothing moves.
+    """
+    rest = (None, ) * (x.ndim - 1)
+    return jax.shard_map(lambda local: local,
+                         mesh=mesh,
+                         in_specs=P(src, *rest),
+                         out_specs=P(dst, *rest),
+                         check_vma=False)(x)
+
+
+def routing_moe_func(hidden_states: jax.Array,
+                     w1: jax.Array,
+                     w2: jax.Array,
+                     w1_scale: jax.Array | None,
+                     w2_scale: jax.Array | None,
+                     gating_output: jax.Array,
+                     *,
+                     topk: int,
+                     renormalize: bool,
+                     mesh: Mesh,
+                     activation: str,
+                     scoring_fn: str,
+                     w1_bias: jax.Array | None = None,
+                     w2_bias: jax.Array | None = None,
+                     hash_based_topk_indices: jax.Array | None = None,
+                     expert_score_correction_bias: jax.Array | None = None,
+                     keep_token_sharding: bool = False) -> jax.Array:
     """Run one MoE layer with tokamax's routing_moe.
 
     hidden_states [num_tokens, hidden] and gating_output [num_tokens, experts]
@@ -158,6 +179,14 @@ def routing_moe_func(
     arguments are as for select_experts. Returns [num_tokens, hidden], sharded
     like hidden_states. Assumes unsupported_reason() returned None for this
     layer.
+
+    keep_token_sharding (sequence-parallel residual stream, see
+    sharding.keeps_tokens_sharded): hidden_states, gating_output and
+    hash_based_topk_indices arrive sharded over EXPERT_DATA instead. On the
+    meshes this integration supports the `data` axis has size 1, so
+    EXPERT_DATA ranks the devices like the EP axes: each device already holds
+    its own share of the tokens. The replica split and gather are skipped and
+    the output is returned sharded over EXPERT_DATA too.
     """
     from tokamax._src.ops.experimental.routing_moe.layer import \
         modular as tk_modular
@@ -180,13 +209,20 @@ def routing_moe_func(
         "remote" if envs.ROUTING_MOE_REMOTE_SCATTER else "local")
     num_replicas = get_mesh_shape_product(mesh, list(replica))
     num_local_rows = num_tokens * num_replicas // mesh.devices.size
-    x = _to_ep_rows(hidden_states, mesh, replica)
+
+    def to_ep_rows(t: jax.Array) -> jax.Array:
+        if keep_token_sharding:
+            # Already one share of the tokens per device, in EP rank order.
+            return _reshard_rows(t, mesh, ShardingAxisName.EXPERT_DATA,
+                                 ShardingAxisName.EXPERT)
+        return _to_ep_rows(t, mesh, replica)
+
+    x = to_ep_rows(hidden_states)
     # Route after the split, so that each device routes only its own share.
     if hash_based_topk_indices is not None:
-        hash_based_topk_indices = _to_ep_rows(hash_based_topk_indices, mesh,
-                                              replica)
+        hash_based_topk_indices = to_ep_rows(hash_based_topk_indices)
     topk_weights, topk_indices = select_experts(
-        _to_ep_rows(gating_output, mesh, replica),
+        to_ep_rows(gating_output),
         topk,
         renormalize,
         scoring_fn,
@@ -213,5 +249,9 @@ def routing_moe_func(
         moe_plan=tk_plan.RoutingMoEPlan(
             remote_scatter=envs.ROUTING_MOE_REMOTE_SCATTER),
     )
-    out = _from_ep_rows(out, mesh, replica, num_local_rows)
+    if keep_token_sharding:
+        out = _reshard_rows(out, mesh, ShardingAxisName.EXPERT,
+                            ShardingAxisName.EXPERT_DATA)
+    else:
+        out = _from_ep_rows(out, mesh, replica, num_local_rows)
     return out[:, :hidden_size]

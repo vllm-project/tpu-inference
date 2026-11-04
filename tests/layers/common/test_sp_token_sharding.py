@@ -141,9 +141,9 @@ def _vllm_config(*,
 
 
 def test_vllm_keeps_tokens_sharded(monkeypatch):
-    """The one gate the linear configs and the MoE share: enable_sp, GMM_EP,
-    and a quantization method validated with the token-sharded stream (FP8
-    only)."""
+    """The one gate the linear configs and the MoE share: enable_sp, GMM_EP or
+    ROUTING_MOE, and a quantization method validated with the token-sharded
+    stream (FP8 only)."""
     keeps = vllm_moe_interface.vllm_keeps_tokens_sharded
     mesh = _shape_only_mesh(attn_dp=2, model=4)
     assert keeps(_vllm_config(quantization=quant_methods.FP8), mesh)
@@ -158,11 +158,15 @@ def test_vllm_keeps_tokens_sharded(monkeypatch):
     assert not keeps(None, mesh)
     # Expert parallelism off: GMM_TP.
     assert not keeps(_vllm_config(enable_expert_parallel=False), mesh)
-    # Another EP backend selected.
-    for flag in _MOE_BACKEND_FLAGS:
+    # Another EP backend selected that ignores keep_token_sharding.
+    for flag in ("USE_MOE_EP_KERNEL", "USE_FUSED_EP_MOE_V2"):
         monkeypatch.setenv(flag, "1")
         assert not keeps(_vllm_config(), mesh), flag
         monkeypatch.delenv(flag)
+    # ROUTING_MOE honors keep_token_sharding.
+    monkeypatch.setenv("USE_ROUTING_MOE", "1")
+    assert keeps(_vllm_config(), mesh)
+    monkeypatch.delenv("USE_ROUTING_MOE")
     assert keeps(_vllm_config(), mesh)
 
 

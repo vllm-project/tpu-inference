@@ -24,7 +24,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 
 from tests.layers.common.test_fused_ep_moe_v2 import (INTER, NUM_EXPERTS, TOPK,
                                                       _dense_reference,
@@ -169,6 +170,31 @@ def test_rows_not_divisible_by_replicas():
     assert _rel_l2(out, _dense_reference(x, gating, *w)) < 0.07
 
 
+def _token_sharded(mesh: Mesh, *arrays):
+    """The arrays with their rows sharded over EXPERT_DATA, as the
+    sequence-parallel residual stream hands them to the MoE."""
+    rows = NamedSharding(mesh, P(ShardingAxisName.EXPERT_DATA, None))
+    return [jax.device_put(a, rows) for a in arrays]
+
+
+@requires_4_devices
+@pytest.mark.usefixtures("tokamax_kernel")
+@pytest.mark.parametrize("sizes", _SUPPORTED_MESHES, ids=_mesh_id)
+def test_keep_token_sharding_matches_dense_reference(sizes):
+    """With keep_token_sharding the tokens come in sharded over EXPERT_DATA,
+    and the output is close to the dense reference and stays sharded over
+    EXPERT_DATA."""
+    mesh = _make_mesh(**sizes)
+    x, gating = _token_sharded(mesh, *_inputs(mesh, 2048))
+    w = _weights(mesh, True)
+    want = _dense_reference(x, gating, *w)
+    out = _run_kernel(mesh, x, gating, *w, keep_token_sharding=True)
+    assert out.shape == x.shape and out.dtype == x.dtype
+    assert out.sharding.is_equivalent_to(x.sharding, x.ndim)
+    error = _rel_l2(out, want)
+    assert error < 0.07, error
+
+
 @pytest.mark.parametrize("case, want", [
     (None, None),
     ("data_axis", "expert axes"),
@@ -219,6 +245,25 @@ def test_moe_apply_dispatch():
             is extra["hash_based_topk_indices"])
     assert (kwargs["expert_score_correction_bias"]
             is extra["e_score_correction_bias"])
+    assert kwargs["keep_token_sharding"] is False
+
+
+def test_moe_apply_forwards_keep_token_sharding():
+    """moe_apply passes the sequence-parallel keep_token_sharding to the
+    kernel."""
+    mesh = _make_mesh()
+    x, gating = _inputs(mesh, 512)
+    w1, w2, s1, s2 = _weights(mesh, True)
+    weights = FusedMoEWeights(w1, s1, None, w2, s2, None)
+    with (mock.patch.object(routing_moe,
+                            "routing_moe_func",
+                            autospec=True,
+                            return_value="kernel") as
+          kernel, mock.patch.object(moe, "fused_moe_func") as gmm):
+        out = moe_apply(_layer(), x, gating, weights, MoEBackend.ROUTING_MOE,
+                        mesh, dict(keep_token_sharding=True))
+    assert out == "kernel" and not gmm.called
+    assert kernel.call_args.kwargs["keep_token_sharding"] is True
 
 
 def test_moe_apply_refuses_an_unsupported_layer():
@@ -249,13 +294,19 @@ def _fake_kernel(x, topk_weights, topk_indices, *args, **kwargs):
 @pytest.mark.usefixtures("tokamax_kernel")
 @pytest.mark.parametrize("sizes", _SUPPORTED_MESHES, ids=_mesh_id)
 @pytest.mark.parametrize("routing", ["plain", "score_bias", "hash"])
-def test_each_token_keeps_its_routing(sizes, routing):
+@pytest.mark.parametrize("keep", [False, True],
+                         ids=["replica_split", "keep_token_sharding"])
+def test_each_token_keeps_its_routing(sizes, routing, keep):
     """Routing after the split gives each token the experts and weights
-    select_experts picks for it on the unsplit rows."""
+    select_experts picks for it on the unsplit rows, also when the tokens
+    arrive sharded over EXPERT_DATA (keep_token_sharding)."""
     from tokamax._src.ops.experimental.routing_moe.layer import modular
     mesh = _make_mesh(**sizes)
     # Rows that don't divide evenly among the replicas, where the mesh allows.
     num_tokens = 152 if sizes.get("attn_dp", 1) == 4 else 150
+    if keep:
+        # EXPERT_DATA sharding needs the tokens to divide the devices.
+        num_tokens = 152
     x, gating = _inputs(mesh, num_tokens)
     # f32 logits, so the weights can be compared without bf16 rounding.
     gating = gating.astype(jnp.float32)
@@ -267,8 +318,15 @@ def test_each_token_keeps_its_routing(sizes, routing):
     elif routing == "hash":
         kwargs["hash_based_topk_indices"] = jax.random.randint(
             jax.random.key(3), (num_tokens, TOPK), 0, NUM_EXPERTS)
+    kernel_kwargs = dict(kwargs)
+    if keep:
+        x, gating = _token_sharded(mesh, x, gating)
+        if "hash_based_topk_indices" in kwargs:
+            kernel_kwargs["hash_based_topk_indices"], = _token_sharded(
+                mesh, kwargs["hash_based_topk_indices"])
+        kernel_kwargs["keep_token_sharding"] = True
     with mock.patch.object(modular, "routing_moe", _fake_kernel):
-        out = _run_kernel(mesh, x, gating, w1, w2, s1, s2, **kwargs)
+        out = _run_kernel(mesh, x, gating, w1, w2, s1, s2, **kernel_kwargs)
     want_weights, want_indices = select_experts(gating, TOPK, True, "softmax",
                                                 **kwargs)
     np.testing.assert_array_equal(out[:, :TOPK], want_indices)

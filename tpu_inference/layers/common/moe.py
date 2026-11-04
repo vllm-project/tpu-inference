@@ -108,7 +108,7 @@ def moe_apply(
     # and return per-shard partial sums, so the reduction can be deferred and
     # fused with a later collective (e.g. a shared-expert all-reduce).
     defer_all_reduce = extra_backend_kwargs.pop("defer_all_reduce", False)
-    # GMM_EP only: keep the output token-sharded over
+    # GMM_EP and ROUTING_MOE: keep the output token-sharded over
     # EXPERT_DATA (sequence-parallel residual stream).
     keep_token_sharding = extra_backend_kwargs.pop("keep_token_sharding",
                                                    False)
@@ -274,6 +274,7 @@ def moe_apply(
                         "hash_based_topk_indices", None),
                     expert_score_correction_bias=extra_backend_kwargs.get(
                         "e_score_correction_bias", None),
+                    keep_token_sharding=keep_token_sharding,
                 )
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance
