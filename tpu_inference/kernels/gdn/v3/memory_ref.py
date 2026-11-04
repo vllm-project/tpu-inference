@@ -357,6 +357,26 @@ class StateBufferedRef(BaseBufferedRef):
     `state_indices[s]`.
     """
 
+    def _wait_out_for_tile(self, slot: int | jax.Array, p_id: int | jax.Array):
+        assert self.sem_sends is not None
+        assert self.window_ref is not None
+        sem = self.sem_sends.at[slot]
+        vmem_ref = self.window_ref.at[slot]
+
+        dma_size = 0
+        for idx in range(self.cfg.seq_tile_size):
+            record = self.metadata_ref.get_record(p_id, idx)
+            is_last_tile = record.is_last_tile
+            r_size = record.r_size
+            num_ckpts = jnp.minimum(r_size, self.cfg.window_size)
+            dma_size += jnp.where(is_last_tile, num_ckpts, 0)
+
+        # NOTE: With bounds checks disabled, the self-copy descriptor may
+        # nominally exceed the window row; it is never executed, only used
+        # to wait for the same number of bytes `copy_out` issued.
+        wait_ref = vmem_ref.at[0, pl.ds(0, dma_size)]
+        pltpu.make_async_copy(wait_ref, wait_ref, sem).wait()
+
     def copy_in(self, src_ref: jax.Ref, grid_indices: tuple[int | jax.Array]):
         assert self.sem_recvs is not None
         assert self.window_ref is not None
@@ -364,6 +384,14 @@ class StateBufferedRef(BaseBufferedRef):
         sem = self.sem_recvs.at[slot]
         vmem_ref = self.window_ref.at[slot]
         p_id = grid_indices[0]
+
+        # Pallas's pipeline loop calls `copy_in(step + 1)` at the top of
+        # iteration `step` before `wait_out(step - 1)` at the bottom, and both
+        # index the same VMEM slot when `buffer_count == 2`. Drain the prior
+        # `copy_out` on this slot before overwriting `vmem_ref[:, 0]`.
+        @pl.when(p_id >= self.buffer_count)
+        def _wait_prev_out():
+            self._wait_out_for_tile(slot, p_id - self.buffer_count)
 
         for idx in range(self.cfg.seq_tile_size):
             record = self.metadata_ref.get_record(p_id, idx)
@@ -436,26 +464,15 @@ class StateBufferedRef(BaseBufferedRef):
             ).start()
 
     def wait_out(self, dst_ref: jax.Ref, grid_indices: tuple[int | jax.Array]):
-        assert self.sem_sends is not None
-        assert self.window_ref is not None
         slot = self.current_wait_out_slot
-        sem = self.sem_sends.at[slot]
-        vmem_ref = self.window_ref.at[slot]
         p_id = grid_indices[0]
+        num_tiles = self.metadata_ref.num_tiles[...]
 
-        dma_size = 0
-        for idx in range(self.cfg.seq_tile_size):
-            record = self.metadata_ref.get_record(p_id, idx)
-            is_last_tile = record.is_last_tile
-            r_size = record.r_size
-            num_ckpts = jnp.minimum(r_size, self.cfg.window_size)
-            dma_size += jnp.where(is_last_tile, num_ckpts, 0)
-
-        # NOTE: With bounds checks disabled, the self-copy descriptor may
-        # nominally exceed the window row; it is never executed, only used
-        # to wait for the same number of bytes `copy_out` issued.
-        wait_ref = vmem_ref.at[0, pl.ds(0, dma_size)]
-        pltpu.make_async_copy(wait_ref, wait_ref, sem).wait()
+        # Earlier tiles were already drained at the start of `copy_in` for
+        # `p_id + self.buffer_count`.
+        @pl.when(p_id >= num_tiles - self.buffer_count)
+        def _wait_final_out():
+            self._wait_out_for_tile(slot, p_id)
 
 
 def create_allocs(

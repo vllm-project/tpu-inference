@@ -466,17 +466,35 @@ class GDNAttentionTest(parameterized.TestCase):
             read_offsets=[3, 1],
             prefill_lengths=[64],
         ),
+        dict(
+            testcase_name="spec_multi_tile_slot_reuse",
+            # Force decode_tile_size=2 across 8 spec sequences (= 4 tiles) on
+            # every TPU chip so tiles 2 and 3 reuse double-buffer VMEM slots 0
+            # and 1. With 2 sequences per tile, tile 2's copy_in into idx=1
+            # (after 1 state read) races ahead of tile 0's copy_out of idx=1
+            # (queued behind 5 checkpoints of idx=0) unless copy_in drains the
+            # prior copy_out first.
+            spec_lengths=[5, 3, 5, 3, 5, 3, 5, 3],
+            read_offsets=[1, 2, 3, 0, 1, 2, 3, 0],
+            prefill_lengths=[],
+            n_kq=8,
+            n_v=16,
+            decode_tile_size=2,
+        ),
     )
-    def test_spec_mode_checkpoints(self, spec_lengths, read_offsets,
-                                   prefill_lengths):
+    def test_spec_mode_checkpoints(self,
+                                   spec_lengths,
+                                   read_offsets,
+                                   prefill_lengths,
+                                   n_kq=2,
+                                   n_v=8,
+                                   decode_tile_size=4):
         """SPEC mode: initial state comes from `base + read_offset` and one
         state checkpoint per window position lands at `base + t`, matching a
         token-by-token eager reference. Prefill sequences in the same batch
         keep the original PER_SEQ behavior (read/write the base slot)."""
         kq_head_dim = 128
         v_head_dim = 128
-        n_kq = 2
-        n_v = 8
         kernel_size = 4
         num_spec_tokens = 4
         window = num_spec_tokens + 1
@@ -527,7 +545,8 @@ class GDNAttentionTest(parameterized.TestCase):
         run_jitted = jax.jit(
             wrapper.fused_conv1d_gdn,
             static_argnames=[
-                "n_kq", "n_v", "d_k", "d_v", "kernel_size", "num_spec_tokens"
+                "n_kq", "n_v", "d_k", "d_v", "kernel_size", "num_spec_tokens",
+                "decode_tile_size"
             ],
         )
 
@@ -553,6 +572,7 @@ class GDNAttentionTest(parameterized.TestCase):
             d_v=v_head_dim,
             kernel_size=kernel_size,
             num_spec_tokens=num_spec_tokens,
+            decode_tile_size=decode_tile_size,
         )
 
         # Reference: spec windows token-by-token with checkpoints.
