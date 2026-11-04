@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING, Optional
 
 import jax.numpy as jnp
@@ -242,17 +243,31 @@ class SpeculativeDecodingManager:
             # When multiple KV cache groups are used (e.g., in hybrid models),
             # attn_metadata becomes a dict mapping layer names to AttentionMetadata.
             # Since all groups share the same seq_lens and input_positions, any would work for those.
-            # However, we specifically look for an attention layer key to get the correct
-            # block_tables structure, just in case the draft model (which is all attention) needs it.
-            attn_key = None
-            for key in attn_metadata.keys():
-                if ".self_attn." in key:
-                    attn_key = key
-                    break
-            if attn_key is not None:
-                attn_metadata = attn_metadata[attn_key]
+            # However, we specifically look for the draft layer or an attention layer key to get
+            # the correct block_tables structure for the draft model (which is all attention).
+            if "draft_layer.0" in attn_metadata:
+                attn_metadata = attn_metadata["draft_layer.0"]
             else:
-                attn_metadata = next(iter(attn_metadata.values()))
+                attn_key = None
+                for key in attn_metadata.keys():
+                    if key.startswith("draft_layer.") or ".self_attn." in key:
+                        attn_key = key
+                        break
+                if attn_key is not None:
+                    attn_metadata = attn_metadata[attn_key]
+                else:
+                    attn_metadata = next(iter(attn_metadata.values()))
+
+        if dataclasses.is_dataclass(attn_metadata):
+            # Normalize fields unused by the pure-attention draft proposer
+            # (gdn_read_offsets and num_spec_tokens) to match the warmup
+            # AttentionMetadata in CompilationManager._precompile_mtp_helpers
+            # and prevent runtime JAX JIT cache misses.
+            attn_metadata = dataclasses.replace(
+                attn_metadata,
+                gdn_read_offsets=None,
+                num_spec_tokens=0,
+            )
 
         req_ids = self.runner.input_batch.req_ids
         max_num_seqs = attn_metadata.seq_lens.shape[0]
@@ -286,7 +301,9 @@ class SpeculativeDecodingManager:
             sharding=(PartitionSpec(ShardingAxisName.ATTN_DATA)))
 
         if self.runner.speculative_config.method == "mtp":
-            aux_hidden_states_for_drafter = (hidden_states, )
+            aux_hidden_states_for_drafter = (tuple(aux_hidden_states)
+                                             if aux_hidden_states else
+                                             (hidden_states, ))
         else:
             aux_hidden_states_for_drafter = aux_hidden_states
 

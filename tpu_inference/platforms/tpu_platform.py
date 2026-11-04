@@ -399,7 +399,7 @@ class TpuPlatform(Platform):
                 "default when prefix caching is enabled) or 'none'.")
 
         # Hybrid (mamba/linear-attention) models support prefix caching with
-        # model-free speculative decoding (n-gram) when USE_BATCHED_RPA_KERNEL=1
+        # speculative decoding (n-gram or MTP) when USE_BATCHED_RPA_KERNEL=1
         # places verify windows in the decode segment: verify windows checkpoint
         # into runner-owned scratch slots and block-boundary states are copied
         # into the scheduler's mamba blocks. Other proposers or non-batched RPA
@@ -408,12 +408,12 @@ class TpuPlatform(Platform):
                 == "align"):
             speculative_config = vllm_config.speculative_config
             spec_method = getattr(speculative_config, "method", None)
-            if speculative_config is not None and (
-                    spec_method != "ngram" or not envs.USE_BATCHED_RPA_KERNEL):
+            if speculative_config is not None and (spec_method not in (
+                    "ngram", "mtp") or not envs.USE_BATCHED_RPA_KERNEL):
                 logger.warning(
                     "[tpu_platform] Disabling prefix caching: hybrid "
                     "(mamba/linear-attention) models only support cached "
-                    "prefixes with n-gram speculative decoding and "
+                    "prefixes with n-gram or MTP speculative decoding and "
                     "USE_BATCHED_RPA_KERNEL=1 on TPU "
                     "(got method=%r, USE_BATCHED_RPA_KERNEL=%s).", spec_method,
                     envs.USE_BATCHED_RPA_KERNEL)

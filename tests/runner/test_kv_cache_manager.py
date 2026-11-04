@@ -899,6 +899,111 @@ class TestKVCacheManager:
         assert shared_layers["draft_layer.0"] == "layer.2"
         assert shared_layers["draft_layer.1"] == "layer.5"
 
+    def test_get_kv_cache_spec_with_mtp_qwen35_text_config(self):
+        # Non-Gemma4 MTP (e.g. Qwen3.5) registers draft_layer.0 using
+        # draft_hf_config.text_config (including explicit head_dim !=
+        # hidden_size // num_attention_heads).
+        self.runner.vllm_config.compilation_config.static_forward_context = {}
+        mock_speculative_config = MagicMock()
+        mock_speculative_config.method = "mtp"
+        mock_speculative_config.use_gemma4_mtp = MagicMock(return_value=False)
+        mock_draft_model_config = MagicMock()
+        mock_hf_config = MagicMock()
+        mock_text_config = MagicMock()
+        mock_text_config.mtp_num_hidden_layers = 1
+        mock_text_config.num_key_value_heads = 2
+        mock_text_config.hidden_size = 4096
+        mock_text_config.num_attention_heads = 32  # 4096 // 32 == 128, but head_dim is 256
+        mock_text_config.head_dim = 256
+        mock_hf_config.text_config = mock_text_config
+        mock_draft_model_config.hf_config = mock_hf_config
+        mock_draft_model_config.hf_text_config = mock_text_config
+        mock_speculative_config.draft_model_config = mock_draft_model_config
+        self.runner.speculative_config = mock_speculative_config
+
+        kv_cache_spec = self.runner.get_kv_cache_spec()
+
+        assert "draft_layer.0" in kv_cache_spec
+        draft_spec = kv_cache_spec["draft_layer.0"]
+        assert isinstance(draft_spec, FullAttentionSpec)
+        assert draft_spec.block_size == self.runner.vllm_config.cache_config.block_size
+        assert draft_spec.num_kv_heads == common_utils.get_padded_num_heads(
+            2, self.runner.mesh.shape["model"])
+        assert draft_spec.head_size == common_utils.get_padded_head_dim(256)
+        assert draft_spec.dtype == torch.bfloat16
+
+    def test_initialize_kv_cache_hybrid_mamba_with_draft_layer_tensor(self):
+        # When draft_layer.0 is added to a hybrid model (e.g. Qwen3.5 with 10
+        # target full-attn + 1 draft full-attn and 30 mamba layers), vLLM's
+        # grouping puts draft_layer.0 in a trailing 1-layer KVCacheTensor.
+        # initialize_kv_cache must exclude draft_layer tensors from the
+        # non_mtp_tensors shared-layer-count assertion and allocate a KV cache
+        # for draft_layer.0.
+        num_blocks = 8
+        block_size = self.runner.vllm_config.cache_config.block_size
+        num_kv_heads = 8
+        head_size = 128
+        attn_dtype = torch.bfloat16
+        attn_page_size = get_attention_page_size_bytes(self.runner.mesh,
+                                                       block_size,
+                                                       num_kv_heads, head_size,
+                                                       attn_dtype, False)
+        mamba_shapes = ((4, 128), (8, 32, 32))
+        mamba_dtypes = (torch.bfloat16, torch.float32)
+        mamba_unpadded = sum(
+            int(np.prod(shape)) * torch.tensor([], dtype=dtype).element_size()
+            for shape, dtype in zip(mamba_shapes, mamba_dtypes))
+        uniform_page_size = attn_page_size + mamba_unpadded
+        tensor_size = uniform_page_size * num_blocks
+
+        mamba_spec = MambaSpec(
+            block_size=block_size,
+            shapes=mamba_shapes,
+            dtypes=mamba_dtypes,
+            page_size_padded=uniform_page_size,
+        )
+        attn_spec = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=attn_dtype,
+            page_size_padded=uniform_page_size,
+        )
+        kv_cache_groups = [
+            KVCacheGroupSpec(layer_names=["layer.0"],
+                             kv_cache_spec=mamba_spec),
+            KVCacheGroupSpec(layer_names=["layer.1", "draft_layer.0"],
+                             kv_cache_spec=attn_spec),
+        ]
+        kv_cache_tensors = [
+            KVCacheTensor(
+                size=tensor_size,
+                layers=["layer.0", "layer.1"],
+                layer_stride=tensor_size,
+                block_stride=uniform_page_size,
+            ),
+            KVCacheTensor(
+                size=tensor_size,
+                layers=["draft_layer.0"],
+                layer_stride=tensor_size,
+                block_stride=uniform_page_size,
+            ),
+        ]
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+        )
+
+        with patch("tpu_inference.runner.kv_cache_manager.utils.hbm_usage_gb",
+                   return_value=[(0, 0)]):
+            self.runner.initialize_kv_cache(kv_cache_config)
+
+        assert len(self.runner.kv_caches) == 3
+        assert "draft_layer.0" in self.runner.layer_name_to_kvcache_index
+        draft_idx = self.runner.layer_name_to_kvcache_index["draft_layer.0"]
+        assert self.runner.kv_caches[draft_idx].shape[0] == num_blocks
+
     def test_delete_kv_cache(self):
         """Test that delete_kv_cache deletes JAX arrays and clears state."""
         # First, initialize KV cache using the same setup as

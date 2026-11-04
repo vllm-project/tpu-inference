@@ -669,3 +669,167 @@ class TestGetModel:
         mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh, False,
                                               None)
         assert result == "vllm_model_sentinel"
+
+    def test_draft_step_fn_passes_spec_step_idx(self, vllm_config, rng, mesh):
+        """Draft models whose __call__ accepts spec_step_idx / **kwargs should
+        receive spec_step_idx as a static kwarg through get_flax_model's
+        wrapped_model_fn -> _get_draft_step_fn -> run_draft_model_impl."""
+        from flax import nnx
+
+        seen_steps = []
+
+        class DummyDraftWithSpecStep(nnx.Module):
+            _self_manages_sharding = True
+
+            def __init__(self, vllm_config, rng, mesh):
+                self.w = nnx.Param(jnp.ones((4, 4), dtype=jnp.bfloat16))
+
+            def __call__(self,
+                         kv_caches,
+                         input_ids,
+                         target_hidden_states,
+                         attention_metadata,
+                         layer_name_to_kvcache_index=None,
+                         spec_step_idx: int = 0,
+                         **kwargs):
+                seen_steps.append(spec_step_idx)
+                out = target_hidden_states + jnp.asarray(
+                    spec_step_idx, dtype=target_hidden_states.dtype)
+                return kv_caches, out, [out], None
+
+        vllm_config.load_config.load_format = "dummy"
+        vllm_config.model_config.runner_type = "generate"
+        vllm_config.speculative_config = MagicMock()
+        vllm_config.speculative_config.draft_model_config.hf_config.architectures = [
+            "DummyDraftArch"
+        ]
+
+        with jax.set_mesh(mesh), patch(
+                "tpu_inference.models.common.model_loader._get_model_architecture",
+                return_value=DummyDraftWithSpecStep
+        ), patch(
+                "tpu_inference.models.common.model_loader.maybe_create_mm_encoder_jit_manager",
+                return_value=None):
+            iface = model_loader.get_flax_model(vllm_config,
+                                                rng,
+                                                mesh,
+                                                is_draft_model=True)
+            kv_caches = [jnp.zeros((2, 4), dtype=jnp.bfloat16)]
+            input_ids = jnp.zeros((2, ), dtype=jnp.int32)
+            hidden = jnp.ones((2, 4), dtype=jnp.bfloat16)
+            kv_caches, out0, res0, _ = iface.model_fn(
+                iface.state_leaves,
+                kv_caches,
+                input_ids,
+                hidden,
+                None,
+                (("draft_layer.0", 0), ),
+                spec_step_idx=0,
+            )
+            kv_caches, out1, res1, _ = iface.model_fn(
+                iface.state_leaves,
+                kv_caches,
+                input_ids,
+                hidden,
+                None,
+                (("draft_layer.0", 0), ),
+                spec_step_idx=1,
+            )
+
+        assert seen_steps == [0, 1]
+        assert jnp.allclose(out0, jnp.ones((2, 4), dtype=jnp.bfloat16))
+        assert jnp.allclose(out1, jnp.full((2, 4), 2.0, dtype=jnp.bfloat16))
+        assert jnp.allclose(res1[0], jnp.full((2, 4), 2.0, dtype=jnp.bfloat16))
+
+    def test_get_flax_model_attaches_builtin_mtp_fns(self, vllm_config, rng,
+                                                     mesh):
+        """Target models with mtp_layer and mtp_forward should have
+        mtp_model_fn, mtp_compute_logits_fn, and mtp_combine_hidden_states_fn
+        attached on jit_model sharing the target model's state_leaves."""
+        from flax import nnx
+
+        seen_steps = []
+
+        class DummyTargetWithMTP(nnx.Module):
+            _self_manages_sharding = True
+
+            def __init__(self, vllm_config, rng, mesh):
+                self.w = nnx.Param(jnp.full((4, 4), 2.0, dtype=jnp.bfloat16))
+                self.mtp_layer = nnx.Module()
+                self.mtp_layer.scale = nnx.Param(
+                    jnp.full((4, ), 3.0, dtype=jnp.bfloat16))
+
+            def __call__(self, kv_caches, input_ids, attention_metadata, *args,
+                         **kwargs):
+                out = jnp.ones((input_ids.shape[0], 4), dtype=jnp.bfloat16)
+                return kv_caches, out, [out], None
+
+            def mtp_forward(self,
+                            kv_caches,
+                            input_ids,
+                            target_hidden_states,
+                            attention_metadata,
+                            layer_name_to_kvcache_index=None,
+                            spec_step_idx: int = 0,
+                            **kwargs):
+                seen_steps.append(spec_step_idx)
+                out = (target_hidden_states * self.mtp_layer.scale.value +
+                       jnp.asarray(spec_step_idx,
+                                   dtype=target_hidden_states.dtype))
+                return kv_caches, out, [out], None
+
+            def compute_logits(self, hidden_states):
+                return hidden_states @ self.w.value
+
+            def compute_mtp_logits(self, hidden_states, lora_metadata=None):
+                return (hidden_states @ self.w.value) * 2.0
+
+            def combine_hidden_states(self, hidden_states):
+                return hidden_states
+
+        vllm_config.load_config.load_format = "dummy"
+        vllm_config.model_config.runner_type = "generate"
+
+        with jax.set_mesh(mesh), patch(
+                "tpu_inference.models.common.model_loader._get_model_architecture",
+                return_value=DummyTargetWithMTP
+        ), patch(
+                "tpu_inference.models.common.model_loader.maybe_create_mm_encoder_jit_manager",
+                return_value=None):
+            iface = model_loader.get_flax_model(vllm_config,
+                                                rng,
+                                                mesh,
+                                                is_draft_model=False)
+            assert hasattr(iface.model, "mtp_model_fn")
+            assert hasattr(iface.model, "mtp_compute_logits_fn")
+            assert hasattr(iface.model, "mtp_combine_hidden_states_fn")
+
+            kv_caches = [jnp.zeros((2, 4), dtype=jnp.bfloat16)]
+            input_ids = jnp.zeros((2, ), dtype=jnp.int32)
+            hidden = jnp.ones((2, 4), dtype=jnp.bfloat16)
+            kv_caches, out0, res0, _ = iface.model.mtp_model_fn(
+                iface.state_leaves,
+                kv_caches,
+                input_ids,
+                hidden,
+                None,
+                (("draft_layer.0", 0), ),
+                spec_step_idx=0,
+            )
+            kv_caches, out1, res1, _ = iface.model.mtp_model_fn(
+                iface.state_leaves,
+                kv_caches,
+                input_ids,
+                hidden,
+                None,
+                (("draft_layer.0", 0), ),
+                spec_step_idx=1,
+            )
+            logits = iface.model.mtp_compute_logits_fn(iface.state_leaves,
+                                                       out0, None)
+
+        assert seen_steps == [0, 1]
+        assert jnp.allclose(out0, jnp.full((2, 4), 3.0, dtype=jnp.bfloat16))
+        assert jnp.allclose(out1, jnp.full((2, 4), 4.0, dtype=jnp.bfloat16))
+        assert jnp.allclose(res1[0], jnp.full((2, 4), 4.0, dtype=jnp.bfloat16))
+        assert jnp.allclose(logits, jnp.full((2, 4), 48.0, dtype=jnp.bfloat16))
