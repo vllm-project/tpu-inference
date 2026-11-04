@@ -27,6 +27,8 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.sampling_params import SamplingType
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.core.kv_cache_planning import (get_kv_cache_config_from_groups,
+                                            get_kv_cache_groups)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor,
                                         MambaSpec, MLAAttentionSpec,
@@ -596,6 +598,162 @@ class TestKVCacheManager:
             assert kv_caches[full_idx].nbytes == num_blocks * full_page
         assert len({index[name] for name in group_layers[2]}) == 2
         assert index['layer.shared'] == index['layer.0']
+
+    # Attention layouts as (num_layers, num_kv_heads, head_size, sliding)
+    # per attention type, and whether every layer slot holds every shape
+    # (then the allocation fills vLLM's budget exactly; otherwise it stays
+    # below it).
+    _MIXED_KV_LAYOUTS = {
+        # Gemma 4 ratio: 5 sliding layers per full-attention layer.
+        "gemma4_ratio": ([(10, 16, 256, True), (2, 4, 512, False)], True),
+        # Head dims and head counts that the TPU pads.
+        "padded_dims": ([(4, 3, 80, True), (2, 1, 192, False)], True),
+        # Three distinct shapes: two sliding-window shapes and one full.
+        "three_shapes": ([(4, 8, 128, True), (4, 2, 256, True),
+                          (2, 4, 512, False)], True),
+        # Full-attention layers are the majority and have the smaller pages.
+        "full_majority": ([(2, 4, 512, True), (6, 2, 128, False)], True),
+        # 5 sliding + 2 full: vLLM forms sliding groups of 2, 2 and 1 layers.
+        "single_layer_group": ([(5, 16, 256, True), (2, 4, 512, False)], True),
+        # 4 sliding + 3 full: vLLM pads the full group to 4 layers, so the
+        # last slot holds only the sliding shape.
+        "padded_group": ([(4, 16, 256, True), (3, 4, 512, False)], False),
+    }
+
+    def _make_layers_from_layout(self, layout, sliding_window=64):
+        """Builds attention layers per `layout`, plus a KV-sharing layer."""
+        layers = {}
+        for num_layers, num_kv_heads, head_size, sliding in layout:
+            for _ in range(num_layers):
+                layers[f'layer.{len(layers)}'] = MagicMock(
+                    spec=Attention,
+                    num_kv_heads=num_kv_heads,
+                    head_size=head_size,
+                    attn_type=AttentionType.DECODER,
+                    sliding_window=sliding_window if sliding else None,
+                    kv_sharing_target_layer_name=None,
+                )
+        num_kv_heads, head_size, sliding = layout[0][1:]
+        layers['layer.shared'] = MagicMock(
+            spec=Attention,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            attn_type=AttentionType.DECODER,
+            sliding_window=sliding_window if sliding else None,
+            kv_sharing_target_layer_name='layer.0',
+        )
+        return layers
+
+    @pytest.mark.parametrize("block_size", [16, 64])
+    @pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+    @pytest.mark.parametrize("layout_name", list(_MIXED_KV_LAYOUTS))
+    def test_mixed_head_dims_allocation_within_vllm_budget(
+            self, layout_name, kv_dtype, block_size):
+        """The TPU allocation stays within the bytes vLLM plans for.
+
+        Runs the padded specs through vLLM's own grouping and KV cache
+        planning, then checks the invariant documented in
+        `_maybe_pad_pages_for_mixed_head_dims` on the arrays that
+        `initialize_kv_cache` actually allocates.
+        """
+        layout, every_slot_full = self._MIXED_KV_LAYOUTS[layout_name]
+        vllm_config = self.runner.vllm_config
+        vllm_config.cache_config.block_size = block_size
+        # What vLLM resolves for specs of mixed shapes when the backend does
+        # not declare a layout.
+        vllm_config.cache_config.kv_cache_layout = "LBNHC"
+        self.runner.kv_cache_dtype = kv_dtype
+        layers = self._make_layers_from_layout(layout)
+        vllm_config.compilation_config.static_forward_context = layers
+
+        kv_cache_spec = self.runner.get_kv_cache_spec()
+        manager = self.runner.kv_cache_manager
+        # Specs carry the padded shapes; key the TPU page sizes by them.
+        tp_size = self.runner.mesh.shape["model"]
+        page_size_of = {
+            (common_utils.get_padded_num_heads(heads, tp_size),
+             common_utils.get_padded_head_dim(size)):
+            self._attn_page_size(heads, size)
+            for _, heads, size, _ in layout
+        }
+        padded_page = sum(page_size_of.values())
+        assert manager._hybrid_uniform_page_size_bytes == padded_page
+        assert all(spec.page_size_bytes == padded_page
+                   for spec in kv_cache_spec.values())
+
+        groups = get_kv_cache_groups(vllm_config, kv_cache_spec)
+        max_group_len = max(len(g.layer_names) for g in groups)
+        num_blocks = 8
+        kv_cache_config = get_kv_cache_config_from_groups(
+            vllm_config, groups, num_blocks * max_group_len * padded_page)
+        assert kv_cache_config.num_blocks == num_blocks
+        reserved = max(t.size for t in kv_cache_config.kv_cache_tensors)
+
+        self.runner.initialize_kv_cache(kv_cache_config)
+
+        kv_caches = self.runner.kv_caches
+        index = self.runner.layer_name_to_kvcache_index
+        # Every layer gets an array of its own shape with num_blocks blocks.
+        for name, spec in kv_cache_spec.items():
+            cache = kv_caches[index[name]]
+            assert cache.shape[0] == num_blocks
+            assert cache.nbytes == num_blocks * page_size_of[
+                (spec.num_kv_heads, spec.head_size)]
+        assert index['layer.shared'] == index['layer.0']
+
+        # Group the arrays by the byte region (layer slot) vLLM placed their
+        # layers in; all KV cache groups alias these regions.
+        arrays_per_region = {}
+        for tensor in kv_cache_config.kv_cache_tensors:
+            for j, name in enumerate(tensor.layers):
+                region = tensor.offset + j * tensor.layer_stride
+                arrays_per_region.setdefault(region, set()).add(index[name])
+        assert len(arrays_per_region) == max_group_len
+        region_budget = num_blocks * padded_page
+        all_full = True
+        for region, arrays in arrays_per_region.items():
+            used = sum(kv_caches[i].nbytes for i in arrays)
+            assert used <= region_budget, region
+            all_full &= used == region_budget
+        # Layers in different slots never share an array.
+        assert sum(len(a) for a in arrays_per_region.values()) == len(
+            {index[name]
+             for name in kv_cache_spec})
+        assert all_full == every_slot_full
+
+        total = sum(cache.nbytes for cache in kv_caches)
+        assert total <= reserved
+        assert (total == reserved) == every_slot_full
+
+    def test_mixed_head_dims_budget_check_raises_before_allocating(self):
+        """Any allocation larger than vLLM's plan is rejected up front."""
+        layout = self._MIXED_KV_LAYOUTS["gemma4_ratio"][0]
+        vllm_config = self.runner.vllm_config
+        vllm_config.cache_config.kv_cache_layout = "LBNHC"
+        vllm_config.compilation_config.static_forward_context = \
+            self._make_layers_from_layout(layout)
+        kv_cache_spec = self.runner.get_kv_cache_spec()
+        groups = get_kv_cache_groups(vllm_config, kv_cache_spec)
+        padded_page = \
+            self.runner.kv_cache_manager._hybrid_uniform_page_size_bytes
+        num_blocks = 8
+        kv_cache_config = get_kv_cache_config_from_groups(
+            vllm_config, groups,
+            num_blocks * max(len(g.layer_names) for g in groups) * padded_page)
+
+        # Simulate the allocator using one byte more per page than the specs
+        # report.
+        def larger_page(*args, **kwargs):
+            return get_attention_page_size_bytes(*args, **kwargs) + 1
+
+        with patch('tpu_inference.runner.kv_cache_manager.'
+                   'get_attention_page_size_bytes',
+                   side_effect=larger_page), \
+             patch('tpu_inference.runner.kv_cache_manager.'
+                   'create_kv_caches') as mock_create, \
+             pytest.raises(RuntimeError, match="exceeds the bytes vLLM"):
+            self.runner.initialize_kv_cache(kv_cache_config)
+        mock_create.assert_not_called()
 
     def test_get_kv_cache_spec_without_compilation_cfg(self):
         # tests if there's no compilation config, we use full attention kv

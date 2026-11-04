@@ -13,6 +13,7 @@
 # limitations under the License.
 import dataclasses
 import os
+from collections import defaultdict
 from typing import TYPE_CHECKING, List
 
 import jax
@@ -94,6 +95,12 @@ class KVCacheManager:
         # on the TPU side (where we duplicate the shared tensor per layer
         # because mamba and attention caches have different shapes).
         self._hybrid_uniform_page_size_bytes: int | None = None
+        # Set by `_maybe_pad_pages_for_mixed_head_dims`: the TPU page size of
+        # each distinct (num_kv_heads, head_dim) attention shape, whose sum is
+        # `_hybrid_uniform_page_size_bytes`. When set, `initialize_kv_cache`
+        # checks that no layer slot allocates more than vLLM reserved for it.
+        self._mixed_head_dim_page_sizes: dict[tuple[int, int],
+                                              int] | None = None
         # Per-mamba-layer leading-dim cap for hybrid models. Mamba state is
         # recurrent (one slot per *active* request), so the `num_blocks`
         # slots vLLM hands out are mostly idle. Set by
@@ -498,12 +505,26 @@ class KVCacheManager:
         same shape share one array, and every other shape gets its own array
         with the same number of blocks.
 
-        To keep vLLM's `num_blocks` equal to what is allocated, every
-        attention spec reports the sum of the TPU page sizes of all distinct
-        KV cache shapes as its `page_size_padded`. The HBM held per block is
-        unchanged compared to placing all layers into one full-attention
-        group, but sliding-window groups now only hold their window of
-        tokens, so far more blocks are left for full-attention layers.
+        To keep what is allocated within vLLM's budget, every attention spec
+        reports the sum of the TPU page sizes of all distinct KV cache shapes
+        as its `page_size_padded`. The HBM held per block is unchanged
+        compared to placing all layers into one full-attention group, but
+        sliding-window groups now only hold their window of tokens, so far
+        more blocks are left for full-attention layers.
+
+        Invariant (checked by `_check_mixed_head_dim_slot_budgets` at
+        allocation time): for every layer slot, i.e. every byte region that
+        vLLM aliases across KV cache groups,
+
+            sum(num_blocks * page_size(shape) for each distinct shape among
+                the layers placed in the slot)
+              <= num_blocks * page_size_padded,
+
+        because each shape appears at most once per slot and
+        `page_size_padded` is the sum over all shapes. It holds with equality
+        when every slot holds every shape (e.g. Gemma 4: 5 sliding groups and
+        1 full group of 10 layers each). When vLLM pads a shorter group, the
+        padded slots hold fewer shapes and leave part of their budget unused.
 
         Args:
             layers: A dictionary mapping layer names to their corresponding
@@ -511,8 +532,9 @@ class KVCacheManager:
 
         Returns:
             True if sliding-window specs can be kept, in which case
-            `_hybrid_uniform_page_size_bytes` has been set. False if the
-            caller should disable sliding window instead.
+            `_hybrid_uniform_page_size_bytes` and
+            `_mixed_head_dim_page_sizes` have been set. False if the caller
+            should disable sliding window instead.
         """
         if not tpu_envs.MIXED_HEAD_DIM_SLIDING_WINDOW:
             return False
@@ -552,6 +574,7 @@ class KVCacheManager:
                                               False,
                                               self.runner.attention_backend))
         self._hybrid_uniform_page_size_bytes = sum(page_sizes.values())
+        self._mixed_head_dim_page_sizes = page_sizes
         logger.info_once(
             "Keeping sliding-window KV cache specs for attention layers with "
             "mixed head dims: padding every attention page to %d bytes, the "
@@ -920,6 +943,8 @@ class KVCacheManager:
         # Pass 1: Group layers by their physical byte slot
         slots: dict[tuple, list[str]] = {}
         slot_num_blocks: dict[tuple, int] = {}
+        # Attention slot -> (byte region key, bytes vLLM reserved for it).
+        slot_regions: dict[tuple, tuple[tuple, int]] = {}
 
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
             num_layers = len(kv_cache_tensor.layers)
@@ -944,7 +969,17 @@ class KVCacheManager:
                     tensor_num_blocks = kv_cache_tensor.size // total_group_page_size
                 alloc_per_layer = True
             else:
-                if (num_layers > 1 and kv_cache_config.num_blocks > 0
+                # With mixed-head-dim padding, a group that vLLM shortened to
+                # a single layer must still alias slot 0 of the other groups
+                # rather than get a tensor of its own (vLLM treats the missing
+                # layers as padding). `layer_stride` is only set by the
+                # aliased-group layout.
+                aliased_single_layer = (
+                    num_layers == 1
+                    and self._mixed_head_dim_page_sizes is not None
+                    and getattr(kv_cache_tensor, 'layer_stride', 0) > 0)
+                if ((num_layers > 1 or aliased_single_layer)
+                        and kv_cache_config.num_blocks > 0
                         and kv_cache_tensor.size >= num_layers *
                         page_size_bytes * kv_cache_config.num_blocks):
                     tensor_num_blocks = kv_cache_config.num_blocks
@@ -1029,7 +1064,19 @@ class KVCacheManager:
                         )
                         slot_num_blocks[slot_key] = tensor_num_blocks
 
+                    if not isinstance(spec, MambaSpec):
+                        # The byte region this layer occupies in vLLM's plan
+                        # (shared by all KV cache groups) and its budget.
+                        slot_regions[slot_key] = (slot_key[:2],
+                                                  tensor_num_blocks *
+                                                  spec.page_size_bytes)
                     slots.setdefault(slot_key, []).append(layer_name)
+
+        if self._mixed_head_dim_page_sizes is not None:
+            self._check_mixed_head_dim_slot_budgets(slots, slot_num_blocks,
+                                                    slot_regions,
+                                                    layer_name_to_spec,
+                                                    kv_cache_config)
 
         # Pass 2: Allocate one physical cache per unique slot and map layers
         for slot_key, layer_names in slots.items():
@@ -1108,6 +1155,55 @@ class KVCacheManager:
 
         self._log_kv_cache_init(kv_cache_config, kv_caches, num_blocks_list,
                                 metadata, duplicate_shared_layers)
+
+    def _check_mixed_head_dim_slot_budgets(
+        self,
+        slots: dict[tuple, list[str]],
+        slot_num_blocks: dict[tuple, int],
+        slot_regions: dict[tuple, tuple[tuple, int]],
+        layer_name_to_spec: dict[str, KVCacheSpec],
+        kv_cache_config: KVCacheConfig,
+    ) -> None:
+        """Checks the invariant of `_maybe_pad_pages_for_mixed_head_dims`.
+
+        Each attention slot becomes one KV cache array of
+        `num_blocks * page_size(shape)` bytes, using the same page size
+        function that sizes the arrays in `create_kv_caches`. This must stay
+        within what vLLM reserved, both per layer slot (the slots that alias
+        one byte region must fit in its `num_blocks * page_size_padded`
+        bytes) and in total (KV cache groups alias the same tensors, so the
+        total is the largest tensor size). Otherwise the TPU would use more
+        HBM than vLLM budgeted.
+
+        Raises:
+            RuntimeError: If the allocation would exceed either budget.
+        """
+        used: dict[tuple, int] = defaultdict(int)
+        budgets: dict[tuple, int] = {}
+        for slot_key, (region, budget) in slot_regions.items():
+            spec = layer_name_to_spec[slots[slot_key][0]]
+            used[region] += slot_num_blocks[slot_key] * int(
+                get_attention_page_size_bytes(
+                    self.runner.mesh, spec.num_states, spec.num_kv_heads,
+                    spec.head_size, spec.dtype, self.use_mla,
+                    self.runner.attention_backend))
+            budgets[region] = max(budgets.get(region, 0), budget)
+        over = {
+            region: (used[region], budgets[region])
+            for region in used if used[region] > budgets[region]
+        }
+        total_used = sum(used.values())
+        total_reserved = max(
+            (t.size for t in kv_cache_config.kv_cache_tensors), default=0)
+        if over or total_used > total_reserved:
+            raise RuntimeError(
+                "KV cache allocation for attention layers with mixed head "
+                "dims exceeds the bytes vLLM reserved: "
+                f"{total_used} allocated vs {total_reserved} reserved in "
+                f"total; over-budget layer slots (region: (allocated, "
+                f"reserved)): {over}. Per-shape page sizes: "
+                f"{self._mixed_head_dim_page_sizes}. Set "
+                "MIXED_HEAD_DIM_SLIDING_WINDOW=0 to disable this path.")
 
     def _log_kv_cache_init(self, kv_cache_config: KVCacheConfig,
                            kv_caches: List[jax.Array],
