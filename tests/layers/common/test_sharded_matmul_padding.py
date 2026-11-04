@@ -24,6 +24,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
+from tokamax._src.ops.gmm_v2.gmm_v2 import TilingRequest
 
 from tpu_inference.kernels.quantized_matmul.util import \
     xla_quantized_batched_matmul
@@ -334,41 +335,37 @@ class TestShardedMatmulPadding(unittest.TestCase):
             lhs_buffer_count: int = 2
 
         vmem_limit = int(64 * 1024 * 1024 * 0.9)  # 57.60 MiB on TPU v7x
+        req = TilingRequest(dims=None,
+                            lhs_cfgs=None,
+                            rhs_cfgs=None,
+                            vmem_limit_bytes=vmem_limit)
+        calc_target = (
+            "tpu_inference.layers.common.linear.calculate_tiling_from_request")
 
         # Case 1: calculate_tiling picks (tm=48, tk=8192, tn=2304, lhs_buffer_count=3)
         # at full limit, but with 1 MiB headroom it would shrink tn to 1920.
         # _safe_calculate_tiling should preserve (tm=48, tk=8192, tn=2304) and
         # fall back to lhs_buffer_count=2.
-        def fake_calc_tight(dims,
-                            lhs_cfgs,
-                            rhs_cfgs,
-                            limit,
-                            fuse_act=None,
-                            has_partial_sum=False):
+        def fake_calc_tight(r):
+            limit = r.vmem_limit_bytes
             if limit >= vmem_limit:
                 return FakeTileSizes(48, 8192, 2304, 48, lhs_buffer_count=3)
             return FakeTileSizes(48, 8192, 1920, 48, lhs_buffer_count=3)
 
-        with patch("tpu_inference.layers.common.linear.calculate_tiling",
-                   side_effect=fake_calc_tight):
-            tiles = _safe_calculate_tiling(None, None, None, vmem_limit, None)
+        with patch(calc_target, side_effect=fake_calc_tight):
+            tiles = _safe_calculate_tiling(req)
             self.assertEqual(
                 tiles, FakeTileSizes(48, 8192, 2304, 48, lhs_buffer_count=2))
 
         # Case 2: lhs_buffer_count=3 still fits comfortably with headroom -> keep 3.
-        def fake_calc_roomy(dims,
-                            lhs_cfgs,
-                            rhs_cfgs,
-                            limit,
-                            fuse_act=None,
-                            has_partial_sum=False):
+        def fake_calc_roomy(r):
+            limit = r.vmem_limit_bytes
             self.assertGreaterEqual(
                 limit, vmem_limit - _GMM_TILING_VMEM_HEADROOM_BYTES)
             return FakeTileSizes(48, 8192, 1024, 48, lhs_buffer_count=3)
 
-        with patch("tpu_inference.layers.common.linear.calculate_tiling",
-                   side_effect=fake_calc_roomy):
-            tiles = _safe_calculate_tiling(None, None, None, vmem_limit, None)
+        with patch(calc_target, side_effect=fake_calc_roomy):
+            tiles = _safe_calculate_tiling(req)
             self.assertEqual(
                 tiles, FakeTileSizes(48, 8192, 1024, 48, lhs_buffer_count=3))
 

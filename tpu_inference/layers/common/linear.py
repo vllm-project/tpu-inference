@@ -18,7 +18,9 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from tokamax._src.ops.gmm_v2.gmm_v2 import calculate_tiling, gmm_v2
+from tokamax._src.ops.gmm_v2.gmm_v2 import (TilingRequest,
+                                            calculate_tiling_from_request,
+                                            gmm_v2)
 
 from tpu_inference.kernels.quantized_matmul.util import (
     quantize_tensor, xla_quantized_batched_matmul)
@@ -36,22 +38,13 @@ logger = init_logger(__name__)
 _GMM_TILING_VMEM_HEADROOM_BYTES = 1024 * 1024
 
 
-def _safe_calculate_tiling(
-    dims,
-    lhs_cfgs,
-    rhs_cfgs,
-    vmem_limit_bytes: int,
-    fuse_act: str | None = None,
-    has_partial_sum: bool = False,
-):
-    tiles = calculate_tiling(dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes,
-                             fuse_act, has_partial_sum)
+def _safe_calculate_tiling(req: TilingRequest):
+    tiles = calculate_tiling_from_request(req)
     if getattr(tiles, "lhs_buffer_count", 2) > 2:
         conservative_limit = max(
-            1, vmem_limit_bytes - _GMM_TILING_VMEM_HEADROOM_BYTES)
-        conservative_tiles = calculate_tiling(dims, lhs_cfgs, rhs_cfgs,
-                                              conservative_limit, fuse_act,
-                                              has_partial_sum)
+            1, req.vmem_limit_bytes - _GMM_TILING_VMEM_HEADROOM_BYTES)
+        conservative_tiles = calculate_tiling_from_request(
+            dataclasses.replace(req, vmem_limit_bytes=conservative_limit))
         if conservative_tiles != tiles:
             tiles = dataclasses.replace(tiles, lhs_buffer_count=2)
     return tiles
