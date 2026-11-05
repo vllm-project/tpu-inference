@@ -67,15 +67,6 @@ if TYPE_CHECKING:
     RPA_V3_DECODE_BLOCK_SIZES: list[int] = []
     RPA_V3_PREFILL_BLOCK_SIZES: list[int] = []
     RPA_V3_MIXED_BLOCK_SIZES: list[int] = []
-    # Optional operator override for the experimental batched RPA kernel block
-    # sizes, per case. Each is a comma-separated 5-tuple
-    # (bq_sz, bq_c_sz, bkv_sz, batch_size, n_buffer). Empty (default) = use the
-    # kernel's VMEM-based heuristic (tuned_params.calculate_block_sizes).
-    BATCHED_RPA_DECODE_BLOCK_SIZES: list[int] = []
-    BATCHED_RPA_PREFILL_BLOCK_SIZES: list[int] = []
-    # Optional VMEM limit (bytes) passed to the batched RPA kernel. 0 (default)
-    # = use pltpu.get_tpu_info().vmem_capacity_bytes.
-    BATCHED_RPA_VMEM_LIMIT_BYTES: int = 0
     FORCE_MOE_RANDOM_ROUTING: bool = False
     JITTED_MM_MODULE_KEYS: list[str] = []
     REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
@@ -441,14 +432,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_int_list("RPA_V3_PREFILL_BLOCK_SIZES"),
     "RPA_V3_MIXED_BLOCK_SIZES":
     env_int_list("RPA_V3_MIXED_BLOCK_SIZES"),
-    # Optional operator override for the experimental batched RPA kernel block
-    # sizes. Comma-separated 5-tuple: bq_sz,bq_c_sz,bkv_sz,batch_size,n_buffer.
-    "BATCHED_RPA_DECODE_BLOCK_SIZES":
-    env_int_list("BATCHED_RPA_DECODE_BLOCK_SIZES"),
-    "BATCHED_RPA_PREFILL_BLOCK_SIZES":
-    env_int_list("BATCHED_RPA_PREFILL_BLOCK_SIZES"),
-    "BATCHED_RPA_VMEM_LIMIT_BYTES":
-    lambda: int(os.getenv("BATCHED_RPA_VMEM_LIMIT_BYTES") or "0"),
     # Force random expert routing in MoE layers (for testing purposes only)
     "FORCE_MOE_RANDOM_ROUTING":
     env_bool("FORCE_MOE_RANDOM_ROUTING", default=False),
