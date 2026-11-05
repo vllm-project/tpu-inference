@@ -72,8 +72,9 @@ Build env knobs:
 
 ## One-time setup outside this repo
 
-- Buildkite: the `DOCKERHUB_TOKEN` secret (Docker Hub user `tpuinference`)
-  readable by this pipeline.
+- Buildkite: the TPU Release cluster secret `DOCKERHUB_TOKEN_TPU_INFERENCE`
+  (Docker Hub user `tpuinference`), with an access policy that lets this
+  pipeline read it from UI builds on the `release-tpu-inference` queue.
 - The `release-tpu-inference` agents can push to
   `us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci` and
   have `docker buildx` with `imagetools create --prefer-index`.
