@@ -42,7 +42,8 @@ from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 
 from tpu_inference import envs, utils
 from tpu_inference.layers.common.utils import (cpu_mesh_context,
-                                               general_device_put)
+                                               general_device_put,
+                                               local_cpu_devices)
 from tpu_inference.layers.jax import JaxModule, JaxModuleList
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.logger import init_logger
@@ -180,7 +181,7 @@ def model_weights_single_file_generator(
     # Because otherwise the tensor will be loaded on TPU:0 by default,
     # although the tensor would eventually be sharded across multiple TPUs,
     # it would lead to OOM on TPU:0 for large models.
-    with jax.default_device(jax.devices("cpu")[0]):
+    with jax.default_device(local_cpu_devices(jax)[0]):
         with safe_open(weights_file, framework=framework) as f:
             for name in f.keys():
                 if filter_regex is not None and not re.match(
