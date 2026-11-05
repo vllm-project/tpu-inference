@@ -16,7 +16,7 @@
 An AttentionBackend runs the kernel of the attention layers and lays out their
 KV cache. A LinearAttentionBackend runs the kernel of the GDN linear attention
 layers of hybrid models. By default the layers run RPAAttentionBackend (RPA v3)
-and GDNLinearAttentionBackend (GDN v3); register_attention_backend adds
+and GDNLinearAttentionBackend (tokamax GDN); register_attention_backend adds
 another pair under a name.
 """
 
@@ -179,9 +179,9 @@ class RPAAttentionBackend(AttentionBackend):
 
 
 # A fused conv1d + GDN kernel, with the signature of
-# kernels.gdn.v3.wrapper.fused_conv1d_gdn. It returns
-# ((new_conv_state, new_recurrent_state), output): the updated conv state and
-# recurrent state caches, and the output of the GDN layer.
+# tokamax._src.ops.causal_conv1d_gated_delta_rule.wrapper.fused_conv1d_gdn. It
+# returns ((new_conv_state, new_recurrent_state), output): the updated conv
+# state and recurrent state caches, and the output of the GDN layer.
 Conv1dGDNKernel = Callable[..., tuple[tuple["jax.Array", "jax.Array"],
                                       "jax.Array"]]
 
@@ -195,12 +195,12 @@ class LinearAttentionBackend(abc.ABC):
 
 
 class GDNLinearAttentionBackend(LinearAttentionBackend):
-    """The default linear attention backend: the GDN v3 kernel."""
+    """The default linear attention backend (tokamax fused conv1d + GDN)."""
 
     def conv1d_gdn_kernel(self) -> Conv1dGDNKernel:
         # Note: imported here so that the platform, which imports this module,
         # does not load the Pallas kernels.
-        from tpu_inference.kernels.gdn.v3 import wrapper
+        from tokamax._src.ops.causal_conv1d_gated_delta_rule import wrapper
         return wrapper.fused_conv1d_gdn
 
 
