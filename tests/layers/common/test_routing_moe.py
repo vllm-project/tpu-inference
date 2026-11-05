@@ -195,6 +195,25 @@ def test_keep_token_sharding_matches_dense_reference(sizes):
     assert error < 0.07, error
 
 
+@requires_4_devices
+@pytest.mark.usefixtures("tokamax_kernel")
+def test_keep_token_sharding_small_batch_fallback():
+    """When num_tokens does not divide EXPERT_DATA (matching sp_token_axes's
+    small-batch fallback to ATTN_DATA), keep_token_sharding=True falls back to
+    the ATTN_DATA replica split and returns ATTN_DATA-sharded output."""
+    mesh = _make_mesh(attn_dp=2, model=2)
+    # 150 tokens: divisible by ATTN_DATA=2, not divisible by EXPERT_DATA=4
+    # (and 75 local rows also exercise replica padding over model=2).
+    x, gating = _inputs(mesh, 150)
+    w = _weights(mesh, True)
+    want = _dense_reference(x, gating, *w)
+    out = _run_kernel(mesh, x, gating, *w, keep_token_sharding=True)
+    assert out.shape == x.shape and out.dtype == x.dtype
+    assert out.sharding.is_equivalent_to(x.sharding, x.ndim)
+    error = _rel_l2(out, want)
+    assert error < 0.07, error
+
+
 @pytest.mark.parametrize("case, want", [
     (None, None),
     ("data_axis", "expert axes"),

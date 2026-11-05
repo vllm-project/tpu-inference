@@ -181,12 +181,14 @@ def routing_moe_func(hidden_states: jax.Array,
     layer.
 
     keep_token_sharding (sequence-parallel residual stream, see
-    sharding.keeps_tokens_sharded): hidden_states, gating_output and
-    hash_based_topk_indices arrive sharded over EXPERT_DATA instead. On the
-    meshes this integration supports the `data` axis has size 1, so
-    EXPERT_DATA ranks the devices like the EP axes: each device already holds
-    its own share of the tokens. The replica split and gather are skipped and
-    the output is returned sharded over EXPERT_DATA too.
+    sharding.keeps_tokens_sharded): when num_tokens divides EXPERT_DATA,
+    hidden_states, gating_output and hash_based_topk_indices arrive sharded
+    over EXPERT_DATA instead (otherwise falls back to the ATTN_DATA replica
+    split, matching sharding.sp_token_axes). On the meshes this integration
+    supports the `data` axis has size 1, so EXPERT_DATA ranks the devices like
+    the EP axes: each device already holds its own share of the tokens. The
+    replica split and gather are skipped and the output is returned sharded
+    over EXPERT_DATA too.
     """
     from tokamax._src.ops.experimental.routing_moe.layer import \
         modular as tk_modular
@@ -198,17 +200,26 @@ def routing_moe_func(hidden_states: jax.Array,
     # An expert id outside the weights would leave its rows unsent, and with
     # remote scatter the kernel would wait for them forever.
     assert gating_output.shape == (num_tokens, num_experts)
+    if keep_token_sharding and (num_tokens % get_mesh_shape_product(
+            mesh, ShardingAxisName.EXPERT_DATA)):
+        keep_token_sharding = False
     if padded_hidden != hidden_size:
         hidden_states = jnp.pad(hidden_states,
                                 ((0, 0), (0, padded_hidden - hidden_size)))
-    logger.info_once(
-        "[MoE]: routing_moe over %d devices, %d experts each, token rows "
-        "split over replica axes %s; %s weights, %s scatter.",
-        mesh.devices.size, num_experts // mesh.devices.size, replica,
-        "fp8" if w1.dtype == jnp.float8_e4m3fn else "bf16",
-        "remote" if envs.ROUTING_MOE_REMOTE_SCATTER else "local")
-    num_replicas = get_mesh_shape_product(mesh, list(replica))
-    num_local_rows = num_tokens * num_replicas // mesh.devices.size
+    weight_dtype = "fp8" if w1.dtype == jnp.float8_e4m3fn else "bf16"
+    scatter = "remote" if envs.ROUTING_MOE_REMOTE_SCATTER else "local"
+    if keep_token_sharding:
+        logger.info_once(
+            "[MoE]: routing_moe over %d devices, %d experts each, token rows "
+            "sharded over EXPERT_DATA; %s weights, %s scatter.",
+            mesh.devices.size, num_experts // mesh.devices.size, weight_dtype,
+            scatter)
+    else:
+        logger.info_once(
+            "[MoE]: routing_moe over %d devices, %d experts each, token rows "
+            "split over replica axes %s; %s weights, %s scatter.",
+            mesh.devices.size, num_experts // mesh.devices.size, replica,
+            weight_dtype, scatter)
 
     def to_ep_rows(t: jax.Array) -> jax.Array:
         if keep_token_sharding:
@@ -253,5 +264,7 @@ def routing_moe_func(hidden_states: jax.Array,
         out = _reshard_rows(out, mesh, ShardingAxisName.EXPERT,
                             ShardingAxisName.EXPERT_DATA)
     else:
+        num_replicas = get_mesh_shape_product(mesh, list(replica))
+        num_local_rows = num_tokens * num_replicas // mesh.devices.size
         out = _from_ep_rows(out, mesh, replica, num_local_rows)
     return out[:, :hidden_size]
