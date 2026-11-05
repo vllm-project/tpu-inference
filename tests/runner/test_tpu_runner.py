@@ -1694,6 +1694,29 @@ class TestTPUJaxRunnerDisableMM:
         assert entry.block_ids == [7, 8]
         np.testing.assert_array_equal(entry.rows, expert_indices[:2, :, 0, :])
 
+    def test_refresh_state_leaves_updates_shared_drafter(self):
+        """refresh_state_leaves propagates runner.state_leaves to runner.drafter
+        when drafter shares the target model (built-in MTP)."""
+        shared_model = object()
+        drafter_shared = SimpleNamespace(model=shared_model, state_leaves=None)
+        runner = SimpleNamespace(
+            state=("leaf_a", "leaf_b"),
+            state_leaves=None,
+            model=shared_model,
+            drafter=drafter_shared,
+        )
+        TPUModelRunner.refresh_state_leaves(runner)
+        assert runner.state_leaves == ("leaf_a", "leaf_b")
+        assert drafter_shared.state_leaves == ("leaf_a", "leaf_b")
+
+        separate_drafter = SimpleNamespace(model=object(),
+                                           state_leaves=("orig", ))
+        runner.drafter = separate_drafter
+        runner.state = ("leaf_c", )
+        TPUModelRunner.refresh_state_leaves(runner)
+        assert runner.state_leaves == ("leaf_c", )
+        assert separate_drafter.state_leaves == ("orig", )
+
     def test_get_min_remaining_slots_mamba_align_mode(self):
         """In mamba align mode, _get_min_remaining_slots caps steps at block boundaries."""
         runner = MagicMock()

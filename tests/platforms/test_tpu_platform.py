@@ -367,6 +367,47 @@ class TestTpuPlatform:
                            match="'all' is not supported on TPU"):
             TpuPlatform.check_and_update_config(vllm_config)
 
+    @pytest.mark.parametrize(
+        "is_hybrid,additional_config,expected_mode",
+        [
+            (True, {}, "align"),
+            (False, {
+                "custom_mamba_cache_multiplier": 16
+            }, "align"),
+            (False, {}, "none"),
+        ],
+    )
+    @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
+           "")
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    def test_check_and_update_config_defaults_mamba_cache_mode_to_align_on_hybrid(
+            self, mock_update, mock_sharding, vllm_config, is_hybrid,
+            additional_config, expected_mode):
+        """Custom TPU hybrid architectures (e.g., MaxTextForCausalLM with
+        custom_mamba_cache_multiplier) may reach check_and_update_config with
+        mamba_cache_mode='none' when enable_prefix_caching is True; TPU must
+        default mamba_cache_mode to 'align' for hybrid models."""
+        vllm_config.parallel_config.pipeline_parallel_size = 1
+        vllm_config.scheduler_config.is_multimodal_model = False
+        vllm_config.compilation_config.mode = "dummy"
+        vllm_config.compilation_config.backend = ""
+        vllm_config.model_config.is_hybrid = is_hybrid
+        vllm_config.model_config.max_model_len = 4096
+        vllm_config.cache_config.enable_prefix_caching = True
+        vllm_config.cache_config.mamba_cache_mode = "none"
+        vllm_config.cache_config.block_size = 256
+        vllm_config.cache_config.mamba_block_size = 256
+        vllm_config.speculative_config = None
+        vllm_config.additional_config = dict(additional_config)
+        mock_sharding.from_vllm_config.return_value.total_dp_size = 1
+
+        TpuPlatform.check_and_update_config(vllm_config)
+
+        assert vllm_config.cache_config.mamba_cache_mode == expected_mode
+
     @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
            "")
     @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")

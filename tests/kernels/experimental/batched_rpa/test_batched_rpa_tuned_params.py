@@ -194,3 +194,35 @@ def test_tunable_params_ge_le_single_dim_difference():
     assert (base >= bigger_bq) is False  # base.bq_sz < bigger_bq.bq_sz
     assert (bigger_bq >= base) is True  # all dims of bigger_bq ≥ base
     assert (bigger_bq <= base) is False  # bigger_bq.bq_sz > base.bq_sz
+
+
+def test_calculate_block_sizes_large_page_size_256():
+    """When serve_cfgs.page_size (e.g. 256) exceeds mxu_column_size (128),
+    calculate_block_sizes must start bkv_sz at max(mxu_column_size, page_size)
+    so bkv_p % page_size == 0 holds."""
+    from tpu_inference.kernels.experimental.batched_rpa.tuned_params import \
+        calculate_block_sizes
+
+    serve_cfg_256 = configs.ServingConfigs(
+        num_seqs=16,
+        page_size=256,
+        total_q_tokens=2048,
+        num_page_indices=256,
+        dtype_q=jnp.bfloat16,
+        dtype_kv=jnp.bfloat16,
+        dtype_out=jnp.bfloat16,
+    )
+    fake_tpu_info = mock.MagicMock(num_lanes=128, mxu_column_size=128)
+    with mock.patch(
+        "tpu_inference.kernels.experimental.batched_rpa.tuned_params.pltpu.get_tpu_info",
+        return_value=fake_tpu_info,
+    ):
+        decode_bs, prefill_bs = calculate_block_sizes(
+            _MODEL_CONFIG,
+            serve_cfg_256,
+            vmem_limit_bytes=1 << 26,
+        )
+    assert decode_bs.bkv_sz >= 256
+    assert decode_bs.bkv_sz % 256 == 0
+    assert prefill_bs.bkv_sz >= 256
+    assert prefill_bs.bkv_sz % 256 == 0

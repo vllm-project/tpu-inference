@@ -1381,6 +1381,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         """
         self.state_leaves = (tuple(jax.tree_util.tree_leaves(self.state)) if
                              isinstance(self.state, nnx.State) else self.state)
+        if getattr(self, "drafter", None) is not None and getattr(
+                self.drafter, "model", None) is self.model:
+            self.drafter.state_leaves = self.state_leaves
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         runner_type = self.model_config.runner_type

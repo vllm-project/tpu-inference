@@ -398,6 +398,20 @@ class TpuPlatform(Platform):
                 "pool is sized for resident state only. Use 'align' (the "
                 "default when prefix caching is enabled) or 'none'.")
 
+        # Hybrid (mamba/linear-attention) models on TPU require align mode for
+        # prefix caching. Custom TPU architectures (like MaxTextForCausalLM) may
+        # not be in vLLM's MODELS_CONFIG_MAP when check_and_update_config runs,
+        # so default mamba_cache_mode to 'align' when prefix caching is enabled
+        # on a hybrid model.
+        is_hybrid_model = bool(
+            getattr(vllm_config.model_config, "is_hybrid", False) or
+            (isinstance(vllm_config.additional_config, dict) and
+             "custom_mamba_cache_multiplier" in vllm_config.additional_config))
+        if (cache_config and cache_config.enable_prefix_caching
+                and is_hybrid_model and getattr(
+                    cache_config, "mamba_cache_mode", "none") == "none"):
+            cache_config.mamba_cache_mode = "align"
+
         # Hybrid (mamba/linear-attention) models support prefix caching with
         # speculative decoding (n-gram or MTP) when USE_BATCHED_RPA_KERNEL=1
         # places verify windows in the decode segment: verify windows checkpoint
@@ -585,7 +599,7 @@ class TpuPlatform(Platform):
             if cache_config.mamba_block_size != cache_config.block_size:
                 logger.info(
                     "Setting mamba_block_size to %d to match the attention "
-                    "block size (was %d) for mamba prefix caching.",
+                    "block size (was %s) for mamba prefix caching.",
                     cache_config.block_size, cache_config.mamba_block_size)
                 cache_config.mamba_block_size = cache_config.block_size
             if (cache_config.prefix_match_unit is not None and

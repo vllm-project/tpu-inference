@@ -196,7 +196,7 @@ def calculate_block_sizes(
         # costs. Therefore, we conservatively only use 80% of the VMEM budget.
         capped_vmem_limit_bytes = vmem_limit_bytes * 0.8
 
-        bkv_sz = bkv_stride = mxu_column_size
+        bkv_sz = bkv_stride = max(mxu_column_size, serve_cfgs.page_size)
         if fixed_bq_sz is None:
             bq_sz = bq_stride = bkv_sz
         else:

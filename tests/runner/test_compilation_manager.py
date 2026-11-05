@@ -178,3 +178,88 @@ class TestMultiHostLockstep:
                 "sync_global_devices") as mock_sync:
             manager._flush_compilations()
         mock_sync.assert_not_called()
+
+
+class TestPrecompileSpecDecodeDPSharding:
+    """Under DP attention (dp_size > 1), precompiled speculative decoding
+    helpers and rejection sampler must use P(ATTN_DATA, ...) sharding and
+    the target model's actual logits dtype."""
+
+    def _make_manager(self):
+        devices = np.array(jax.devices()[:1]).reshape(
+            (1, ) * len(MESH_AXIS_NAMES))
+        mesh = Mesh(devices, MESH_AXIS_NAMES)
+        runner = SimpleNamespace(
+            mesh=mesh,
+            rank=0,
+            dp_size=2,
+            vocab_size=256,
+            max_num_reqs=8,
+            num_reqs_paddings=[8],
+            num_logits_paddings=[32],
+            num_tokens_paddings=[32],
+            attn_num_reqs_paddings=[8],
+            rng_params_for_sampling=jnp.zeros((2, ), dtype=jnp.uint32),
+            rejection_sampler=mock.MagicMock(),
+            vllm_config=SimpleNamespace(parallel_config=None),
+            scheduler_config=SimpleNamespace(async_scheduling=True),
+            speculative_config=SimpleNamespace(
+                num_speculative_tokens=3,
+                method="mtp",
+                draft_model_config=SimpleNamespace(get_hidden_size=lambda: 64),
+            ),
+            model_config=SimpleNamespace(
+                max_logprobs=5,
+                logprobs_mode="processed_logprobs",
+                get_hidden_size=lambda: 64,
+                dtype=jnp.bfloat16,
+            ),
+        )
+        manager = CompilationManager.__new__(CompilationManager)
+        manager.runner = runner
+        manager._get_logits_dtype = lambda: jnp.float32
+        manager._should_skip_padding_combination = lambda *args, **kwargs: False
+        return manager
+
+    def test_precompile_rejection_sampler_uses_attn_data_sharding_and_logits_dtype(
+            self):
+        manager = self._make_manager()
+        calls = []
+
+        def record(name, fn, *args, **kwargs):
+            calls.append((name, args))
+
+        manager._run_compilation = record
+        CompilationManager._precompile_rejection_sampler(manager)
+
+        assert len(calls) == 2
+        for _name, args in calls:
+            draft_token_ids, num_draft_tokens, _draft_probs, target_probs, _bonus_ids, sampling_meta, _rng = args
+            assert draft_token_ids.sharding.spec == PartitionSpec(
+                ShardingAxisName.ATTN_DATA)
+            assert num_draft_tokens.sharding.spec == PartitionSpec(
+                ShardingAxisName.ATTN_DATA)
+            assert target_probs.sharding.spec == PartitionSpec(
+                ShardingAxisName.ATTN_DATA, None)
+            assert target_probs.dtype == jnp.float32
+            if sampling_meta.do_sampling:
+                assert sampling_meta.temperature.sharding.spec == PartitionSpec(
+                    ShardingAxisName.ATTN_DATA)
+
+    def test_precompile_extract_last_sampled_tokens_uses_attn_data_sharding(
+            self):
+        manager = self._make_manager()
+        calls = {}
+
+        def record(name, fn, *args, **kwargs):
+            calls[name] = args
+
+        manager._run_compilation = record
+        CompilationManager._precompile_extract_last_sampled_tokens(manager)
+
+        extract_args = calls["worker0 extract_last_sampled_tokens"]
+        spec_meta, sampled_token_ids = extract_args[0], extract_args[1]
+        assert spec_meta.draft_lengths.sharding.spec == PartitionSpec(
+            ShardingAxisName.ATTN_DATA)
+        assert sampled_token_ids.sharding.spec == PartitionSpec(
+            ShardingAxisName.ATTN_DATA)
