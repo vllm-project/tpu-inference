@@ -1263,7 +1263,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             # Only pre-warm torchax for pooling tasks to prevent JIT during inference
             # while avoiding unnecessary overhead for standard generative models.
-            if self.is_pooling_model:
+            if (self.is_pooling_model and not getattr(
+                    model.pooler_fn, "pools_device_logits", False)):
                 import torchax
                 from torchax.interop import torch_view
 
@@ -1653,6 +1654,69 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         return placeholder_req_id_to_index
 
+    def _pool(
+        self,
+        hidden_states: jax.Array,
+        logits_indices: jax.Array,
+        logits_indices_selector,
+        scheduler_output: "VllmSchedulerOutput",
+    ) -> ModelRunnerOutput:
+        """Run the pooler for the current batch and build its output.
+
+        Poolers that set ``pools_device_logits`` receive the per-request
+        logits computed on device from the LAST token rows, so only
+        ``[num_reqs, num_labels]`` values cross to the host; every other
+        pooler receives the full hidden states as before.
+        """
+        num_reqs = self.input_batch.num_reqs
+        pooling_metadata = self.input_batch.get_pooling_metadata()
+        # Scheduled token counts for the current chunk.
+        num_scheduled_tokens = np.array([
+            scheduler_output.num_scheduled_tokens[req_id]
+            for req_id in self.input_batch.req_ids[:num_reqs]
+        ],
+                                        dtype=np.int32)
+
+        if getattr(self.pooler_fn, "pools_device_logits", False):
+            if logits_indices_selector is not None:
+                raise RuntimeError("Device-logits pooling requires request "
+                                   "order without in-process DP reordering")
+            with self.maybe_forbid_compile:
+                rows = self._select_from_array_fn(
+                    hidden_states, logits_indices, self.mesh,
+                    self.vllm_config.sharding_config.prefill_cp_size)
+                logits = self.compute_logits_fn(self.state_leaves, rows)
+            outputs = self.pooler_fn(logits, pooling_metadata)
+            # Complete only requests whose full prompt has been processed
+            # (chunked prefill). The buffer's seq_lens view is not the
+            # region written by _prepare_inputs.
+            completed = (self.input_batch.num_computed_tokens_cpu[:num_reqs] +
+                         num_scheduled_tokens
+                         >= self.input_batch.num_prompt_tokens[:num_reqs])
+            pooler_output = [
+                out if done else None for out, done in zip(outputs, completed)
+            ]
+        else:
+            seq_lens_view = self.device_buffer.get_view((self.max_num_reqs, ),
+                                                        key="seq_lens")
+            seq_lens = seq_lens_view[:num_reqs]
+            # Call the pooler with the decoupled interface
+            pooler_output = self.pooler_fn(
+                hidden_states,
+                pooling_metadata,
+                seq_lens,
+                num_scheduled_tokens,
+            )
+
+        return ModelRunnerOutput(
+            req_ids=self.input_batch.req_ids,
+            req_id_to_index=self.input_batch.req_id_to_index,
+            sampled_token_ids=[],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=pooler_output,
+        )
+
     def _execute_model(
         self,
         scheduler_output: "VllmSchedulerOutput",
@@ -1799,38 +1863,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 return hidden_states
 
         if self.is_pooling_model:
-            num_reqs = self.input_batch.num_reqs
-
-            # Retrieve sequence lengths
-            seq_lens_view = self.device_buffer.get_view((self.max_num_reqs, ),
-                                                        key="seq_lens")
-            seq_lens = seq_lens_view[:num_reqs]
-
-            pooling_metadata = self.input_batch.get_pooling_metadata()
-
-            # Extract scheduled token counts for the current chunk
-            num_scheduled_tokens = np.array([
-                scheduler_output.num_scheduled_tokens[req_id]
-                for req_id in self.input_batch.req_ids[:num_reqs]
-            ],
-                                            dtype=np.int32)
-
-            # Call the pooler with the decoupled interface
-            pooler_output = self.pooler_fn(
-                hidden_states,
-                pooling_metadata,
-                seq_lens,
-                num_scheduled_tokens,
-            )
-
-            return ModelRunnerOutput(
-                req_ids=self.input_batch.req_ids,
-                req_id_to_index=self.input_batch.req_id_to_index,
-                sampled_token_ids=[],
-                logprobs=None,
-                prompt_logprobs_dict={},
-                pooler_output=pooler_output,
-            )
+            return self._pool(hidden_states, logits_indices,
+                              logits_indices_selector, scheduler_output)
 
         full_hidden_states = hidden_states
 

@@ -1064,6 +1064,11 @@ class CompilationManager:
 
     def _precompile_compute_pooling(self) -> None:
         logger.info("Compiling compute_pooling with different input shapes.")
+        prewarm = getattr(self.runner.pooler_fn, "prewarm", None)
+        if prewarm is not None:
+            # Poolers that consume device logits compile their own path.
+            prewarm(self.runner)
+            return
 
         # vLLM pooling layer design has complex and dynamic logic. There are
         # interoperate between tensors from host and accelerator.
