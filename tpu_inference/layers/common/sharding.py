@@ -14,6 +14,7 @@
 
 import json
 import math
+import re
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, List, Optional
 
@@ -149,6 +150,88 @@ def is_attn_dp(mesh: Mesh) -> bool:
                                                 ShardingAxisName.ATTN_DATA)
     dp_size = utils.get_mesh_shape_product(mesh, ShardingAxisName.MLP_DATA)
     return (attn_dp_size // dp_size) > 1
+
+
+def is_shared_expert_prefix(prefix: str) -> bool:
+    """Whether a linear layer's prefix names a MoE shared expert.
+
+    Covers both checkpoint namings: `.shared_expert.` (Qwen) and
+    `.shared_experts.` (DeepSeek V2/V3 style).
+    """
+    return re.search(r"\.shared_experts?\.", prefix) is not None
+
+
+def shared_expert_is_replicated(shared_experts) -> bool:
+    """Whether every linear of the shared expert has replicated weights.
+
+    VllmQuantLinearConfig replicates the shared expert under the
+    sequence-parallel residual stream (`sharding.keeps_tokens_sharded`); it
+    then runs on the local token slice and its output is already complete.
+    Reads the linears' actual weight sharding, so it can't disagree with the
+    linear configs.
+    """
+    modules_fn = getattr(shared_experts, "modules", None)
+    if not callable(modules_fn):
+        return False
+    configs = [
+        m.quant_method.linear_config for m in modules_fn()
+        if getattr(getattr(m, "quant_method", None), "linear_config", None)
+        is not None
+    ]
+    return bool(configs) and all(
+        all(axis is None for axis in c.weight_sharding) for c in configs)
+
+
+def keeps_tokens_sharded(mesh: Mesh | None, enable_sp: bool, *,
+                         gmm_ep: bool) -> bool:
+    """Whether the residual stream stays token-sharded over EXPERT_DATA.
+
+    Sequence parallelism (`enable_sp`) under attention DP with GMM_EP
+    (`expert_parallel_gmm`): the MoE consumes and produces tokens sharded over
+    all devices (EXPERT_DATA), so instead of resharding to ATTN_DATA around
+    every linear and the MoE, the activations outside attention stay
+    token-sharded: column-parallel projections all-gather (FP8) tokens over the
+    attention TP axis, row-parallel ones reduce-scatter, and router / shared
+    expert / norms run on the local token slice.
+
+    Only under attention DP with attention TP > 1 and GMM_EP; otherwise
+    `enable_sp` keeps its MLP_TENSOR input / output sharding:
+
+    - `gmm_ep`: the MoE backend must be GMM_EP. GMM_TP (expert parallelism
+      off) and the other EP backends (USE_MOE_EP_KERNEL, USE_FUSED_EP_MOE_V2,
+      USE_ROUTING_MOE) ignore `keep_token_sharding`. vLLM callers decide this
+      with `select_moe_backend` via `vllm_keeps_tokens_sharded`.
+    - The `expert` and `pcp` mesh axes must be size 1. The linears gather and
+      reduce-scatter tokens over ATTN_HEAD (`model`, `expert`, `dcp`) inside
+      each ATTN_DATA block, but EXPERT_DATA orders `expert` before `model` and
+      puts `pcp` last, so with either axis > 1 the token rows would not line
+      up with EXPERT_DATA.
+    """
+    if not enable_sp or not gmm_ep:
+        return False
+    if mesh is None or not is_attn_dp(mesh):
+        return False
+    if any(
+            utils.get_mesh_shape_product(mesh, axis) > 1
+            for axis in ("expert", "pcp")):
+        return False
+    return (utils.get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD) > 1
+            and utils.get_mesh_shape_product(mesh,
+                                             ShardingAxisName.EXPERT_DATA) > 1)
+
+
+def sp_token_axes(mesh: Mesh, keep_tokens_sharded: bool, num_tokens: int):
+    """EXPERT_DATA if `num_tokens` tokens stay sharded over it, else None.
+
+    Requires the token count to divide EXPERT_DATA; otherwise the linears use
+    the usual ATTN_DATA token sharding (XLA reshards around them).
+    """
+    if not keep_tokens_sharded:
+        return None
+    if num_tokens % utils.get_mesh_shape_product(mesh,
+                                                 ShardingAxisName.EXPERT_DATA):
+        return None
+    return ShardingAxisName.EXPERT_DATA
 
 
 @dataclass

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import dataclasses
+import math
 
 import jax
 import jax.numpy as jnp
@@ -60,6 +61,7 @@ def xla_quantized_matmul(
     w_q: jax.Array,
     w_scale: jax.Array,
     quantize_activation=True,
+    ag_axis=None,
 ) -> jax.Array:
     """
     Reference (pure JAX) implementation of the quantized matmul kernel below.
@@ -70,6 +72,9 @@ def xla_quantized_matmul(
         w_s: Weight quantization scale. [n_output_features]
         mesh: Mesh to shard on.
         weight_sharding: PartitionSpec for the weight tensor.
+        ag_axis: Optional mesh axes to all-gather the activation rows over
+            before the matmul (inside a shard_map). A quantized activation is
+            gathered after quantization, so the all-gather moves FP8 / int8.
 
     Returns:
         Output of the quantized matmul.
@@ -100,6 +105,15 @@ def xla_quantized_matmul(
             acc_dtype = jnp.int32
 
         x_q, x_scale = quantize_tensor(x, w_q.dtype)
+        if ag_axis is not None:
+            x_q = jax.lax.all_gather(x_q,
+                                     axis_name=ag_axis,
+                                     axis=0,
+                                     tiled=True)
+            x_scale = jax.lax.all_gather(x_scale,
+                                         axis_name=ag_axis,
+                                         axis=0,
+                                         tiled=True)
         out = jax.lax.dot_general(
             x_q,
             w_q,
@@ -108,6 +122,8 @@ def xla_quantized_matmul(
         ).astype(jnp.float32)
         out *= x_scale
     else:
+        if ag_axis is not None:
+            x = jax.lax.all_gather(x, axis_name=ag_axis, axis=0, tiled=True)
         out = jax.lax.dot_general(
             x,
             w_q,
@@ -137,17 +153,91 @@ def _pad_sharded_activation(
     return x, orig_len
 
 
+def _sp_layout(in_axis, out_axis, sp_token_axes, defer_all_reduce: bool):
+    """Which ends of a matmul stay token-sharded over `sp_token_axes`.
+
+    With sequence parallelism (`sp_token_axes` set, see
+    `VllmQuantLinearConfig.get_sp_token_axes`) activations outside attention
+    are token-sharded over `sp_token_axes` instead of `ATTN_DATA`:
+
+    * replicated weight (in=None, out=None): token-sharded in and out, no
+      collective;
+    * column-parallel (in=None, out=TP): token-sharded in; the tokens are
+      all-gathered over the TP (out) axis inside the shard_map, output
+      `ATTN_DATA` x TP as usual. On the xla_quantized_matmul path the
+      activation is gathered after FP8 quantization; with
+      ENABLE_QUANTIZED_MATMUL_KERNEL (gmm_v2) it is gathered in bf16, because
+      gmm_v2 quantizes the LHS itself. Small weights may instead be gathered
+      (`_sp_gather_weight_is_cheaper`);
+    * row-parallel (in=TP, out=None): `ATTN_DATA` in; `psum_scatter`
+      (reduce-scatter) over the TP axis instead of `psum`, output
+      token-sharded.
+
+    Returns (x_token_axes, out_token_axes, col_parallel, row_parallel).
+    """
+    if sp_token_axes is None:
+        return (ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_DATA, False,
+                False)
+    replicated = in_axis is None and out_axis is None
+    col_parallel = in_axis is None and out_axis is not None
+    row_parallel = (in_axis is not None and out_axis is None
+                    and not defer_all_reduce)
+    x_axes = (sp_token_axes
+              if replicated or col_parallel else ShardingAxisName.ATTN_DATA)
+    out_axes = (sp_token_axes
+                if replicated or row_parallel else ShardingAxisName.ATTN_DATA)
+    return x_axes, out_axes, col_parallel, row_parallel
+
+
+# Largest all-gathered weight ([K, N]) for the sequence-parallel
+# column-parallel weight-gather path (`_sp_gather_weight_is_cheaper`). That
+# path reads the full weight from HBM and holds it as a temporary on every
+# device, which the collective byte count doesn't see; the cap keeps it to
+# genuinely small projections (e.g. a GDN in_proj_ba).
+_SP_WEIGHT_GATHER_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _sp_gather_weight_is_cheaper(x_shape, x_dtype, w_shape, w_dtype,
+                                 tp_size: int) -> bool:
+    """Whether a sequence-parallel column-parallel matmul all-gathers the
+    weight (then all_to_alls the output) instead of the token rows.
+
+    Shapes are the local shards inside the shard_map: x [m, ..., K] with m
+    token rows (1 / TP of the ATTN_DATA block) and w [K, n] with n = N / TP
+    columns. Bytes each device receives:
+
+      token gather : (TP - 1) * m * K * x_bytes
+      weight gather: (TP - 1) * (K * n * w_bytes + m * n * out_bytes)
+
+    The weight gather is used only if it receives fewer bytes and the full
+    weight is at most `_SP_WEIGHT_GATHER_MAX_BYTES`.
+    """
+    k, n = w_shape
+    rows = math.prod(x_shape) // k
+    w_bytes = jnp.dtype(w_dtype).itemsize
+    if tp_size * k * n * w_bytes > _SP_WEIGHT_GATHER_MAX_BYTES:
+        return False
+    out_bytes = jnp.result_type(x_dtype, w_dtype).itemsize
+    token_gather = rows * k * jnp.dtype(x_dtype).itemsize
+    weight_gather = k * n * w_bytes + rows * n * out_bytes
+    return weight_gather < token_gather
+
+
 def sharded_matmul(x: jax.Array,
                    w: jax.Array,
                    weight_sharding: P | NamedSharding,
                    *,
                    mesh: Mesh | None = None,
-                   defer_all_reduce: bool = False) -> jax.Array:
+                   defer_all_reduce: bool = False,
+                   sp_token_axes=None) -> jax.Array:
     """Matmul that can skip its all-reduce (``defer_all_reduce=True``).
 
     A plain einsum under GSPMD is always all-reduced by the partitioner, so it
     runs in shard_map. No bias: vLLM's RowParallelLinear rejects
     reduce_results=False with an in-layer bias.
+
+    ``sp_token_axes``: mesh axes the tokens are sharded over outside attention
+    (sequence parallelism, see ``_sp_layout``); None keeps ``ATTN_DATA``.
     """
     if isinstance(weight_sharding, NamedSharding):
         mesh = mesh or weight_sharding.mesh
@@ -155,7 +245,11 @@ def sharded_matmul(x: jax.Array,
     in_axis, out_axis = weight_sharding
     # x may have extra leading batch dims.
     batch_dims = (None, ) * (x.ndim - 2)
-    x_spec = P(ShardingAxisName.ATTN_DATA, *batch_dims, in_axis)
+    x_axes, out_axes, sp_col_parallel, sp_row_parallel = _sp_layout(
+        in_axis, out_axis, sp_token_axes, defer_all_reduce)
+    x_spec = P(x_axes, *batch_dims, in_axis)
+    tp_size = (get_mesh_shape_product(mesh, out_axis)
+               if sp_col_parallel else 1)
 
     x, orig_len = _pad_sharded_activation(x, mesh, x_spec[0], axis_idx=0)
 
@@ -164,16 +258,45 @@ def sharded_matmul(x: jax.Array,
         NamedSharding(mesh, x_spec) if mesh else x_spec)
 
     def wrapper(x, w):
-        out = x @ w
+        if sp_col_parallel:
+            if _sp_gather_weight_is_cheaper(x.shape, x.dtype, w.shape, w.dtype,
+                                            tp_size):
+                # Small weight (e.g. a few output columns): gather the weight
+                # instead of the token rows. Each device then holds its token
+                # rows x all N columns; all_to_all swaps the TP tiles so it
+                # ends with all rows x its N / TP columns.
+                w_full = jax.lax.all_gather(w,
+                                            axis_name=out_axis,
+                                            axis=1,
+                                            tiled=True)
+                out = jax.lax.all_to_all(x @ w_full,
+                                         axis_name=out_axis,
+                                         split_axis=x.ndim - 1,
+                                         concat_axis=0,
+                                         tiled=True)
+            else:
+                x_full = jax.lax.all_gather(x,
+                                            axis_name=out_axis,
+                                            axis=0,
+                                            tiled=True)
+                out = x_full @ w
+        else:
+            out = x @ w
         if in_axis and not defer_all_reduce:
-            out = jax.lax.psum(out, axis_name=in_axis)
+            if sp_row_parallel:
+                out = jax.lax.psum_scatter(out,
+                                           axis_name=in_axis,
+                                           scatter_dimension=0,
+                                           tiled=True)
+            else:
+                out = jax.lax.psum(out, axis_name=in_axis)
         return out
 
     out = jax.shard_map(
         wrapper,
         mesh=mesh,
         in_specs=(x_spec, weight_sharding),
-        out_specs=P(ShardingAxisName.ATTN_DATA, *batch_dims, out_axis),
+        out_specs=P(out_axes, *batch_dims, out_axis),
         check_vma=False,
     )(x, w)
 
@@ -189,7 +312,8 @@ def sharded_quantized_matmul(x: jax.Array,
                              *,
                              mesh: Mesh | None = None,
                              defer_all_reduce: bool = False,
-                             maybe_quantize_x: bool = True) -> jax.Array:
+                             maybe_quantize_x: bool = True,
+                             sp_token_axes=None) -> jax.Array:
     """
     Wrapper around the quantized matmul kernel.
 
@@ -206,6 +330,9 @@ def sharded_quantized_matmul(x: jax.Array,
             reduction with a subsequent collective).
         maybe_quantize_x: (Optional) If True, the underlying matmul implementation will try to quantize the activation when appropriate.
             Whether and how activation is quantized is contingent on the weight quantization.
+        sp_token_axes: (Optional) Mesh axes the tokens are sharded over outside
+            attention (sequence parallelism, see `_sp_layout`). None keeps
+            `ATTN_DATA`.
 
     Returns:
         Output of the quantized matmul.
@@ -221,7 +348,9 @@ def sharded_quantized_matmul(x: jax.Array,
     # NOTE (jacobplatin/kyuyeunk) there have been numeric issues (concerning) NaNs
     # with the kernel and thus we disable it for now.
     in_axis, out_axis = weight_spec
-    x_sharding = P(ShardingAxisName.ATTN_DATA, in_axis)
+    x_axes, out_axes, sp_col_parallel, sp_row_parallel = _sp_layout(
+        in_axis, out_axis, sp_token_axes, defer_all_reduce)
+    x_sharding = P(x_axes, in_axis)
     enable_quantized_matmul_kernel = w_s is not None and (len(
         w_s.shape) == 3 or len(w_s.shape) == 4)
     if enable_quantized_matmul_kernel:
@@ -240,7 +369,7 @@ def sharded_quantized_matmul(x: jax.Array,
         else:
             # 1D (channelwise) case
             scale_sharding = P(out_axis, )
-    out_sharding = P(ShardingAxisName.ATTN_DATA, out_axis)
+    out_sharding = P(out_axes, out_axis)
 
     x, orig_len = _pad_sharded_activation(x, mesh, x_sharding[0], axis_idx=0)
 
@@ -250,6 +379,14 @@ def sharded_quantized_matmul(x: jax.Array,
 
     def wrapper(x, w_q, w_s):
         if enable_quantized_matmul_kernel:
+            if sp_col_parallel:
+                # gmm_v2 quantizes the LHS itself, so on this path the tokens
+                # are gathered in bf16 (2x the bytes of the FP8 gather in
+                # xla_quantized_matmul below).
+                x = jax.lax.all_gather(x,
+                                       axis_name=out_axis,
+                                       axis=0,
+                                       tiled=True)
             output = gmm_v2(
                 lhs=x,
                 rhs=jnp.expand_dims(w_q, 0),
@@ -263,12 +400,20 @@ def sharded_quantized_matmul(x: jax.Array,
                 maybe_quantize_lhs=maybe_quantize_x,
             )
         else:
-            output = xla_quantized_matmul(x,
-                                          w_q,
-                                          w_s,
-                                          quantize_activation=maybe_quantize_x)
+            output = xla_quantized_matmul(
+                x,
+                w_q,
+                w_s,
+                quantize_activation=maybe_quantize_x,
+                ag_axis=out_axis if sp_col_parallel else None)
         if in_axis and not defer_all_reduce:
-            output = jax.lax.psum(output, axis_name=in_axis)
+            if sp_row_parallel:
+                output = jax.lax.psum_scatter(output,
+                                              axis_name=in_axis,
+                                              scatter_dimension=0,
+                                              tiled=True)
+            else:
+                output = jax.lax.psum(output, axis_name=in_axis)
         return output
 
     out = jax.shard_map(

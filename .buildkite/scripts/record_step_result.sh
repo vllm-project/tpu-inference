@@ -42,14 +42,18 @@ fi
 echo "Step ${STEP_KEY} outcome: ${OUTCOME}"
 message=""
 
+# In kube pipelines, record steps depend on their test steps with `allow_failure: true`.
+# When an upstream stage fails (e.g., Stage 1 UnitTest/CorrectnessTest), Stage 2 is skipped
+# by Buildkite, but Stage 2's record step still runs due to `allow_failure: true`.
+# `buildkite-agent step get "outcome"` returns an empty string "" (with exit code 0) for
+# steps that did not run. We map "" to "❓ Untested" so the support matrix is accurate,
+# while still letting "" fall through to `exit 1` below so this record step blocks
+# any subsequent stage (e.g., Stage 3 Benchmark) from running.
 case $OUTCOME in
   "passed")
     message="✅ Passing"
     ;;
-  "skipped")
-    message="❓ Untested"
-    ;;
-  "unverified")
+  "skipped" | "unverified" | "")
     message="❓ Untested"
     ;;
   "not enough HBM")

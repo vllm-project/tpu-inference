@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     AGGREGATED_STATS_DIR: str = ""
     PYTHON_TRACER_LEVEL: int = 1
     USE_MOE_EP_KERNEL: bool = False
+    RAGGED_GATHER_REDUCE_VERSION: str = "v3"
     USE_UNFUSED_MEGABLOCKS: bool = False
     USE_DENSE_MOE: bool = False
     NUM_SLICES: int = 1
@@ -59,6 +60,7 @@ if TYPE_CHECKING:
     CONTINUE_DECODE_EOS_CHECK_INTERVAL: int = 1
     USE_BATCHED_RPA_KERNEL: bool = False
     USE_BATCHED_RPA_SEQ_ON_LANE: bool = False
+    DCP_PROJ_REPLICATE: bool = True
     # Optional operator override for the RPA v3 kernel block sizes, one per
     # case. Each is a comma-separated 4-tuple (bq_sz, bkv_sz, bq_csz, bkv_csz).
     # Empty (default) = use the built-in tuned/heuristic sizes.
@@ -116,6 +118,8 @@ if TYPE_CHECKING:
     USE_FUSED_EP_MOE_V2: bool = False
     FUSED_EP_MOE_V2_CAPACITY: int = 128
     FUSED_EP_MOE_V2_SHARDED_PLAN: bool = True
+    USE_ROUTING_MOE: bool = False
+    ROUTING_MOE_REMOTE_SCATTER: bool = True
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
@@ -132,6 +136,7 @@ if TYPE_CHECKING:
     TPU_MOE_LOWTOK_MAX_TOKENS: int = 128
     USE_FUSED_RMSNORM_QUANT: bool = False
     FUSED_RMSNORM_BLOCK_M: int = 512
+    TPU_MOE_TOPK_WEIGHTS_FLOAT32: bool = False
 
 
 def env_with_choices(
@@ -321,6 +326,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use custom expert-parallel kernel for MoE (Mixture of Experts)
     "USE_MOE_EP_KERNEL":
     env_bool("USE_MOE_EP_KERNEL", default=False),
+    # Version of ragged gather reduce kernel to use for SparseCore combine ("v2", "v3")
+    "RAGGED_GATHER_REDUCE_VERSION":
+    env_with_choices("RAGGED_GATHER_REDUCE_VERSION", "v3", ["v2", "v3"]),
     # Enable megablocks for JAX sparse matmul for MoE (Mixture of Experts)
     # using Unfused weights
     "USE_UNFUSED_MEGABLOCKS":
@@ -419,6 +427,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("USE_BATCHED_RPA_KERNEL"),
     "USE_BATCHED_RPA_SEQ_ON_LANE":
     env_bool("USE_BATCHED_RPA_SEQ_ON_LANE"),
+    "DCP_PROJ_REPLICATE":
+    lambda: (env_bool("DCP_PROJ_REPLICATE", default=True)()
+             if "DCP_PROJ_REPLICATE" in os.environ else env_bool(
+                 "VLLM_DCP_PROJ_REPLICATE", default=True)()),
     # Optional operator override for RPA v3 kernel block sizes, per case.
     # Comma-separated 4-tuple: bq_sz,bkv_sz,bq_csz,bkv_csz. Empty = use the
     # built-in tuned/heuristic sizes. Lets operators retune the decode
@@ -557,7 +569,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "ROPE_CACHE_ROW_MAJOR":
     env_bool("ROPE_CACHE_ROW_MAJOR", default=False),
     # similar to ROPE_CACHE_ROW_MAJOR, but for the hash-MoE routing table
-    # (`*.routed_experts.hash_indices_table`, [vocab_size, num_experts_per_tok]).
+    # (`*.routed_experts.tpu_hash_indices_table`, [vocab_size, num_experts_per_tok]).
     "HASH_TABLE_ROW_MAJOR":
     env_bool("HASH_TABLE_ROW_MAJOR", default=False),
     "MLA_TRANSPOSE_KV_CACHE":
@@ -639,6 +651,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # instead of all of them. Faster at every size measured on Qwen3.8-2.4T.
     "FUSED_EP_MOE_V2_SHARDED_PLAN":
     env_bool("FUSED_EP_MOE_V2_SHARDED_PLAN", default=True),
+    # Run EP MoE layers with tokamax's routing_moe kernel
+    # (MoEBackend.ROUTING_MOE) instead of the GMM path. Supports fp8 weights
+    # with per-channel scales and bf16 weights; any other layer raises an error.
+    # Only vLLM-path models read this flag; USE_MOE_EP_KERNEL and
+    # USE_FUSED_EP_MOE_V2 take priority. Only the EP path is wired up and
+    # tested for now; TP support is a TODO. See layers/common/routing_moe.py.
+    "USE_ROUTING_MOE":
+    env_bool("USE_ROUTING_MOE", default=False),
+    # How routing_moe returns the expert outputs (remote or local).
+    "ROUTING_MOE_REMOTE_SCATTER":
+    env_bool("ROUTING_MOE_REMOTE_SCATTER", default=True),
     # Gap between token-bucket padding sizes for TPU precompilation. When 0,
     # buckets grow as powers of two; otherwise buckets increase by this gap
     # once past the power-of-two ramp. Previously provided by vllm.envs, which
@@ -719,6 +742,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("USE_FUSED_RMSNORM_QUANT", default=False),
     "FUSED_RMSNORM_BLOCK_M":
     lambda: int(os.getenv("FUSED_RMSNORM_BLOCK_M") or "512"),
+    # Keep FusedMoE top-k routing weights in float32 precision instead of casting
+    # to the activation dtype (e.g. bfloat16) in fused_moe_gmm. Improves numerical
+    # parity with training frameworks (e.g. MaxText) in RL and distillation workloads.
+    # The MOE_TOPK_WEIGHTS_FLOAT32 alias is supported for backward compatibility
+    # with the atwigg/mlperf branch and deployment configs.
+    "TPU_MOE_TOPK_WEIGHTS_FLOAT32":
+    lambda: (env_bool("TPU_MOE_TOPK_WEIGHTS_FLOAT32", default=False)
+             () or env_bool("MOE_TOPK_WEIGHTS_FLOAT32", default=False)()),
 }
 
 

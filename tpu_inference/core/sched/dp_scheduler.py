@@ -55,6 +55,24 @@ from tpu_inference.utils import time_function
 logger = init_logger(__name__)
 
 
+def _get_max_cache_hit_length(request: Request) -> int:
+    """Longest prefix-cache hit this request may read, in tokens (0 = none).
+
+    Mirrors what vLLM's Scheduler hands to KVCacheManager.get_computed_blocks.
+    Newer vLLM folds `skip_reading_prefix_cache` and the prompt-logprobs lower
+    bound into `Request.get_max_cache_hit_length()` (via
+    `prefix_cache_hit_limit`); older vLLM exposed a bare
+    `Request.skip_reading_prefix_cache` flag.
+    """
+    get_max = getattr(request, "get_max_cache_hit_length", None)
+    if get_max is not None:
+        return get_max()
+    if getattr(request, "skip_reading_prefix_cache", False):
+        return 0
+    # The last token is always recomputed to produce logits.
+    return request.num_tokens - 1
+
+
 class SchedulerCommand(Enum):
     """Enum for scheduler worker process commands."""
     ADD_REQUEST = "add_request"
@@ -325,10 +343,12 @@ def _scheduler_worker_process(
                     # Probe for cached blocks without recording prefix cache stats.
                     request = data
                     kv_cache_mgr = scheduler.kv_cache_manager
-                    if not kv_cache_mgr.enable_caching or request.skip_reading_prefix_cache:
+                    max_cache_hit_length = (_get_max_cache_hit_length(request)
+                                            if kv_cache_mgr.enable_caching else
+                                            0)
+                    if max_cache_hit_length <= 0:
                         _send_result(0)
                     else:
-                        max_cache_hit_length = request.num_tokens - 1
                         _, num_cached_tokens, *_ = (
                             kv_cache_mgr.coordinator.find_longest_cache_hit(
                                 request.block_hashes, max_cache_hit_length))
@@ -942,10 +962,6 @@ class DPScheduler(SchedulerInterface):
         for output in rank_outputs:
             combined_finished_req_ids.update(output.finished_req_ids)
 
-        # Combine other fields (take from first non-empty or use defaults)
-        num_common_prefix_blocks = rank_outputs[
-            0].num_common_prefix_blocks if rank_outputs else []
-
         # Create DP rank assignment mapping for scheduled requests
         assigned_dp_rank = {}
         for req_id in combined_num_scheduled_tokens.keys():
@@ -1019,7 +1035,6 @@ class DPScheduler(SchedulerInterface):
             total_num_scheduled_tokens=total_scheduled_tokens,
             scheduled_spec_decode_tokens=combined_spec_decode_tokens,
             scheduled_encoder_inputs=combined_encoder_inputs,
-            num_common_prefix_blocks=num_common_prefix_blocks,
             finished_req_ids=combined_finished_req_ids,
             free_encoder_mm_hashes=set(),
             assigned_dp_rank=assigned_dp_rank,
