@@ -143,6 +143,45 @@ class FusedRmsnormFp8KernelTest(parameterized.TestCase):
         np.testing.assert_array_equal(np.asarray(q_out.scale),
                                       np.asarray(q_sum.scale))
 
+    @parameterized.named_parameters(
+        {
+            "testcase_name": "per_token",
+            "block_k": None
+        },
+        {
+            "testcase_name": "subchannel_128",
+            "block_k": 128
+        },
+    )
+    def test_bf16_scale_rounding_matches_stored_scale(self, block_k):
+        x = jax.random.normal(jax.random.key(7), (32, 256), dtype=jnp.bfloat16)
+        scale = jax.random.uniform(jax.random.key(8), (256, ),
+                                   dtype=jnp.bfloat16,
+                                   minval=0.5,
+                                   maxval=2.0)
+        q_out = fused_rmsnorm_fp8.fused_rmsnorm_fp8(x,
+                                                    scale,
+                                                    eps=1e-6,
+                                                    block_k=block_k,
+                                                    implementation="xla")
+        x_f32 = x.astype(jnp.float32)
+        var = jnp.mean(jnp.square(x_f32), axis=-1, keepdims=True)
+        x_norm = (x_f32 * jax.lax.rsqrt(var + 1e-6)) * scale.astype(
+            jnp.float32)
+        if block_k is None:
+            expected_q = jnp.clip(x_norm / q_out.scale.astype(jnp.float32),
+                                  -448.0, 448.0).astype(jnp.float8_e4m3fn)
+        else:
+            x_blocked = jnp.reshape(x_norm, (32, 256 // block_k, block_k))
+            s_blocked = q_out.scale[:, :, None].astype(jnp.float32)
+            expected_q = jnp.reshape(
+                jnp.clip(x_blocked / s_blocked, -448.0, 448.0),
+                (32, 256)).astype(jnp.float8_e4m3fn)
+        np.testing.assert_array_equal(
+            np.asarray(q_out.qvalue).view(np.uint8),
+            np.asarray(expected_q).view(np.uint8),
+        )
+
     def test_ptq_provider_consumes_prequantized_qarray(self):
         layer = nnx.Linear(128,
                            64,

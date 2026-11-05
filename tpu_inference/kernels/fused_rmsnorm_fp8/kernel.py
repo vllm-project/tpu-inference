@@ -153,23 +153,26 @@ def _fused_rmsnorm_quant_kernel(
     x_norm = (x_f32 * rsqrt_var) * gamma_f32
 
     # 2. Dynamic scale computation and clamping.
+    # Round scale to bfloat16 before dividing x_norm to match qwix's
+    # quantize_with_scale_zero_point divisor and downstream bfloat16 dequant.
     if block_k is None or block_k >= x_norm.shape[-1]:
         x_abs_max = jnp.max(jnp.abs(x_norm), axis=-1, keepdims=True)
-        scale = jnp.maximum(x_abs_max / quant_max, _MIN_SCALE)
-        x_scaled = x_norm / scale
+        scale_bf16 = jnp.maximum(x_abs_max / quant_max,
+                                 _MIN_SCALE).astype(jnp.bfloat16)
+        x_scaled = x_norm / scale_bf16.astype(jnp.float32)
         x_clamped = jnp.clip(x_scaled, -quant_max, quant_max)
-        out_scale_ref[...] = scale.astype(jnp.bfloat16)
+        out_scale_ref[...] = scale_bf16
     else:
         bm, k = x_norm.shape
         num_blocks = k // block_k
         x_norm_blocked = jnp.reshape(x_norm, (bm, num_blocks, block_k))
         x_abs_max = jnp.max(jnp.abs(x_norm_blocked), axis=-1, keepdims=True)
-        scale = jnp.maximum(x_abs_max / quant_max, _MIN_SCALE)
-        x_scaled = x_norm_blocked / scale
+        scale_bf16 = jnp.maximum(x_abs_max / quant_max,
+                                 _MIN_SCALE).astype(jnp.bfloat16)
+        x_scaled = x_norm_blocked / scale_bf16.astype(jnp.float32)
         x_clamped = jnp.clip(x_scaled, -quant_max, quant_max)
         x_clamped = jnp.reshape(x_clamped, (bm, k))
-        out_scale_ref[...] = jnp.reshape(scale,
-                                         (bm, num_blocks)).astype(jnp.bfloat16)
+        out_scale_ref[...] = jnp.reshape(scale_bf16, (bm, num_blocks))
 
     # 3. Direct cast to float8_e4m3fn in VMEM.
     out_q_ref[...] = x_clamped.astype(jnp.float8_e4m3fn)
@@ -284,9 +287,11 @@ def fused_rmsnorm_fp8_reference(
     k = x_norm.shape[-1]
     if block_k is None or block_k >= k:
         abs_max = jnp.max(jnp.abs(x_norm), axis=-1, keepdims=True)
-        q_scale = jnp.maximum(abs_max / quant_max, _MIN_SCALE)
-        x_clamped = jnp.clip(x_norm / q_scale, -quant_max, quant_max)
-        out_scale = q_scale.astype(jnp.bfloat16)
+        q_scale_bf16 = jnp.maximum(abs_max / quant_max,
+                                   _MIN_SCALE).astype(jnp.bfloat16)
+        x_clamped = jnp.clip(x_norm / q_scale_bf16.astype(jnp.float32),
+                             -quant_max, quant_max)
+        out_scale = q_scale_bf16
     else:
         if k % block_k != 0:
             raise ValueError(
@@ -296,11 +301,15 @@ def fused_rmsnorm_fp8_reference(
         num_blocks = k // block_k
         x_norm_blocked = jnp.reshape(x_norm, (*leading, num_blocks, block_k))
         abs_max = jnp.max(jnp.abs(x_norm_blocked), axis=-1, keepdims=True)
-        q_scale = jnp.maximum(abs_max / quant_max, _MIN_SCALE)
-        x_clamped = jnp.clip(x_norm_blocked / q_scale, -quant_max, quant_max)
+        q_scale_bf16 = jnp.maximum(abs_max / quant_max,
+                                   _MIN_SCALE).astype(jnp.bfloat16)
+        x_clamped = jnp.clip(
+            x_norm_blocked / q_scale_bf16.astype(jnp.float32),
+            -quant_max,
+            quant_max,
+        )
         x_clamped = jnp.reshape(x_clamped, (*leading, k))
-        out_scale = jnp.reshape(q_scale,
-                                (*leading, num_blocks)).astype(jnp.bfloat16)
+        out_scale = jnp.reshape(q_scale_bf16, (*leading, num_blocks))
 
     out_q = x_clamped.astype(jnp.float8_e4m3fn)
     if return_residual:
