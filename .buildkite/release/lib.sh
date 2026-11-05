@@ -184,11 +184,12 @@ dockerhub_digest() {
 dockerhub_login() {
   local config_dir="$1" username="${2:-${RELEASE_DOCKERHUB_USERNAME}}"
   { set +x; } 2>/dev/null # Never trace the token into the build log.
-  # An explicit check rather than ${DOCKERHUB_TOKEN:?}: under an EXIT trap,
-  # some bash versions exit 0 after that expansion error.
-  [[ -n "${DOCKERHUB_TOKEN:-}" ]] || die "the DOCKERHUB_TOKEN secret is not set for this step."
-  printf '%s' "${DOCKERHUB_TOKEN}" \
+  # An explicit check rather than ${DOCKERHUB_TOKEN_TPU_INFERENCE:?}: under an
+  # EXIT trap, some bash versions exit 0 after that expansion error.
+  [[ -n "${DOCKERHUB_TOKEN_TPU_INFERENCE:-}" ]] \
+    || die "the DOCKERHUB_TOKEN_TPU_INFERENCE secret is not set for this step."
+  printf '%s' "${DOCKERHUB_TOKEN_TPU_INFERENCE}" \
     | DOCKER_CONFIG="${config_dir}" docker login -u "${username}" --password-stdin >/dev/null 2>&1 \
     || die "Docker Hub login failed for ${username}."
-  unset DOCKERHUB_TOKEN
+  unset DOCKERHUB_TOKEN_TPU_INFERENCE
 }
