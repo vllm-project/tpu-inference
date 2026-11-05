@@ -190,6 +190,66 @@ def test_hbm_usage_bytes_non_addressable_devices(_):
     remote.memory_stats.assert_not_called()
 
 
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
+def test_hbm_usage_bytes_multihost_non_addressable_device():
+    """Tests hbm_usage_bytes when remote devices raise on memory_stats()."""
+    mock_remote_device = MagicMock()
+    mock_remote_device.memory_stats.side_effect = RuntimeError(
+        "MemoryStats is only supported for addressable PjRt devices"
+    )
+    mock_local_device1 = MagicMock()
+    mock_local_device1.memory_stats.return_value = {
+        "bytes_in_use": 90 * GBYTES,
+        "bytes_limit": 128 * GBYTES
+    }
+    mock_local_device2 = MagicMock()
+    mock_local_device2.memory_stats.return_value = {
+        "bytes_in_use": 110 * GBYTES,
+        "bytes_limit": 128 * GBYTES
+    }
+
+    devices = [mock_remote_device, mock_local_device1, mock_local_device2]
+    usage = hbm_usage_bytes(devices)
+
+    expected_usage = [
+        (90 * GBYTES, 128 * GBYTES),
+        (90 * GBYTES, 128 * GBYTES),
+        (110 * GBYTES, 128 * GBYTES),
+    ]
+    assert usage == expected_usage
+    mock_local_device1.memory_stats.assert_called_once()
+    mock_local_device2.memory_stats.assert_called_once()
+
+
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
+@patch("jax.live_arrays")
+@patch("jax.devices")
+def test_hbm_usage_bytes_pathways_callable_device(mock_devices,
+                                                  mock_live_arrays):
+    """Tests pathways_hbm_usage_gb when buffer.data.device is a callable method."""
+    mock_jax_device = MagicMock()
+    mock_jax_device.device_kind = "TPU v5p"
+    mock_devices.return_value = [mock_jax_device]
+
+    mock_device1 = MagicMock()
+    mock_device2 = MagicMock()
+    devices = [mock_device1, mock_device2]
+
+    mock_data1 = MagicMock()
+    mock_data1.device = MagicMock(return_value=mock_device1)
+    mock_data1.nbytes = 4096
+
+    mock_shard1 = MagicMock()
+    mock_shard1.data = mock_data1
+
+    mock_array = MagicMock()
+    mock_array.addressable_shards = [mock_shard1]
+    mock_live_arrays.return_value = [mock_array]
+
+    usage = hbm_usage_bytes(devices)
+    assert usage == [(4096, 95 * GBYTES), (0, 95 * GBYTES)]
+
+
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
 @patch("jax.live_arrays")
 @patch("jax.devices")
