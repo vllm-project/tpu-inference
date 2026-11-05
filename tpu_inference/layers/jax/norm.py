@@ -15,11 +15,9 @@
 import math
 
 import jax
-import jax.numpy as jnp
 import qwix
 import qwix.pallas as qpl
 from flax import nnx
-from jax._src import mesh as mesh_lib
 from jax.sharding import AbstractMesh, Mesh, PartitionSpec
 
 from tpu_inference import envs
@@ -36,7 +34,12 @@ def _resolve_mesh(
     residual: jax.Array | None,
     mesh: Mesh | AbstractMesh | None,
 ) -> Mesh | AbstractMesh | None:
-    """Resolves the active JAX Mesh or AbstractMesh for shard_map."""
+    """Resolves the JAX Mesh or AbstractMesh to shard_map over.
+
+    Uses the layer's mesh unless a different mesh is set via `jax.set_mesh`
+    (the tpu-inference runner sets it for every forward pass), and otherwise
+    falls back to the mesh of a `NamedSharding` on the inputs.
+    """
     ctx_mesh = jax.sharding.get_abstract_mesh()
     if mesh is not None and not mesh.empty:
         if not ctx_mesh.empty and mesh.abstract_mesh != ctx_mesh:
@@ -44,9 +47,6 @@ def _resolve_mesh(
         return mesh
     if not ctx_mesh.empty:
         return ctx_mesh
-    phys_mesh = mesh_lib.thread_resources.env.physical_mesh
-    if not phys_mesh.empty:
-        return phys_mesh
     for arr in (x, weight, residual):
         if arr is None:
             continue
@@ -165,7 +165,20 @@ def sharded_fused_rmsnorm_fp8_quant(
 
 
 class JaxRmsNorm(nnx.RMSNorm, JaxModule):
-    """RmsNorm layer for JAX."""
+    """RmsNorm layer for JAX.
+
+    Args:
+      quant_config: Quantization configuration.
+      prefix: Prefix for parameter names.
+      fuse_fp8_quant: Opt-in for fused RMSNorm + dynamic FP8 activation
+        quantization. Only set it for norms whose output feeds exclusively into
+        qwix-quantized linear layers (e.g. Qwen2/Qwen3 `input_layernorm` and
+        `post_attention_layernorm`). The layer then returns a pre-quantized
+        `qwix.QArray` while the active qwix rule quantizes activations exactly
+        like the fused kernel (dynamic, per-token absmax `float8_e4m3fn`; see
+        `fused_rmsnorm_fp8.is_fusable_act_quant_rule`), and a regular array
+        otherwise.
+    """
 
     def __init__(self,
                  *args,
@@ -185,8 +198,10 @@ class JaxRmsNorm(nnx.RMSNorm, JaxModule):
         self.weight = self.scale
         delattr(self, 'scale')
 
-        self.prefix = prefix
         self.fuse_fp8_quant = fuse_fp8_quant
+        if fuse_fp8_quant:
+            # Install the qwix QArray hooks before qwix intercepts the model.
+            fused_rmsnorm_fp8.enable_qwix_qarray_passthrough()
         self.mesh = getattr(quant_config, "mesh", None)
         self.quant_method = None
         if quant_config is not None:
@@ -202,19 +217,13 @@ class JaxRmsNorm(nnx.RMSNorm, JaxModule):
             return self.weight
 
     def _should_fuse_fp8_quant(self) -> bool:
+        if not self.fuse_fp8_quant:
+            return False
+        # qwix.quantize_model's initialization pass sees the unfused graph.
         if getattr(self, "disable_quant_stats_update", False):
             return False
-        if self.fuse_fp8_quant:
-            return True
-        if not envs.USE_FUSED_RMSNORM_QUANT:
-            return False
-        if not self.prefix.endswith(
-            ("input_layernorm", "post_attention_layernorm")):
-            return False
-        rule = qpl.get_current_rule("einsum")
-        if rule is None or rule.act_qtype is None or rule.act_static_scale:
-            return False
-        return jnp.dtype(rule.act_qtype) == jnp.float8_e4m3fn
+        return fused_rmsnorm_fp8.is_fusable_act_quant_rule(
+            qpl.get_current_rule("einsum"))
 
     def __call__(
         self,

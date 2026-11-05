@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
 from unittest import mock
 
 import jax
@@ -26,10 +27,29 @@ from qwix._src.providers import ptq
 
 from tpu_inference.kernels.fused_rmsnorm_fp8 import kernel as fused_rmsnorm_fp8
 
+_MIB = 1024 * 1024
+_FP8_RULE = qconfig.QuantizationRule(
+    module_path=".*",
+    weight_qtype=jnp.float8_e4m3fn,
+    act_qtype=jnp.float8_e4m3fn,
+)
+
 
 def _has_tpu() -> bool:
     return bool(jax.devices()) and all(d.platform == "tpu"
                                        for d in jax.devices())
+
+
+def _random_inputs(m, k, has_residual=False):
+    k1, k2, k3 = jax.random.split(jax.random.key(42), 3)
+    x = jax.random.normal(k1, (m, k), dtype=jnp.bfloat16) * 2.5
+    scale = jax.random.uniform(k2, (k, ),
+                               dtype=jnp.bfloat16,
+                               minval=0.5,
+                               maxval=1.5)
+    residual = (jax.random.normal(k3, (m, k), dtype=jnp.bfloat16) *
+                1.5 if has_residual else None)
+    return x, scale, residual
 
 
 class FusedRmsnormFp8KernelTest(parameterized.TestCase):
@@ -60,7 +80,19 @@ class FusedRmsnormFp8KernelTest(parameterized.TestCase):
             "expected": 64
         },
         {
-            "testcase_name": "m_8_pref_512",
+            "testcase_name": "m_32_smallest_tile",
+            "m": 32,
+            "pref": 512,
+            "expected": 32
+        },
+        {
+            "testcase_name": "m_16_single_full_block",
+            "m": 16,
+            "pref": 512,
+            "expected": 16
+        },
+        {
+            "testcase_name": "m_8_single_full_block",
             "m": 8,
             "pref": 512,
             "expected": 8
@@ -72,14 +104,167 @@ class FusedRmsnormFp8KernelTest(parameterized.TestCase):
             "expected": None
         },
         {
+            "testcase_name": "m_12_unaligned",
+            "m": 12,
+            "pref": 512,
+            "expected": None
+        },
+        {
+            "testcase_name": "m_48_not_fp8_tile_aligned",
+            "m": 48,
+            "pref": 512,
+            "expected": None
+        },
+        {
             "testcase_name": "m_100_unaligned",
             "m": 100,
             "pref": 512,
             "expected": None
         },
+        {
+            "testcase_name": "m_4096_vmem_cap_300",
+            "m": 4096,
+            "pref": 512,
+            "max_block_m": 300,
+            "expected": 256
+        },
+        {
+            "testcase_name": "m_4096_vmem_cap_below_smallest_tile",
+            "m": 4096,
+            "pref": 512,
+            "max_block_m": 16,
+            "expected": None
+        },
+        {
+            "testcase_name": "m_16_vmem_cap_below_single_block",
+            "m": 16,
+            "pref": 512,
+            "max_block_m": 8,
+            "expected": None
+        },
     )
-    def test_select_block_m(self, m, pref, expected):
-        self.assertEqual(fused_rmsnorm_fp8.select_block_m(m, pref), expected)
+    def test_select_block_m(self, m, pref, expected, max_block_m=None):
+        self.assertEqual(
+            fused_rmsnorm_fp8.select_block_m(m, pref, max_block_m=max_block_m),
+            expected)
+
+    @parameterized.named_parameters(
+        {
+            "testcase_name": "64mib_vmem",
+            "vmem_capacity_bytes": 64 * _MIB,
+            "has_residual": False,
+            "expected": 512
+        },
+        {
+            "testcase_name": "64mib_vmem_residual",
+            "vmem_capacity_bytes": 64 * _MIB,
+            "has_residual": True,
+            "expected": 256
+        },
+        {
+            "testcase_name": "128mib_vmem_residual",
+            "vmem_capacity_bytes": 128 * _MIB,
+            "has_residual": True,
+            "expected": 512
+        },
+    )
+    def test_block_m_respects_vmem_budget(self, vmem_capacity_bytes,
+                                          has_residual, expected):
+        max_block_m = fused_rmsnorm_fp8.max_block_m_for_vmem(
+            5120,
+            x_itemsize=2,
+            residual_itemsize=2 if has_residual else None,
+            return_residual=has_residual,
+            vmem_capacity_bytes=vmem_capacity_bytes,
+        )
+        self.assertEqual(
+            fused_rmsnorm_fp8.select_block_m(4096,
+                                             512,
+                                             max_block_m=max_block_m),
+            expected)
+
+    def test_vmem_budget_defaults_to_tpu_vmem_capacity(self):
+        tpu_info = mock.Mock(vmem_capacity_bytes=64 * _MIB)
+        with mock.patch.object(fused_rmsnorm_fp8.pltpu,
+                               "get_tpu_info",
+                               return_value=tpu_info):
+            self.assertEqual(
+                fused_rmsnorm_fp8.max_block_m_for_vmem(5120, x_itemsize=2),
+                fused_rmsnorm_fp8.max_block_m_for_vmem(5120,
+                                                       x_itemsize=2,
+                                                       vmem_capacity_bytes=64 *
+                                                       _MIB))
+
+    @parameterized.named_parameters(
+        {
+            "testcase_name": "fp8_dynamic_per_token",
+            "rule_kwargs": {},
+            "expected": True
+        },
+        {
+            "testcase_name": "fp8_qtype_strings",
+            "rule_kwargs": {
+                "weight_qtype": "float8_e4m3fn",
+                "act_qtype": "float8_e4m3fn"
+            },
+            "expected": True
+        },
+        {
+            "testcase_name": "weight_only",
+            "rule_kwargs": {
+                "act_qtype": None
+            },
+            "expected": False
+        },
+        {
+            "testcase_name": "activation_only",
+            "rule_kwargs": {
+                "weight_qtype": None
+            },
+            "expected": False
+        },
+        {
+            "testcase_name": "int8_activations",
+            "rule_kwargs": {
+                "weight_qtype": jnp.int8,
+                "act_qtype": jnp.int8
+            },
+            "expected": False
+        },
+        {
+            "testcase_name": "static_scale",
+            "rule_kwargs": {
+                "act_static_scale": True
+            },
+            "expected": False
+        },
+        {
+            "testcase_name": "subchannel_tiling",
+            "rule_kwargs": {
+                "tile_size": 128
+            },
+            "expected": False
+        },
+        {
+            "testcase_name": "clipped_absmax",
+            "rule_kwargs": {
+                "act_calibration_method": "absmax,0.8"
+            },
+            "expected": False
+        },
+        {
+            "testcase_name": "minmax",
+            "rule_kwargs": {
+                "act_calibration_method": "minmax"
+            },
+            "expected": False
+        },
+    )
+    def test_is_fusable_act_quant_rule(self, rule_kwargs, expected):
+        rule = dataclasses.replace(_FP8_RULE, **rule_kwargs)
+        self.assertEqual(fused_rmsnorm_fp8.is_fusable_act_quant_rule(rule),
+                         expected)
+        self.assertFalse(fused_rmsnorm_fp8.is_fusable_act_quant_rule(None))
 
     @parameterized.named_parameters(
         {
@@ -188,20 +373,13 @@ class FusedRmsnormFp8KernelTest(parameterized.TestCase):
                            use_bias=False,
                            param_dtype=jnp.bfloat16,
                            rngs=nnx.Rngs(0))
-        q_rules = [
-            qconfig.QuantizationRule(
-                module_path=".*",
-                weight_qtype=jnp.float8_e4m3fn,
-                act_qtype=jnp.float8_e4m3fn,
-            ),
-        ]
         x = jax.random.normal(jax.random.key(0), (16, 128), dtype=jnp.bfloat16)
         scale = jax.random.uniform(jax.random.key(1), (128, ),
                                    dtype=jnp.bfloat16,
                                    minval=0.5,
                                    maxval=1.5)
-        ptq_layer = qwix_model.quantize_model(layer, ptq.PtqProvider(q_rules),
-                                              x)
+        ptq_layer = qwix_model.quantize_model(layer,
+                                              ptq.PtqProvider([_FP8_RULE]), x)
 
         q_act = fused_rmsnorm_fp8.fused_rmsnorm_fp8(x,
                                                     scale,
@@ -209,16 +387,80 @@ class FusedRmsnormFp8KernelTest(parameterized.TestCase):
                                                     implementation="xla")
         expected = dot_general.dot_general(q_act, ptq_layer.kernel.array,
                                            (((1, ), (0, )), ((), ())))
-        with self.enter_context(
-                mock.patch.object(
-                    qarray,
-                    "quantize",
-                    wraps=qarray.quantize,
-                )) as mock_quantize:
+        with mock.patch.object(qarray, "quantize",
+                               wraps=qarray.quantize) as mock_quantize:
             actual = ptq_layer(q_act)
             mock_quantize.assert_not_called()
 
         np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+
+    def test_ptq_provider_requantizes_mismatched_qarray(self):
+        """A consumer quantizing activations differently gets requantized input."""
+        layer = nnx.Linear(256,
+                           64,
+                           use_bias=False,
+                           param_dtype=jnp.bfloat16,
+                           rngs=nnx.Rngs(0))
+        x = jax.random.normal(jax.random.key(0), (16, 256), dtype=jnp.bfloat16)
+        scale = jnp.ones((256, ), dtype=jnp.bfloat16)
+        subchannel_rule = dataclasses.replace(_FP8_RULE, tile_size=128)
+        ptq_layer = qwix_model.quantize_model(
+            layer, ptq.PtqProvider([subchannel_rule]), x)
+
+        q_act = fused_rmsnorm_fp8.fused_rmsnorm_fp8(x,
+                                                    scale,
+                                                    implementation="xla")
+        expected = ptq_layer(qarray.dequantize(q_act))
+        with mock.patch.object(qarray, "quantize",
+                               wraps=qarray.quantize) as mock_quantize:
+            actual = ptq_layer(q_act)
+            mock_quantize.assert_called()
+
+        np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+
+    def test_promote_dtype_hook_only_changes_qarray_operands(self):
+        fused_rmsnorm_fp8.enable_qwix_qarray_passthrough()
+        provider = ptq.PtqProvider([_FP8_RULE])
+        original_promote_dtype = type(provider).promote_dtype.__wrapped__
+
+        f32 = jnp.ones((2, 4), dtype=jnp.float32)
+        bf16 = jnp.ones((4, 3), dtype=jnp.bfloat16)
+        np_f32 = np.ones((4, ), dtype=np.float32)
+        # Without QArray operands, qwix's own promotion runs unchanged.
+        for operands, kwargs in (
+            ((f32, bf16), {}),
+            ((f32, bf16), {
+                "dtype": jnp.bfloat16
+            }),
+            ((np_f32, bf16), {}),
+            ((bf16, 2.0, None), {}),
+        ):
+            expected = original_promote_dtype(provider, operands, **kwargs)
+            actual = provider.promote_dtype(operands, **kwargs)
+            self.assertLen(actual, len(expected))
+            for got, want in zip(actual, expected):
+                self.assertIs(type(got), type(want))
+                if isinstance(want, jax.Array):
+                    self.assertEqual(got.dtype, want.dtype)
+                else:
+                    self.assertIs(got, want)
+
+        # QArray operands pass through untouched; the rest are still promoted.
+        q_act = fused_rmsnorm_fp8.fused_rmsnorm_fp8(jnp.ones(
+            (2, 128), dtype=jnp.bfloat16),
+                                                    jnp.ones(
+                                                        (128, ),
+                                                        dtype=jnp.bfloat16),
+                                                    implementation="xla")
+        bias = jnp.ones((3, ), dtype=jnp.float32)
+        promoted = provider.promote_dtype((q_act, None, bias),
+                                          dtype=jnp.bfloat16)
+        self.assertIs(promoted[0], q_act)
+        self.assertIsNone(promoted[1])
+        self.assertEqual(promoted[2].dtype, jnp.bfloat16)
+        promoted = provider.promote_dtype(q_act, None)
+        self.assertIs(promoted[0], q_act)
+        self.assertIsNone(promoted[1])
 
     def test_validation_errors(self):
         x = jnp.ones((16, 128), dtype=jnp.bfloat16)
@@ -244,8 +486,40 @@ class FusedRmsnormFp8KernelTest(parameterized.TestCase):
                 scale,
                 implementation="pallas",
             )
+        with self.assertRaisesRegex(ValueError, "must be a multiple of 32"):
+            fused_rmsnorm_fp8.fused_rmsnorm_fp8_pallas(jnp.ones(
+                (64, 128), dtype=jnp.bfloat16),
+                                                       scale,
+                                                       block_m=16)
 
     @parameterized.named_parameters(
+        {
+            "testcase_name": "decode_m8_single_block",
+            "m": 8,
+            "k": 5120,
+            "block_m": 8,
+            "block_k": None,
+            "has_residual": False,
+            "return_residual": False,
+        },
+        {
+            "testcase_name": "decode_m16_single_block",
+            "m": 16,
+            "k": 5120,
+            "block_m": 16,
+            "block_k": None,
+            "has_residual": False,
+            "return_residual": False,
+        },
+        {
+            "testcase_name": "decode_m32_residual",
+            "m": 32,
+            "k": 5120,
+            "block_m": 32,
+            "block_k": None,
+            "has_residual": True,
+            "return_residual": True,
+        },
         {
             "testcase_name": "qwen_1k_per_token",
             "m": 1024,
@@ -306,15 +580,7 @@ class FusedRmsnormFp8KernelTest(parameterized.TestCase):
         if not _has_tpu():
             self.skipTest("Pallas TPU kernel test requires TPU backend.")
 
-        k1, k2, k3 = jax.random.split(jax.random.key(42), 3)
-        x = jax.random.normal(k1, (m, k), dtype=jnp.bfloat16) * 2.5
-        scale = jax.random.uniform(k2, (k, ),
-                                   dtype=jnp.bfloat16,
-                                   minval=0.5,
-                                   maxval=1.5)
-        residual = (jax.random.normal(k3, (m, k), dtype=jnp.bfloat16) *
-                    1.5 if has_residual else None)
-
+        x, scale, residual = _random_inputs(m, k, has_residual)
         ref_outs = jax.jit(lambda x_in, s_in, r_in: fused_rmsnorm_fp8.
                            fused_rmsnorm_fp8_reference(
                                x_in,
@@ -349,6 +615,51 @@ class FusedRmsnormFp8KernelTest(parameterized.TestCase):
         if return_residual:
             np.testing.assert_array_equal(np.asarray(ref_outs[2]),
                                           np.asarray(pallas_outs[2]))
+
+    @parameterized.named_parameters(
+        {
+            "testcase_name": "decode_m16",
+            "m": 16,
+            "has_residual": False
+        },
+        {
+            "testcase_name": "prefill_m4096",
+            "m": 4096,
+            "has_residual": False
+        },
+        {
+            "testcase_name": "prefill_m4096_residual",
+            "m": 4096,
+            "has_residual": True
+        },
+    )
+    def test_auto_block_selection_matches_reference_on_tpu(
+            self, m, has_residual):
+        if not _has_tpu():
+            self.skipTest("Pallas TPU kernel test requires TPU backend.")
+
+        x, scale, residual = _random_inputs(m, 5120, has_residual)
+        with mock.patch.object(fused_rmsnorm_fp8,
+                               "fused_rmsnorm_fp8_pallas",
+                               wraps=fused_rmsnorm_fp8.fused_rmsnorm_fp8_pallas
+                               ) as mock_pallas:
+            q_out = jax.jit(
+                lambda x_in, s_in, r_in: fused_rmsnorm_fp8.fused_rmsnorm_fp8(
+                    x_in, s_in, r_in, return_residual=has_residual))(x, scale,
+                                                                     residual)
+            mock_pallas.assert_called_once()
+        if has_residual:
+            q_out = q_out[0]
+        ref_q, ref_scale = fused_rmsnorm_fp8.fused_rmsnorm_fp8_reference(
+            x, scale, residual)[:2]
+        exact_match_ratio = float(
+            np.mean(
+                np.asarray(ref_q).view(np.uint8) == np.asarray(
+                    q_out.qvalue).view(np.uint8)))
+        self.assertGreaterEqual(exact_match_ratio, 0.999)
+        np.testing.assert_allclose(np.asarray(q_out.scale, dtype=np.float32),
+                                   np.asarray(ref_scale, dtype=np.float32),
+                                   atol=1e-4)
 
 
 if __name__ == "__main__":

@@ -720,7 +720,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "TPU_MOE_LOWTOK_MAX_TOKENS":
     lambda: int(os.getenv("TPU_MOE_LOWTOK_MAX_TOKENS", "128")),
     # Fuse RMSNorm and dynamic FP8 activation quantization into a single
-    # Pallas TPU VPU kernel pass when Qwix dynamic FP8 quantization is active.
+    # Pallas TPU kernel pass for norms that opt in (Qwen2/Qwen3 decoder layers)
+    # while a matching qwix dynamic FP8 activation quantization rule is active.
     "USE_FUSED_RMSNORM_QUANT":
     env_bool("USE_FUSED_RMSNORM_QUANT", default=False),
     "FUSED_RMSNORM_BLOCK_M":
