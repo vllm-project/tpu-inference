@@ -878,10 +878,23 @@ class DPScheduler(SchedulerInterface):
         """
         unsent = self._unsent_requests
         self._unsent_requests = defaultdict(list)
-        for rank, requests in unsent.items():
-            self._send_command(rank, SchedulerCommand.ADD_REQUESTS, requests)
-        for rank in unsent:
-            self._get_result(rank, SchedulerCommand.ADD_REQUESTS)
+        sent_ranks: List[int] = []
+        first_exc: Optional[Exception] = None
+        try:
+            for rank, requests in unsent.items():
+                self._send_command(rank, SchedulerCommand.ADD_REQUESTS,
+                                   requests)
+                sent_ranks.append(rank)
+        except Exception as e:
+            first_exc = e
+        for rank in sent_ranks:
+            try:
+                self._get_result(rank, SchedulerCommand.ADD_REQUESTS)
+            except Exception as e:
+                if first_exc is None:
+                    first_exc = e
+        if first_exc is not None:
+            raise first_exc
 
     def _flush_pending(self) -> None:
         """Drain the pending reqs."""
@@ -1726,7 +1739,7 @@ class DPScheduler(SchedulerInterface):
                 continue
             try:
                 self._get_result(rank, SchedulerCommand.SHUTDOWN)
-            except (RuntimeError, OSError) as e:
+            except (RuntimeError, OSError, SchedulerWorkerError) as e:
                 logger.warning(
                     f"Rank {rank}: Failed to get shutdown acknowledgment: {e}")
 

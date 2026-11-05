@@ -491,7 +491,8 @@ class TestDPScheduler:
 
         def get_result(rank, command=None):
             log.append(("get", rank, command))
-            result = (results or {}).get(command)
+            table = results or {}
+            result = table.get((rank, command), table.get(command))
             if isinstance(result, Exception):
                 raise result  # as _get_result does for a worker error
             return result
@@ -587,9 +588,9 @@ class TestDPScheduler:
     def test_failed_held_add_raises_from_next_command(
             self, mock_vllm_config, mock_kv_cache_config,
             mock_structured_output_manager):
-        """If a rank fails to add its held requests (or is dead), the next
-        command raises the error before sending anything else, and the
-        requests are not held for a retry."""
+        """If a rank fails to add its held requests (or is dead), every
+        already-sent rank's reply is still drained before raising so surviving
+        pipes stay aligned, and the requests are not held for a retry."""
         scheduler = self._create_scheduler(mock_vllm_config,
                                            mock_kv_cache_config,
                                            mock_structured_output_manager)
@@ -597,14 +598,35 @@ class TestDPScheduler:
         scheduler._batch_prefills = False
         add = SchedulerCommand.ADD_REQUESTS
         error = SchedulerWorkerError(0, "add failed")
-        log = self._record_ipc(scheduler, {add: error})
+        log = self._record_ipc(scheduler, {(0, add): error})
 
-        req = SimpleNamespace(request_id="req-0")
-        scheduler.add_request(req)
+        r0 = SimpleNamespace(request_id="req-0")  # rank 0
+        r1 = SimpleNamespace(request_id="req-1")  # rank 1
+        scheduler.add_request(r0)
+        scheduler.add_request(r1)
         with pytest.raises(SchedulerWorkerError):
             scheduler.get_num_unfinished_requests()
 
-        assert log == [("send", 0, add, [req]), ("get", 0, add)]
+        assert log == [
+            ("send", 0, add, [r0]),
+            ("send", 1, add, [r1]),
+            ("get", 0, add),
+            ("get", 1, add),
+        ]
+        assert not scheduler._unsent_requests
+
+        # Also check send failure on rank 1: only rank 0 (already sent) is
+        # drained; rank 1 never got a message so we don't block reading it.
+        log = self._record_ipc(scheduler)
+        scheduler.input_conns[1].send_bytes.side_effect = BrokenPipeError()
+        r2 = SimpleNamespace(request_id="req-2")  # rank 0
+        r3 = SimpleNamespace(request_id="req-3")  # rank 1
+        scheduler.add_request(r2)
+        scheduler.add_request(r3)
+        with pytest.raises(BrokenPipeError):
+            scheduler.get_num_unfinished_requests()
+
+        assert log == [("send", 0, add, [r2]), ("get", 0, add)]
         assert not scheduler._unsent_requests
 
     def test_least_loaded_sends_each_add_at_once(
@@ -649,6 +671,38 @@ class TestDPScheduler:
 
         shutdown = SchedulerCommand.SHUTDOWN
         assert log == [("send", 1, shutdown, None), ("get", 1, shutdown)]
+
+    def test_shutdown_catches_worker_error(self, mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager):
+        """An unread SchedulerWorkerError on a rank's pipe must not abort
+        shutdown() before joining workers and closing pipes."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+        shutdown = SchedulerCommand.SHUTDOWN
+        stale = SchedulerWorkerError(0, "unread error")
+        log = self._record_ipc(scheduler, {(0, shutdown): stale})
+        procs = [MagicMock(), MagicMock()]
+        for p in procs:
+            p.is_alive.side_effect = [True, True, False]  # send, ack, join
+        scheduler.processes = procs
+        scheduler.output_conns = [
+            MagicMock() for _ in range(scheduler.dp_size)
+        ]
+
+        scheduler.shutdown()
+
+        assert log == [
+            ("send", 0, shutdown, None),
+            ("send", 1, shutdown, None),
+            ("get", 0, shutdown),
+            ("get", 1, shutdown),
+        ]
+        for p in procs:
+            p.join.assert_called_once()
+        for conn in scheduler.input_conns + scheduler.output_conns:
+            conn.close.assert_called_once()
 
     def test_worker_add_requests_adds_in_order_with_one_ack(self):
         """The worker adds every request of an ADD_REQUESTS in order and
