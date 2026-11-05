@@ -12,12 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
+
 import jax
 import jax.numpy as jnp
 import qwix
 import qwix.pallas as qpl
 from flax import nnx
-from jax.sharding import Mesh, PartitionSpec
+from jax._src import mesh as mesh_lib
+from jax.sharding import AbstractMesh, Mesh, PartitionSpec
 
 from tpu_inference import envs
 from tpu_inference.kernels.fused_rmsnorm_fp8 import kernel as fused_rmsnorm_fp8
@@ -27,17 +30,55 @@ from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 
 
-def _get_token_partition_spec(mesh: Mesh | None,
-                              ndim: int = 2) -> PartitionSpec:
+def _resolve_mesh(
+    x: jax.Array,
+    weight: jax.Array,
+    residual: jax.Array | None,
+    mesh: Mesh | AbstractMesh | None,
+) -> Mesh | AbstractMesh | None:
+    """Resolves the active JAX Mesh or AbstractMesh for shard_map."""
+    ctx_mesh = jax.sharding.get_abstract_mesh()
+    if mesh is not None and not mesh.empty:
+        if not ctx_mesh.empty and mesh.abstract_mesh != ctx_mesh:
+            return ctx_mesh
+        return mesh
+    if not ctx_mesh.empty:
+        return ctx_mesh
+    phys_mesh = mesh_lib.thread_resources.env.physical_mesh
+    if not phys_mesh.empty:
+        return phys_mesh
+    for arr in (x, weight, residual):
+        if arr is None:
+            continue
+        for candidate in (arr, jax.typeof(arr)):
+            sharding = getattr(candidate, "sharding", None)
+            if (isinstance(sharding, jax.sharding.NamedSharding)
+                    and isinstance(sharding.mesh, (Mesh, AbstractMesh))
+                    and not sharding.mesh.empty):
+                return sharding.mesh
+    return None
+
+
+def _get_token_partition_spec(
+    mesh: Mesh | AbstractMesh | None,
+    ndim: int = 2,
+    num_tokens: int | None = None,
+) -> PartitionSpec:
     """Returns PartitionSpec(token_axes, None, ...) matching ATTN_DATA on mesh."""
     if mesh is None or ndim < 2:
         return PartitionSpec(*((None, ) * max(ndim, 1)))
+    manual_axes = set(getattr(mesh, "manual_axes", ()))
     attn_data = sharding_lib.ShardingAxisName.ATTN_DATA
     raw_axes = (attn_data, ) if isinstance(attn_data,
                                            str) else tuple(attn_data)
-    valid_axes = tuple(ax for ax in raw_axes if ax in mesh.axis_names)
+    valid_axes = tuple(ax for ax in raw_axes
+                       if ax in mesh.axis_names and ax not in manual_axes)
     if not valid_axes:
         return PartitionSpec(*((None, ) * ndim))
+    if num_tokens is not None:
+        shard_factor = math.prod(mesh.shape[ax] for ax in valid_axes)
+        if shard_factor > 1 and num_tokens % shard_factor != 0:
+            return PartitionSpec(*((None, ) * ndim))
     first_axis = valid_axes[0] if len(valid_axes) == 1 else valid_axes
     return PartitionSpec(first_axis, *((None, ) * (ndim - 1)))
 
@@ -51,17 +92,17 @@ def sharded_fused_rmsnorm_fp8_quant(
     return_residual: bool = False,
     preferred_block_m: int | None = None,
     block_k: int | None = None,
-    mesh: Mesh | None = None,
+    mesh: Mesh | AbstractMesh | None = None,
 ) -> qwix.QArray | tuple[qwix.QArray, jax.Array]:
     """Executes fused RMSNorm (+ optional residual) + FP8 dynamic quant across mesh."""
     if preferred_block_m is None:
         preferred_block_m = envs.FUSED_RMSNORM_BLOCK_M
 
-    if mesh is None:
-        sharding = getattr(x, "sharding", None)
-        if isinstance(sharding, jax.sharding.NamedSharding) and isinstance(
-                sharding.mesh, Mesh) and not sharding.mesh.empty:
-            mesh = sharding.mesh
+    mesh = _resolve_mesh(x, weight, residual, mesh)
+    manual_axes = (set(getattr(mesh, "manual_axes",
+                               ())) if mesh is not None else set())
+    auto_axes = (tuple(ax for ax in mesh.axis_names
+                       if ax not in manual_axes) if mesh is not None else ())
 
     def _run_local(
         x_local: jax.Array,
@@ -78,7 +119,7 @@ def sharded_fused_rmsnorm_fp8_quant(
             return_residual=return_residual,
         )
 
-    if mesh is None or x.ndim < 2:
+    if mesh is None or not auto_axes or x.ndim < 2:
         return _run_local(x, weight, residual)
 
     def _run_local_tuples(
@@ -92,7 +133,7 @@ def sharded_fused_rmsnorm_fp8_quant(
             return q_arr.qvalue, q_arr.scale, updated_res
         return local_out.qvalue, local_out.scale
 
-    token_spec = _get_token_partition_spec(mesh, x.ndim)
+    token_spec = _get_token_partition_spec(mesh, x.ndim, x.shape[0])
     weight_spec = PartitionSpec(None)
     out_specs = ((token_spec, token_spec, token_spec) if return_residual else
                  (token_spec, token_spec))

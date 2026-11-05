@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest import mock
+
 import jax
 import pytest
 import qwix
@@ -21,6 +23,7 @@ from vllm.config import ModelConfig, VllmConfig
 
 from tpu_inference.layers.jax.norm import (JaxLayerNorm, JaxRmsNorm,
                                            sharded_fused_rmsnorm_fp8_quant)
+from tpu_inference.layers.jax.quantization.unquantized import UnquantizedConfig
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 
 
@@ -145,6 +148,40 @@ class TestJaxRmsNorm:
         monkeypatch.setenv("USE_FUSED_RMSNORM_QUANT", "1")
         out_fused = q_block(x)
         assert jax.numpy.allclose(out_fused, out_unfused, rtol=2e-2, atol=2e-2)
+
+    def test_fused_rmsnorm_fp8_jit_context_mesh(self):
+        """Verifies shard_map wrapping inside @jax.jit when layer.mesh is None."""
+        mesh = Mesh(jax.devices()[:1], ("model", ))
+        num_features = 256
+        layer = JaxRmsNorm(
+            num_features=num_features,
+            epsilon=1e-6,
+            dtype=jax.numpy.bfloat16,
+            param_dtype=jax.numpy.bfloat16,
+            rngs=nnx.Rngs(0),
+            quant_config=UnquantizedConfig({}),
+            fuse_fp8_quant=True,
+        )
+        assert layer.mesh is None
+        x = jax.random.normal(jax.random.PRNGKey(0), (16, num_features),
+                              dtype=jax.numpy.bfloat16)
+
+        with mock.patch("jax.shard_map", wraps=jax.shard_map) as mock_smap:
+            with jax.set_mesh(mesh):
+                q_out = jax.jit(lambda inp: layer(inp))(x)
+            assert mock_smap.call_count == 1
+        assert isinstance(q_out, qwix.QArray)
+        assert q_out.qvalue.shape == (16, num_features)
+        assert q_out.scale.shape == (16, 1)
+
+        sharded_x = jax.device_put(
+            x,
+            jax.sharding.NamedSharding(mesh,
+                                       jax.sharding.PartitionSpec(None, None)))
+        with mock.patch("jax.shard_map", wraps=jax.shard_map) as mock_smap:
+            q_sharded = jax.jit(lambda inp: layer(inp))(sharded_x)
+            assert mock_smap.call_count == 1
+        assert jax.numpy.array_equal(q_sharded.scale, q_out.scale)
 
 
 class TestJaxLayerNorm:

@@ -37,7 +37,7 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from qwix._src.core import qarray
-from qwix._src.providers import boxed_param
+from qwix._src.providers import boxed_param, ptq
 
 _CANDIDATE_BLOCK_MS: tuple[int, ...] = (512, 256, 128, 64, 32, 16, 8)
 _FP8_E4M3FN_MAX: float = 448.0
@@ -84,6 +84,7 @@ def enable_qwix_qarray_passthrough() -> None:
         return orig_promote_dtype(self, *args, **kwargs)
 
     boxed_param.quantize_act = _passthrough_quantize_act
+    ptq.quantize_act = _passthrough_quantize_act
     boxed_param.BoxedParamProvider.promote_dtype = _safe_promote_dtype
     _QWIX_PASSTHROUGH_INSTALLED = True
 
