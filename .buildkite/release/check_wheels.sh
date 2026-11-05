@@ -14,8 +14,8 @@
 # limitations under the License.
 
 # Check that the two wheels this build made install together from PyPI alone,
-# as a user's `pip install vllm-tpu==<version>` would after the publish:
-# resolve the combined wheel against the local tpu-inference wheel plus
+# as a user's `pip install vllm-jax==<version>` would after the publish:
+# resolve the combined wheel against the local vllm-jax-core wheel plus
 # pypi.org, for the platform the wheels support (CPython 3.12 on x86_64 Linux
 # with the glibc of WHEEL_MAX_MANYLINUX in lib.sh).
 set -euo pipefail
@@ -34,18 +34,18 @@ ls -l "${WORK}/dist"
 echo "--- Installing uv"
 UV="$(install_uv "${WORK}/uv")"
 
-echo "--- :mag: Resolving vllm-tpu==${VERSION} from these wheels and pypi.org"
-resolve_vllm_tpu "${UV}" "${VERSION}" "${WORK}/resolved.txt" --find-links "${WORK}/dist"
+echo "--- :mag: Resolving ${COMBINED_PROJECT}==${VERSION} from these wheels and pypi.org"
+resolve_combined "${UV}" "${VERSION}" "${WORK}/resolved.txt" --find-links "${WORK}/dist"
 
-grep -E "^(vllm-tpu|tpu-inference|torch|torchvision|torchax|jax|jaxlib|libtpu|flax|transformers)==" \
+grep -E "^(${COMBINED_PROJECT}|${CORE_PROJECT}|torch|torchvision|torchax|jax|jaxlib|libtpu|flax|transformers)==" \
   "${WORK}/resolved.txt" | tee "${WORK}/pins.txt"
-grep -qx "tpu-inference==${VERSION}" "${WORK}/pins.txt" \
-  || die "the combined wheel does not resolve tpu-inference==${VERSION}."
+grep -qx "${CORE_PROJECT}==${VERSION}" "${WORK}/pins.txt" \
+  || die "the combined wheel does not resolve ${CORE_PROJECT}==${VERSION}."
 
 NAMES=""
 for f in "${WORK}"/dist/*; do NAMES+="\`$(basename "${f}")\` "; done
 buildkite-agent annotate --style info --context release-wheels <<EOF
-Wheels: ${NAMES}\`vllm-tpu==${VERSION}\` resolves from them plus pypi.org ($(grep -c '==' "${WORK}/resolved.txt") packages):
+Wheels: ${NAMES}\`${COMBINED_PROJECT}==${VERSION}\` resolves from them plus pypi.org ($(grep -c '==' "${WORK}/resolved.txt") packages):
 
 \`\`\`
 $(cat "${WORK}/pins.txt")

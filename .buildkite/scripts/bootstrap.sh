@@ -432,12 +432,19 @@ else
     echo "Sleeping for 5 seconds to ensure GitHub API is updated..."
     sleep 5
 
-    API_URL="https://api.github.com/repos/vllm-project/tpu-inference/pulls/$BUILDKITE_PULL_REQUEST"
+    # owner/repo from the pipeline's repository URL, so this call works before
+    # and after the repo's rename (tpu-inference -> vllm-jax); -L follows
+    # GitHub's redirect while the pipeline still names the old path.
+    GITHUB_REPO_PATH="$(sed -E 's#^(https://github\.com/|git@github\.com:)##; s#\.git$##' <<< "${BUILDKITE_REPO:-}")"
+    if [[ ! "$GITHUB_REPO_PATH" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+      GITHUB_REPO_PATH="vllm-project/vllm-jax"
+    fi
+    API_URL="https://api.github.com/repos/${GITHUB_REPO_PATH}/pulls/$BUILDKITE_PULL_REQUEST"
     echo "Fetching PR details from: $API_URL"
 
     # Fetch the response body and save to a temporary file
     GITHUB_PR_RESPONSE_FILE="github_api_logs.json"
-    curl -s "$API_URL" -o "$GITHUB_PR_RESPONSE_FILE"
+    curl -sL "$API_URL" -o "$GITHUB_PR_RESPONSE_FILE"
     
     # Upload the full response body as a Buildkite artifact
     echo "Uploading GitHub API response as artifact..."

@@ -15,8 +15,8 @@
 """Helper functions for building and publishing the release wheels.
 
 build_tpu_inference_wheel.sh and build_vllm_tpu_wheel.sh use the build
-checks. publish_wheel.sh uses the publish checks for tpu-inference and the
-combined vllm-tpu (wheel and sdist).
+checks. publish_wheel.sh uses the publish checks for vllm-jax-core and the
+combined vllm-jax (wheel and sdist).
 """
 
 import base64

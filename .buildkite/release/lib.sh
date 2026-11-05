@@ -13,12 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Shared by the tpu-inference-release steps and the wheel build and publish
+# Shared by the release pipeline's steps and the wheel build and publish
 # scripts in .buildkite/scripts. Sourced, not run.
 
+# PyPI projects of a release: this repo's wheel (the Python package is still
+# tpu_inference), and the combined wheel, vLLM renamed and pinned to it.
+# shellcheck disable=SC2034 # Read by the scripts that source this file.
+CORE_PROJECT="vllm-jax-core"
+COMBINED_PROJECT="vllm-jax"
+
 # Newest manylinux tag (i.e. glibc) the release wheels may need: the release
-# queue runs on Ubuntu 24.04 (glibc 2.39), the vllm-tpu build fails on a wheel
-# tagged above this, and check_wheels.sh resolves for this platform.
+# queue runs on Ubuntu 24.04 (glibc 2.39), the combined wheel's build fails on
+# a wheel tagged above this, and check_wheels.sh resolves for this platform.
 WHEEL_MAX_MANYLINUX="2_39"
 
 # Release branches and versions: public PEP 440 versions in normalized form
@@ -126,15 +132,15 @@ check_manylinux_tag() {
   fi
 }
 
-# Resolve vllm-tpu==<version> for the platform the wheels support (CPython
-# 3.12 on x86_64 Linux with the glibc of WHEEL_MAX_MANYLINUX) into <out_file>,
-# passing any extra uv flags (e.g. --find-links <dir>).
-resolve_vllm_tpu() {
+# Resolve COMBINED_PROJECT==<version> for the platform the wheels support
+# (CPython 3.12 on x86_64 Linux with the glibc of WHEEL_MAX_MANYLINUX) into
+# <out_file>, passing any extra uv flags (e.g. --find-links <dir>).
+resolve_combined() {
   local uv_bin="$1" version="$2" out_file="$3"
   shift 3
   local req_file
   req_file="$(dirname "${out_file}")/req.in"
-  echo "vllm-tpu==${version}" > "${req_file}"
+  echo "${COMBINED_PROJECT}==${version}" > "${req_file}"
   "${uv_bin}" pip compile "${req_file}" --no-config --quiet \
     --python-version 3.12 --python-platform "x86_64-manylinux_${WHEEL_MAX_MANYLINUX}" \
     --index-url https://pypi.org/simple \
@@ -148,10 +154,10 @@ resolve_vllm_tpu() {
 # never collide with. GAR is internal; Docker Hub is what users pull.
 RELEASE_GAR="${RELEASE_GAR:-us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci}"
 # shellcheck disable=SC2034 # Read by build_images.sh.
-RELEASE_IMAGE="${RELEASE_GAR}/vllm-tpu"
+RELEASE_IMAGE="${RELEASE_GAR}/vllm-jax"
 # shellcheck disable=SC2034 # Read by build_images.sh.
 RELEASE_TAG_PREFIX="release-"
-RELEASE_DOCKERHUB_REPO="${RELEASE_DOCKERHUB_REPO:-vllm/vllm-tpu}"
+RELEASE_DOCKERHUB_REPO="${RELEASE_DOCKERHUB_REPO:-vllm/vllm-jax}"
 RELEASE_DOCKERHUB_USERNAME="${RELEASE_DOCKERHUB_USERNAME:-tpuinference}"
 
 # The digest part of <repo>@sha256:<hex>.

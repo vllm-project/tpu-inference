@@ -1,12 +1,14 @@
 # vllm-tpu-release
 
-One Buildkite pipeline publishes the Docker image (`vllm/vllm-tpu`) and two
-wheels (`tpu-inference` and the combined `vllm-tpu`) of each tpu-inference
-release. It builds the image and both wheels once from the release branch,
-stages the image in GAR and checks the wheels, waits for approval, then
-publishes those same bytes to Docker Hub and PyPI, so users get exactly what
-was built and approved. It runs only in the **TPU Release** cluster, on the
-`release-tpu-inference` queue.
+One Buildkite pipeline publishes the Docker image (`vllm/vllm-jax`) and two
+wheels (`vllm-jax-core`, this repo, and the combined `vllm-jax`) of each
+vllm-jax release. The names live in `lib.sh` (`CORE_PROJECT`,
+`COMBINED_PROJECT`, `RELEASE_DOCKERHUB_REPO`); the Python package is still
+`tpu_inference`. It builds the image and both wheels once from the release
+branch, stages the image in GAR and checks the wheels, waits for approval,
+then publishes those same bytes to Docker Hub and PyPI, so users get exactly
+what was built and approved. It runs only in the **TPU Release** cluster, on
+the `release-tpu-inference` queue.
 
 The pipeline's settings upload [`pipeline.yml`](pipeline.yml) from the build's
 own checkout, and only for builds of `releases/v*`. A release branch runs the
@@ -30,9 +32,9 @@ branch.
      the version yet, and warns if `vX.Y.Z` is already on Docker Hub;
    - **builds once**: the image, from the release checkout's
      `docker/Dockerfile` and vLLM pin (`.buildkite/vllm_lkg.version`), staged
-     in GAR as `vllm-tpu:release-<version>-build<N>` (CI's own `vllm-tpu` tags
+     in GAR as `vllm-jax:release-<version>-build<N>` (CI's own `vllm-tpu` tags
      are `<commit>-<vllm commit>-<tpu>`, so the two never collide), and both
-     wheels (`tpu-inference` and `vllm-tpu`);
+     wheels (`vllm-jax-core` and `vllm-jax`);
    - **checks**: the wheels resolve together from pypi.org for CPython 3.12
      on x86_64 Linux (`check_wheels.sh`).
 4. **Approve** the publish block. It names the staged digest and asks whether
@@ -40,13 +42,12 @@ branch.
    existing Docker Hub tag may be replaced. PyPI releases can't be replaced.
 5. The build publishes what it built and checked:
    - copies the staged image by digest to Docker Hub as
-     `vllm/vllm-tpu:vX.Y.Z` (and `latest` if chosen);
-   - uploads `tpu-inference`, then `vllm-tpu`, to PyPI with Trusted Publishing
+     `vllm/vllm-jax:vX.Y.Z` (and `latest` if chosen);
+   - uploads `vllm-jax-core`, then `vllm-jax`, to PyPI with Trusted Publishing
      (`.buildkite/scripts/publish_wheel.sh`), waiting until each wheel installs
      from PyPI;
    - checks, without credentials, that an anonymous request for the Docker Hub
-     tag returns the staged digest and that `vllm-tpu==X.Y.Z` resolves from
-     pypi.org.
+     tag returns the staged digest.
 
 Build env knobs:
 
@@ -57,7 +58,8 @@ Build env knobs:
 
 ## Pipeline settings (Buildkite, made by hand)
 
-- Repository `https://github.com/vllm-project/tpu-inference.git`.
+- Repository `https://github.com/vllm-project/vllm-jax.git` (GitHub redirects
+  the former `tpu-inference` URL).
 - GitHub: no builds on push or pull request (manual only).
 - Steps:
 
@@ -73,10 +75,10 @@ Build env knobs:
 ## One-time setup outside this repo
 
 - Buildkite: the `DOCKERHUB_TOKEN` secret (Docker Hub user `tpuinference`)
-  readable by this pipeline.
+  readable by this pipeline; that user can push to `vllm/vllm-jax`.
 - The `release-tpu-inference` agents can push to
   `us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci` and
   have `docker buildx` with `imagetools create --prefer-index`.
-- PyPI: a Google Trusted Publisher on both `tpu-inference` and `vllm-tpu` for
+- PyPI: a Google Trusted Publisher on both `vllm-jax-core` and `vllm-jax` for
   the service account of the agents on the `release-tpu-inference` queue.
   Without it, `publish_wheel.sh` can't mint a token and uploads nothing.
