@@ -108,8 +108,8 @@ def moe_apply(
     # and return per-shard partial sums, so the reduction can be deferred and
     # fused with a later collective (e.g. a shared-expert all-reduce).
     defer_all_reduce = extra_backend_kwargs.pop("defer_all_reduce", False)
-    # GMM_EP and ROUTING_MOE: keep the output token-sharded over
-    # EXPERT_DATA (sequence-parallel residual stream).
+    # GMM_EP, ROUTING_MOE and FUSED_EP_MOE_V2: keep the output token-sharded
+    # over EXPERT_DATA (sequence-parallel residual stream).
     keep_token_sharding = extra_backend_kwargs.pop("keep_token_sharding",
                                                    False)
 
@@ -239,6 +239,7 @@ def moe_apply(
                     scoring_fn=layer.scoring_func,
                     score_bias=extra_backend_kwargs.get(
                         "e_score_correction_bias", None),
+                    keep_token_sharding=keep_token_sharding,
                 )
             case MoEBackend.ROUTING_MOE:
                 reason = routing_moe.unsupported_reason(mesh)
