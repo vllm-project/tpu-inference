@@ -13,6 +13,7 @@ from vllm.model_executor.models.utils import WeightsMapper
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxLinear
+from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.gemma4 import Gemma4Model, init_fn
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
@@ -21,6 +22,8 @@ from tpu_inference.models.jax.sequence_classification import (
 from tpu_inference.models.jax.utils.weight_utils import (JaxAutoWeightsLoader,
                                                          LoadableWithIterator,
                                                          StandardWeightLoader)
+
+logger = init_logger(__name__)
 
 
 class Gemma4ForSequenceClassification(JaxModule, LoadableWithIterator,
@@ -97,7 +100,15 @@ class Gemma4ForSequenceClassification(JaxModule, LoadableWithIterator,
                         f"got {tuple(weight.shape)}")
                 yield name, weight
 
-        return loader.load_weights(checked_weights())
+        loaded = loader.load_weights(checked_weights())
+        if "score.weight" not in loaded:
+            raise RuntimeError("Native sequence classifier score.weight "
+                               "was not loaded")
+        weight = self.score.weight.get_value()
+        logger.info(
+            "Native JAX sequence classification enabled: score=%s labels=%d",
+            tuple(weight.shape), self.num_labels)
+        return loaded
 
     def __call__(
         self,

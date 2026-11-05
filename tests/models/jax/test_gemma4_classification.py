@@ -13,10 +13,7 @@ from flax import nnx
 from jax.sharding import Mesh
 from transformers import Gemma4Config
 from vllm.config import ModelConfig, PoolerConfig, set_current_vllm_config
-from vllm.model_executor.layers.pooler import DispatchPooler
-from vllm.model_executor.layers.pooler.seqwise import (ClassifierPoolerHead,
-                                                       LastPool,
-                                                       SequencePooler)
+from vllm.model_executor.layers.pooler.seqwise import ClassifierPoolerHead
 from vllm.pooling_params import PoolingParams
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 
@@ -150,11 +147,16 @@ class TestGemma4SequenceClassification:
             ),
         ],
     )
-    def test_supports_native_sequence_classification_guards(
-            self, mutation, expected):
+    def test_supports_vllm_config_guards(self, mutation, expected):
         cfg = _make_supported_vllm_config()
         mutation(cfg)
         assert supports_native_sequence_classification(cfg) is expected
+        assert Gemma4ForSequenceClassification.supports_vllm_config(
+            cfg) is expected
+        # The same answer after get_flax_model swaps in the JAX dtype.
+        cfg.model_config.dtype = jnp.bfloat16
+        assert Gemma4ForSequenceClassification.supports_vllm_config(
+            cfg) is expected
 
     @pytest.mark.parametrize(
         ("hf_kwargs", "expected_labels"),
@@ -249,8 +251,9 @@ class TestGemma4SequenceClassification:
                 assert "multi_modal" in skip_substrs
 
             def load_weights(self, iterator):
-                captured.extend(list(iterator))
-                return {"loaded"}
+                items = list(iterator)
+                captured.extend(items)
+                return {name for name, _ in items}
 
         with patch(
                 "tpu_inference.models.jax.gemma4_classification.JaxAutoWeightsLoader",
@@ -263,7 +266,7 @@ class TestGemma4SequenceClassification:
                     ("score.weight", jnp.ones((2, 4))),
                 ],
             )
-            assert res == {"loaded"}
+            assert res == {"language_model.layers.0.weight", "score.weight"}
             assert [name for name, _ in captured] == [
                 "language_model.layers.0.weight",
                 "score.weight",
@@ -276,6 +279,13 @@ class TestGemma4SequenceClassification:
             ):
                 Gemma4ForSequenceClassification.load_weights(
                     dummy, [("score.weight", jnp.ones((3, 4)))])
+
+            with pytest.raises(RuntimeError,
+                               match="score.weight was not loaded"):
+                Gemma4ForSequenceClassification.load_weights(
+                    dummy,
+                    [("model.language_model.layers.0.weight", jnp.ones(
+                        (4, 4)))])
 
     def test_pooler_and_flax_model_state_refresh(self):
         mesh = _make_tp_mesh()
@@ -348,20 +358,12 @@ class TestGemma4SequenceClassification:
             )
 
     def test_pooler_mixed_activation_and_task_validation(self):
-        weight = jnp.ones((4, 2), dtype=jnp.float32)
-        param = nnx.Param(weight)
-        param.set_metadata("_is_loaded", True)
-        model = SimpleNamespace(score=SimpleNamespace(weight=param),
-                                num_labels=2)
         head = ClassifierPoolerHead(
             head_dtype=torch.float32,
             activation=torch.nn.Softmax(dim=-1),
         )
-        dispatch = DispatchPooler(
-            {"classify": SequencePooler(LastPool(), head)})
-        pooler = NativeSequenceClassificationPooler(model,
-                                                    dispatch,
-                                                    hidden_size=4)
+        pooler = NativeSequenceClassificationPooler(head)
+        assert pooler.pools_device_logits
 
         logits_dev = jnp.asarray([[0.0, 0.0], [1.0, 2.0]], dtype=jnp.float32)
         metadata = PoolingMetadata(

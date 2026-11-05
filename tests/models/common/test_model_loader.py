@@ -684,6 +684,10 @@ class TestGetModel:
         unsupported_cfg = _make_supported_vllm_config()
         unsupported_cfg.model_config.pooler_config.seq_pooling_type = "MEAN"
         assert model_loader.resolve_model_impl_type(unsupported_cfg) == "vllm"
+        # An explicit flax_nnx request still falls back through get_model's
+        # UnsupportedArchitectureError handler instead of loading the class.
+        with pytest.raises(model_loader.UnsupportedArchitectureError):
+            model_loader.get_flax_model(unsupported_cfg, rng, mesh)
 
         captured = []
 
