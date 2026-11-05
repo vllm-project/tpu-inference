@@ -12,7 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Tests for the sequence-parallel residual stream: `enable_sp` under
-attention DP with GMM_EP or ROUTING_MOE.
+attention DP with expert parallelism and one of two MoE backends:
+
+- GMM_EP: USE_MOE_EP_KERNEL=0 (and USE_FUSED_EP_MOE_V2 / USE_ROUTING_MOE
+  unset).
+- ROUTING_MOE: USE_ROUTING_MOE=1 (with USE_MOE_EP_KERNEL=0 and
+  USE_FUSED_EP_MOE_V2 unset, as both take priority over it).
 
 The sharded-matmul and MoE tests need 8 devices (e.g. CPU with
 XLA_FLAGS=--xla_force_host_platform_device_count=8, or a TPU v7x-8). On hosts
