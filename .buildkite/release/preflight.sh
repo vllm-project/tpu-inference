@@ -22,8 +22,8 @@
 #             step reads both from there.
 #   Docker    warns if v<version> is already on Docker Hub; the approver
 #             decides whether to overwrite it.
-#   PyPI      fails if tpu-inference or vllm-tpu already has this version on
-#             PyPI (PyPI releases can't be replaced).
+#   PyPI      fails if CORE_PROJECT or COMBINED_PROJECT (lib.sh) already has
+#             this version on PyPI (PyPI releases can't be replaced).
 #   CI        not checked here; the approver confirms tpu-inference-ci passed on
 #             this commit (linked in the annotation).
 set -euo pipefail
@@ -33,10 +33,10 @@ source "${SCRIPT_DIR}/lib.sh"
 
 echo "--- :label: Release version"
 VERSION="$(resolve_release_version)"
-echo "tpu-inference ${VERSION} from ${BUILDKITE_BRANCH} at ${BUILDKITE_COMMIT}"
+echo "vllm-jax ${VERSION} from ${BUILDKITE_BRANCH} at ${BUILDKITE_COMMIT}"
 
 echo "--- :package: PyPI"
-for project in tpu-inference vllm-tpu; do
+for project in "${CORE_PROJECT}" "${COMBINED_PROJECT}"; do
   check_not_published "${project}" "${VERSION}"
 done
 echo "--- :docker: ${RELEASE_DOCKERHUB_REPO}:v${VERSION} on Docker Hub"
@@ -55,9 +55,9 @@ PRE="no"
 is_prerelease "${VERSION}" && PRE="yes"
 buildkite-agent meta-data set release-prerelease "${PRE}"
 buildkite-agent annotate --style info --context release-plan <<EOF
-**tpu-inference ${VERSION}** from \`${BUILDKITE_BRANCH}\` at \`${BUILDKITE_COMMIT:0:12}\` (pre-release: ${PRE})
+**vllm-jax ${VERSION}** from \`${BUILDKITE_BRANCH}\` at \`${BUILDKITE_COMMIT:0:12}\` (pre-release: ${PRE})
 
 - CI: before approving, confirm tpu-inference-ci passed on this commit with \`NIGHTLY=1\` for each \`MODEL_IMPL_TYPE\` (auto, flax_nnx, vllm): https://buildkite.com/vllm/tpu-inference-ci/builds?branch=${BUILDKITE_BRANCH}
 - Docker Hub: ${DOCKERHUB_LINE}
-- PyPI: \`tpu-inference\` and \`vllm-tpu\` ${VERSION} not there yet
+- PyPI: \`${CORE_PROJECT}\` and \`${COMBINED_PROJECT}\` ${VERSION} not there yet
 EOF

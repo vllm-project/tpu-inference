@@ -14,7 +14,8 @@
 # limitations under the License.
 #
 # ------------------------------------------------------
-# Build the tpu-inference release wheel.
+# Build the vllm-jax-core release wheel (this repo; the Python package inside
+# is tpu_inference).
 #
 # Version (resolved by release_version in .buildkite/release/lib.sh):
 #   - Set once by preflight.sh in Buildkite meta-data (release-version), or
@@ -25,12 +26,12 @@
 #
 # Environment:
 #   PUBLISH_PYPI   PyPI project checked for an existing release on pypi.org
-#                  (default: tpu-inference).
+#                  (default: CORE_PROJECT in .buildkite/release/lib.sh).
 #   PYTHON         Interpreter for the build venv (default: python3).
 #
 # Output:
-#   dist/tpu_inference-<version>-py3-none-any.whl, uploaded as a Buildkite
-#   artifact. Build meta-data TPU_INFERENCE_WHEEL_NAME for later steps.
+#   dist/vllm_jax_core-<version>-py3-none-any.whl, uploaded as a Buildkite
+#   artifact. Build meta-data VLLM_JAX_CORE_WHEEL_NAME for later steps.
 #
 # ------------------------------------------------------
 
@@ -40,10 +41,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PYTHON="${PYTHON:-python3}"
 WHEEL_UTILS="${SCRIPT_DIR}/wheel_utils.py"
-PUBLISH_PYPI="${PUBLISH_PYPI:-tpu-inference}"
-# Provides release_version, check_not_published and die.
+# Provides CORE_PROJECT, release_version, check_not_published and die.
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/../release/lib.sh"
+PUBLISH_PYPI="${PUBLISH_PYPI:-${CORE_PROJECT}}"
 
 command -v buildkite-agent >/dev/null 2>&1 \
     || die "buildkite-agent not found: this script only runs in Buildkite."
@@ -58,7 +59,7 @@ echo "Release version: ${VERSION}"
 check_not_published "${PUBLISH_PYPI}" "${VERSION}"
 
 # --- Private build venv ------------------------------------------------------
-WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tpu-inference-build.XXXXXX")"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/vllm-jax-core-build.XXXXXX")"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
 # CI agents lack python3-venv (no ensurepip), so create the venv without pip
@@ -97,6 +98,6 @@ echo "--- :mag: Checking metadata"
 
 # --- Hand off to later steps -------------------------------------------------
 buildkite-agent artifact upload "$WHEEL"
-buildkite-agent meta-data set "TPU_INFERENCE_WHEEL_NAME" "$(basename "$WHEEL")"
+buildkite-agent meta-data set "VLLM_JAX_CORE_WHEEL_NAME" "$(basename "$WHEEL")"
 
 echo "Built ${WHEEL}"

@@ -14,10 +14,10 @@
 # limitations under the License.
 #
 # ------------------------------------------------------
-# Build vLLM-TPU with tpu-inference using either PyPI or a local wheel:
-# 1. PyPI Build: Uses specified version of tpu-inference from PyPI.
-#   ./build_vllm_tpu.sh <tpu-inference-version> <vllm-tpu-version> [vllm-branch-tag-or-commit-hash](default: main)
-# 2. Local Build: Uses local .whl file of tpu-inference
+# Build vLLM-TPU with vllm-jax-core using either PyPI or a local wheel:
+# 1. PyPI Build: Uses specified version of vllm-jax-core from PyPI.
+#   ./build_vllm_tpu.sh <vllm-jax-core-version> <vllm-tpu-version> [vllm-branch-tag-or-commit-hash](default: main)
+# 2. Local Build: Uses local .whl file of vllm-jax-core
 #   ./build_vllm_tpu.sh <--local> <vllm-tpu-version> [vllm-branch-tag-or-commit-hash](default: main)
 #
 # Example:
@@ -41,9 +41,9 @@ if [[ "$1" == "--local" ]]; then
     fi
 
     # Detect local wheel and extract version automatically
-    WHL_PATH=$(find /workspace/tpu_inference/dist -name "tpu_inference-*.whl" 2>/dev/null | head -n 1)
+    WHL_PATH=$(find /workspace/tpu_inference/dist -name "vllm_jax_core-*.whl" 2>/dev/null | head -n 1)
     if [ -z "${WHL_PATH}" ]; then
-        echo "ERROR: Local wheel not found. Please ensure you have built tpu-inference first."
+        echo "ERROR: Local wheel not found. Please ensure you have built vllm-jax-core first."
         exit 1
     fi
 
@@ -52,12 +52,12 @@ if [[ "$1" == "--local" ]]; then
     VLLM_BRANCH=${2:-"main"}
 else
     if [ "$#" -lt 2 ]; then
-        echo "Usage: $0 <tpu-inference-version> <vllm-tpu-version> [vllm-branch-tag-or-commit-hash]"
+        echo "Usage: $0 <vllm-jax-core-version> <vllm-tpu-version> [vllm-branch-tag-or-commit-hash]"
         echo "  [vllm-branch-tag-or-commit-hash] is optional, defaults to 'main'."
         exit 1
     fi
 
-    # Pypi build requires explicit version for tpu-inference
+    # Pypi build requires explicit version for vllm-jax-core
     TPU_INFERENCE_VERSION=$1
     VLLM_TPU_VERSION=$2
     VLLM_BRANCH=${3:-"main"}
@@ -65,7 +65,7 @@ fi
 
 echo "--- Starting vLLM-TPU wheel build ---"
 echo "Mode: $([[ "${WHL_PATH}" ]] && echo "Local Build" || echo "Pypi Build")"
-echo "TPU Inference Version: ${TPU_INFERENCE_VERSION}"
+echo "vllm-jax-core Version: ${TPU_INFERENCE_VERSION}"
 echo "vLLM-TPU Version: ${VLLM_TPU_VERSION}"
 echo "vLLM Branch/Tag/Commit Hash: ${VLLM_BRANCH}"
 
@@ -90,17 +90,20 @@ fi
 echo "Successfully checked out ${VLLM_BRANCH}."
 git pull || echo "Warning: Failed to pull updates (may be on a tag)."
 
-# --- Step 2: Update tpu-inference version in requirements ---
-REQUIRED_LINE="tpu-inference==${TPU_INFERENCE_VERSION}"
+# --- Step 2: Update the vllm-jax-core version in requirements ---
+# vLLM's tpu.txt names this repo by its former name (tpu-inference); replace
+# that line too, so pip never installs both names of the same package.
+REQUIRED_LINE="vllm-jax-core==${TPU_INFERENCE_VERSION}"
 REQUIREMENTS_FILE="requirements/tpu.txt"
 BACKUP_FILE="${REQUIREMENTS_FILE}.bak"
+PIN_RE='^(tpu-inference|vllm-jax-core)=='
 
 if [[ "${WHL_PATH}" ]]; then
-    echo "Using local wheel for tpu-inference"
-    REQUIRED_LINE="tpu-inference @ file://${WHL_PATH}"
+    echo "Using local wheel for vllm-jax-core"
+    REQUIRED_LINE="vllm-jax-core @ file://${WHL_PATH}"
 fi
 
-echo "Updating tpu-inference version in $REQUIREMENTS_FILE..."
+echo "Updating the vllm-jax-core version in $REQUIREMENTS_FILE..."
 
 if [ -f "$REQUIREMENTS_FILE" ]; then
     # Check if the last character is NOT a newline. If not, append one.
@@ -110,10 +113,10 @@ if [ -f "$REQUIREMENTS_FILE" ]; then
     fi
 fi
 
-if grep -q "^tpu-inference==" "$REQUIREMENTS_FILE"; then
+if grep -qE "$PIN_RE" "$REQUIREMENTS_FILE"; then
     # Replace the existing version using sed, which creates the .bak file
     echo "(Action: Existing version found. Replacing.)"
-    sed -i.bak "s|^tpu-inference==.*|$REQUIRED_LINE|" "$REQUIREMENTS_FILE"
+    sed -i.bak -E "s#${PIN_RE}.*#${REQUIRED_LINE}#" "$REQUIREMENTS_FILE"
 
 else
     # Line not found -> Append the new line to the file end, and manually create .bak

@@ -361,7 +361,7 @@ class KernelAutoTuneResultProcessor:
             return None
 
         owner = os.environ.get('KERNEL_AUTOTUNE_PR_OWNER', 'vllm-project')
-        repo = os.environ.get('KERNEL_AUTOTUNE_PR_REPO', 'tpu-inference')
+        repo = os.environ.get('KERNEL_AUTOTUNE_PR_REPO', 'vllm-jax')
         head_branch = (
             os.environ.get('KERNEL_AUTOTUNE_PR_HEAD_BRANCH', '').strip()
             or f"kernel_autotune.update_tuned_params_{self.autotune_id}")

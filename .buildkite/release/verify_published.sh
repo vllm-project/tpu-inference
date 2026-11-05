@@ -14,7 +14,8 @@
 # limitations under the License.
 
 # After the publish, check what users get, without credentials: an anonymous
-# request for vllm/vllm-tpu:v<version> must return the staged digest.
+# request for RELEASE_DOCKERHUB_REPO:v<version> (vllm/vllm-jax) must return
+# the staged digest.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null

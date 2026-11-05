@@ -15,11 +15,11 @@
 #
 # ------------------------------------------------------
 # Publish a release to PyPI with Trusted Publishing (no stored API token).
-# Run tpu-inference first, then vllm-tpu (which pins that tpu-inference).
+# Run vllm-jax-core first, then vllm-jax (which pins that vllm-jax-core).
 #
 # Usage:
-#   publish_wheel.sh tpu-inference   # tpu-inference (wheel only)
-#   publish_wheel.sh vllm-tpu        # vllm-tpu, the combined wheel (+ sdist)
+#   publish_wheel.sh vllm-jax-core   # vllm-jax-core, this repo (wheel only)
+#   publish_wheel.sh vllm-jax        # vllm-jax, the combined wheel (+ sdist)
 #
 # What it does:
 #   1. Download the files built earlier in this build and check their name
@@ -31,7 +31,7 @@
 #   4. Upload the files and their attestations with twine.
 #   5. Wait until the release is installable from PyPI.
 #
-# One-time PyPI setup, per project (tpu-inference, vllm-tpu):
+# One-time PyPI setup, per project (vllm-jax-core, vllm-jax):
 #   Project -> Publishing -> Add a new publisher -> Google Cloud ->
 #   email: <service-account>@<project>.iam.gserviceaccount.com
 #   (use a "pending publisher" if the project doesn't exist yet).
@@ -67,18 +67,18 @@ source "${SCRIPT_DIR}/../release/lib.sh"
 # compares two independent sources.
 TARGET="${1:-}"
 case "${TARGET}" in
-    tpu-inference)
-        WHEEL_GLOB="tpu_inference-*.whl"
+    vllm-jax-core)
+        WHEEL_GLOB="vllm_jax_core-*.whl"
         SDIST_GLOB=""   # build_tpu_inference_wheel.sh makes no sdist.
-        PUBLISHED_KEY="TPU_INFERENCE_PUBLISHED_VERSION"
+        PUBLISHED_KEY="VLLM_JAX_CORE_PUBLISHED_VERSION"
         ;;
-    vllm-tpu)
-        WHEEL_GLOB="vllm_tpu-*.whl"
-        SDIST_GLOB="vllm_tpu-*.tar.gz"
-        PUBLISHED_KEY="VLLM_TPU_PUBLISHED_VERSION"
+    vllm-jax)
+        WHEEL_GLOB="vllm_jax-*.whl"
+        SDIST_GLOB="vllm_jax-*.tar.gz"
+        PUBLISHED_KEY="VLLM_JAX_PUBLISHED_VERSION"
         ;;
     *)
-        die "usage: $0 <tpu-inference|vllm-tpu>"
+        die "usage: $0 <vllm-jax-core|vllm-jax>"
         ;;
 esac
 
@@ -96,7 +96,7 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 mkdir -p "${WORK_DIR}/dist"
 
 # Both releases upload to dist/; the globs never match each other's files
-# (`tpu_inference-` vs `vllm_tpu-`).
+# (`vllm_jax_core-` vs `vllm_jax-`).
 (cd "${WORK_DIR}" && buildkite-agent artifact download "dist/${WHEEL_GLOB}" .)
 if [[ -n "${SDIST_GLOB}" ]]; then
     (cd "${WORK_DIR}" && buildkite-agent artifact download "dist/${SDIST_GLOB}" .)
@@ -192,8 +192,8 @@ unset API_TOKEN
 # release to be installable, so poll for up to 5 minutes.
 #   --python-version 3.12        look for a cp312 wheel, whatever Python this
 #                                agent has.
-#   --platform <the wheel's tag> manylinux_X_Y_x86_64 for vllm-tpu, any for
-#                                tpu-inference. pip matches a manylinux_X_Y
+#   --platform <the wheel's tag> manylinux_X_Y_x86_64 for vllm-jax, any for
+#                                vllm-jax-core. pip matches a manylinux_X_Y
 #                                --platform exactly, not "this or older", so a
 #                                fixed tag would miss a wheel tagged otherwise.
 #   --only-binary :all:          check the wheel; never build the sdist.

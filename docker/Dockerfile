@@ -56,7 +56,7 @@ RUN if [ "$BM_INFRA" = "true" ]; then \
 # the pod is handed one at run time.
 #
 # Staged to /tmp and moved, because COPY cannot be conditional and this file
-# builds the published vllm/vllm-tpu image as well as the test one. Only the
+# builds the published vllm/vllm-jax image as well as the test one. Only the
 # test image keeps the binary.
 COPY --from=buildkite/agent:3 /usr/local/bin/buildkite-agent /tmp/buildkite-agent
 RUN if [ "$IS_TEST" = "true" ]; then \
