@@ -362,6 +362,7 @@ def get_flax_model(
                                            PartitionSpec(
                                                ShardingAxisName.ATTN_DATA,
                                                None))  # (T, D)
+    replicated_sharding = NamedSharding(mesh, PartitionSpec())
 
     # For performance consideration, refer to:
     # https://flax.readthedocs.io/en/latest/guides/performance.html
@@ -392,7 +393,7 @@ def get_flax_model(
                 kv_cache_shardings,
                 hidden_states_sharding,
                 hidden_states_sharding,  # aux hidden states
-                None,  # expert ids
+                replicated_sharding,  # expert ids
             ),
             donate_argnums=1,  # 0 is state_leaves, 1 is kv_cache
             static_argnums=(

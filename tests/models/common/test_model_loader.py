@@ -833,3 +833,61 @@ class TestGetModel:
         assert jnp.allclose(out1, jnp.full((2, 4), 4.0, dtype=jnp.bfloat16))
         assert jnp.allclose(res1[0], jnp.full((2, 4), 4.0, dtype=jnp.bfloat16))
         assert jnp.allclose(logits, jnp.full((2, 4), 48.0, dtype=jnp.bfloat16))
+
+    def test_get_flax_model_replicates_expert_indices_sharding(
+            self, vllm_config, rng, mesh):
+        """get_flax_model must specify replicated NamedSharding(mesh, PartitionSpec())
+        for the 4th output (expert_indices) of run_model_impl."""
+        from flax import nnx
+        from jax.sharding import PartitionSpec
+
+        class DummyMoETarget(nnx.Module):
+            _self_manages_sharding = True
+
+            def __init__(self, vllm_config, rng, mesh):
+                self.w = nnx.Param(jnp.ones((4, 4), dtype=jnp.bfloat16))
+
+            def __call__(self, kv_caches, input_ids, attention_metadata, *args,
+                         **kwargs):
+                out = jnp.ones((input_ids.shape[0], 4), dtype=jnp.bfloat16)
+                expert_ids = jnp.zeros((1, input_ids.shape[0], 2),
+                                       dtype=jnp.int32)
+                return kv_caches, out, [out], expert_ids
+
+            def compute_logits(self, hidden_states):
+                return hidden_states @ self.w.value
+
+        vllm_config.load_config.load_format = "dummy"
+        vllm_config.model_config.runner_type = "generate"
+
+        with jax.set_mesh(mesh), patch(
+                "tpu_inference.models.common.model_loader._get_model_architecture",
+                return_value=DummyMoETarget
+        ), patch(
+                "tpu_inference.models.common.model_loader.maybe_create_mm_encoder_jit_manager",
+                return_value=None
+        ), patch(
+                "tpu_inference.models.common.model_loader.get_step_fn_compiler_options",
+                return_value={}):
+            iface = model_loader.get_flax_model(vllm_config,
+                                                rng,
+                                                mesh,
+                                                is_draft_model=False)
+            kv_caches = [jnp.zeros((2, 4), dtype=jnp.bfloat16)]
+            input_ids = jnp.zeros((2, ), dtype=jnp.int32)
+            _, _, _, expert_ids = iface.model_fn(
+                iface.state_leaves,
+                kv_caches,
+                input_ids,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                True,
+                True,
+            )
+
+        assert expert_ids is not None
+        assert expert_ids.sharding.spec == PartitionSpec()
