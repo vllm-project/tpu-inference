@@ -204,15 +204,15 @@ def test_dp_sched_routing(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_dp_sched_start_method(monkeypatch: pytest.MonkeyPatch):
-    """DP_SCHED_START_METHOD defaults to fork and only accepts fork/spawn."""
+    """DP_SCHED_START_METHOD is unset by default and accepts fork/spawn."""
     monkeypatch.delenv("DP_SCHED_START_METHOD", raising=False)
-    assert envs.DP_SCHED_START_METHOD == "fork"
+    assert envs.DP_SCHED_START_METHOD is None
 
     monkeypatch.setenv("DP_SCHED_START_METHOD", "spawn")
     assert envs.DP_SCHED_START_METHOD == "spawn"
 
     monkeypatch.setenv("DP_SCHED_START_METHOD", "Spawn")
-    assert envs.DP_SCHED_START_METHOD.lower() == "spawn"
+    assert envs.DP_SCHED_START_METHOD == "Spawn"
 
     monkeypatch.setenv("DP_SCHED_START_METHOD", "forkserver")
     with pytest.raises(ValueError, match="DP_SCHED_START_METHOD"):

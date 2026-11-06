@@ -33,8 +33,15 @@ from vllm.v1.request import Request
 
 from tpu_inference.core.sched.dp_scheduler import (
     DPScheduler, DPSchedulerOutput, SchedulerCommand,
-    _get_max_cache_hit_length, _scheduler_worker_trampoline,
-    update_vllm_config_for_dp_scheduler)
+    _get_max_cache_hit_length, _resolve_start_method,
+    _scheduler_worker_trampoline, update_vllm_config_for_dp_scheduler)
+
+
+@pytest.fixture(autouse=True)
+def _default_start_method(monkeypatch):
+    """Tests start from the default start method unless they set one."""
+    monkeypatch.delenv("DP_SCHED_START_METHOD", raising=False)
+    monkeypatch.delenv("VLLM_WORKER_MULTIPROC_METHOD", raising=False)
 
 
 def _make_mock_mp_context():
@@ -1416,7 +1423,7 @@ class TestDPScheduler:
         observed_during_spawn = []
 
         def inspect_process(*args, **kwargs):
-            spawn_vllm_config = kwargs["args"][3]
+            spawn_vllm_config = kwargs["kwargs"]["vllm_config"]
             # The full vllm_config payload must be picklable while detached during worker spawn,
             # with static_all_moe_layers (list[str]) kept intact.
             pickle.dumps(spawn_vllm_config)
@@ -1632,6 +1639,39 @@ class TestDPScheduler:
         assert vllm_config.compilation_config.static_forward_context == {
             "layer_0": unpicklable_attn
         }
+
+
+class TestResolveStartMethod:
+
+    # (DP_SCHED_START_METHOD, VLLM_WORKER_MULTIPROC_METHOD, JAX_PLATFORMS,
+    #  expected start method)
+    _CASES = [
+        (None, None, "", "fork"),
+        (None, "spawn", "", "spawn"),
+        ("spawn", None, "", "spawn"),
+        ("Spawn", None, "", "spawn"),
+        ("fork", "spawn", "", "fork"),
+        ("spawn", None, "proxy", "fork"),
+        (None, "spawn", "proxy", "fork"),
+    ]
+
+    @pytest.mark.parametrize("dp_sched, vllm_method, jax_platforms, expected",
+                             _CASES)
+    def test_resolve_start_method(self, monkeypatch, dp_sched, vllm_method,
+                                  jax_platforms, expected):
+        """DP_SCHED_START_METHOD wins, else vLLM's setting; no spawn under
+        Pathways."""
+        env = {
+            "DP_SCHED_START_METHOD": dp_sched,
+            "VLLM_WORKER_MULTIPROC_METHOD": vllm_method,
+            "JAX_PLATFORMS": jax_platforms,
+        }
+        for name, value in env.items():
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+        assert _resolve_start_method() == expected
 
 
 class TestSchedulerWorkerTrampoline:

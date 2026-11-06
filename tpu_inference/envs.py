@@ -76,7 +76,7 @@ if TYPE_CHECKING:
     DP_SCHED_BATCH_PREFILL: bool = False
     DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS: int = 10000
     DP_SCHED_ROUTING: str = "least_loaded"
-    DP_SCHED_START_METHOD: str = "fork"
+    DP_SCHED_START_METHOD: str | None = None
     VLLM_MOE_CHUNK_SIZE: int = 0
     ONEHOT_MOE_PERMUTE_THRESHOLD: int = 0
     PROFILE_SINGLE_DEVICE: bool = False
@@ -511,9 +511,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # "spawn" starts each worker from a fresh interpreter, which avoids that
     # hazard at the cost of a few seconds of extra (parallel) worker startup.
     # Use "spawn" if engine startup hangs with DP scheduling enabled.
+    # Unset (default): follow vLLM's VLLM_WORKER_MULTIPROC_METHOD (default
+    # "fork"). Set it to change only the DP scheduler workers, e.g. to spawn
+    # them while the rest of vLLM keeps forking.
     "DP_SCHED_START_METHOD":
     env_with_choices("DP_SCHED_START_METHOD",
-                     "fork", ["fork", "spawn"],
+                     None, ["fork", "spawn"],
                      case_sensitive=False),
     "MLA_XPOSE_N_TILE_SIZE":
     lambda: int(os.getenv("MLA_XPOSE_N_TILE_SIZE", "160")),

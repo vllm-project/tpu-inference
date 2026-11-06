@@ -181,6 +181,27 @@ def _set_none_hash_state(state: Dict[str, Any]) -> None:
         setattr(kv_cache_utils, name, value)
 
 
+def _resolve_start_method() -> str:
+    """Returns the multiprocessing start method for the scheduler workers.
+
+    DP_SCHED_START_METHOD wins if set. Otherwise the workers follow vLLM's
+    VLLM_WORKER_MULTIPROC_METHOD, so a deployment that already runs vLLM with
+    spawn gets spawned scheduler workers too. Spawn is not used under
+    Pathways (JAX_PLATFORMS=proxy): a spawned worker re-imports
+    tpu_inference, which initializes Pathways again, and that path is
+    untested.
+    """
+    method = envs.DP_SCHED_START_METHOD
+    if method is None:
+        method = vllm_envs.VLLM_WORKER_MULTIPROC_METHOD
+    method = method.lower()
+    if method == "spawn" and "proxy" in (envs.JAX_PLATFORMS or ""):
+        logger.warning("DP scheduler workers are not spawned under Pathways "
+                       "(JAX_PLATFORMS=proxy); using fork.")
+        method = "fork"
+    return method
+
+
 def _scheduler_worker_trampoline(
     rank: int,
     input_conn: Connection,
@@ -558,10 +579,10 @@ class DPScheduler(SchedulerInterface):
         # multiprocessing.Queue uses background feeder threads for put(),
         # which causes GIL contention and thread convoy effects at high DP
         # sizes. Using raw Pipe connections eliminates all background threads.
-        # The start method is configurable (envs.DP_SCHED_START_METHOD):
+        # The start method is configurable (see _resolve_start_method):
         # "spawn" avoids forking the engine process after the TPU runtime has
         # started threads, which can deadlock the forked child.
-        self._start_method: str = envs.DP_SCHED_START_METHOD.lower()
+        self._start_method: str = _resolve_start_method()
         ctx = multiprocessing.get_context(self._start_method)
         self.input_conns: List[Connection] = []  # parent writes, child reads
         self.output_conns: List[Connection] = []  # child writes, parent reads
