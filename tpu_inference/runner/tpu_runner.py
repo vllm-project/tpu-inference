@@ -2425,9 +2425,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.speculative_config:
             raw_max_decode = getattr(self.input_batch, "max_decode_tokens",
                                      None)
-            max_decode_tokens = (
-                raw_max_decode if isinstance(raw_max_decode, int) else
-                self.speculative_config.num_speculative_tokens + 1)
+            max_decode_tokens = (raw_max_decode if isinstance(
+                raw_max_decode,
+                int) else self.speculative_config.num_speculative_tokens + 1)
             discard_set = set(discard_sampled_tokens_req_indices)
             for req_idx, req_id in enumerate(req_ids):
                 req_state = self.requests[req_id]
@@ -3246,10 +3246,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 sharding=metadata_attn_sharding)
 
         spec_config = getattr(self, "speculative_config", None)
-        num_spec_tokens = (spec_config.num_speculative_tokens
-                           if (spec_config
-                               and self.kv_cache_config.has_mamba_layers) else
-                           0)
+        num_spec_tokens = (spec_config.num_speculative_tokens if
+                           (spec_config
+                            and self.kv_cache_config.has_mamba_layers) else 0)
         if num_spec_tokens > 0:
             gdn_read_offsets_cpu = np.zeros(self.max_num_reqs, dtype=np.int32)
             for dp_rank in range(dp_size):

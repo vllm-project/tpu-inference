@@ -493,10 +493,10 @@ class CompilationManager:
             mamba_state_indices = None
 
         spec_config = getattr(self.runner, "speculative_config", None)
-        num_spec_tokens = (
-            spec_config.num_speculative_tokens
-            if (spec_config and self.runner.kv_cache_config.has_mamba_layers)
-            else 0)
+        num_spec_tokens = (spec_config.num_speculative_tokens if
+                           (spec_config
+                            and self.runner.kv_cache_config.has_mamba_layers)
+                           else 0)
         if num_spec_tokens > 0:
             gdn_read_offsets = device_array(self.runner.mesh,
                                             np.zeros(self.runner.max_num_reqs,
