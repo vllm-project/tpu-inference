@@ -544,6 +544,8 @@ def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:
     """
     if sharding is None:
         sharding = NamedSharding(mesh, PartitionSpec(None))
+    elif isinstance(sharding, PartitionSpec):
+        sharding = NamedSharding(mesh, sharding)
     return general_device_put(*args, sharding=sharding, **kwargs)
 
 

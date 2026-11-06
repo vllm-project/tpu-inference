@@ -156,9 +156,10 @@ def _bindable(arr: Any) -> bool:
         return False
 
 
-# KV-cache leaves are ordinary float arrays in the weight tree, so _bindable
-# accepts them, but the trainer has no counterpart to pair them with.
-_NON_WEIGHT_PATH_PARTS = ("['cache']", )
+# KV-cache leaves and frozen MTP drafter leaves (`mtp_block`) are ordinary float
+# arrays in the weight tree, so _bindable accepts them, but the trainer has no
+# counterpart to pair them with when MTP co-training is disabled.
+_NON_WEIGHT_PATH_PARTS = ("['cache']", "['mtp_block']")
 
 
 def _is_weight(name: str) -> bool:

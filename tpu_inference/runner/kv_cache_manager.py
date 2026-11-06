@@ -607,16 +607,58 @@ class KVCacheManager:
                         draft_hf_config, text_config)
                     for draft_layer, target_layer in redirects.items():
                         self.shared_kv_cache_layers[draft_layer] = target_layer
-                elif method in ("eagle3", "dflash"):
-                    draft_num_layers = getattr(draft_hf_config,
-                                               'num_hidden_layers', 1)
+                elif method in ("eagle3", "dflash", "mtp"):
+                    draft_configs = [
+                        c for c in (
+                            draft_hf_config,
+                            getattr(draft_hf_config, "text_config", None),
+                            getattr(draft_model_config, "hf_text_config",
+                                    None),
+                        ) if c is not None
+                    ]
+
+                    def _get_draft_int(*names: str) -> int | None:
+                        for cfg_obj in draft_configs:
+                            for name in names:
+                                val = getattr(cfg_obj, name, None)
+                                if (isinstance(val, int)
+                                        and not isinstance(val, bool)
+                                        and val > 0):
+                                    return val
+                        return None
+
                     if method == "eagle3":
                         draft_num_layers = 1
+                    elif method == "mtp":
+                        draft_num_layers = _get_draft_int(
+                            "num_nextn_predict_layers",
+                            "mtp_num_hidden_layers",
+                            "n_predict",
+                        ) or 1
+                    else:
+                        draft_num_layers = _get_draft_int(
+                            "num_hidden_layers") or 1
+
+                    raw_num_kv_heads = (
+                        _get_draft_int("num_global_key_value_heads",
+                                       "num_key_value_heads")
+                        or base_num_kv_heads)
+                    raw_head_size = _get_draft_int("global_head_dim",
+                                                   "head_dim")
+                    if raw_head_size is None:
+                        hidden_size = _get_draft_int("hidden_size")
+                        num_attn_heads = _get_draft_int("num_attention_heads")
+                        if (hidden_size is not None
+                                and num_attn_heads is not None):
+                            raw_head_size = hidden_size // num_attn_heads
+                        else:
+                            raw_head_size = (
+                                draft_hf_config.hidden_size //
+                                draft_hf_config.num_attention_heads)
+
                     num_kv_heads = common_utils.get_padded_num_heads(
-                        draft_hf_config.num_key_value_heads, model_cnt)
-                    head_size = common_utils.get_padded_head_dim(
-                        draft_hf_config.hidden_size //
-                        draft_hf_config.num_attention_heads)
+                        raw_num_kv_heads, model_cnt)
+                    head_size = common_utils.get_padded_head_dim(raw_head_size)
                     for i in range(draft_num_layers):
                         if self.use_mla:
                             kv_cache_spec[
@@ -669,8 +711,8 @@ class KVCacheManager:
                 if isinstance(attn_module, MambaBase):
                     spec = attn_module.get_kv_cache_spec(
                         self.runner.vllm_config)
-                    if (isinstance(spec, MambaSpec) and uses_gdn_spec_scratch(
-                            self.runner.vllm_config)
+                    if (isinstance(spec, MambaSpec)
+                            and uses_gdn_spec_scratch(self.runner.vllm_config)
                             and spec.num_speculative_blocks > 0):
                         # Verify windows checkpoint into runner-owned scratch
                         # slots, so the scheduler must not reserve (or
@@ -847,7 +889,8 @@ class KVCacheManager:
                     duplicate_shared_layers = True
                     non_mtp_tensors = [
                         t for t in kv_cache_config.kv_cache_tensors
-                        if not any("mtp" in name for name in t.layers)
+                        if not any("mtp" in name or "draft_layer" in name
+                                   for name in t.layers)
                     ]
                     if non_mtp_tensors:
                         # assert that each kv_cache_tensor in kv_cache_config.kv_cache_tensors has the same number of shared layers

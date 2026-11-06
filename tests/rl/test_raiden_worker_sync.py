@@ -90,12 +90,23 @@ class TestIsWeight(unittest.TestCase):
                 "['base']['decoder']['layers_0']['attention']['cache']"
                 "['cached_prefill_key']"))
 
+    def test_drops_mtp_block_leaves(self):
+        self.assertFalse(
+            rws._is_weight(
+                "['base']['mtp_block']['mtp_0_transformer_layer']['mlp']"
+                "['kernel']"))
+
     def test_filter_bindable_drops_cache_without_touching_weights(self):
         leaf = SimpleNamespace(shape=(2, ), dtype="float32")
-        names = ["['w']", "['attention']['cache']['cached_prefill_key']"]
-        kept_names, kept_arrays = rws._filter_bindable(names, [leaf, leaf])
-        # The cache leaf is dropped before `_bindable` is consulted, so it goes
-        # even though it is an ordinary float array.
+        names = [
+            "['w']",
+            "['attention']['cache']['cached_prefill_key']",
+            "['base']['mtp_block']['mtp_0_transformer_layer']['mlp']['kernel']",
+        ]
+        kept_names, kept_arrays = rws._filter_bindable(names,
+                                                       [leaf, leaf, leaf])
+        # The cache and mtp_block leaves are dropped before `_bindable` is
+        # consulted, so they go even though they are ordinary float arrays.
         self.assertEqual(kept_names, [])
         self.assertEqual(kept_arrays, [])
 

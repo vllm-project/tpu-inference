@@ -425,3 +425,134 @@ def test_get_draft_block_tables_dp_reordering():
         dtype=np.int32,
     ).reshape(-1)
     assert np.array_equal(reordered_interleaved, expected_interleaved)
+
+
+def _create_mock_proposer(
+    method: str,
+    num_speculative_tokens: int,
+) -> Eagle3Proposer:
+    vllm_config = mock.MagicMock(spec=VllmConfig)
+    vllm_config.model_config = mock.MagicMock()
+    vllm_config.model_config.seed = 42
+    vllm_config.model_config.max_model_len = 8192
+    vllm_config.cache_config = mock.MagicMock(block_size=16)
+    vllm_config.speculative_config = mock.MagicMock()
+    vllm_config.speculative_config.method = method
+    vllm_config.speculative_config.num_speculative_tokens = (
+        num_speculative_tokens)
+    vllm_config.speculative_config.use_gemma4_mtp.return_value = False
+    vllm_config.speculative_config.draft_model_config = mock.MagicMock()
+    vllm_config.speculative_config.draft_model_config.hf_config = (
+        mock.MagicMock(mtp_use_dedicated_embeddings=False))
+
+    mock_runner = mock.MagicMock()
+    devices = np.array(jax.devices()).reshape((1, len(jax.devices())))
+    mock_runner.mesh = jax.sharding.Mesh(devices, axis_names=('data', 'model'))
+    mock_runner.max_num_tokens = 8192
+    mock_runner.max_model_len = 8192
+    mock_runner.kv_cache_config.kv_cache_groups = [mock.MagicMock()]
+    mock_runner.input_batch = mock.MagicMock()
+
+    return Eagle3Proposer(vllm_config=vllm_config, runner=mock_runner)
+
+
+def test_load_model_builtin_mtp_from_runner_model():
+    """Verify Eagle3Proposer.load_model reuses built-in MTP functions and
+    state_leaves directly when self.runner.model exposes mtp_model_fn."""
+    proposer = _create_mock_proposer("mtp", 2)
+
+    target_state = mock.sentinel.target_state
+    target_leaves = (mock.sentinel.leaf0, mock.sentinel.leaf1)
+    target_model = mock.MagicMock()
+    target_model.mtp_model_fn = mock.sentinel.mtp_model_fn
+    target_model.mtp_compute_logits_fn = mock.sentinel.mtp_compute_logits_fn
+    target_model.mtp_combine_hidden_states_fn = (
+        mock.sentinel.mtp_combine_hidden_states_fn)
+
+    proposer.runner.model = target_model
+    proposer.runner.state = target_state
+    proposer.runner.state_leaves = target_leaves
+
+    with mock.patch("tpu_inference.spec_decode.jax.eagle3.get_model"
+                    ) as mock_get_model:
+        proposer.load_model(target_state)
+
+    mock_get_model.assert_not_called()
+    assert proposer.model_fn is mock.sentinel.mtp_model_fn
+    assert proposer.compute_logits_fn is mock.sentinel.mtp_compute_logits_fn
+    assert (proposer.combine_hidden_states_fn
+            is mock.sentinel.mtp_combine_hidden_states_fn)
+    assert proposer.state is target_state
+    assert proposer.state_leaves is target_leaves
+    assert proposer.model is target_model
+
+    # Verify method="eagle3" does NOT hijack built-in mtp_model_fn
+    eagle3_proposer = _create_mock_proposer("eagle3", 2)
+    eagle3_proposer.runner.model = target_model
+    eagle3_proposer.runner.state = {}
+    with mock.patch(
+            "tpu_inference.spec_decode.jax.eagle3.get_model"
+    ) as mock_get_model_eagle3, mock.patch(
+            "tpu_inference.spec_decode.jax.eagle3.resolve_model_impl_type",
+            return_value="vllm"):
+        eagle3_proposer.load_model(target_state)
+    mock_get_model_eagle3.assert_called_once()
+    assert eagle3_proposer.model_fn is not mock.sentinel.mtp_model_fn
+
+
+def test_prepare_inputs_mtp():
+    """Verify prepare_inputs with method='mtp' uses aux_hidden_states[0]
+    directly without calling combine_hidden_states_fn."""
+    proposer = _create_mock_proposer("mtp", 2)
+    num_reqs = 2
+    max_num_seqs = 8
+    total_tokens = 8
+    hidden_size = 64
+
+    proposer.runner.input_batch.num_reqs = num_reqs
+    proposer.combine_hidden_states_fn = mock.MagicMock(
+        side_effect=AssertionError(
+            "combine_hidden_states_fn should not be called for mtp"))
+    proposer.state = None
+    proposer.state_leaves = None
+    proposer.runner.input_batch.block_table = [mock.MagicMock()]
+    (proposer.runner.input_batch.block_table[0].get_cpu_tensor.return_value
+     ) = jnp.zeros((num_reqs, 4), dtype=jnp.int32)
+
+    qsl_cpu = np.zeros(max_num_seqs + 1, dtype=np.int32)
+    query_lens = np.zeros(max_num_seqs, dtype=np.int32)
+    query_lens[:num_reqs] = [3, 4]
+    qsl_cpu[1:] = np.cumsum(query_lens)
+
+    sl_cpu = np.zeros(max_num_seqs, dtype=np.int32)
+    sl_cpu[:num_reqs] = [3, 4]
+
+    input_ids = jnp.arange(total_tokens)
+    trunk_hidden = jnp.ones((total_tokens, hidden_size), dtype=jnp.bfloat16)
+    aux_hidden_states = (trunk_hidden, )
+
+    num_rejected_tokens = jnp.zeros(max_num_seqs, dtype=jnp.int32)
+    last_sampled_token_id = jnp.ones(max_num_seqs, dtype=jnp.int32)
+    next_prompt_token_id = jnp.zeros(max_num_seqs, dtype=jnp.int32)
+    is_in_prefill = jnp.zeros(max_num_seqs, dtype=jnp.bool_)
+
+    attn_metadata = AttentionMetadata(
+        seq_lens=jnp.array(sl_cpu),
+        input_positions=jnp.arange(total_tokens),
+        query_start_loc=jnp.array(qsl_cpu),
+        block_tables=jnp.array([]),
+        request_distribution=None,
+    )
+
+    num_reqs_dp = jnp.array([num_reqs], dtype=jnp.int32)
+    with jax.set_mesh(proposer.mesh):
+        target_hidden_states, out_input_ids, last_token_indices, _ = (
+            proposer.prepare_inputs(attn_metadata, input_ids,
+                                    aux_hidden_states, last_sampled_token_id,
+                                    next_prompt_token_id, is_in_prefill,
+                                    num_rejected_tokens, num_reqs_dp))
+
+    assert target_hidden_states.shape == (total_tokens, hidden_size)
+    assert out_input_ids.shape == (total_tokens, )
+    assert last_token_indices.shape == (max_num_seqs, )
+    proposer.combine_hidden_states_fn.assert_not_called()

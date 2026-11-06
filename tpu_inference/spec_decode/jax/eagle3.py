@@ -71,6 +71,16 @@ class Eagle3Proposer:
 
     def load_model(self, target_model: Any) -> None:
         """Loads the draft model."""
+        if self.method == "mtp" and hasattr(self.runner.model, "mtp_model_fn"):
+            self.model_fn = self.runner.model.mtp_model_fn
+            self.compute_logits_fn = self.runner.model.mtp_compute_logits_fn
+            self.combine_hidden_states_fn = (
+                self.runner.model.mtp_combine_hidden_states_fn)
+            self.state = target_model
+            self.state_leaves = self.runner.state_leaves
+            self.model = self.runner.model
+            return
+
         shared_names = [
             "vllm_model.language_model.model.embed_tokens.weight",
             "vllm_model.model.embed_tokens.weight"
@@ -335,10 +345,11 @@ class Eagle3Proposer:
 
         # The last KV cache group is for the draft model.
         block_tables = get_draft_block_tables(self.runner, req_indices_dp)
-        block_tables = device_array(self.mesh,
-                                    block_tables,
-                                    sharding=PartitionSpec(
-                                        ShardingAxisName.ATTN_DATA))
+        block_tables = device_array(
+            self.mesh,
+            block_tables,
+            sharding=NamedSharding(self.mesh,
+                                   PartitionSpec(ShardingAxisName.ATTN_DATA)))
         num_reqs = num_reqs_dp
         return self._prepare_inputs(
             state_leaves=self.state_leaves,
@@ -579,16 +590,18 @@ class Eagle3Proposer:
         last_token_indices,
         target_hidden_states,
     ) -> tuple[list[jax.Array], jnp.ndarray]:
-        return self._propose(
-            state_leaves=self.state_leaves,
-            kv_caches=kv_caches,
-            input_ids=input_ids,
-            attn_metadata=attn_metadata,
-            last_token_indices=last_token_indices,
-            target_hidden_states=target_hidden_states,
-            num_speculative_tokens=self.num_speculative_tokens,
-            layer_name_to_kvcache_index=tuple(
-                self.runner.layer_name_to_kvcache_index.items()))
+        propose_fn = (self._propose
+                      if getattr(self.mesh.devices.flat[0], "platform", None)
+                      == "tpu" else self._propose_no_compiler_options)
+        return propose_fn(state_leaves=self.state_leaves,
+                          kv_caches=kv_caches,
+                          input_ids=input_ids,
+                          attn_metadata=attn_metadata,
+                          last_token_indices=last_token_indices,
+                          target_hidden_states=target_hidden_states,
+                          num_speculative_tokens=self.num_speculative_tokens,
+                          layer_name_to_kvcache_index=tuple(
+                              self.runner.layer_name_to_kvcache_index.items()))
 
     @jax.jit(
         donate_argnames=("kv_caches", ),
@@ -665,6 +678,7 @@ class Eagle3Proposer:
                 seq_lens=new_seq_lens,
                 query_start_loc=query_start_loc,
                 block_tables=new_block_tables,
+                num_spec_tokens=0,
             )
             kv_caches, new_hidden_states, residual, _ = self.model_fn(
                 state_leaves,
@@ -684,3 +698,10 @@ class Eagle3Proposer:
         draft_token_ids = self._stack_draft_token_ids(draft_token_ids_list)
 
         return kv_caches, draft_token_ids
+
+    _propose_no_compiler_options = jax.jit(
+        _propose.__wrapped__,
+        donate_argnames=("kv_caches", ),
+        out_shardings=(None, None),
+        static_argnums=(0, 7, 8),
+    )

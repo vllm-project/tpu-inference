@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING, Optional
 
 import jax.numpy as jnp
@@ -27,7 +28,7 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.utils import SpecDecodeMetadata
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
-from tpu_inference.utils import device_array
+from tpu_inference.utils import device_array, safe_device_get
 
 if TYPE_CHECKING:
     from tpu_inference.layers.common.attention_metadata import \
@@ -189,7 +190,8 @@ class SpeculativeDecodingManager:
         next_prompt_token_id, is_in_prefill, num_reqs_dp = device_array(
             self.runner.mesh,
             (next_prompt_token_id, is_in_prefill, num_reqs_dp),
-            sharding=(PartitionSpec(ShardingAxisName.ATTN_DATA)))
+            sharding=NamedSharding(self.runner.mesh,
+                                   PartitionSpec(ShardingAxisName.ATTN_DATA)))
 
         aux_hidden_states_for_drafter = aux_hidden_states
 
@@ -219,7 +221,7 @@ class SpeculativeDecodingManager:
                 draft_token_ids = jnp.expand_dims(draft_token_ids, 1)
             return draft_token_ids[:, :num_spec]
         else:
-            draft_token_ids = np.array(draft_token_ids)
+            draft_token_ids = np.array(safe_device_get(draft_token_ids))
             if draft_token_ids.ndim == 1:
                 draft_token_ids = np.expand_dims(draft_token_ids, axis=-1)
             return draft_token_ids[:, :num_spec].tolist()
@@ -242,17 +244,32 @@ class SpeculativeDecodingManager:
             # When multiple KV cache groups are used (e.g., in hybrid models),
             # attn_metadata becomes a dict mapping layer names to AttentionMetadata.
             # Since all groups share the same seq_lens and input_positions, any would work for those.
-            # However, we specifically look for an attention layer key to get the correct
-            # block_tables structure, just in case the draft model (which is all attention) needs it.
-            attn_key = None
-            for key in attn_metadata.keys():
-                if ".self_attn." in key:
-                    attn_key = key
-                    break
-            if attn_key is not None:
-                attn_metadata = attn_metadata[attn_key]
+            # However, we specifically look for the draft layer or an attention layer key to get
+            # the correct block_tables structure for the draft model (which is all attention).
+            if "draft_layer.0" in attn_metadata:
+                attn_metadata = attn_metadata["draft_layer.0"]
             else:
-                attn_metadata = next(iter(attn_metadata.values()))
+                attn_key = None
+                for key in attn_metadata.keys():
+                    if key.startswith("draft_layer.") or ".self_attn." in key:
+                        attn_key = key
+                        break
+                if attn_key is not None:
+                    attn_metadata = attn_metadata[attn_key]
+                else:
+                    attn_metadata = next(iter(attn_metadata.values()))
+
+        if dataclasses.is_dataclass(attn_metadata):
+            # Clear gdn_read_offsets (unused by the pure-attention draft
+            # proposer) and set num_spec_tokens to K so step 0 of
+            # Eagle3Proposer._propose runs with decode_query_size = K + 1,
+            # matching CompilationManager._precompile_mtp_helpers.
+            attn_metadata = dataclasses.replace(
+                attn_metadata,
+                gdn_read_offsets=None,
+                num_spec_tokens=self.runner.speculative_config.
+                num_speculative_tokens,
+            )
 
         req_ids = self.runner.input_batch.req_ids
         max_num_seqs = attn_metadata.seq_lens.shape[0]
@@ -283,10 +300,13 @@ class SpeculativeDecodingManager:
         next_prompt_token_id, is_in_prefill, num_reqs_dp = device_array(
             self.runner.mesh,
             (next_prompt_token_id, is_in_prefill, num_reqs_dp),
-            sharding=(PartitionSpec(ShardingAxisName.ATTN_DATA)))
+            sharding=NamedSharding(self.runner.mesh,
+                                   PartitionSpec(ShardingAxisName.ATTN_DATA)))
 
         if self.runner.speculative_config.method == "mtp":
-            aux_hidden_states_for_drafter = (hidden_states, )
+            aux_hidden_states_for_drafter = (tuple(aux_hidden_states)
+                                             if aux_hidden_states else
+                                             (hidden_states, ))
         else:
             aux_hidden_states_for_drafter = aux_hidden_states
 
@@ -316,7 +336,7 @@ class SpeculativeDecodingManager:
                 draft_token_ids = jnp.expand_dims(draft_token_ids, 1)
             return draft_token_ids[:, :num_spec]
         else:
-            draft_token_ids = np.array(draft_token_ids)
+            draft_token_ids = np.array(safe_device_get(draft_token_ids))
             if draft_token_ids.ndim == 1:
                 draft_token_ids = np.expand_dims(draft_token_ids, axis=-1)
             return draft_token_ids[:, :num_spec].tolist()
@@ -415,6 +435,7 @@ class SpeculativeDecodingManager:
         padded_bonus_logits_indices = np.concatenate(out_bonus_logits_indices)
         padded_num_draft_tokens = np.concatenate(out_draft_lengths)
         padded_num_draft_tokens_cpu = padded_num_draft_tokens
+        padded_logits_indices_cpu = padded_logits_indices
         # CPU -> TPU copy.
         (padded_num_draft_tokens, padded_logits_indices,
          padded_target_logits_indices,
@@ -432,6 +453,7 @@ class SpeculativeDecodingManager:
             final_logits_indices=padded_logits_indices,
         )
         metadata.draft_lengths_cpu = padded_num_draft_tokens_cpu
+        metadata.final_logits_indices_cpu = padded_logits_indices_cpu
         metadata.req_indices_dp = req_indices_dp
         metadata.req_ids_dp = req_ids_dp
         return metadata

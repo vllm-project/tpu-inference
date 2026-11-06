@@ -887,6 +887,27 @@ class CompilationManager:
                     is_last_rank=is_last_rank,
                     num_reqs=num_reqs)
 
+    def _get_logits_dtype(self) -> jnp.dtype:
+        hsize = self.runner.model_config.get_hidden_size()
+        num_reqs = self.runner.num_reqs_paddings[0]
+        hidden_states = jax.ShapeDtypeStruct(
+            (num_reqs, hsize),
+            jnp.bfloat16,
+            sharding=NamedSharding(
+                self.runner.mesh,
+                PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
+        )
+        with self.runner.maybe_select_dummy_loras(
+                self.runner.lora_config,
+                np.array([num_reqs], dtype=np.int32)):
+            lora_metadata = self.runner.lora_utils.extract_lora_metadata()
+            return jax.eval_shape(
+                self.runner.compute_logits_fn,
+                self.runner.state_leaves,
+                hidden_states,
+                lora_metadata,
+            ).dtype
+
     def _precompile_select_from_array_helper(
         self,
         name: str,
@@ -897,6 +918,7 @@ class CompilationManager:
         indices_sharding: Optional[NamedSharding] = None,
         only_equal_paddings: bool = False,
         check_should_skip_padding: bool = True,
+        dtype: Any = jnp.bfloat16,
     ) -> None:
         """Precompile select_from_array operations with various input shape combinations.
 
@@ -927,7 +949,7 @@ class CompilationManager:
                     continue
 
                 array = jax.ShapeDtypeStruct((array_size, hidden_dim),
-                                             jnp.bfloat16,
+                                             dtype,
                                              sharding=input_sharding)
                 indices_to_select = jax.ShapeDtypeStruct(
                     (indices_count, ), jnp.int32, sharding=indices_sharding)
@@ -974,16 +996,20 @@ class CompilationManager:
 
         if self.runner.speculative_config:
             vocab_size = self.runner.vocab_size
+            logits_dtype = self._get_logits_dtype()
+            logits_sharding = NamedSharding(
+                self.runner.mesh,
+                PartitionSpec(ShardingAxisName.MLP_DATA,
+                              ShardingAxisName.MLP_TENSOR))
             self._precompile_select_from_array_helper(
                 name=
                 f"worker{self.runner.rank} select bonus tokens for spec decoding",
                 source_paddings=self.runner.num_logits_paddings,
                 indices_paddings=self.runner.num_reqs_paddings,
                 hidden_dim=vocab_size,
-                input_sharding=NamedSharding(
-                    self.runner.mesh,
-                    PartitionSpec(ShardingAxisName.MLP_DATA,
-                                  ShardingAxisName.MLP_TENSOR)),
+                input_sharding=logits_sharding,
+                indices_sharding=dp_sharding,
+                dtype=logits_dtype,
             )
             self._precompile_select_from_array_helper(
                 name=
@@ -991,11 +1017,10 @@ class CompilationManager:
                 source_paddings=self.runner.num_logits_paddings,
                 indices_paddings=self.runner.num_logits_paddings,
                 hidden_dim=vocab_size,
-                input_sharding=NamedSharding(
-                    self.runner.mesh,
-                    PartitionSpec(ShardingAxisName.MLP_DATA,
-                                  ShardingAxisName.MLP_TENSOR)),
+                input_sharding=logits_sharding,
+                indices_sharding=dp_sharding,
                 only_equal_paddings=True,
+                dtype=logits_dtype,
             )
 
     def _precompile_compute_logits(self) -> None:
@@ -1044,12 +1069,18 @@ class CompilationManager:
         replicated_sharding = NamedSharding(self.runner.mesh, PartitionSpec())
         for num_reqs in self.runner.num_reqs_paddings:
             # `logits_sharding` need to be consistent with
-            # compute_logits_fn's output sharding to avoid serving
+            # compute_logits_fn's output sharding (or bonus_logits sharding
+            # when speculative decoding is active) to avoid serving
             # time re-compilation.
-            logits_sharding = NamedSharding(
-                self.runner.mesh,
-                PartitionSpec(ShardingAxisName.MLP_DATA,
-                              ShardingAxisName.MLP_TENSOR))
+            if self.runner.speculative_config:
+                logits_sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+            else:
+                logits_sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(ShardingAxisName.MLP_DATA,
+                                  ShardingAxisName.MLP_TENSOR))
             # Similarly, `sampling_metadata_sharding` need to consistent
             # with runtime sampling_metadata sharding to the sample
             # function.
@@ -1180,8 +1211,9 @@ class CompilationManager:
                     if num_reqs > num_logits:
                         continue
                     combined_size = num_logits + num_reqs
-                    logits_sharding = NamedSharding(self.runner.mesh,
-                                                    PartitionSpec())
+                    logits_sharding = NamedSharding(
+                        self.runner.mesh,
+                        PartitionSpec(ShardingAxisName.ATTN_DATA, None))
                     token_ids_sharding = NamedSharding(
                         self.runner.mesh,
                         PartitionSpec(ShardingAxisName.ATTN_DATA))
@@ -1246,17 +1278,18 @@ class CompilationManager:
             "Compiling _process_and_extend_logits with different input shapes."
         )
         vocab_size = self.runner.vocab_size
+        logits_dtype = self._get_logits_dtype()
+        logits_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+        dp_sharding = NamedSharding(self.runner.mesh,
+                                    PartitionSpec(ShardingAxisName.ATTN_DATA))
         for num_logits in self.runner.num_logits_paddings:
             for num_reqs in self.runner.num_reqs_paddings:
                 if num_reqs > num_logits:
                     continue
 
-                logits_sharding = NamedSharding(self.runner.mesh,
-                                                PartitionSpec())
-                dp_sharding = NamedSharding(self.runner.mesh, PartitionSpec())
-
                 target_logits = self._create_dummy_tensor(
-                    (num_logits, vocab_size), jnp.float32, logits_sharding)
+                    (num_logits, vocab_size), logits_dtype, logits_sharding)
 
                 processed_bonus_logits = self._create_dummy_tensor(
                     (num_reqs, vocab_size), jnp.float32, logits_sharding)
@@ -1312,25 +1345,18 @@ class CompilationManager:
         logger.info(
             "Compiling _extend_logits_simple with different input shapes.")
         vocab_size = self.runner.vocab_size
+        logits_dtype = self._get_logits_dtype()
+        logits_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))
         for num_logits in self.runner.num_logits_paddings:
             for num_reqs in self.runner.num_reqs_paddings:
                 if num_reqs > num_logits:
                     continue
 
-                attn_data_size = get_mesh_shape_product(
-                    self.runner.mesh, ShardingAxisName.ATTN_DATA)
-                if attn_data_size == 1:
-                    logits_spec = PartitionSpec()
-                else:
-                    logits_spec = PartitionSpec(ShardingAxisName.ATTN_DATA,
-                                                None)
-
-                logits_sharding = NamedSharding(self.runner.mesh, logits_spec)
-
                 target_logits = self._create_dummy_tensor(
-                    (num_logits, vocab_size), jnp.bfloat16, logits_sharding)
+                    (num_logits, vocab_size), logits_dtype, logits_sharding)
                 bonus_logits = self._create_dummy_tensor(
-                    (num_reqs, vocab_size), jnp.bfloat16, logits_sharding)
+                    (num_reqs, vocab_size), logits_dtype, logits_sharding)
 
                 self._run_compilation(
                     f"worker{self.runner.rank} _extend_logits_simple",
@@ -1361,17 +1387,23 @@ class CompilationManager:
     def _precompile_select_from_array_spec_decode(self) -> None:
         logger.info("Compiling select_from_array with different input shapes.")
         vocab_size = self.runner.vocab_size
+        logits_dtype = self._get_logits_dtype()
         sharding = NamedSharding(
-            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+            self.runner.mesh,
+            PartitionSpec(ShardingAxisName.MLP_DATA,
+                          ShardingAxisName.MLP_TENSOR))
         indices_sharding = NamedSharding(
             self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
 
         for num_logits in self.runner.num_logits_paddings:
+            array = self._create_dummy_tensor(
+                (num_logits, vocab_size), logits_dtype, sharding)
             for num_reqs in self.runner.num_reqs_paddings:
+                if self._should_skip_padding_combination(num_logits,
+                                                         num_reqs,
+                                                         only_equal=False):
+                    continue
                 # Case 1: Select bonus logits (indices shape (num_reqs, ))
-                array = self._create_dummy_tensor(
-                    (num_logits, vocab_size), self.runner.model_config.dtype,
-                    sharding)
                 indices_bonus = self._create_dummy_tensor(
                     (num_reqs, ), jnp.int32, indices_sharding)
                 self._run_compilation(
@@ -1385,18 +1417,18 @@ class CompilationManager:
                     num_reqs=num_reqs,
                 )
 
-                # Case 2: Select target logits (indices shape (num_logits, ))
-                indices_target = self._create_dummy_tensor(
-                    (num_logits, ), jnp.int32, indices_sharding)
-                self._run_compilation(
-                    f"worker{self.runner.rank} select_target_logits",
-                    self.runner._select_from_array_fn,
-                    array,
-                    indices_target,
-                    self.runner.mesh,
-                    self.runner.vllm_config.sharding_config.prefill_cp_size,
-                    num_logits=num_logits,
-                )
+            # Case 2: Select target logits (indices shape (num_logits, ))
+            indices_target = self._create_dummy_tensor(
+                (num_logits, ), jnp.int32, indices_sharding)
+            self._run_compilation(
+                f"worker{self.runner.rank} select_target_logits",
+                self.runner._select_from_array_fn,
+                array,
+                indices_target,
+                self.runner.mesh,
+                self.runner.vllm_config.sharding_config.prefill_cp_size,
+                num_logits=num_logits,
+            )
 
     def _precompile_extract_draft_token_ids(self) -> None:
         logger.info(
@@ -1451,6 +1483,10 @@ class CompilationManager:
         # bonus_tokens (num_reqs)].
         for num_logits in self.runner.num_logits_paddings:
             for num_reqs in self.runner.num_reqs_paddings:
+                if self._should_skip_padding_combination(num_logits,
+                                                         num_reqs,
+                                                         only_equal=False):
+                    continue
                 sampled_token_ids = self._create_dummy_tensor(
                     (num_logits + num_reqs, ),
                     jnp.int32,
@@ -1485,23 +1521,41 @@ class CompilationManager:
                     num_logits=num_logits,
                     num_reqs=num_reqs,
                 )
+                if (self.runner.scheduler_config.async_scheduling
+                        and not getattr(sampled_token_ids,
+                                        "is_fully_addressable", True)):
+                    from tpu_inference.runner.tpu_runner import \
+                        _replicate_tokens_for_host
+                    self._run_compilation(
+                        f"worker{self.runner.rank} _replicate_tokens_for_host",
+                        _replicate_tokens_for_host,
+                        sampled_token_ids,
+                        num_logits=num_logits,
+                        num_reqs=num_reqs,
+                    )
 
     def _precompile_rejection_sampler(self) -> None:
         logger.info("Compiling rejection_sampler with different input shapes.")
         vocab_size = self.runner.vocab_size
+        logits_dtype = self._get_logits_dtype()
+        sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+        dp_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
         for num_logits in self.runner.num_logits_paddings:
             for num_reqs in self.runner.num_reqs_paddings:
-                sharding = NamedSharding(
-                    self.runner.mesh,
-                    PartitionSpec(ShardingAxisName.MLP_DATA,
-                                  ShardingAxisName.MLP_TENSOR))
+                if self._should_skip_padding_combination(num_logits,
+                                                         num_reqs,
+                                                         only_equal=False):
+                    continue
                 target_probs = self._create_dummy_tensor(
-                    (num_logits, vocab_size), self.runner.model_config.dtype,
-                    sharding)
+                    (num_logits, vocab_size), logits_dtype, sharding)
                 draft_token_ids = self._create_dummy_tensor((num_logits, ),
-                                                            jnp.int32)
+                                                            jnp.int32,
+                                                            dp_sharding)
                 num_draft_tokens = self._create_dummy_tensor((num_reqs, ),
-                                                             jnp.int32)
+                                                             jnp.int32,
+                                                             dp_sharding)
                 bonus_token_ids = self._create_dummy_tensor((num_reqs, ),
                                                             jnp.int32)
 
@@ -1519,11 +1573,14 @@ class CompilationManager:
                     if do_sampling:
                         compilation_name = "random_rejection_sampler"
                         temperature = self._create_dummy_tensor((num_reqs, ),
-                                                                np.float32)
+                                                                np.float32,
+                                                                dp_sharding)
                         top_k = self._create_dummy_tensor((num_reqs, ),
-                                                          np.int32)
+                                                          np.int32,
+                                                          dp_sharding)
                         top_p = self._create_dummy_tensor((num_reqs, ),
-                                                          np.float32)
+                                                          np.float32,
+                                                          dp_sharding)
                         sampling_metadata = TPUSupportedSamplingMetadata(
                             temperature=temperature,
                             top_k=top_k,
@@ -1614,6 +1671,8 @@ class CompilationManager:
                     request_distribution=request_distribution,
                     mamba_state_indices=eagle3_mamba_state_indices,
                     padded_num_reqs=num_reqs,
+                    num_spec_tokens=self.runner.speculative_config.
+                    num_speculative_tokens,
                 )
 
                 def drafter_propose_warmup(_fn, _args, _call_kwargs):
@@ -1758,6 +1817,8 @@ class CompilationManager:
                     request_distribution=request_distribution,
                     mamba_state_indices=mamba_state_indices,
                     padded_num_reqs=num_reqs,
+                    num_spec_tokens=self.runner.speculative_config.
+                    num_speculative_tokens,
                 )
 
                 def drafter_propose_warmup(_fn, _args, _call_kwargs):

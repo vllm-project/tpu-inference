@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import inspect
 from typing import Any, Dict, Optional, Tuple
 
 import jax
@@ -64,6 +65,10 @@ _VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset({
 # List of architectures that don't have pipeline parallelism support in jax yet.
 _PP_DISABLED_MODELS: frozenset[str] = frozenset(
     {"DeepseekV3ForCausalLM", "Eagle3LlamaForCausalLM", "GptOssForCausalLM"})
+
+_EVAL_SHAPE_KWARGS: dict[str, Any] = ({
+    "graph_updates": False
+} if "graph_updates" in inspect.signature(nnx.eval_shape).parameters else {})
 
 
 class UnsupportedArchitectureError(ValueError):
@@ -193,7 +198,7 @@ def _get_nnx_model(
                 mesh,
                 apply_to_abstract_model=True)
 
-            model = nnx.eval_shape(abstract_model_fn, graph_updates=False)
+            model = nnx.eval_shape(abstract_model_fn, **_EVAL_SHAPE_KWARGS)
             quantization_config = vllm_config.model_config.hf_config.quantization_config if hasattr(
                 vllm_config.model_config.hf_config,
                 "quantization_config") else {}
@@ -269,7 +274,7 @@ def _get_nnx_model(
                 mesh,
                 apply_to_abstract_model=True)
         with jax.set_mesh(mesh):
-            model = nnx.eval_shape(abstract_model_fn, graph_updates=False)
+            model = nnx.eval_shape(abstract_model_fn, **_EVAL_SHAPE_KWARGS)
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
@@ -417,13 +422,15 @@ def get_flax_model(
 
     _draft_step_fns: Dict[Any, Any] = {}
 
-    def _get_draft_step_fn(kv_caches):
+    def _get_draft_step_fn(kv_caches, impl_fn=None):
+        if impl_fn is None:
+            impl_fn = run_draft_model_impl
         shardings = _kv_cache_out_shardings(kv_caches)
-        key = tuple(jax.tree.leaves(shardings))
+        key = (impl_fn, tuple(jax.tree.leaves(shardings)))
         fn = _draft_step_fns.get(key)
         if fn is None:
             fn = jax.jit(
-                run_draft_model_impl,
+                impl_fn,
                 out_shardings=(
                     shardings,
                     hidden_states_sharding,
@@ -432,14 +439,15 @@ def get_flax_model(
                 ),
                 donate_argnums=1,  # 0 is state_leaves, 1 is kv_cache
                 static_argnums=(5, ),  # 5 is layer_name_to_kvcache_index
+                static_argnames=("spec_step_idx", ),
             )
             _draft_step_fns[key] = fn
         return fn
 
-    def run_draft_model_impl(state_leaves, *args):
+    def run_draft_model_impl(state_leaves, *args, **kwargs):
         state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
         model = nnx.merge(graphdef, state)
-        return model(*args)
+        return model(*args, **kwargs)
 
     logits_sharding = NamedSharding(
         mesh,
@@ -594,6 +602,34 @@ def get_flax_model(
     # `ModelInterface.model`. The torchax path sets the same attribute in
     # `models/vllm/vllm_model_wrapper.py`, so both paths define it.
     jit_model.step_fn_no_options = wrapped_model_fn_no_options
+
+    if (not is_draft_model and hasattr(jit_model, "mtp_forward")
+            and getattr(jit_model, "mtp_layer", None) is not None):
+
+        def run_mtp_model_impl(state_leaves, *args, **kwargs):
+            state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
+            model = nnx.merge(graphdef, state)
+            return model.mtp_forward(*args, **kwargs)
+
+        def wrapped_mtp_model_fn(*args, **kwargs):
+            kwargs.pop("shared_attention_metadata", None)
+            return _get_draft_step_fn(args[1], run_mtp_model_impl)(*args,
+                                                                   **kwargs)
+
+        has_mtp_logits = hasattr(jit_model, "compute_mtp_logits")
+
+        @jax.jit(out_shardings=(logits_sharding))
+        def run_mtp_compute_logits(state_leaves, *args):
+            state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
+            model = nnx.merge(graphdef, state)
+            hidden_state, *_ = args
+            if has_mtp_logits:
+                return model.compute_mtp_logits(hidden_state)
+            return model.compute_logits(hidden_state)
+
+        jit_model.mtp_model_fn = wrapped_mtp_model_fn
+        jit_model.mtp_compute_logits_fn = run_mtp_compute_logits
+        jit_model.mtp_combine_hidden_states_fn = combine_hidden_states
 
     return ModelInterface(
         model_fn=wrapped_model_fn,

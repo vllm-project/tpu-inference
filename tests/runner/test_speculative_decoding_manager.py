@@ -471,3 +471,105 @@ class TestSpeculativeDecodingManager:
         assert result == [[10, 11], [20, 21]]
         self.runner.drafter.prepare_inputs.assert_called_once()
         self.runner.drafter.propose.assert_called_once()
+
+    def test_propose_eagle3_draft_token_ids_mtp_hybrid_metadata_and_aux_hidden(
+            self):
+        """For method='mtp' on hybrid models, propose_eagle3_draft_token_ids
+        must select draft_layer.0's AttentionMetadata (not layer.0's Mamba
+        metadata) and prefer non-empty aux_hidden_states (pre-norm trunk hidden
+        state) over post-norm hidden_states."""
+        self.runner.drafter = MagicMock(spec=Eagle3Proposer)
+        self.runner.speculative_config.method = "mtp"
+
+        self.runner.input_batch = MagicMock()
+        self.runner.input_batch.req_ids = ["req-1", "req-2"]
+        self.runner.requests = {
+            "req-1": MagicMock(),
+            "req-2": MagicMock(),
+        }
+        self.runner.mesh = self.mock_mesh
+        self.runner.kv_caches = MagicMock()
+
+        from tpu_inference.layers.common.attention_metadata import \
+            AttentionMetadata
+
+        mamba_meta = MagicMock(name="mamba_meta")
+        mamba_meta.seq_lens.shape = [2]
+        draft_meta = AttentionMetadata(
+            input_positions=np.zeros((4, ), dtype=np.int32),
+            block_tables=np.zeros((8, ), dtype=np.int32),
+            seq_lens=np.array([2, 2], dtype=np.int32),
+            query_start_loc=np.array([0, 2, 4], dtype=np.int32),
+            request_distribution=np.array([0, 0, 2], dtype=np.int32),
+            mamba_state_indices=np.zeros((2, ), dtype=np.int32),
+            padded_num_reqs=2,
+            gdn_read_offsets=np.zeros((2, ), dtype=np.int32),
+            num_spec_tokens=3,
+        )
+        grouped_attn_metadata = {
+            "layer.0": mamba_meta,
+            "layer.3": draft_meta,
+            "draft_layer.0": draft_meta,
+        }
+
+        def fake_prepare_inputs(meta, *args, **kwargs):
+            return (MagicMock(), MagicMock(), MagicMock(), meta)
+
+        self.runner.drafter.prepare_inputs.side_effect = fake_prepare_inputs
+        self.runner.drafter.propose.return_value = (
+            self.runner.kv_caches,
+            [[10, 11], [20, 21]],
+        )
+
+        spec_decode_metadata = MagicMock(spec=SpecDecodeMetadata)
+        spec_decode_metadata.req_indices_dp = {0: [0, 1]}
+        pre_norm_hidden = MagicMock(name="pre_norm_hidden")
+        post_norm_hidden = MagicMock(name="post_norm_hidden")
+
+        with patch(
+                "tpu_inference.runner.speculative_decoding_manager.device_array",
+                side_effect=lambda mesh, x, **kwargs: x):
+            self.runner.speculative_decoding_manager.propose_eagle3_draft_token_ids(
+                spec_decode_metadata=spec_decode_metadata,
+                last_sampled_token_id=MagicMock(),
+                num_rejected_tokens=MagicMock(),
+                discard_sampled_tokens_req_indices=[],
+                aux_hidden_states=[pre_norm_hidden],
+                attn_metadata=grouped_attn_metadata,
+                scheduler_output=MagicMock(),
+                input_ids=MagicMock(),
+                async_scheduling=False,
+                hidden_states=post_norm_hidden,
+            )
+
+        call_args = self.runner.drafter.prepare_inputs.call_args[0]
+        passed_meta = call_args[0]
+        assert isinstance(passed_meta, AttentionMetadata)
+        assert passed_meta.gdn_read_offsets is None
+        assert passed_meta.num_spec_tokens == 3
+        propose_kwargs = self.runner.drafter.propose.call_args[1]
+        assert propose_kwargs["attn_metadata"].gdn_read_offsets is None
+        assert propose_kwargs["attn_metadata"].num_spec_tokens == 3
+        assert isinstance(call_args[2], tuple)
+        assert call_args[2] == (pre_norm_hidden, )
+
+        # When aux_hidden_states is empty, fall back to (hidden_states,).
+        self.runner.drafter.prepare_inputs.reset_mock()
+        with patch(
+                "tpu_inference.runner.speculative_decoding_manager.device_array",
+                side_effect=lambda mesh, x, **kwargs: x):
+            self.runner.speculative_decoding_manager.propose_eagle3_draft_token_ids(
+                spec_decode_metadata=spec_decode_metadata,
+                last_sampled_token_id=MagicMock(),
+                num_rejected_tokens=MagicMock(),
+                discard_sampled_tokens_req_indices=[],
+                aux_hidden_states=(),
+                attn_metadata=grouped_attn_metadata,
+                scheduler_output=MagicMock(),
+                input_ids=MagicMock(),
+                async_scheduling=False,
+                hidden_states=post_norm_hidden,
+            )
+
+        call_args_empty = self.runner.drafter.prepare_inputs.call_args[0]
+        assert call_args_empty[2] == (post_norm_hidden, )
