@@ -33,7 +33,7 @@ const COMMAND_DATA = {
     },
     "source": { 
         cmd: `# 1. Install system dependencies:\nsudo apt-get update && sudo apt-get install -y libopenblas-base libopenmpi-dev libomp-dev\n\n# 2. Clone the vllm and tpu-inference repositories:\ngit clone https://github.com/vllm-project/tpu-inference.git\nexport VLLM_COMMIT_HASH=$(cat tpu-inference/.buildkite/vllm_lkg.version)\ngit clone https://github.com/vllm-project/vllm.git\ncd vllm\ngit checkout "\${VLLM_COMMIT_HASH}"\ncd ..\n\n# 3. Install uv and set up a Python virtual environment:\ncurl -LsSf https://astral.sh/uv/install.sh | sh\nsource $HOME/.local/bin/env\nuv venv vllm_env --python 3.12\nsource vllm_env/bin/activate\n\n# 4. Install vllm from source, targeting the TPU device:\ncd vllm\nuv pip install -r requirements/tpu.txt --torch-backend=cpu\nVLLM_TARGET_DEVICE="tpu" uv pip install -e . --no-build-isolation\ncd ..\n\n# 5. Install tpu-inference from source:\ncd tpu-inference\nuv pip install -e .\ncd ..`, 
-        inst: "For debugging or development purposes, you can install <code>tpu-inference</code> from source. <code>tpu-inference</code> is a plugin for <code>vllm</code>, so you need to install both from source." 
+        inst: "For debugging or development purposes, you can install <code>vllm-jax</code> from source. <code>vllm-jax</code> is a plugin for <code>vllm</code>, so you need to install both from source." 
     }
 };
 

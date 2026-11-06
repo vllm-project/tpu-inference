@@ -10,7 +10,7 @@
   },
   "benchmark_cases": [
     {
-      "case_name": "Qwen3_8-2_4T-A95B-FP8-dataset_random-inlen_8192-outlen_1024-max_concurrency_368",
+      "case_name": "Qwen3_8-2_4T-A95B-FP8-dataset_random-inlen_8192-outlen_1024-max_concurrency_384",
       "ci_queue": [
         "tpu_v7x_32_queue"
       ],
@@ -28,10 +28,12 @@
           "NEW_MODEL_DESIGN": "1",
           "MOE_HIERARCHICAL_DISPATCH": "1",
           "MOE_HIERARCHICAL_COLLECT": "1",
+          "MOE_FOLD_ROUTING_INTO_DISPATCH": "1",
           "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
           "RAGGED_GATHER_MAX_ROW_SUBCHUNKS": "1",
           "RAGGED_GATHER_TRIM_ROWS": "0",
           "TPU_MESH_ATTN_DP_RING": "1",
+          "SKIP_MAMBA_SCHEDULER_BLOCKS": "1",
           "MOE_STAGE_WEIGHTS_ON_HOST": "1",
           "VLLM_INCREMENTAL_FP8_LOADING": "1",
           "BF16_LINEAR_REQUANTIZE_BLOCK_SIZE": "512",
@@ -52,12 +54,12 @@
           "enable-expert-parallel": true,
           "additional-config": "{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true, \"attn_dp_size\": 8}}, \"compilation_sizes\": [384]}",
           "max-model-len": 40960,
-          "max-num-seqs": 46,
+          "max-num-seqs": 48,
           "max-num-batched-tokens": 512,
           "block-size": 128,
           "kv-cache-dtype": "fp8",
           "gpu-memory-utilization": 0.98,
-          "num-gpu-blocks-override": 27232,
+          "num-gpu-blocks-override": 28928,
           "no-enable-prefix-caching": true,
           "async-scheduling": true
         }
@@ -70,9 +72,9 @@
           "dataset-name": "random",
           "random-input-len": 8192,
           "random-output-len": 1024,
-          "num-prompts": 368,
-          "max-concurrency": 368,
-          "num-warmups": 368,
+          "num-prompts": 384,
+          "max-concurrency": 384,
+          "num-warmups": 384,
           "request-rate": "inf",
           "seed": 42,
           "ignore-eos": true,

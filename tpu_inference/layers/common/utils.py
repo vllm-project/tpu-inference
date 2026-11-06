@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Sequence
 from contextlib import nullcontext
 
 import jax
@@ -182,3 +183,11 @@ def cpu_mesh() -> Mesh:
 def cpu_mesh_context():
     """A context to enforce using CPU mesh, used for loading weights on CPU."""
     return jax.set_mesh(cpu_mesh())
+
+
+def as_axes(spec: str | Sequence[str] | None) -> tuple[str, ...]:
+    """Turn an axis spec (None, one axis name or several) into a tuple of axis
+    names."""
+    if spec is None:
+        return ()
+    return (spec, ) if isinstance(spec, str) else tuple(spec)

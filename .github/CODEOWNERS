@@ -19,7 +19,7 @@
 /CONTRIBUTING.md @jrplatin @bvrockwell @RobMulla @QiliangCui
 
 # Distributed Computing
-/tpu_inference/distributed/ @mrjunwan-lang @sixiang-google
+/tpu_inference/distributed/ @mrjunwan-lang @sixiang-google @wenxindongwork @QiliangCui
 
 # Kernel Implementations (Performance-critical)
 /tpu_inference/kernels/ @kyuyeunk @bythew3i @a1yssan13 @jrplatin
@@ -32,6 +32,9 @@
 /tpu_inference/layers/jax/ @jrplatin @gpolovets1 @lk-chen
 /tpu_inference/layers/vllm/ @kyuyeunk @vanbasten23 @gxd3 @jrplatin
 /tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v4/ @gxd3 @a1yssan13 @inucool12
+# FlyWheel attention backend (--attention-backend flywheel)
+/tpu_inference/layers/common/flywheel_*.py @kyuyeunk @lk-chen @jrplatin @gxd3
+/tpu_inference/layers/vllm/backends/flywheel.py @kyuyeunk @vanbasten23 @gxd3 @jrplatin @lk-chen
 
 # Model Implementations and wrappers
 /tpu_inference/models/ @kyuyeunk @lk-chen @jrplatin
@@ -83,8 +86,8 @@
 
 # Tests mirror production-code ownership (CODEOWNERS rules per subtree)
 /tests/core/ @sixiang-google @mrjunwan-lang @wenxindongwork
-/tests/distributed/ @mrjunwan-lang @sixiang-google
-/tests/executors/ @sixiang-google @mrjunwan-lang
+/tests/distributed/ @mrjunwan-lang @sixiang-google @wenxindongwork @QiliangCui
+/tests/executors/ @sixiang-google @mrjunwan-lang @wenxindongwork @QiliangCui
 /tests/kernels/ @kyuyeunk @bythew3i @a1yssan13
 /tests/kernels/deepseek_v4 @gxd3 @a1yssan13 @inucool12
 /tests/kernels/rpa_v3_cp/ @kyuyeunk @wenxindongwork @weiyu0824 
@@ -94,7 +97,7 @@
 /tests/models/ @kyuyeunk @lk-chen @jrplatin
 /tests/models/jax/ @kyuyeunk @lk-chen @jrplatin
 /tests/layers/jax/sample/test_rejection_sampler.py @Lumosis @gxd3
-/tests/platforms/ @sixiang-google @mrjunwan-lang
+/tests/platforms/ @sixiang-google @mrjunwan-lang @wenxindongwork @QiliangCui
 /tests/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google @mrjunwan-lang @gxd3 @a1yssan13
 /tests/spec_decode/ @Lumosis @gxd3
 /tests/worker/ @sixiang-google @mrjunwan-lang @jrplatin @vanbasten23 @wenxindongwork
@@ -102,3 +105,6 @@
 /tests/e2e/ @pv97 @wenxindongwork @jrplatin @Lumosis @gxd3
 /tests/offload/ @juncgu-google @richardsliu
 /tests/scripts/ @jrplatin @QiliangCui
+/tests/kernels/flywheel_*_test.py @kyuyeunk @bythew3i @a1yssan13 @lk-chen
+/tests/layers/common/test_flywheel_*.py @kyuyeunk @lk-chen @jrplatin
+/tests/layers/vllm/backends/test_flywheel.py @kyuyeunk @lk-chen @jrplatin

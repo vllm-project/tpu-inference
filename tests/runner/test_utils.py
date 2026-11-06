@@ -4,6 +4,7 @@ import logging
 import os
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, mock_open, patch
 
 import jax
@@ -19,8 +20,8 @@ from tpu_inference.runner.utils import (
     PhasedBasedProfiler, build_token_paddings,
     determine_phase_from_batch_composition_stats,
     extract_request_ids_for_tracing, get_batch_composition_stats,
-    get_padded_num_reqs_with_upper_limit, get_padded_token_len,
-    get_req_paddings, get_token_paddings)
+    get_eos_token_id, get_padded_num_reqs_with_upper_limit,
+    get_padded_token_len, get_req_paddings, get_token_paddings)
 
 
 def test_min_token_size_alignment():
@@ -930,3 +931,64 @@ def test_merge_profile_directories_ignores_stale_prior_run_data(tmp_path):
     # New data lands in its own canonical dir.
     new_dst = phase_dir / "plugins" / "profile" / "2026_05_06_04_47_36"
     assert (new_dst / "new.xplane.pb").read_text() == "NEW"
+
+
+class TestGetEosTokenId:
+    """Tests for get_eos_token_id config extraction, deduplication, and fallbacks."""
+
+    def test_single_eos_from_hf_config(self):
+        cfg = SimpleNamespace(hf_config=SimpleNamespace(eos_token_id=151643))
+        assert get_eos_token_id(cfg) == (151643, )
+
+    def test_list_eos_from_hf_config(self):
+        cfg = SimpleNamespace(hf_config=SimpleNamespace(
+            eos_token_id=[151643, 151645]))
+        assert get_eos_token_id(cfg) == (151643, 151645)
+
+    def test_eos_from_hf_text_config(self):
+        cfg = SimpleNamespace(hf_text_config=SimpleNamespace(eos_token_id=42))
+        assert get_eos_token_id(cfg) == (42, )
+
+    def test_eos_from_generation_config(self):
+        cfg = SimpleNamespace(
+            try_get_generation_config=lambda: {"eos_token_id": [100, 200]})
+        assert get_eos_token_id(cfg) == (100, 200)
+
+    def test_deduplication_and_order_preservation(self):
+        cfg = SimpleNamespace(
+            hf_config=SimpleNamespace(eos_token_id=[10, 20]),
+            hf_text_config=SimpleNamespace(eos_token_id=20),
+            try_get_generation_config=lambda: {"eos_token_id": [30, 10]},
+        )
+        assert get_eos_token_id(cfg) == (10, 20, 30)
+
+    def test_filters_invalid_types_and_mocks(self):
+        cfg = SimpleNamespace(
+            hf_config=SimpleNamespace(eos_token_id=MagicMock()),
+            hf_text_config=SimpleNamespace(
+                eos_token_id=["invalid", True, False, None, 99]),
+            try_get_generation_config=lambda: {"eos_token_id": "bad"},
+        )
+        assert get_eos_token_id(cfg) == (99, )
+
+    def test_fallback_to_vocab_size(self):
+        cfg = SimpleNamespace(
+            hf_config=SimpleNamespace(eos_token_id=None),
+            get_vocab_size=lambda: 32000,
+        )
+        assert get_eos_token_id(cfg) == (31999, )
+
+    def test_fallback_to_empty_when_no_config(self):
+        cfg = SimpleNamespace()
+        assert get_eos_token_id(cfg) == ()
+
+    def test_generation_config_exception_handled(self):
+
+        def bad_gen():
+            raise RuntimeError("corrupted")
+
+        cfg = SimpleNamespace(
+            try_get_generation_config=bad_gen,
+            get_vocab_size=lambda: 1000,
+        )
+        assert get_eos_token_id(cfg) == (999, )

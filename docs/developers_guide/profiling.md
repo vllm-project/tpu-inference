@@ -4,7 +4,7 @@ There are currently three ways to profile your workload.
 
 ## Using `examples/tpu_profiling.py`
 
-### vLLM TPU Profiling Script
+### vLLM JAX Profiling Script
 
 This script is a utility for profiling the performance of the vLLM engine on TPU VMs. It uses the JAX profiler to capture detailed performance traces.
 

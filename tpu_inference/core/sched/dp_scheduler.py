@@ -55,6 +55,24 @@ from tpu_inference.utils import time_function
 logger = init_logger(__name__)
 
 
+def _get_max_cache_hit_length(request: Request) -> int:
+    """Longest prefix-cache hit this request may read, in tokens (0 = none).
+
+    Mirrors what vLLM's Scheduler hands to KVCacheManager.get_computed_blocks.
+    Newer vLLM folds `skip_reading_prefix_cache` and the prompt-logprobs lower
+    bound into `Request.get_max_cache_hit_length()` (via
+    `prefix_cache_hit_limit`); older vLLM exposed a bare
+    `Request.skip_reading_prefix_cache` flag.
+    """
+    get_max = getattr(request, "get_max_cache_hit_length", None)
+    if get_max is not None:
+        return get_max()
+    if getattr(request, "skip_reading_prefix_cache", False):
+        return 0
+    # The last token is always recomputed to produce logits.
+    return request.num_tokens - 1
+
+
 class SchedulerCommand(Enum):
     """Enum for scheduler worker process commands."""
     ADD_REQUEST = "add_request"
@@ -67,6 +85,7 @@ class SchedulerCommand(Enum):
     RESET_PREFIX_CACHE = "reset_prefix_cache"
     GET_NUM_UNFINISHED_REQUESTS = "get_num_unfinished_requests"
     HAS_FINISHED_REQUESTS = "has_finished_requests"
+    HAS_REQUEST = "has_request"
     GET_REQUEST_COUNTS = "get_request_counts"
     GET_TOKEN_COUNT = "get_token_count"
     GET_PENDING_PREFILL_TOKENS = "get_pending_prefill_tokens"
@@ -239,58 +258,8 @@ def _scheduler_worker_process(
                 case SchedulerCommand.UPDATE_FROM_OUTPUT:
                     model_runner_output = data
                     scheduler_output = _cached_scheduler_outputs.popleft()
-
-                    # Tokens removed by the rewrite below, per request.
-                    shortfalls: Dict[str, int] = {}
-
-                    if model_runner_output.sampled_token_ids:
-                        # Synchronize the locally cached `num_scheduled_tokens` with the actual
-                        # count of generated tokens from the continue-decode multi-step execution.
-                        # This ensures correct request state updates and MoE experts slicing inside
-                        # local `scheduler.update_from_output(...)`.
-                        cached_data = scheduler_output.scheduled_cached_reqs
-                        num_output_tokens_dict = dict(
-                            zip(cached_data.req_ids,
-                                cached_data.num_output_tokens))
-                        for req_id, req_idx in model_runner_output.req_id_to_index.items(
-                        ):
-                            if num_output_tokens_dict.get(req_id, 0) > 0:
-                                num_sampled = len(model_runner_output.
-                                                  sampled_token_ids[req_idx])
-                                if num_sampled > 0:
-                                    original = (scheduler_output.
-                                                num_scheduled_tokens[req_id])
-                                    if original != num_sampled:
-                                        shortfalls[req_id] = (original -
-                                                              num_sampled)
-                                    scheduler_output.num_scheduled_tokens[
-                                        req_id] = num_sampled
-
                     result = scheduler.update_from_output(
                         scheduler_output, model_runner_output)
-
-                    # Track in-flight and stale output tokens on the
-                    # SCHEDULED count, not the SAMPLED count.
-                    # _update_after_schedule (vllm scheduler.py) adds the
-                    # scheduled count to num_in_flight_tokens, but
-                    # update_from_output subtracts the sampled count the
-                    # overwrite above left there, and the difference stays
-                    # attached to the request.
-                    #
-                    # Preemption copies that difference into
-                    # num_stale_output_tokens, and schedule()
-                    # then parks the request forever, waiting on output
-                    # tokens that never arrive.
-                    for req_id, shortfall in shortfalls.items():
-                        request = scheduler.requests.get(req_id)
-                        if request is None:
-                            continue  # finished and dropped during the update
-                        request.num_in_flight_tokens = max(
-                            0, request.num_in_flight_tokens - shortfall)
-                        if request.num_stale_output_tokens > 0:
-                            request.num_stale_output_tokens = max(
-                                0, request.num_stale_output_tokens - shortfall)
-
                     _send_result(result)
 
                 case SchedulerCommand.GET_GRAMMAR_BITMASK:
@@ -322,6 +291,14 @@ def _scheduler_worker_process(
 
                 case SchedulerCommand.HAS_FINISHED_REQUESTS:
                     result = scheduler.has_finished_requests()
+                    _send_result(result)
+
+                case SchedulerCommand.HAS_REQUEST:
+                    request_id = data
+                    if hasattr(scheduler, "has_request"):
+                        result = scheduler.has_request(request_id)
+                    else:
+                        result = request_id in scheduler.requests
                     _send_result(result)
 
                 case SchedulerCommand.GET_REQUEST_COUNTS:
@@ -366,10 +343,12 @@ def _scheduler_worker_process(
                     # Probe for cached blocks without recording prefix cache stats.
                     request = data
                     kv_cache_mgr = scheduler.kv_cache_manager
-                    if not kv_cache_mgr.enable_caching or request.skip_reading_prefix_cache:
+                    max_cache_hit_length = (_get_max_cache_hit_length(request)
+                                            if kv_cache_mgr.enable_caching else
+                                            0)
+                    if max_cache_hit_length <= 0:
                         _send_result(0)
                     else:
-                        max_cache_hit_length = request.num_tokens - 1
                         _, num_cached_tokens, *_ = (
                             kv_cache_mgr.coordinator.find_longest_cache_hit(
                                 request.block_hashes, max_cache_hit_length))
@@ -532,46 +511,64 @@ class DPScheduler(SchedulerInterface):
         self.output_conns: List[Connection] = []  # child writes, parent reads
         self.processes: List[Process] = []
 
+        # Keep unpicklable config state out of process arguments while workers
+        # start, and restore it afterwards in a finally block.
+        compilation_config = self.vllm_config.compilation_config
+        cached_static_forward_context = (
+            compilation_config.static_forward_context.copy())
+        compilation_config.static_forward_context.clear()
+        # `slice` is not declared on DeviceConfig; core_tpu.py attaches it
+        # dynamically via setattr (holding jax.devices()) only in disagg mode.
+        device_config = self.vllm_config.device_config
+        cached_slice = getattr(device_config, 'slice', None)
+        if cached_slice is not None:
+            device_config.slice = None
+
         gc_was_enabled = gc.isenabled()
         if gc_was_enabled:
             gc.disable()
         gc.freeze()
 
-        for rank in range(self.dp_size):
-            # Each pipe gives (parent_end, child_end)
-            # Input pipe: parent sends commands, child receives
-            input_parent_conn, input_child_conn = ctx.Pipe()
-            # Output pipe: child sends results, parent receives
-            output_parent_conn, output_child_conn = ctx.Pipe()
+        try:
+            for rank in range(self.dp_size):
+                # Each pipe gives (parent_end, child_end)
+                # Input pipe: parent sends commands, child receives
+                input_parent_conn, input_child_conn = ctx.Pipe()
+                # Output pipe: child sends results, parent receives
+                output_parent_conn, output_child_conn = ctx.Pipe()
 
-            self.input_conns.append(input_parent_conn)
-            self.output_conns.append(output_parent_conn)
+                self.input_conns.append(input_parent_conn)
+                self.output_conns.append(output_parent_conn)
 
-            process = ctx.Process(
-                target=_scheduler_worker_process,
-                args=(
-                    rank,
-                    input_child_conn,
-                    output_child_conn,
-                    self.vllm_config,
-                    self.per_rank_kv_cache_configs[rank],
-                    structured_output_manager,
-                    block_size,
-                    self.hash_block_size,
-                    mm_registry,
-                    include_finished_set,
-                    log_stats,
-                    original_scheduler_cls,
-                ),
-            )
-            process.start()
-            # Close child ends in parent process
-            input_child_conn.close()
-            output_child_conn.close()
-            self.processes.append(process)
-
-        if gc_was_enabled:
-            gc.enable()
+                process = ctx.Process(
+                    target=_scheduler_worker_process,
+                    args=(
+                        rank,
+                        input_child_conn,
+                        output_child_conn,
+                        self.vllm_config,
+                        self.per_rank_kv_cache_configs[rank],
+                        structured_output_manager,
+                        block_size,
+                        self.hash_block_size,
+                        mm_registry,
+                        include_finished_set,
+                        log_stats,
+                        original_scheduler_cls,
+                    ),
+                )
+                process.start()
+                # Close child ends in parent process
+                input_child_conn.close()
+                output_child_conn.close()
+                self.processes.append(process)
+        finally:
+            compilation_config.static_forward_context.update(
+                cached_static_forward_context)
+            if cached_slice is not None:
+                device_config.slice = cached_slice
+            if gc_was_enabled:
+                gc.enable()
 
         # Reverse mapping from output connection to rank for wait()-based collection.
         self._output_conn_to_rank: Dict[int, int] = {
@@ -965,10 +962,6 @@ class DPScheduler(SchedulerInterface):
         for output in rank_outputs:
             combined_finished_req_ids.update(output.finished_req_ids)
 
-        # Combine other fields (take from first non-empty or use defaults)
-        num_common_prefix_blocks = rank_outputs[
-            0].num_common_prefix_blocks if rank_outputs else []
-
         # Create DP rank assignment mapping for scheduled requests
         assigned_dp_rank = {}
         for req_id in combined_num_scheduled_tokens.keys():
@@ -1042,7 +1035,6 @@ class DPScheduler(SchedulerInterface):
             total_num_scheduled_tokens=total_scheduled_tokens,
             scheduled_spec_decode_tokens=combined_spec_decode_tokens,
             scheduled_encoder_inputs=combined_encoder_inputs,
-            num_common_prefix_blocks=num_common_prefix_blocks,
             finished_req_ids=combined_finished_req_ids,
             free_encoder_mm_hashes=set(),
             assigned_dp_rank=assigned_dp_rank,
@@ -1300,19 +1292,6 @@ class DPScheduler(SchedulerInterface):
         We need to route the model runner output to the appropriate scheduler
         based on which rank each request belongs to.
         """
-        cached_data = scheduler_output.scheduled_cached_reqs
-        num_output_tokens_dict = dict(
-            zip(cached_data.req_ids, cached_data.num_output_tokens))
-
-        for req_id, req_idx in model_runner_output.req_id_to_index.items():
-            if num_output_tokens_dict.get(req_id, 0) > 0:
-                if model_runner_output.sampled_token_ids:
-                    num_sampled = len(
-                        model_runner_output.sampled_token_ids[req_idx])
-                    if num_sampled > 0:
-                        scheduler_output.num_scheduled_tokens[
-                            req_id] = num_sampled
-
         # Split model output by DP rank (each rank gets only its req_ids).
         rank_model_outputs = self._split_model_output_by_rank(
             scheduler_output, model_runner_output)
@@ -1411,6 +1390,7 @@ class DPScheduler(SchedulerInterface):
         aux_output = g.aux_output_connector_output
 
         outputs = []
+
         for rank in range(self.dp_size):
             req_ids = scheduler_output.req_ids_per_rank.get(rank, [])
 
@@ -1450,6 +1430,16 @@ class DPScheduler(SchedulerInterface):
         """Remove finished requests from our DP rank assignment tracking."""
         for req_id in finished_req_ids:
             self.assigned_dp_rank.pop(req_id, None)
+
+    def has_request(self, request_id: str) -> bool:
+        """Check if the scheduler holds the request across pending and DP ranks."""
+        if any(r.request_id == request_id for r in self._pending_new_requests):
+            return True
+        rank = self.assigned_dp_rank.get(request_id)
+        if rank is None:
+            return False
+        self._send_command(rank, SchedulerCommand.HAS_REQUEST, request_id)
+        return self._get_result(rank, SchedulerCommand.HAS_REQUEST)
 
     def finish_requests(self, request_ids,
                         finished_status) -> List[FinishedRequestInfo]:

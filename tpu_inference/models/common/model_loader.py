@@ -58,6 +58,7 @@ _VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset({
     "Qwen3MoeForCausalLM",
     "KimiK25ForConditionalGeneration",
     "Qwen3_5MoeForConditionalGeneration",
+    "Qwen3_5ForConditionalGeneration",
 })
 
 # List of architectures that don't have pipeline parallelism support in jax yet.
@@ -77,6 +78,8 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     from tpu_inference.models.jax.deepseek_v3 import DeepseekV3ForCausalLM
     from tpu_inference.models.jax.dflash import DFlashForCausalLM
     from tpu_inference.models.jax.gemma4 import Gemma4ForCausalLM
+    from tpu_inference.models.jax.gemma4_classification import \
+        Gemma4ForSequenceClassification
     from tpu_inference.models.jax.gemma4_mm import \
         Gemma4ForConditionalGeneration
     from tpu_inference.models.jax.gemma4_mtp import Gemma4MTPForCausalLM
@@ -102,6 +105,8 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY[
         "Gemma4ForConditionalGeneration"] = Gemma4ForConditionalGeneration
     _MODEL_REGISTRY["Gemma4ForCausalLM"] = Gemma4ForCausalLM
+    _MODEL_REGISTRY[
+        "Gemma4ForSequenceClassification"] = Gemma4ForSequenceClassification
     _MODEL_REGISTRY["Gemma4MTPModel"] = Gemma4MTPForCausalLM
     _MODEL_REGISTRY["DFlashForCausalLM"] = DFlashForCausalLM
     _MODEL_REGISTRY["DFlashDraftModel"] = DFlashForCausalLM
@@ -115,6 +120,15 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
         "registered in tpu-inference. Falling back to vLLM-native "
         f"Pytorch definition. JAX-native architectures: {list(_MODEL_REGISTRY.keys())}"
     )
+
+
+def _supports_vllm_config(model_class: Any, vllm_config: VllmConfig) -> bool:
+    """Ask a model class whether it supports this configuration natively.
+
+    Classes without a ``supports_vllm_config`` hook support every config.
+    """
+    hook = getattr(model_class, "supports_vllm_config", None)
+    return hook is None or bool(hook(vllm_config))
 
 
 def _get_nnx_model(
@@ -319,6 +333,18 @@ def get_flax_model(
     mesh: Mesh,
     is_draft_model: bool = False,
 ) -> ModelInterface:
+    if is_draft_model:
+        model_class = _get_model_architecture(
+            vllm_config.speculative_config.draft_model_config.hf_config)
+    else:
+        model_class = _get_model_architecture(
+            vllm_config.model_config.hf_config)
+        if not _supports_vllm_config(model_class, vllm_config):
+            raise UnsupportedArchitectureError(
+                f"{model_class.__name__} does not support this "
+                "configuration natively; falling back to the vLLM "
+                "implementation.")
+
     original_dtype = vllm_config.model_config.dtype
     model_dtype = to_jax_dtype(original_dtype)
     vllm_config.model_config.dtype = model_dtype
@@ -328,13 +354,6 @@ def get_flax_model(
     if vllm_config.model_config:
         update_vllm_config_for_qwix_quantization(vllm_config)
 
-    if is_draft_model:
-        model_class = _get_model_architecture(
-            vllm_config.speculative_config.draft_model_config.hf_config)
-    else:
-        model_class = _get_model_architecture(
-            vllm_config.model_config.hf_config)
-
     # Instantiate pooler if needed for Hybrid Path
     is_pooling = vllm_config.model_config.runner_type == "pooling"
     pooler = None
@@ -343,7 +362,9 @@ def get_flax_model(
         pooler_config = getattr(vllm_config.model_config, "pooler_config",
                                 None)
         if pooler_config is not None:
-            pooler = DispatchPooler.for_embedding(pooler_config)
+            build_pooler = getattr(model_class, "build_pooler", None)
+            pooler = (build_pooler(vllm_config) if build_pooler is not None
+                      else DispatchPooler.for_embedding(pooler_config))
 
     jit_model = _get_nnx_model(model_class,
                                vllm_config,
@@ -442,7 +463,10 @@ def get_flax_model(
 
     logits_sharding = NamedSharding(
         mesh,
-        PartitionSpec(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR))
+        getattr(
+            model_class, "logits_partition_spec",
+            PartitionSpec(ShardingAxisName.MLP_DATA,
+                          ShardingAxisName.MLP_TENSOR)))
 
     @jax.jit(out_shardings=(logits_sharding))
     def run_compute_logits(state_leaves, *args):
@@ -552,7 +576,10 @@ def get_flax_model(
         get_mrope_input_positions_fn=get_mrope_input_positions_fn,
     )
 
-    if pooler is not None:
+    if pooler is not None and getattr(pooler, "pools_device_logits", False):
+        # The model-built pooler consumes device logits directly.
+        pooler_fn = pooler
+    elif pooler is not None:
         import torchax
         from torchax.interop import torch_view
         from vllm.v1.pool.metadata import PoolingMetadata
@@ -580,6 +607,13 @@ def get_flax_model(
 
                 # Execute pooling on CPU
                 outputs = pooler(torch_states, pooling_metadata)
+
+                # DispatchPooler returns a dense [num_reqs, hidden] tensor
+                # when all requests share a task (vllm-project/vllm#62940),
+                # but ModelRunnerOutput.pooler_output must be a per-request
+                # list: the scheduler does `if pooler_outputs` on it.
+                if isinstance(outputs, torch.Tensor):
+                    outputs = list(outputs.unbind(0))
                 return outputs
 
         pooler_fn = compute_pooler_output
@@ -775,6 +809,17 @@ def resolve_model_architecture(vllm_config: VllmConfig,
         f"{architectures}")
     arch = architectures[0]
     impl = "vllm" if arch in _VLLM_PREFERRED_ARCHITECTURES else "flax_nnx"
+    if impl == "flax_nnx" and not is_draft_model:
+        # A registered class may decline this configuration (for example a
+        # pooling model that only supports some pooler settings); use the
+        # vLLM implementation then instead of failing at load time.
+        try:
+            model_class = _get_model_architecture(hf_config)
+        except UnsupportedArchitectureError:
+            model_class = None
+        if model_class is not None and not _supports_vllm_config(
+                model_class, vllm_config):
+            return "vllm"
     return impl
 
 

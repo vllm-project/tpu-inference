@@ -47,8 +47,8 @@ class TestDescribeSignature:
         assert _describe_signature(kwargs) == kwargs
 
     def test_drops_array_payloads(self):
-        # `_precompile_backbone` passes the whole metadata object; its repr
-        # prints every element of every array, once per padding combination.
+        # Guards the log line against any non-scalar kwarg; array reprs would
+        # print every element of every array, once per padding combination.
         num_reqs = 64
         ones = jnp.ones((num_reqs, ), dtype=jnp.int32)
         kwargs = {
@@ -178,3 +178,120 @@ class TestMultiHostLockstep:
                 "sync_global_devices") as mock_sync:
             manager._flush_compilations()
         mock_sync.assert_not_called()
+
+
+class TestPrecompileBackboneSharedAttentionMetadata:
+    """`_run_compilation` lowers with `call_kwargs`; `**kwargs` only names the
+    log line. The backbone metadata has to go through `call_kwargs`, or AOT
+    traces the `None` variant and the warm-up compiles the backbone again."""
+
+    def test_lowers_with_the_metadata_the_warmup_passes(self):
+        devices = np.array(jax.devices()[:1]).reshape(
+            (1, ) * len(MESH_AXIS_NAMES))
+        model_fn = mock.Mock(return_value=([], None, [], None))
+        runner = SimpleNamespace(
+            mesh=Mesh(devices, MESH_AXIS_NAMES),
+            vllm_config=SimpleNamespace(sharding_config=SimpleNamespace(
+                total_dp_size=1, prefill_cp_size=1)),
+            attn_max_num_seqs=8,
+            max_num_reqs=8,
+            attention_backend=SimpleNamespace(
+                warmup_arrays=lambda *args, **kwargs: None,
+                backend_metadata=lambda *args: None),
+            kv_cache_config=SimpleNamespace(
+                has_mamba_layers=False,
+                kv_cache_groups=[SimpleNamespace(layer_names=["attn"])]),
+            input_batch=SimpleNamespace(
+                block_table=[SimpleNamespace(max_num_blocks_per_req=4)]),
+            lora_config=None,
+            maybe_select_dummy_loras=mock.MagicMock(),
+            lora_utils=SimpleNamespace(extract_lora_metadata=lambda: None),
+            model_fn=model_fn,
+            state_leaves=(),
+            kv_caches=[],
+            layer_name_to_kvcache_index={"attn": 0},
+        )
+        manager = CompilationManager.__new__(CompilationManager)
+        manager.runner = runner
+        manager._run_compilation = mock.Mock()
+
+        tokens = jnp.zeros((16, ), dtype=jnp.int32)
+        manager._precompile_backbone_helper("backbone",
+                                            input_ids=tokens,
+                                            positions=tokens,
+                                            inputs_embeds=None,
+                                            num_reqs=8)
+
+        manager._run_compilation.assert_called_once()
+        kwargs = manager._run_compilation.call_args.kwargs
+        # Lowered through call_kwargs, not left in the log-only **kwargs.
+        assert "shared_attention_metadata" not in kwargs
+        lowered = kwargs["call_kwargs"]["shared_attention_metadata"]
+        assert isinstance(lowered, SharedAttentionMetadata)
+        # The warm-up calls model_fn with the same metadata the AOT traced.
+        kwargs["warmup_handler"](None, (), {})
+        warmup_kwargs = model_fn.call_args.kwargs
+        assert warmup_kwargs["shared_attention_metadata"] is lowered
+
+
+def _decode_only_shapes(*,
+                        dp_size=1,
+                        token_paddings_per_dp,
+                        attn_req_paddings_per_dp,
+                        max_decode_tokens=1):
+    runner = SimpleNamespace(
+        dp_size=dp_size,
+        num_tokens_paddings_per_dp=token_paddings_per_dp,
+        attn_num_reqs_paddings_per_dp=attn_req_paddings_per_dp,
+        input_batch=SimpleNamespace(max_decode_tokens=max_decode_tokens),
+    )
+    manager = CompilationManager.__new__(CompilationManager)
+    manager.runner = runner
+    return CompilationManager._decode_only_backbone_shapes(manager)
+
+
+class TestDecodeOnlyBackboneShapes:
+    """The DCP decode-only backbone (`is_decode=True`) is a separate compiled
+    variant per (num_tokens, num_reqs) padding pair, so the warm-up has to
+    enumerate exactly the pairs `_prepare_inputs` can produce.
+    """
+
+    TOKENS = [16, 32, 64, 128, 256, 512, 1024, 2048]
+
+    def test_smallest_request_bucket_pairs_with_smallest_token_bucket(self):
+        # Regression: with ATTN_CUSTOM_NUM_REQS_BUCKETS=4 and max_num_seqs=16
+        # a decode-only step with <= 4 live requests pads to 16 tokens x 4
+        # reqs. The old `num_tokens == num_reqs` rule only warmed up (16, 16),
+        # and the first such step paid a ~30 s JIT compile mid-benchmark.
+        shapes = _decode_only_shapes(token_paddings_per_dp=self.TOKENS,
+                                     attn_req_paddings_per_dp=[4, 16])
+        assert shapes == {(16, 4), (16, 16)}
+
+    def test_matches_runtime_padding_for_power_of_two_buckets(self):
+        shapes = _decode_only_shapes(token_paddings_per_dp=self.TOKENS,
+                                     attn_req_paddings_per_dp=[8, 16, 32, 64])
+        # 1..8 reqs -> 16 tokens; 9..16 -> 16; 17..32 -> 32; 33..64 -> 64.
+        assert shapes == {(16, 8), (16, 16), (32, 32), (64, 64)}
+
+    def test_scales_by_dp_size(self):
+        shapes = _decode_only_shapes(dp_size=4,
+                                     token_paddings_per_dp=self.TOKENS,
+                                     attn_req_paddings_per_dp=[16, 64])
+        # Per rank: 1..16 reqs -> 16 tokens; 17..32 -> 32; 33..64 -> 64.
+        assert shapes == {(64, 64), (128, 256), (256, 256)}
+
+    def test_spec_decode_covers_up_to_max_decode_tokens_per_request(self):
+        # 16 reqs x 3 tokens = 48 -> buckets 16, 32 and 64 are all reachable.
+        shapes = _decode_only_shapes(token_paddings_per_dp=self.TOKENS,
+                                     attn_req_paddings_per_dp=[16],
+                                     max_decode_tokens=3)
+        assert shapes == {(16, 16), (32, 16), (64, 16)}
+
+    def test_never_exceeds_the_step_token_budget(self):
+        # max_num_batched_tokens=32: a decode-only step can never hold more
+        # than 32 live requests, so the 64-request bucket is unreachable and
+        # nothing pads past the largest token bucket.
+        shapes = _decode_only_shapes(token_paddings_per_dp=[16, 32],
+                                     attn_req_paddings_per_dp=[16, 64],
+                                     max_decode_tokens=4)
+        assert shapes == {(16, 16), (32, 16), (32, 64)}

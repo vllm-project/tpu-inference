@@ -510,7 +510,7 @@ class TPUWorker(WorkerBase):
                                    self.rank - 1)
 
     def determine_available_memory(self) -> int:
-        gpu_memory_utilization = self.cache_config.gpu_memory_utilization
+        gpu_memory_utilization = self.cache_config.resolved_gpu_memory_utilization
         hbm_usage = utils.hbm_usage_bytes(self.devices)
         total_hbm_limit = total_hbm_used = 0
         for used, limit in hbm_usage:
@@ -814,26 +814,30 @@ class TPUWorker(WorkerBase):
     def bind_raiden_sync(self,
                          worker_index: int = 0,
                          parallelism: int = 4,
-                         job_name: str = "rollout") -> dict:
+                         job_name: str = "rollout",
+                         auto_h2d: Optional[bool] = None) -> dict:
         """Binds this worker's live weights to Raiden and returns wire-safe
         registration metadata (never the arrays)."""
         from tpu_inference.rl import \
             raiden_worker_sync  # pylint: disable=g-import-not-at-top
 
         state = self.get_weights_state()
+        worker_idx = worker_index if worker_index != 0 else getattr(
+            self, "rank", 0)
         if self._raiden_rl_weight_sync is None:
             self._raiden_rl_weight_sync = raiden_worker_sync.RaidenWorkerSync(
                 job_name=job_name,
-                worker_index=worker_index,
+                worker_index=worker_idx,
                 parallelism=parallelism,
+                auto_h2d=auto_h2d,
             )
         else:
             # Re-bind: the transport is reused, but the caller may have moved
             # this worker to a different Raiden job (per-replica job names), and
             # metadata_dict() would otherwise re-register under the stale one.
             self._raiden_rl_weight_sync.job_name = job_name
-            self._raiden_rl_weight_sync.worker_index = worker_index
-        self._raiden_rl_weight_sync.bind(state)
+            self._raiden_rl_weight_sync.worker_index = worker_idx
+        self._raiden_rl_weight_sync.bind(state, auto_h2d=auto_h2d)
         return self._raiden_rl_weight_sync.metadata_dict()
 
     def refresh_model_state_leaves(self) -> None:

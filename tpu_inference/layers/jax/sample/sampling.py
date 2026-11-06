@@ -30,15 +30,22 @@ from tpu_inference.layers.common.binary_search import topk_mask, topp_mask
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
+from tpu_inference.logger import init_logger
 from tpu_inference.models.common.compiler_options import \
     get_sampling_compiler_options
+from tpu_inference.utils import TPU_SECOND_LAST_MINOR
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import VllmSchedulerOutput
 
     from tpu_inference.runner.input_batch import CachedRequestState
 
+logger = init_logger(__name__)
+
 _SAMPLING_EPS = 1e-5
+
+# Largest chunk size the top-k prefilter tries.
+_MAX_PREFILTER_CHUNK = 256
 
 
 def _distributed_sampling_max_top_k() -> int:
@@ -90,6 +97,89 @@ def _can_sample_distributed(
         (tpu_sampling_metadata.top_k <= _distributed_sampling_max_top_k()) &
         (tpu_sampling_metadata.top_p > 0.0))
     return jnp.all(is_greedy | supported)
+
+
+def _topk_prefilter_enabled() -> bool:
+    """Whether distributed sampling uses the top-k prefilter (opt-in)."""
+    return envs.ENABLE_TOPK_PREFILTER
+
+
+def _topk_prefilter_chunk(num_values: int, k: int) -> int:
+    """Returns the chunk size that sorts the fewest values, or 0 to skip.
+
+    Multiples of 8 (`TPU_SECOND_LAST_MINOR`) fill whole float32 TPU tiles, so
+    they are tried first (they were faster in micro-benchmarks). If none
+    divides the shard, any divisor is used (e.g. chunk 11 for 12628 values),
+    which still beats lax.top_k.
+    """
+    tile = TPU_SECOND_LAST_MINOR
+    multiples_of_tile = range(tile, _MAX_PREFILTER_CHUNK + 1, tile)
+    any_size = range(2, _MAX_PREFILTER_CHUNK + 1)
+    for candidates in (multiples_of_tile, any_size):
+        best_chunk, best_cost = 0, num_values
+        for candidate in candidates:
+            if num_values % candidate or num_values // candidate < k:
+                continue
+            cost = num_values // candidate + k * candidate
+            if cost < best_cost:
+                best_chunk, best_cost = candidate, cost
+        if best_chunk:
+            return best_chunk
+    return 0
+
+
+def _prefiltered_top_k(
+        values: jax.Array,
+        k: int,
+        chunk: Optional[int] = None) -> tuple[jax.Array, jax.Array]:
+    """Same values as `lax.top_k(values, k)`, but only the k chunks with the
+    largest maxima (which hold every top-k value) go through the final top-k.
+
+    Chunk c holds values c, c + num_chunks, c + 2 * num_chunks, ..., so the
+    chunk maxima are an elementwise max across rows. On TPU7x this layout is
+    faster than contiguous chunks.
+
+    Like `lax.top_k`, the values come back in descending order;
+    `_merge_topk_candidates` relies on this. Indices of tied values may differ
+    from `lax.top_k`.
+    """
+    batch, num_values = values.shape
+    if chunk is None:
+        chunk = _topk_prefilter_chunk(num_values, k)
+    if chunk == 0:
+        logger.warning_once(
+            "Top-k prefilter skipped: no chunk size up to %d helps for %d "
+            "values per vocab shard, so sampling uses lax.top_k.",
+            _MAX_PREFILTER_CHUNK, num_values)
+        return lax.top_k(values, k)
+    num_chunks = num_values // chunk
+    # chunks[b, r, c] = values[b, r * num_chunks + c].
+    chunks = values.reshape(batch, chunk, num_chunks)
+    _, chunk_ids = lax.top_k(jnp.max(chunks, axis=1), k)
+    candidates = jnp.take_along_axis(chunks, chunk_ids[:, None, :], axis=2)
+    top_values, positions = lax.top_k(candidates.reshape(batch, chunk * k), k)
+    top_ids = ((positions // k) * num_chunks +
+               jnp.take_along_axis(chunk_ids, positions % k, axis=1))
+    return top_values, top_ids
+
+
+def _topp_mask_sorted(values: jax.Array, top_p: jax.Array,
+                      replace_val: float) -> jax.Array:
+    """`topp_mask` for a few candidates: one sort instead of 32 passes."""
+    sorted_values = -lax.sort(-values, dimension=values.ndim - 1)
+    cumulative = jnp.cumsum(jax.nn.softmax(sorted_values, axis=-1), axis=-1)
+    cutoff = jnp.sum(cumulative < top_p[:, None], axis=-1, keepdims=True)
+    cutoff = jnp.minimum(cutoff, values.shape[-1] - 1)
+    threshold = jnp.take_along_axis(sorted_values, cutoff, axis=-1)
+    return jnp.where(values >= threshold, values, replace_val)
+
+
+def _shard_topk_candidates(values: jax.Array,
+                           k: int) -> tuple[jax.Array, jax.Array]:
+    """Each vocab shard's top-k candidates, in descending order."""
+    if _topk_prefilter_enabled():
+        return _prefiltered_top_k(values, k)
+    return lax.top_k(values, k)
 
 
 @dataclass
@@ -234,11 +324,16 @@ def _merge_topk_candidates(
                                     axis=-1)[:, 0]
     shard_candidates = candidate_values.reshape(candidate_values.shape[0], -1,
                                                 candidates_per_shard)
+    # Each shard's candidates are sorted in descending order, so the last one
+    # is the smallest.
     shard_tails = shard_candidates[:, :, -1]
     incomplete = jnp.any(shard_tails >= threshold[:, None], axis=-1)
     topk_values = jnp.where(candidate_values >= threshold[:, None],
                             candidate_values, -1e12)
-    filtered_values = topp_mask(topk_values, top_p, replace_val=-1e12)
+    if _topk_prefilter_enabled():
+        filtered_values = _topp_mask_sorted(topk_values, top_p, -1e12)
+    else:
+        filtered_values = topp_mask(topk_values, top_p, replace_val=-1e12)
     return filtered_values, candidate_ids, incomplete
 
 
@@ -285,8 +380,8 @@ def _distributed_topk_sample(
         local_logits = with_layout_constraint(local_logits,
                                               Layout(major_to_minor=(1, 0)))
         scaled_logits = local_logits / safe_temperature[:, None]
-        local_values, local_ids = lax.top_k(scaled_logits,
-                                            candidates_per_shard)
+        local_values, local_ids = _shard_topk_candidates(
+            scaled_logits, candidates_per_shard)
         local_ids = (local_ids + shard_index * local_vocab_size).astype(
             jnp.int32)
 

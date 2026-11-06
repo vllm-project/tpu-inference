@@ -305,7 +305,6 @@ class TestTPUOffloadConnectorScheduler:
             finished_req_ids=set(),
             scheduled_encoder_inputs={},
             scheduled_spec_decode_tokens={},
-            num_common_prefix_blocks=0,
             free_encoder_mm_hashes=[],
         )
 
@@ -417,7 +416,6 @@ class TestTPUOffloadConnectorScheduler:
             finished_req_ids=set(),
             scheduled_encoder_inputs={},
             scheduled_spec_decode_tokens={},
-            num_common_prefix_blocks=0,
             free_encoder_mm_hashes=[],
         )
 
@@ -491,7 +489,6 @@ class TestTPUOffloadConnectorScheduler:
             finished_req_ids={"req1"},
             scheduled_encoder_inputs={},
             scheduled_spec_decode_tokens={},
-            num_common_prefix_blocks=0,
             free_encoder_mm_hashes=[],
         )
 

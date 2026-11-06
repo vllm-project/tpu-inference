@@ -29,6 +29,7 @@ follow model layer order, so a hybrid model whose first layer is linear
 attention (Qwen3.5, ``full_attention_interval=4``) gets
 ``[linear, linear, linear, full]``.
 """
+import inspect
 from types import SimpleNamespace
 
 import numpy as np
@@ -377,14 +378,34 @@ def _worker(num_blocks=16, dp_size=1):
                               dp_size=dp_size)
 
 
+def _connector(hash_block_size=_BLOCK_SIZE):
+    params = inspect.signature(AuxOutputSchedulerConnector).parameters
+    if "kv_cache_manager" in params:
+        manager = SimpleNamespace(block_size=_BLOCK_SIZE, block_pool=None)
+        kv_cache_manager = SimpleNamespace(
+            coordinator=SimpleNamespace(full_attention_group_id=0,
+                                        single_type_managers=[manager]),
+            block_pool=SimpleNamespace(hash_block_size=hash_block_size),
+            kv_cache_config=SimpleNamespace(num_blocks=16))
+        return AuxOutputSchedulerConnector(kv_cache_manager)
+    if params:
+        return AuxOutputSchedulerConnector(hash_block_size)
+    return AuxOutputSchedulerConnector()
+
+
 class _Request:
     """The request fields the upstream scheduler connector reads."""
 
-    def __init__(self, req_id, num_prompt_tokens, prompt_start=0):
+    def __init__(self,
+                 req_id,
+                 num_prompt_tokens,
+                 prompt_start=0,
+                 num_computed_tokens=0):
         self.request_id = req_id
         self.num_prompt_tokens = num_prompt_tokens
         self.num_tokens = num_prompt_tokens
         self.num_output_tokens = 0
+        self.num_computed_tokens = num_computed_tokens
         self.block_hashes = []
         self.sampling_params = SimpleNamespace(
             routed_experts_prompt_start=prompt_start)
@@ -399,10 +420,12 @@ class _Request:
 
 
 def _schedule(connector, requests, num_scheduled):
-    return connector.build_connector_meta(
-        SimpleNamespace(num_scheduled_tokens=num_scheduled),
-        {r.request_id: r
-         for r in requests})
+    req_by_id = {r.request_id: r for r in requests}
+    meta = connector.build_connector_meta(
+        SimpleNamespace(num_scheduled_tokens=num_scheduled), req_by_id)
+    for req_id, count in num_scheduled.items():
+        req_by_id[req_id].num_computed_tokens += count
+    return meta
 
 
 def _entry(req_id, start, end, num_accepted, block_ids, dp_rank=0):
@@ -419,7 +442,7 @@ class TestTPUAuxOutputWorker:
     ``take_output``: rows cover [emit start, num_tokens - 1)."""
 
     def test_chunked_prefill_then_decode(self):
-        connector = AuxOutputSchedulerConnector()
+        connector = _connector()
         worker = _worker()
         req = _Request("r0", num_prompt_tokens=6)
         blocks = [1, 2]
@@ -445,7 +468,7 @@ class TestTPUAuxOutputWorker:
                                       _rows(6, 7))
 
     def test_prompt_start_skips_leading_rows(self):
-        connector = AuxOutputSchedulerConnector()
+        connector = _connector()
         worker = _worker()
         req = _Request("r0", num_prompt_tokens=5, prompt_start=3)
 
@@ -456,14 +479,14 @@ class TestTPUAuxOutputWorker:
                                       _rows(3, 5))
 
     def test_prefix_hit_reads_rows_computed_by_earlier_request(self):
-        connector = AuxOutputSchedulerConnector()
+        connector = _connector()
         worker = _worker()
         a = _Request("a", num_prompt_tokens=4)
         worker.begin_step(_schedule(connector, [a], {"a": 4}))
         worker.process_step(["a"], [_entry("a", 0, 4, 4, [3])])
 
         # b hits a's cached block 3 and only executes position 4.
-        b = _Request("b", num_prompt_tokens=5)
+        b = _Request("b", num_prompt_tokens=5, num_computed_tokens=4)
         worker.begin_step(_schedule(connector, [a, b], {"b": 1}))
         out = worker.process_step(["b"], [_entry("b", 4, 5, 1, [3, 5])])
         b.append_token()

@@ -98,19 +98,21 @@ set_jax_envs() {
 set_kube_jax_envs() {
     case $1 in
         v6)
+            export TESTS_GROUP_LABEL="[jax] TPU6e Tests Group"
             export TPU_VERSION="tpu6e"
             export KUBE_SHAPE_SINGLE="ct6e-standard-1t/1x1"
             export KUBE_SHAPE_MULTI="ct6e-standard-8t/2x4"
             export TENSOR_PARALLEL_SIZE_SINGLE=1
             ;;
         v7)
+            export TESTS_GROUP_LABEL="[jax] TPU7x Tests Group"
             export TPU_VERSION="tpu7x"
             export KUBE_SHAPE_SINGLE="tpu7x-standard-1t/1x1x1"
             export KUBE_SHAPE_MULTI="tpu7x-standard-4t/2x2x1"
             export TENSOR_PARALLEL_SIZE_SINGLE=2
             ;;
         unset)
-            unset TPU_VERSION KUBE_SHAPE_SINGLE KUBE_SHAPE_MULTI TENSOR_PARALLEL_SIZE_SINGLE
+            unset TESTS_GROUP_LABEL TPU_VERSION KUBE_SHAPE_SINGLE KUBE_SHAPE_MULTI TENSOR_PARALLEL_SIZE_SINGLE
             ;;
     esac
 }

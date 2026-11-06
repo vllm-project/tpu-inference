@@ -13,7 +13,7 @@
 # limitations under the License.
 """Implements the Eagle3 proposer for speculative decoding on JAX/TPU."""
 from dataclasses import replace
-from typing import Any
+from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
@@ -28,6 +28,7 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import (get_model,
                                                       resolve_model_impl_type)
+from tpu_inference.spec_decode.jax.utils import get_draft_block_tables
 from tpu_inference.utils import device_array
 
 logger = init_logger(__name__)
@@ -314,6 +315,7 @@ class Eagle3Proposer:
         is_in_prefill: jax.Array,
         num_rejected_tokens: jax.Array,
         num_reqs_dp: jax.Array,
+        req_indices_dp: Optional[dict[int, list[int]]] = None,
     ) -> tuple[jax.Array, jax.Array, jax.Array, AttentionMetadata]:
         """Prepare drafter inputs based on target forward outputs.
 
@@ -332,10 +334,7 @@ class Eagle3Proposer:
         )
 
         # The last KV cache group is for the draft model.
-        num_kv_cache_groups = len(self.runner.kv_cache_config.kv_cache_groups)
-        draft_kv_cache_group_id = num_kv_cache_groups - 1
-        block_tables = self.runner.input_batch.block_table[
-            draft_kv_cache_group_id].get_cpu_tensor().reshape(-1)
+        block_tables = get_draft_block_tables(self.runner, req_indices_dp)
         block_tables = device_array(self.mesh,
                                     block_tables,
                                     sharding=PartitionSpec(

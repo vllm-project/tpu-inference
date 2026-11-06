@@ -21,10 +21,11 @@ another pair under a name.
 """
 
 import abc
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import numpy as np
 from vllm import envs as vllm_envs
 from vllm.ray.lazy_utils import is_in_ray_actor
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -34,15 +35,46 @@ from tpu_inference import envs
 if TYPE_CHECKING:
     import jax
     import jax.numpy as jnp
-    from jax.sharding import Mesh
+    from jax.sharding import Mesh, NamedSharding
     from vllm.config import VllmConfig
+    from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 
     from tpu_inference.layers.common.attention_metadata import (
         AttentionMetadata, SharedAttentionMetadata)
+    from tpu_inference.utils import DeviceBuffer
+
+
+@dataclass(frozen=True)
+class HostStepInputs:
+    """The host arrays TPUModelRunner._prepare_inputs has filled for one step.
+
+    They follow its per-DP-rank layout: rank r's requests start at
+    r * max_num_reqs_per_dp_rank in seq_lens and the block tables, and at
+    r * (max_num_reqs_per_dp_rank + 1) in query_start_loc. request_distribution
+    is the flat (dp_size * 3,) RPA (decode_end, prefill_end, mixed_end) per
+    rank; the runner puts no request in the prefill-only group, so each rank's
+    is [num_decode, num_decode, num_reqs]. block_tables maps a KV cache group
+    id to its (max_num_seqs, max_num_blocks_per_req) view.
+    """
+    kv_cache_groups: "Sequence[KVCacheGroupSpec]"
+    block_tables: Mapping[int, np.ndarray]
+    query_start_loc: np.ndarray
+    seq_lens: np.ndarray
+    request_distribution: np.ndarray
+    scheduled_tokens_per_dp_rank: Mapping[int, Sequence[int]]
+    dp_size: int
+    max_num_reqs_per_dp_rank: int
+    padded_num_scheduled_tokens_per_dp_rank: int
 
 
 class AttentionBackend(abc.ABC):
-    """The kernel of the attention layers and the layout of their KV cache."""
+    """The kernel of the attention layers and the layout of their KV cache.
+
+    A backend that needs metadata of its own in each step, beyond the
+    AttentionMetadata RPA uses, overrides prepare_step, backend_metadata and
+    warmup_arrays; by default it has none. Either way the warmup compiles one
+    executable per token bucket, as for RPA, so the metadata holds only device
+    arrays: a static field would compile one executable per value."""
 
     @abc.abstractmethod
     def get_kv_cache_shape(self, total_num_pages: int, page_size: int,
@@ -75,6 +107,44 @@ class AttentionBackend(abc.ABC):
         decode_query_size: int,
     ) -> tuple["jax.Array", "jax.Array"]:
         """(kv_cache, output) of attention_interface.attention."""
+
+    def check_config(self, vllm_config: "VllmConfig") -> None:
+        """Raise for an engine configuration this backend cannot serve. It may
+        adjust the configuration, e.g. the block size. Runs in
+        TpuPlatform.check_and_update_config, before any worker starts."""
+
+    def prepare_step(self, step: HostStepInputs,
+                     device_buffer: "DeviceBuffer") -> None:
+        """Decide the backend's metadata of one step on the host, and write
+        the arrays the device needs into device_buffer, each under its own key
+        (DeviceBuffer.get_view). The buffer reaches the device in the step's
+        one transfer, and backend_metadata reads them back."""
+
+    def backend_metadata(self, metadata: Mapping[str, "jax.Array"],
+                         gid: int) -> object:
+        """Build the backend's own metadata of one KV cache group, which the
+        runner puts in AttentionMetadata.backend_metadata.
+          Input:
+            metadata: the step's device buffer, unpacked on the device. It
+              maps each key written with DeviceBuffer.get_view, by the runner
+              (e.g. "seq_lens") or by prepare_step (e.g. a backend's own
+              "kv_write_slices_gid_0"), to its array. In the warmup it holds
+              the dummy arrays of warmup_arrays instead.
+            gid: the KV cache group id, the index of a KVCacheGroupSpec in the
+              KV cache config. A group is a set of layers that share one KV
+              cache spec and one block table.
+          Output:
+            a pytree of the backend's own type, or None."""
+        return None
+
+    def warmup_arrays(self, kv_cache_groups: "Sequence[KVCacheGroupSpec]", *,
+                      num_tokens: int, max_num_reqs: int, dp_size: int,
+                      mesh: "Mesh",
+                      sharding: "NamedSharding") -> Mapping[str, "jax.Array"]:
+        """Dummy device arrays for backend_metadata to read in the warmup,
+        shaped like the ones prepare_step puts into the device buffer, so that
+        serving reuses the warmed up executables."""
+        return {}
 
 
 class RPAAttentionBackend(AttentionBackend):
@@ -204,8 +274,8 @@ def create_linear_attention_backend(name: str) -> LinearAttentionBackend:
 
 def check_attention_backend_config(vllm_config: "VllmConfig") -> None:
     """Raise if a registered backend is selected for an engine whose processes
-    cannot rebuild its name. Runs in TpuPlatform.check_and_update_config,
-    before any worker starts.
+    cannot rebuild its name, or that the backend's check_config rejects. Runs
+    in TpuPlatform.check_and_update_config, before any worker starts.
 
     register_attention_backend adds the name to AttentionBackendEnum at
     runtime. Enum members pickle by value, and a process that unpickles
@@ -229,3 +299,14 @@ def check_attention_backend_config(vllm_config: "VllmConfig") -> None:
         raise ValueError(
             f"--attention-backend {name} supports a single host with forked "
             f"processes only, not: {', '.join(reasons)}.")
+    # A JAX (flax_nnx) model's attention layers run RPA, whatever KV cache
+    # layout the runner allocates. Imported here: model_loader imports
+    # vllm.config, which loads TpuPlatform, which imports this module.
+    from tpu_inference.models.common.model_loader import \
+        resolve_model_impl_type
+    if resolve_model_impl_type(vllm_config) != "vllm":
+        raise ValueError(
+            f"--attention-backend {name} runs in vLLM models only, but "
+            f"MODEL_IMPL_TYPE={envs.MODEL_IMPL_TYPE} resolves to flax_nnx for "
+            "this model. Set MODEL_IMPL_TYPE=vllm.")
+    create_attention_backend(name).check_config(vllm_config)

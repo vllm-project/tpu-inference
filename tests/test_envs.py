@@ -358,8 +358,6 @@ def test_ray_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("RAY_USAGE_STATS_ENABLED", "1")
     assert envs.RAY_USAGE_STATS_ENABLED
 
-    assert envs.VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE == "shm"
-
 
 def test_invalid_attribute_raises_error():
     with pytest.raises(AttributeError,
