@@ -420,6 +420,12 @@ class TestKVCacheManager:
             common_utils.get_padded_head_dim(head_size),
             self.runner.kv_cache_dtype, False)
 
+    @pytest.fixture
+    def mixed_head_dims_enabled(self, monkeypatch):
+        """Opts in to keeping sliding window with mixed head dims."""
+        monkeypatch.setenv("MIXED_HEAD_DIM_SLIDING_WINDOW", "1")
+
+    @pytest.mark.usefixtures("mixed_head_dims_enabled")
     def test_get_kv_cache_spec_mixed_head_dims_keeps_sliding_window(self):
         layers = self._make_mixed_head_dim_layers()
         self.runner.vllm_config.compilation_config.static_forward_context = \
@@ -458,15 +464,17 @@ class TestKVCacheManager:
             'layer.shared': 'layer.0'
         }
 
-    @pytest.mark.parametrize("reason", ["env_var", "hybrid_manager_disabled"])
+    @pytest.mark.parametrize("reason",
+                             ["default_off", "hybrid_manager_disabled"])
     def test_get_kv_cache_spec_mixed_head_dims_fallback(
             self, monkeypatch, reason):
-        # The opt-out env var and a disabled hybrid KV cache manager both
-        # restore the old behavior: sliding window off, all layers full
-        # attention with their own page size.
-        if reason == "env_var":
-            monkeypatch.setenv("MIXED_HEAD_DIM_SLIDING_WINDOW", "0")
+        # By default (the env var is opt-in), and with a disabled hybrid KV
+        # cache manager even when opted in, sliding window is off and all
+        # layers are full attention with their own page size.
+        if reason == "default_off":
+            monkeypatch.delenv("MIXED_HEAD_DIM_SLIDING_WINDOW", raising=False)
         else:
+            monkeypatch.setenv("MIXED_HEAD_DIM_SLIDING_WINDOW", "1")
             monkeypatch.setattr(self.runner.vllm_config.scheduler_config,
                                 "disable_hybrid_kv_cache_manager", True)
         layers = self._make_mixed_head_dim_layers()
@@ -486,6 +494,7 @@ class TestKVCacheManager:
                 layers[f'layer.{i}'].head_size)
             assert layers[f'layer.{i}'].sliding_window is None
 
+    @pytest.mark.usefixtures("mixed_head_dims_enabled")
     def test_get_kv_cache_spec_mixed_head_dims_without_sliding_window(self):
         # Mixed head dims but no sliding-window layer: nothing to keep, so the
         # page sizes are left alone.
@@ -504,6 +513,7 @@ class TestKVCacheManager:
                 layers[f'layer.{i}'].num_kv_heads,
                 layers[f'layer.{i}'].head_size)
 
+    @pytest.mark.usefixtures("mixed_head_dims_enabled")
     def test_get_kv_cache_spec_mixed_head_dims_mla_unaffected(self):
         self.runner.kv_cache_manager.use_mla = True
         mock_hf_text_config = MagicMock()
@@ -525,6 +535,7 @@ class TestKVCacheManager:
             isinstance(spec, MLAAttentionSpec)
             for spec in kv_cache_spec.values())
 
+    @pytest.mark.usefixtures("mixed_head_dims_enabled")
     def test_pad_pages_for_mixed_head_dims_skips_mamba(self):
         layers = self._make_mixed_head_dim_layers()
         layers['linear_attn'] = MagicMock(spec=MambaBase)
@@ -533,6 +544,7 @@ class TestKVCacheManager:
         assert not manager._maybe_pad_pages_for_mixed_head_dims(layers)
         assert manager._hybrid_uniform_page_size_bytes is None
 
+    @pytest.mark.usefixtures("mixed_head_dims_enabled")
     def test_initialize_kv_cache_mixed_head_dims_matches_num_blocks(self):
         # The TPU allocation for the padded specs must cover exactly the
         # blocks vLLM budgets for.
@@ -644,6 +656,7 @@ class TestKVCacheManager:
         )
         return layers
 
+    @pytest.mark.usefixtures("mixed_head_dims_enabled")
     @pytest.mark.parametrize("block_size", [16, 64])
     @pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float8_e4m3fn])
     @pytest.mark.parametrize("layout_name", list(_MIXED_KV_LAYOUTS))
@@ -725,6 +738,7 @@ class TestKVCacheManager:
         assert total <= reserved
         assert (total == reserved) == every_slot_full
 
+    @pytest.mark.usefixtures("mixed_head_dims_enabled")
     def test_mixed_head_dims_budget_check_raises_before_allocating(self):
         """Any allocation larger than vLLM's plan is rejected up front."""
         layout = self._MIXED_KV_LAYOUTS["gemma4_ratio"][0]

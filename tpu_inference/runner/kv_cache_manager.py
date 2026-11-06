@@ -579,7 +579,7 @@ class KVCacheManager:
             "Keeping sliding-window KV cache specs for attention layers with "
             "mixed head dims: padding every attention page to %d bytes, the "
             "sum of the page sizes of each (num_kv_heads, head_dim) shape: %s. "
-            "Set MIXED_HEAD_DIM_SLIDING_WINDOW=0 to disable.",
+            "Unset MIXED_HEAD_DIM_SLIDING_WINDOW to disable.",
             self._hybrid_uniform_page_size_bytes,
             ", ".join(f"{heads}x{dim}: {size}"
                       for (heads, dim), size in page_sizes.items()))
