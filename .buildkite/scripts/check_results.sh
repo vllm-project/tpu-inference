@@ -33,7 +33,7 @@ for KEY in "$@"; do
     fi
     echo "Step ${KEY} outcome: ${OUTCOME}"
 
-    if [ "${OUTCOME}" != "passed" ] && [ "${OUTCOME}" != "skipped" ] ; then
+    if [ "${OUTCOME}" != "passed" ] && [ "${OUTCOME}" != "skipped" ] && [ "${OUTCOME}" != "soft_failed" ] ; then
         ANY_FAILED=true
     fi
 done
