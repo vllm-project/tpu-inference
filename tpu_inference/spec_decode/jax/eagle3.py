@@ -345,10 +345,11 @@ class Eagle3Proposer:
 
         # The last KV cache group is for the draft model.
         block_tables = get_draft_block_tables(self.runner, req_indices_dp)
-        block_tables = device_array(self.mesh,
-                                    block_tables,
-                                    sharding=PartitionSpec(
-                                        ShardingAxisName.ATTN_DATA))
+        block_tables = device_array(
+            self.mesh,
+            block_tables,
+            sharding=NamedSharding(self.mesh,
+                                   PartitionSpec(ShardingAxisName.ATTN_DATA)))
         num_reqs = num_reqs_dp
         return self._prepare_inputs(
             state_leaves=self.state_leaves,

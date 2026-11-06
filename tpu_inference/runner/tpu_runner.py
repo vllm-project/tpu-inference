@@ -634,6 +634,12 @@ def _subtract_num_rejected_tokens_fn(seq_lens: jax.Array, positions: jax.Array,
     return seq_lens, positions
 
 
+@jax.jit(out_shardings=PartitionSpec())
+def _replicate_tokens_for_host(tokens: jax.Array) -> jax.Array:
+    """Replicate DP-sharded token IDs across all hosts before async D2H copy."""
+    return tokens
+
+
 @jax.jit
 def _subtract_gdn_read_offsets_fn(gdn_read_offsets: jax.Array,
                                   num_rejected_tokens: jax.Array,
@@ -2386,6 +2392,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     spec_decode_metadata)
 
             # Save the previous results
+            if (self.speculative_config
+                    and not getattr(next_tokens, "is_fully_addressable", True)
+                    and
+                    not getattr(next_tokens, "is_fully_replicated", False)):
+                with jax.set_mesh(self.mesh):
+                    next_tokens = _replicate_tokens_for_host(next_tokens)
             next_tokens = jax.copy_to_host_async(next_tokens)
             # The acceptance counts are still on TPU: assume every draft is
             # accepted here, `_prepare_inputs` subtracts the actual rejections
@@ -3185,7 +3197,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                                   dp_size),
                     max_num_reqs_per_dp_rank=max_num_reqs_per_dp_rank,
                 ))
-            logits_indices_view[:] = spec_decode_metadata.final_logits_indices
+            logits_indices_view[:] = (
+                spec_decode_metadata.final_logits_indices_cpu if getattr(
+                    spec_decode_metadata, "final_logits_indices_cpu", None)
+                is not None else spec_decode_metadata.final_logits_indices)
 
         # Put to device
         sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(

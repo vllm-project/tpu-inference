@@ -1528,6 +1528,18 @@ class CompilationManager:
                     num_logits=num_logits,
                     num_reqs=num_reqs,
                 )
+                if (self.runner.scheduler_config.async_scheduling
+                        and not getattr(sampled_token_ids,
+                                        "is_fully_addressable", True)):
+                    from tpu_inference.runner.tpu_runner import \
+                        _replicate_tokens_for_host
+                    self._run_compilation(
+                        f"worker{self.runner.rank} _replicate_tokens_for_host",
+                        _replicate_tokens_for_host,
+                        sampled_token_ids,
+                        num_logits=num_logits,
+                        num_reqs=num_reqs,
+                    )
 
     def _precompile_rejection_sampler(self) -> None:
         logger.info("Compiling rejection_sampler with different input shapes.")

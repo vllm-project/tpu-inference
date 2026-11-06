@@ -28,7 +28,7 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.utils import SpecDecodeMetadata
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
-from tpu_inference.utils import device_array
+from tpu_inference.utils import device_array, safe_device_get
 
 if TYPE_CHECKING:
     from tpu_inference.layers.common.attention_metadata import \
@@ -190,7 +190,8 @@ class SpeculativeDecodingManager:
         next_prompt_token_id, is_in_prefill, num_reqs_dp = device_array(
             self.runner.mesh,
             (next_prompt_token_id, is_in_prefill, num_reqs_dp),
-            sharding=(PartitionSpec(ShardingAxisName.ATTN_DATA)))
+            sharding=NamedSharding(self.runner.mesh,
+                                   PartitionSpec(ShardingAxisName.ATTN_DATA)))
 
         aux_hidden_states_for_drafter = aux_hidden_states
 
@@ -220,7 +221,7 @@ class SpeculativeDecodingManager:
                 draft_token_ids = jnp.expand_dims(draft_token_ids, 1)
             return draft_token_ids[:, :num_spec]
         else:
-            draft_token_ids = np.array(draft_token_ids)
+            draft_token_ids = np.array(safe_device_get(draft_token_ids))
             if draft_token_ids.ndim == 1:
                 draft_token_ids = np.expand_dims(draft_token_ids, axis=-1)
             return draft_token_ids[:, :num_spec].tolist()
@@ -298,7 +299,8 @@ class SpeculativeDecodingManager:
         next_prompt_token_id, is_in_prefill, num_reqs_dp = device_array(
             self.runner.mesh,
             (next_prompt_token_id, is_in_prefill, num_reqs_dp),
-            sharding=(PartitionSpec(ShardingAxisName.ATTN_DATA)))
+            sharding=NamedSharding(self.runner.mesh,
+                                   PartitionSpec(ShardingAxisName.ATTN_DATA)))
 
         if self.runner.speculative_config.method == "mtp":
             aux_hidden_states_for_drafter = (tuple(aux_hidden_states)
@@ -333,7 +335,7 @@ class SpeculativeDecodingManager:
                 draft_token_ids = jnp.expand_dims(draft_token_ids, 1)
             return draft_token_ids[:, :num_spec]
         else:
-            draft_token_ids = np.array(draft_token_ids)
+            draft_token_ids = np.array(safe_device_get(draft_token_ids))
             if draft_token_ids.ndim == 1:
                 draft_token_ids = np.expand_dims(draft_token_ids, axis=-1)
             return draft_token_ids[:, :num_spec].tolist()
@@ -432,6 +434,7 @@ class SpeculativeDecodingManager:
         padded_bonus_logits_indices = np.concatenate(out_bonus_logits_indices)
         padded_num_draft_tokens = np.concatenate(out_draft_lengths)
         padded_num_draft_tokens_cpu = padded_num_draft_tokens
+        padded_logits_indices_cpu = padded_logits_indices
         # CPU -> TPU copy.
         (padded_num_draft_tokens, padded_logits_indices,
          padded_target_logits_indices,
@@ -449,6 +452,7 @@ class SpeculativeDecodingManager:
             final_logits_indices=padded_logits_indices,
         )
         metadata.draft_lengths_cpu = padded_num_draft_tokens_cpu
+        metadata.final_logits_indices_cpu = padded_logits_indices_cpu
         metadata.req_indices_dp = req_indices_dp
         metadata.req_ids_dp = req_ids_dp
         return metadata
