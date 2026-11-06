@@ -106,6 +106,7 @@ class RoutedExpertsStepEntry:
     num_accepted: int
     block_ids: List[int]
     dp_rank: int = 0
+    is_resumed: bool = False
 
 
 @dataclass
@@ -113,6 +114,7 @@ class _RequestState:
     emit_cursor: int
     pending_steps: int = 0
     finished: bool = False
+    in_decode: bool = False
 
 
 class TPUAuxOutputWorker:
@@ -173,8 +175,18 @@ class TPUAuxOutputWorker:
         # Store the whole step first: a request may read a prefix block that
         # another request in the same step just computed.
         for entry in entries:
+            state = self._requests.get(entry.req_id)
+            if state is not None and entry.is_resumed:
+                state.in_decode = False
+            # Under async scheduling + speculative decoding, scheduler_output's
+            # pre-step num_computed_tokens is recorded before the previous
+            # step's rejected draft tokens are subtracted. Once in decode, the
+            # true start position on device is state.emit_cursor (the exact end
+            # of the previous step's accepted tokens).
+            token_start = (state.emit_cursor if state is not None
+                           and state.in_decode else entry.token_start)
             slots = reconstruct_slots(entry.block_ids, len(entry.rows),
-                                      self.block_size, entry.token_start)
+                                      self.block_size, token_start)
             self._buffers[entry.dp_rank].store(entry.rows, slots)
 
         outputs: Dict[str, AuxRequestOutput] = {}
@@ -182,7 +194,9 @@ class TPUAuxOutputWorker:
             state = self._requests.get(entry.req_id)
             if state is None or entry.num_accepted <= 0:
                 continue
-            token_end = entry.token_start + entry.num_accepted
+            token_start = (state.emit_cursor
+                           if state.in_decode else entry.token_start)
+            token_end = token_start + entry.num_accepted
             if state.emit_cursor > token_end:
                 continue
             rows = self._buffers[entry.dp_rank].get(entry.block_ids,
@@ -190,6 +204,7 @@ class TPUAuxOutputWorker:
                                                     token_end)
             outputs[entry.req_id] = AuxRequestOutput(state.emit_cursor, rows)
             state.emit_cursor = token_end
+            state.in_decode = True
 
         for req_id in step_req_ids:
             state = self._requests.get(req_id)

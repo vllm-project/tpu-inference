@@ -492,6 +492,100 @@ class TestTPUAuxOutputWorker:
         assert out["r0"].token_start == 4
         np.testing.assert_array_equal(out["r0"].rows, _rows(4, 6))
 
+    def test_async_spec_decode_multi_step_with_rejections(self):
+        connector = _connector()
+        worker = _worker()
+        req = _Request("r0", num_prompt_tokens=4)
+        blocks = [1, 2, 3, 4]
+
+        # Step 0 (prefill): 4 tokens, 1 sampled.
+        worker.begin_step(_schedule(connector, [req], {"r0": 4}))
+        out = worker.process_step(["r0"], [_entry("r0", 0, 4, 4, blocks)])
+        req.append_token()
+        np.testing.assert_array_equal(connector.take_output(req, out),
+                                      _rows(0, 4))
+
+        # Step 1 (spec decode): 4 scheduled (4..8), 1 accepted (3 rejected).
+        worker.begin_step(_schedule(connector, [req], {"r0": 4}))
+        # Under async scheduling, Step 2 is scheduled before Step 1 resolves,
+        # so its pre-step num_computed_tokens is still 8 (optimistic).
+        step2_meta = _schedule(connector, [req], {"r0": 4})
+
+        out = worker.process_step(["r0"], [_entry("r0", 4, 8, 1, blocks)])
+        req.num_computed_tokens -= 3
+        req.append_token()
+        np.testing.assert_array_equal(connector.take_output(req, out),
+                                      _rows(4, 5))
+
+        # Step 2 (spec decode): entry.token_start is 8 (un-reconciled), 3 accepted.
+        worker.begin_step(step2_meta)
+        step3_meta = _schedule(connector, [req], {"r0": 4})
+        out = worker.process_step(["r0"], [
+            RoutedExpertsStepEntry(req_id="r0",
+                                   rows=_rows(5, 9),
+                                   token_start=8,
+                                   num_accepted=3,
+                                   block_ids=blocks)
+        ])
+        req.num_computed_tokens -= 1
+        for _ in range(3):
+            req.append_token()
+        np.testing.assert_array_equal(connector.take_output(req, out),
+                                      _rows(5, 8))
+
+        # Step 3 (spec decode): entry.token_start is 9 (after Step 1 reconciled,
+        # before Step 2 reconciled), 1 accepted.
+        worker.begin_step(step3_meta)
+        out = worker.process_step(["r0"], [
+            RoutedExpertsStepEntry(req_id="r0",
+                                   rows=_rows(8, 12),
+                                   token_start=9,
+                                   num_accepted=1,
+                                   block_ids=blocks)
+        ])
+        req.num_computed_tokens -= 3
+        req.append_token()
+        np.testing.assert_array_equal(connector.take_output(req, out),
+                                      _rows(8, 9))
+
+    def test_async_spec_decode_resumed_request_resets_in_decode(self):
+        connector = _connector()
+        worker = _worker()
+        req = _Request("r0", num_prompt_tokens=4)
+        blocks = [1, 2, 3, 4]
+
+        # Step 0 (prefill 4) -> Step 1 (spec decode 2 accepted -> emit_cursor=6, in_decode=True).
+        worker.begin_step(_schedule(connector, [req], {"r0": 4}))
+        out = worker.process_step(["r0"], [_entry("r0", 0, 4, 4, blocks)])
+        req.append_token()
+        np.testing.assert_array_equal(connector.take_output(req, out),
+                                      _rows(0, 4))
+
+        worker.begin_step(_schedule(connector, [req], {"r0": 4}))
+        out = worker.process_step(["r0"], [_entry("r0", 4, 8, 2, blocks)])
+        req.num_computed_tokens -= 2
+        req.append_token()
+        req.append_token()
+        np.testing.assert_array_equal(connector.take_output(req, out),
+                                      _rows(4, 6))
+        assert worker._requests["r0"].in_decode is True
+
+        # Preempted and resumed with partial prefix hit (recomputing from token 4..7):
+        # is_resumed=True resets in_decode so token_start=4 is respected.
+        req.num_computed_tokens = 4
+        worker.begin_step(_schedule(connector, [req], {"r0": 3}))
+        out = worker.process_step(["r0"], [
+            RoutedExpertsStepEntry(req_id="r0",
+                                   rows=_rows(4, 7),
+                                   token_start=4,
+                                   num_accepted=3,
+                                   block_ids=blocks,
+                                   is_resumed=True)
+        ])
+        req.append_token()
+        np.testing.assert_array_equal(connector.take_output(req, out),
+                                      _rows(6, 7))
+
     def test_finish_waits_for_in_flight_output(self):
         # Async scheduling: step N+1's metadata finishes the request before
         # step N's output is processed.

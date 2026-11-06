@@ -505,7 +505,7 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
                     runner=self._runner,
                     scheduler_output=self._scheduler_output,
                     expert_indices_cpu=np.asarray(
-                        jax.device_get(self._expert_indices)),
+                        common_utils.safe_device_get(self._expert_indices)),
                     req_ids=self._model_runner_output.req_ids,
                     sampled_token_ids=valid_sampled_token_ids,
                     req_ids_dp=self._req_ids_dp,
@@ -777,6 +777,7 @@ def _routed_experts_step_entries(
     for new_req in scheduler_output.scheduled_new_reqs:
         chunk_start[new_req.req_id] = new_req.num_computed_tokens
     cached_reqs = scheduler_output.scheduled_cached_reqs
+    resumed_reqs = set(getattr(cached_reqs, "resumed_req_ids", None) or ())
     for i, rid in enumerate(cached_reqs.req_ids):
         chunk_start[rid] = cached_reqs.num_computed_tokens[i]
 
@@ -809,6 +810,7 @@ def _routed_experts_step_entries(
                     num_accepted=num_accepted,
                     block_ids=block_ids_by_req.get(req_id, []),
                     dp_rank=dp_rank,
+                    is_resumed=(req_id in resumed_reqs),
                 ))
     return entries
 
@@ -2516,7 +2518,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     runner=self,
                     scheduler_output=scheduler_output,
                     expert_indices_cpu=np.asarray(
-                        jax.device_get(expert_indices)),
+                        common_utils.safe_device_get(expert_indices)),
                     req_ids=req_ids,
                     sampled_token_ids=valid_sampled_token_ids,
                     req_ids_dp=req_ids_dp,
