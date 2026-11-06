@@ -639,11 +639,10 @@ class KVCacheManager:
                         draft_num_layers = _get_draft_int(
                             "num_hidden_layers") or 1
 
-                    raw_num_kv_heads = (_get_draft_int(
-                        "num_global_key_value_heads", "num_key_value_heads")
-                                        or getattr(draft_hf_config,
-                                                   "num_key_value_heads", None)
-                                        or base_num_kv_heads)
+                    raw_num_kv_heads = (
+                        _get_draft_int("num_global_key_value_heads",
+                                       "num_key_value_heads")
+                        or base_num_kv_heads)
                     raw_head_size = _get_draft_int("global_head_dim",
                                                    "head_dim")
                     if raw_head_size is None:

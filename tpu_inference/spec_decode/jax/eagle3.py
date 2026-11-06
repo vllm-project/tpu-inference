@@ -71,7 +71,7 @@ class Eagle3Proposer:
 
     def load_model(self, target_model: Any) -> None:
         """Loads the draft model."""
-        if hasattr(self.runner.model, "mtp_model_fn"):
+        if self.method == "mtp" and hasattr(self.runner.model, "mtp_model_fn"):
             self.model_fn = self.runner.model.mtp_model_fn
             self.compute_logits_fn = self.runner.model.mtp_compute_logits_fn
             self.combine_hidden_states_fn = (
@@ -678,6 +678,7 @@ class Eagle3Proposer:
                 seq_lens=new_seq_lens,
                 query_start_loc=query_start_loc,
                 block_tables=new_block_tables,
+                num_spec_tokens=0,
             )
             kv_caches, new_hidden_states, residual, _ = self.model_fn(
                 state_leaves,

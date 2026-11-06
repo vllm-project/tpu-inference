@@ -546,10 +546,10 @@ class TestSpeculativeDecodingManager:
         passed_meta = call_args[0]
         assert isinstance(passed_meta, AttentionMetadata)
         assert passed_meta.gdn_read_offsets is None
-        assert passed_meta.num_spec_tokens == 0
+        assert passed_meta.num_spec_tokens == 3
         propose_kwargs = self.runner.drafter.propose.call_args[1]
         assert propose_kwargs["attn_metadata"].gdn_read_offsets is None
-        assert propose_kwargs["attn_metadata"].num_spec_tokens == 0
+        assert propose_kwargs["attn_metadata"].num_spec_tokens == 3
         assert isinstance(call_args[2], tuple)
         assert call_args[2] == (pre_norm_hidden, )
 

@@ -25,47 +25,32 @@ def _create_proposer(
     method: str,
     num_speculative_tokens: int,
 ) -> Eagle3Proposer:
-    try:
-        model_config = ModelConfig(model=model_dir,
-                                   runner="generate",
-                                   max_model_len=8192,
-                                   seed=42)
+    model_config = ModelConfig(model=model_dir,
+                               runner="generate",
+                               max_model_len=8192,
+                               seed=42)
 
-        speculative_config = SpeculativeConfig(
-            target_model_config=model_config,
-            target_parallel_config=ParallelConfig(),
-            model=eagle3_dir,
-            method=method,
-            num_speculative_tokens=num_speculative_tokens,
-        )
+    speculative_config = SpeculativeConfig(
+        target_model_config=model_config,
+        target_parallel_config=ParallelConfig(),
+        model=eagle3_dir,
+        method=method,
+        num_speculative_tokens=num_speculative_tokens,
+    )
 
-        vllm_config = VllmConfig(model_config=model_config,
-                                 cache_config=CacheConfig(block_size=16),
-                                 speculative_config=speculative_config,
-                                 device_config=DeviceConfig(device="tpu"),
-                                 parallel_config=ParallelConfig(
-                                     pipeline_parallel_size=1,
-                                     tensor_parallel_size=1),
-                                 load_config=LoadConfig(),
-                                 scheduler_config=SchedulerConfig(
-                                     max_num_batched_tokens=8192,
-                                     max_num_seqs=128,
-                                     max_model_len=model_config.max_model_len,
-                                     is_encoder_decoder=False))
-    except Exception:
-        vllm_config = mock.MagicMock(spec=VllmConfig)
-        vllm_config.model_config = mock.MagicMock()
-        vllm_config.model_config.seed = 42
-        vllm_config.model_config.max_model_len = 8192
-        vllm_config.cache_config = mock.MagicMock(block_size=16)
-        vllm_config.speculative_config = mock.MagicMock()
-        vllm_config.speculative_config.method = method
-        vllm_config.speculative_config.num_speculative_tokens = (
-            num_speculative_tokens)
-        vllm_config.speculative_config.use_gemma4_mtp.return_value = False
-        vllm_config.speculative_config.draft_model_config = mock.MagicMock()
-        vllm_config.speculative_config.draft_model_config.hf_config = (
-            mock.MagicMock(mtp_use_dedicated_embeddings=False))
+    vllm_config = VllmConfig(model_config=model_config,
+                             cache_config=CacheConfig(block_size=16),
+                             speculative_config=speculative_config,
+                             device_config=DeviceConfig(device="tpu"),
+                             parallel_config=ParallelConfig(
+                                 pipeline_parallel_size=1,
+                                 tensor_parallel_size=1),
+                             load_config=LoadConfig(),
+                             scheduler_config=SchedulerConfig(
+                                 max_num_batched_tokens=8192,
+                                 max_num_seqs=128,
+                                 max_model_len=model_config.max_model_len,
+                                 is_encoder_decoder=False))
 
     # Mock the runner, as the proposer needs it for initialization
     mock_runner = mock.MagicMock()
@@ -442,10 +427,39 @@ def test_get_draft_block_tables_dp_reordering():
     assert np.array_equal(reordered_interleaved, expected_interleaved)
 
 
+def _create_mock_proposer(
+    method: str,
+    num_speculative_tokens: int,
+) -> Eagle3Proposer:
+    vllm_config = mock.MagicMock(spec=VllmConfig)
+    vllm_config.model_config = mock.MagicMock()
+    vllm_config.model_config.seed = 42
+    vllm_config.model_config.max_model_len = 8192
+    vllm_config.cache_config = mock.MagicMock(block_size=16)
+    vllm_config.speculative_config = mock.MagicMock()
+    vllm_config.speculative_config.method = method
+    vllm_config.speculative_config.num_speculative_tokens = (
+        num_speculative_tokens)
+    vllm_config.speculative_config.use_gemma4_mtp.return_value = False
+    vllm_config.speculative_config.draft_model_config = mock.MagicMock()
+    vllm_config.speculative_config.draft_model_config.hf_config = (
+        mock.MagicMock(mtp_use_dedicated_embeddings=False))
+
+    mock_runner = mock.MagicMock()
+    devices = np.array(jax.devices()).reshape((1, len(jax.devices())))
+    mock_runner.mesh = jax.sharding.Mesh(devices, axis_names=('data', 'model'))
+    mock_runner.max_num_tokens = 8192
+    mock_runner.max_model_len = 8192
+    mock_runner.kv_cache_config.kv_cache_groups = [mock.MagicMock()]
+    mock_runner.input_batch = mock.MagicMock()
+
+    return Eagle3Proposer(vllm_config=vllm_config, runner=mock_runner)
+
+
 def test_load_model_builtin_mtp_from_runner_model():
     """Verify Eagle3Proposer.load_model reuses built-in MTP functions and
     state_leaves directly when self.runner.model exposes mtp_model_fn."""
-    proposer = _create_proposer("mtp", 2)
+    proposer = _create_mock_proposer("mtp", 2)
 
     target_state = mock.sentinel.target_state
     target_leaves = (mock.sentinel.leaf0, mock.sentinel.leaf1)
@@ -472,11 +486,24 @@ def test_load_model_builtin_mtp_from_runner_model():
     assert proposer.state_leaves is target_leaves
     assert proposer.model is target_model
 
+    # Verify method="eagle3" does NOT hijack built-in mtp_model_fn
+    eagle3_proposer = _create_mock_proposer("eagle3", 2)
+    eagle3_proposer.runner.model = target_model
+    eagle3_proposer.runner.state = {}
+    with mock.patch(
+            "tpu_inference.spec_decode.jax.eagle3.get_model"
+    ) as mock_get_model_eagle3, mock.patch(
+            "tpu_inference.spec_decode.jax.eagle3.resolve_model_impl_type",
+            return_value="vllm"):
+        eagle3_proposer.load_model(target_state)
+    mock_get_model_eagle3.assert_called_once()
+    assert eagle3_proposer.model_fn is not mock.sentinel.mtp_model_fn
+
 
 def test_prepare_inputs_mtp():
     """Verify prepare_inputs with method='mtp' uses aux_hidden_states[0]
     directly without calling combine_hidden_states_fn."""
-    proposer = _create_proposer("mtp", 2)
+    proposer = _create_mock_proposer("mtp", 2)
     num_reqs = 2
     max_num_seqs = 8
     total_tokens = 8

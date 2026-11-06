@@ -616,12 +616,16 @@ def get_flax_model(
             return _get_draft_step_fn(args[1], run_mtp_model_impl)(*args,
                                                                    **kwargs)
 
+        has_mtp_logits = hasattr(jit_model, "compute_mtp_logits")
+
         @jax.jit(out_shardings=(logits_sharding))
         def run_mtp_compute_logits(state_leaves, *args):
             state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
             model = nnx.merge(graphdef, state)
             hidden_state, *_ = args
-            return model.compute_mtp_logits(hidden_state)
+            if has_mtp_logits:
+                return model.compute_mtp_logits(hidden_state)
+            return model.compute_logits(hidden_state)
 
         jit_model.mtp_model_fn = wrapped_mtp_model_fn
         jit_model.mtp_compute_logits_fn = run_mtp_compute_logits

@@ -263,3 +263,29 @@ class TestPrecompileSpecDecodeDPSharding:
             ShardingAxisName.ATTN_DATA)
         assert sampled_token_ids.sharding.spec == PartitionSpec(
             ShardingAxisName.ATTN_DATA)
+
+    def test_precompile_extend_logits_simple_and_gather_logprobs_use_attn_data_sharding(
+            self):
+        manager = self._make_manager()
+        calls = {}
+
+        def record(name, fn, *args, **kwargs):
+            calls[name] = args
+
+        manager._run_compilation = record
+        CompilationManager._precompile_extend_logits_simple(manager)
+        CompilationManager._precompile_gather_logprobs(manager)
+
+        extend_args = calls["worker0 _extend_logits_simple"]
+        target_logits, bonus_logits = extend_args[0], extend_args[1]
+        assert target_logits.sharding.spec == PartitionSpec(
+            ShardingAxisName.ATTN_DATA, None)
+        assert bonus_logits.sharding.spec == PartitionSpec(
+            ShardingAxisName.ATTN_DATA, None)
+
+        gather_spec_args = calls["worker0 gather_logprobs_spec"]
+        spec_logits, spec_token_ids = gather_spec_args[0], gather_spec_args[1]
+        assert spec_logits.sharding.spec == PartitionSpec(
+            ShardingAxisName.ATTN_DATA, None)
+        assert spec_token_ids.sharding.spec == PartitionSpec(
+            ShardingAxisName.ATTN_DATA)

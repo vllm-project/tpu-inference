@@ -1211,8 +1211,9 @@ class CompilationManager:
                     if num_reqs > num_logits:
                         continue
                     combined_size = num_logits + num_reqs
-                    logits_sharding = NamedSharding(self.runner.mesh,
-                                                    PartitionSpec())
+                    logits_sharding = NamedSharding(
+                        self.runner.mesh,
+                        PartitionSpec(ShardingAxisName.ATTN_DATA, None))
                     token_ids_sharding = NamedSharding(
                         self.runner.mesh,
                         PartitionSpec(ShardingAxisName.ATTN_DATA))
@@ -1345,20 +1346,12 @@ class CompilationManager:
             "Compiling _extend_logits_simple with different input shapes.")
         vocab_size = self.runner.vocab_size
         logits_dtype = self._get_logits_dtype()
+        logits_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))
         for num_logits in self.runner.num_logits_paddings:
             for num_reqs in self.runner.num_reqs_paddings:
                 if num_reqs > num_logits:
                     continue
-
-                attn_data_size = get_mesh_shape_product(
-                    self.runner.mesh, ShardingAxisName.ATTN_DATA)
-                if attn_data_size == 1:
-                    logits_spec = PartitionSpec()
-                else:
-                    logits_spec = PartitionSpec(ShardingAxisName.ATTN_DATA,
-                                                None)
-
-                logits_sharding = NamedSharding(self.runner.mesh, logits_spec)
 
                 target_logits = self._create_dummy_tensor(
                     (num_logits, vocab_size), logits_dtype, logits_sharding)
@@ -1678,6 +1671,8 @@ class CompilationManager:
                     request_distribution=request_distribution,
                     mamba_state_indices=eagle3_mamba_state_indices,
                     padded_num_reqs=num_reqs,
+                    num_spec_tokens=self.runner.speculative_config.
+                    num_speculative_tokens,
                 )
 
                 def drafter_propose_warmup(_fn, _args, _call_kwargs):
@@ -1822,6 +1817,8 @@ class CompilationManager:
                     request_distribution=request_distribution,
                     mamba_state_indices=mamba_state_indices,
                     padded_num_reqs=num_reqs,
+                    num_spec_tokens=self.runner.speculative_config.
+                    num_speculative_tokens,
                 )
 
                 def drafter_propose_warmup(_fn, _args, _call_kwargs):
