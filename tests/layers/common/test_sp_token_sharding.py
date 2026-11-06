@@ -12,7 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Tests for the sequence-parallel residual stream: `enable_sp` under
-attention DP with the GMM_EP MoE (USE_MOE_EP_KERNEL=0).
+attention DP with expert parallelism and one of two MoE backends:
+
+- GMM_EP: USE_MOE_EP_KERNEL=0 (and USE_FUSED_EP_MOE_V2 / USE_ROUTING_MOE
+  unset).
+- ROUTING_MOE: USE_ROUTING_MOE=1 (with USE_MOE_EP_KERNEL=0 and
+  USE_FUSED_EP_MOE_V2 unset, as both take priority over it).
 
 The sharded-matmul and MoE tests need 8 devices (e.g. CPU with
 XLA_FLAGS=--xla_force_host_platform_device_count=8, or a TPU v7x-8). On hosts
@@ -83,18 +88,18 @@ def _shape_only_mesh(**sizes):
 
 def test_keeps_tokens_sharded_guards():
 
-    def keeps(mesh, enable_sp=True, gmm_ep=True):
-        return common_sharding.keeps_tokens_sharded(mesh,
-                                                    enable_sp,
-                                                    gmm_ep=gmm_ep)
+    def keeps(mesh, enable_sp=True, moe_keeps_tokens=True):
+        return common_sharding.keeps_tokens_sharded(
+            mesh, enable_sp, moe_keeps_tokens=moe_keeps_tokens)
 
     mesh = _shape_only_mesh(attn_dp=2, model=4)
-    # Enabled under attention DP + attention TP > 1 with GMM_EP.
+    # Enabled under attention DP + attention TP > 1 when the MoE keeps tokens
+    # sharded (GMM_EP or ROUTING_MOE).
     assert keeps(mesh)
     assert not keeps(mesh, enable_sp=False)
     assert not keeps(None)
     # Any other MoE backend ignores keep_token_sharding.
-    assert not keeps(mesh, gmm_ep=False)
+    assert not keeps(mesh, moe_keeps_tokens=False)
     # Only under attention DP with attention TP > 1.
     assert not keeps(_shape_only_mesh(model=8))
     assert not keeps(_shape_only_mesh(attn_dp=8))
@@ -141,9 +146,9 @@ def _vllm_config(*,
 
 
 def test_vllm_keeps_tokens_sharded(monkeypatch):
-    """The one gate the linear configs and the MoE share: enable_sp, GMM_EP,
-    and a quantization method validated with the token-sharded stream (FP8
-    only)."""
+    """The one gate the linear configs and the MoE share: enable_sp, GMM_EP or
+    ROUTING_MOE, and a quantization method validated with the token-sharded
+    stream (FP8 only)."""
     keeps = vllm_moe_interface.vllm_keeps_tokens_sharded
     mesh = _shape_only_mesh(attn_dp=2, model=4)
     assert keeps(_vllm_config(quantization=quant_methods.FP8), mesh)
@@ -158,11 +163,15 @@ def test_vllm_keeps_tokens_sharded(monkeypatch):
     assert not keeps(None, mesh)
     # Expert parallelism off: GMM_TP.
     assert not keeps(_vllm_config(enable_expert_parallel=False), mesh)
-    # Another EP backend selected.
-    for flag in _MOE_BACKEND_FLAGS:
+    # Another EP backend selected that ignores keep_token_sharding.
+    for flag in ("USE_MOE_EP_KERNEL", "USE_FUSED_EP_MOE_V2"):
         monkeypatch.setenv(flag, "1")
         assert not keeps(_vllm_config(), mesh), flag
         monkeypatch.delenv(flag)
+    # ROUTING_MOE honors keep_token_sharding.
+    monkeypatch.setenv("USE_ROUTING_MOE", "1")
+    assert keeps(_vllm_config(), mesh)
+    monkeypatch.delenv("USE_ROUTING_MOE")
     assert keeps(_vllm_config(), mesh)
 
 
@@ -581,7 +590,9 @@ def test_sp_token_sharding_small_batch_fallback(monkeypatch, tc_permute):
     w2_s = jax.device_put(w2, ep_spec)
 
     assert common_sharding.sp_token_axes(
-        mesh, common_sharding.keeps_tokens_sharded(mesh, True, gmm_ep=True),
+        mesh,
+        common_sharding.keeps_tokens_sharded(mesh, True,
+                                             moe_keeps_tokens=True),
         num_tokens) is None
 
     def _run(keep_sharded):
