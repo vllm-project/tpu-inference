@@ -104,6 +104,9 @@ def run_jax_gdn_attention(
     """
     if read_state_indices is None:
         read_state_indices = state_indices
+    if num_spec_tokens > 0:
+        assert read_offsets is not None, (
+            "read_offsets is required when num_spec_tokens > 0")
 
     in_specs = (
         P(ShardingAxisName.ATTN_DATA,
@@ -125,10 +128,9 @@ def run_jax_gdn_attention(
         P(ShardingAxisName.ATTN_DATA),  # seq_lens
         P(ShardingAxisName.ATTN_DATA),  # read_state_indices
     )
-    if num_spec_tokens > 0 or read_offsets is not None:
+    if read_offsets is not None:
         in_specs = in_specs + (
-            P(ShardingAxisName.ATTN_DATA)
-            if read_offsets is not None else None,  # read_offsets
+            P(ShardingAxisName.ATTN_DATA),  # read_offsets
         )
 
     out_specs = (
@@ -150,7 +152,7 @@ def run_jax_gdn_attention(
         d_v=d_v,
         kernel_size=kernel_size,
     )
-    if num_spec_tokens > 0 or read_offsets is not None:
+    if read_offsets is not None:
         partial_kwargs["num_spec_tokens"] = num_spec_tokens
 
     p_run_jax_gdn_attention_local = functools.partial(
@@ -182,7 +184,7 @@ def run_jax_gdn_attention(
         seq_lens,
         read_state_indices,
     )
-    if num_spec_tokens > 0 or read_offsets is not None:
+    if read_offsets is not None:
         mapped_args = mapped_args + (read_offsets, )
 
     (new_conv_state, new_recurrent_state), output = mapped_fn(*mapped_args)
