@@ -74,6 +74,7 @@ nav:
     - 'Code Examples':
       - 'Multi Modal Inference': api_and_code_examples/multi_modal_inference.md
       - 'Offline LoRA': api_and_code_examples/offline_lora_inference.md
+      - 'OLMo 2': api_and_code_examples/olmo2.md
     - 'Out-of-Tree Usage': getting_started/out-of-tree.md
   - 'Developers Guides':
     - 'Contributing to vLLM JAX': developers_guide/contributing.md
