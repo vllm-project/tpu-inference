@@ -18,9 +18,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
+from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, Qwen3Config
 from vllm.config import ModelConfig, set_current_vllm_config
 from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
@@ -30,7 +31,7 @@ from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     get_kv_cache_shape
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
-from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
+from tpu_inference.models.jax.qwen3 import Qwen3DecoderLayer, Qwen3ForCausalLM
 from tpu_inference.models.jax.utils.qwix.qwix_utils import \
     apply_qwix_quantization
 from tpu_inference.runner.kv_cache import create_kv_caches
@@ -355,6 +356,35 @@ class TestQwen3ForCausalLM:
                 rtol=1e-2,
                 atol=1e-2,
             )
+
+    @pytest.mark.parametrize("use_fused_rmsnorm_quant", [False, True])
+    def test_decoder_layer_fused_rmsnorm_opt_in(self, monkeypatch, rng, mesh,
+                                                use_fused_rmsnorm_quant):
+        """Only norms that feed quantized projections opt into fused FP8."""
+        monkeypatch.setenv("USE_FUSED_RMSNORM_QUANT",
+                           "1" if use_fused_rmsnorm_quant else "0")
+        config = Qwen3Config(hidden_size=256,
+                             intermediate_size=512,
+                             num_attention_heads=2,
+                             num_key_value_heads=1,
+                             head_dim=128,
+                             num_hidden_layers=1,
+                             vocab_size=128,
+                             rms_norm_eps=1e-6)
+        with jax.set_mesh(mesh):
+            layer = Qwen3DecoderLayer(config=config,
+                                      dtype=jnp.bfloat16,
+                                      rng=nnx.Rngs(rng),
+                                      mesh=mesh,
+                                      kv_cache_dtype="auto",
+                                      quant_config=None,
+                                      prefix="model.layers.0")
+
+        assert layer.input_layernorm.fuse_fp8_quant == use_fused_rmsnorm_quant
+        assert (layer.post_attention_layernorm.fuse_fp8_quant ==
+                use_fused_rmsnorm_quant)
+        assert not layer.self_attn.q_norm.fuse_fp8_quant
+        assert not layer.self_attn.k_norm.fuse_fp8_quant
 
     def test_vocab_padding_for_sharding(self, rng, mesh):
         """Verify that embed_tokens shape is rounded up when tensor_parallel_size > 1."""
