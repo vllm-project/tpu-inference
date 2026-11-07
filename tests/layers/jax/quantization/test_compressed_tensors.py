@@ -13,20 +13,21 @@
 # limitations under the License.
 """Unit tests for the JAX-native compressed-tensors config (issue #2261).
 
-These tests exercise the *dispatch* logic (`get_quant_method`): given a
-compressed-tensors `quantization_config`, does each layer get routed to the
-right JAX quant method (or skipped)? They mirror `test_fp8.py::TestFp8Config`,
-which asserts `layer.quant_method` types rather than running a forward pass.
+Tests cover quant-method dispatch, checkpoint scale loading, and FP8 forward
+values for the JAX-native compressed-tensors path.
 """
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
+import torch
 from flax import nnx
 from jax.sharding import Mesh
 
 from tpu_inference.layers.common.sharding import MESH_AXIS_NAMES
-from tpu_inference.layers.jax.linear import JaxLinear
+from tpu_inference.layers.jax.linear import (JaxLinear,
+                                             JaxMergedColumnParallelLinear)
 from tpu_inference.layers.jax.quantization.compressed_tensors import \
     CompressedTensorsConfig
 from tpu_inference.layers.jax.quantization.fp8 import (
@@ -164,6 +165,66 @@ class TestCompressedTensorsConfig:
         with jax.set_mesh(mesh):
             mlp = _MLP(16, 16, rngs, config, prefix="mlp")
         assert isinstance(mlp.proj1.quant_method, Fp8TensorwiseLinearMethod)
+
+    @pytest.mark.parametrize("scale_shape", [(), (1, ), (1, 1), (8, 1)])
+    def test_fp8_tensor_scale_loading(self, rngs, mesh, scale_shape):
+        config = CompressedTensorsConfig(_fp8_tensor_config())
+        with jax.set_mesh(mesh):
+            layer = JaxLinear(16,
+                              8,
+                              rngs=rngs,
+                              use_bias=False,
+                              quant_config=config,
+                              prefix="proj")
+            weight = torch.ones((8, 16), dtype=torch.float8_e4m3fn)
+            scale = torch.full(scale_shape, 0.25)
+            layer.weight.weight_loader(layer.weight, weight)
+            layer.weight_scale.weight_loader(layer.weight_scale, scale)
+            np.testing.assert_array_equal(layer.weight_scale[...],
+                                          np.full(8, 0.25))
+            output = jax.jit(lambda x: layer(x))(jnp.ones((2, 16)))
+            np.testing.assert_allclose(output, np.full((2, 8), 4.0))
+
+    @pytest.mark.parametrize("scale_shape", [(), (1, ), (1, 1), "channel"])
+    @pytest.mark.parametrize("load_order", [(0, 1), (1, 0)])
+    def test_fp8_merged_tensor_scale_loading(self, rngs, mesh, scale_shape,
+                                             load_order):
+        config = CompressedTensorsConfig(_fp8_tensor_config())
+        output_sizes = [4, 8]
+        with jax.set_mesh(mesh):
+            layer = JaxMergedColumnParallelLinear(16,
+                                                  output_sizes,
+                                                  rngs=rngs,
+                                                  use_bias=False,
+                                                  quant_config=config,
+                                                  prefix="gate_up_proj")
+            for shard_id in load_order:
+                size = output_sizes[shard_id]
+                weight = torch.ones((size, 16), dtype=torch.float8_e4m3fn)
+                shape = (size, 1) if scale_shape == "channel" else scale_shape
+                scale = torch.full(shape, 0.25 * (shard_id + 1))
+                layer.weight.weight_loader(layer.weight, weight, shard_id)
+                layer.weight_scale.weight_loader(layer.weight_scale, scale,
+                                                 shard_id)
+            np.testing.assert_array_equal(layer.weight_scale[...],
+                                          [0.25] * 4 + [0.5] * 8)
+            output = jax.jit(lambda x: layer(x))(jnp.ones((2, 16)))
+            np.testing.assert_allclose(output,
+                                       np.tile([4.0] * 4 + [8.0] * 8, (2, 1)))
+
+    @pytest.mark.parametrize("scale_shape", [(), (1, ), (12, 1)])
+    def test_fp8_merged_full_scale_loading(self, rngs, mesh, scale_shape):
+        config = CompressedTensorsConfig(_fp8_tensor_config())
+        with jax.set_mesh(mesh):
+            layer = JaxMergedColumnParallelLinear(16, [4, 8],
+                                                  rngs=rngs,
+                                                  use_bias=False,
+                                                  quant_config=config,
+                                                  prefix="gate_up_proj")
+            layer.weight_scale.weight_loader(layer.weight_scale,
+                                             torch.full(scale_shape, 0.25))
+            np.testing.assert_array_equal(layer.weight_scale[...],
+                                          np.full(12, 0.25))
 
     def test_ignored_layer_is_skipped(self, rngs, mesh):
         """A layer matched by the ignore regex -> UnquantizedLinearMethod."""
