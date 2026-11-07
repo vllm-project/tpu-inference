@@ -131,7 +131,7 @@ def main():
             "publish_images",
             ["approve_publish"],
             ["bash .buildkite/release/publish_images.sh"],
-            secrets=["DOCKERHUB_TOKEN"],
+            secrets=["DOCKERHUB_TOKEN_TPU_INFERENCE"],
             concurrency=1,
             concurrency_group="tpu-inference-dockerhub-publish",
         ))
