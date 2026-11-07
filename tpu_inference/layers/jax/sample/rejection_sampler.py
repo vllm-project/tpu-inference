@@ -296,6 +296,9 @@ def _compute_probs(
     top_k = sampling_metadata.top_k[segment_ids]
     top_p = sampling_metadata.top_p[segment_ids]
     temperatures = sampling_metadata.temperature[segment_ids]
+    is_greedy = temperatures == GREEDY_TEMPERATURE
+    greedy_token_ids = jnp.argmax(logits, axis=-1)
+    temperatures = jnp.where(is_greedy, 1.0, temperatures)
 
     # Apply top-k and top-p masking
     logits = logits.astype(jnp.float32)
@@ -314,7 +317,12 @@ def _compute_probs(
     # Add epsilon to avoid division by zero
     logits /= (temperatures + 1e-9)
 
-    return jax.nn.softmax(logits, axis=-1)
+    probs = jax.nn.softmax(logits, axis=-1)
+    # Greedy requests in a mixed batch must accept/recover only the argmax.
+    greedy_probs = jax.nn.one_hot(greedy_token_ids,
+                                  logits.shape[-1],
+                                  dtype=probs.dtype)
+    return jnp.where(is_greedy[:, None], greedy_probs, probs)
 
 
 def _get_segment_info(num_draft_tokens: jax.Array, total_tokens: int):
