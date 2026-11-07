@@ -285,6 +285,9 @@ def quantize_tensor(
     dtype_min = float(dtype_info.min)
 
     abs_max = jnp.max(jnp.abs(tensor), axis=axis, keepdims=True)
+    # Avoid float16 scale underflow and reciprocal overflow for small values.
+    if abs_max.dtype == jnp.float16:
+        abs_max = abs_max.astype(jnp.float32)
     scale = abs_max / dtype_max
 
     # If scale=0, scale_inv=1/scale=1/0=NaN. Since NaN will cause numeric error
