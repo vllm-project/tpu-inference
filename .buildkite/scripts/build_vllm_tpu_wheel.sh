@@ -14,21 +14,22 @@
 # limitations under the License.
 #
 # ------------------------------------------------------
-# Build the combined `vllm-tpu` release wheel and sdist from upstream vLLM.
+# Build the combined `vllm-jax` release wheel and sdist from upstream vLLM.
 #
-# The result is vLLM renamed to `vllm-tpu`, built for its in-tree TPU target,
-# with a pip dependency on `tpu-inference` (this repo). tpu-inference is not
-# bundled; pip installs it from PyPI.
+# The result is vLLM renamed to `vllm-jax`, built for its in-tree TPU target,
+# with a pip dependency on `vllm-jax-core` (this repo). vllm-jax-core is not
+# bundled; pip installs it from PyPI. Both names are COMBINED_PROJECT and
+# CORE_PROJECT in .buildkite/release/lib.sh.
 #
-# Only vLLM is cloned: this script runs from the tpu-inference checkout, and
-# the combined wheel needs just the tpu-inference version, not its source.
+# Only vLLM is cloned: this script runs from this repo's checkout, and the
+# combined wheel needs just the vllm-jax-core version, not its source.
 #
 # Steps (all on a temp clone of vLLM, deleted on exit; nothing is committed):
 #   1. Shallow-clone vLLM at the ref in .buildkite/vllm_lkg.version, the
-#      same ref CI tests tpu-inference against.
-#   2. Rename the package "vllm" -> "vllm-tpu" in pyproject.toml and in
+#      same ref CI tests this repo against.
+#   2. Rename the package "vllm" -> "vllm-jax" in pyproject.toml and in
 #      vLLM's own importlib.metadata lookups (else they fail at runtime).
-#   3. Pin tpu-inference==<version> in requirements/tpu.txt, which is where
+#   3. Pin vllm-jax-core==<version> in requirements/tpu.txt, which is where
 #      setup.py reads dependencies from when VLLM_TARGET_DEVICE=tpu. vLLM
 #      already lists a tpu-inference version there; it is replaced.
 #   4. Build the wheel and sdist into OUTPUT_DIR, with the build deps in this
@@ -48,9 +49,9 @@
 # Usage:
 #   ./build_vllm_tpu_wheel.sh <version>
 #
-#   <version>    tpu-inference version to pin, built in the same release (the
+#   <version>    vllm-jax-core version to pin, built in the same release (the
 #                release pipeline checks the two resolve together before
-#                publishing either); also used as the vllm-tpu version.
+#                publishing either); also used as the vllm-jax version.
 #
 # Examples:
 #   ./build_vllm_tpu_wheel.sh 0.31.0
@@ -74,16 +75,16 @@
 #   VLLM_REF_OVERRIDE      Dev only: build this vLLM branch, tag or full SHA
 #                          instead of vllm_lkg.version. Never set it for a
 #                          release; the result was not tested with this
-#                          tpu-inference.
+#                          repo.
 #   OUTPUT_DIR             Output directory (default: <repo-root>/dist). Old
-#                          vllm_tpu-* files are removed; tpu_inference-* files
+#                          vllm_jax-* files are removed; vllm_jax_core-* files
 #                          are kept.
 #   KEEP_VLLM_SRC          Set to 1 to keep the patched clone for debugging.
 #   PYTHON                 Interpreter for the build venv (default: python3).
 #
 # Output:
-#   ${OUTPUT_DIR}/vllm_tpu-<version>-cpXY-cpXY-manylinux_<glibc>_x86_64.whl
-#   ${OUTPUT_DIR}/vllm_tpu-<version>.tar.gz
+#   ${OUTPUT_DIR}/vllm_jax-<version>-cpXY-cpXY-manylinux_<glibc>_x86_64.whl
+#   ${OUTPUT_DIR}/vllm_jax-<version>.tar.gz
 #   (cpXY = the Python that ran the build, e.g. cp312; <glibc> as detected,
 #   e.g. 2_17, at most WHEEL_MAX_MANYLINUX)
 # ------------------------------------------------------
@@ -96,9 +97,12 @@ WHEEL_UTILS="${SCRIPT_DIR}/wheel_utils.py"
 # Provides get_vllm_commit_hash (the vLLM commit in .buildkite/vllm_lkg.version).
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/configs/pipeline_config.sh"
-# Provides die, is_valid_release_version and check_manylinux_tag.
+# Provides CORE_PROJECT, COMBINED_PROJECT, die, is_valid_release_version and
+# check_manylinux_tag.
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/../release/lib.sh"
+# The combined wheel's file name prefix (PEP 427 normalizes - to _).
+COMBINED_FILE_PREFIX="${COMBINED_PROJECT//-/_}"
 
 VLLM_REPO="${VLLM_REPO:-https://github.com/vllm-project/vllm.git}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/dist}"
@@ -129,8 +133,8 @@ METADATA_FILES=(
 usage() {
     echo "Usage: $0 <version>"
     echo ""
-    echo "  <version>   The tpu-inference version of this release. Used to"
-    echo "              pin tpu-inference==<version> and as vllm-tpu's own"
+    echo "  <version>   The ${CORE_PROJECT} version of this release. Used to"
+    echo "              pin ${CORE_PROJECT}==<version> and as ${COMBINED_PROJECT}'s own"
     echo "              version, e.g. 0.31.0rc1 -> both are 0.31.0rc1."
     echo ""
     echo "vLLM is built at the commit in .buildkite/vllm_lkg.version"
@@ -194,7 +198,7 @@ require_cmd "${PYTHON}" "${PYTHON} not found; set PYTHON=<interpreter>."
 
 # --- Temp workspace and cleanup ----------------------------------------------
 # Set up before cloning so the clone is always removed, even on failure.
-WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/vllm-tpu-build.XXXXXX")"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/${COMBINED_PROJECT}-build.XXXXXX")"
 VLLM_SRC_DIR="${WORK_DIR}/vllm"
 cleanup() {
     if [[ "${KEEP_VLLM_SRC}" == "1" ]]; then
@@ -224,12 +228,13 @@ curl -fsSL --retry 3 -o "${WORK_DIR}/get-pip.py" \
 # wheel_utils.py needs packaging.
 "$PY" -m pip install --quiet packaging
 
-echo "--- Starting vllm-tpu wheel build ---"
-echo "tpu-inference version  : ${CORE_VERSION}"
-echo "vllm-tpu version       : ${WHEEL_VERSION}"
-echo "vLLM repo              : ${VLLM_REPO}"
-echo "vLLM ref               : ${VLLM_REF}"
-echo "Output dir             : ${OUTPUT_DIR}"
+echo "--- Starting ${COMBINED_PROJECT} wheel build ---"
+printf '%-23s: %s\n' \
+    "${CORE_PROJECT} version" "${CORE_VERSION}" \
+    "${COMBINED_PROJECT} version" "${WHEEL_VERSION}" \
+    "vLLM repo" "${VLLM_REPO}" \
+    "vLLM ref" "${VLLM_REF}" \
+    "Output dir" "${OUTPUT_DIR}"
 
 # --- Step 1: Shallow-clone vLLM ----------------------------------------------
 # init + fetch (not `clone --branch`) so full commit SHAs work too.
@@ -252,28 +257,29 @@ for f in "$PYPROJECT_FILE" "$REQUIREMENTS_FILE" "$DETECT_MANYLINUX_SCRIPT"; do
     [[ -f "$f" ]] || die "${f} not found in vLLM ref '${VLLM_REF}'."
 done
 
-# --- Step 2: Rename the package to vllm-tpu ----------------------------------
+# --- Step 2: Rename the package to COMBINED_PROJECT --------------------------
 # Replace only the first `name = "vllm"` line (the [project] name).
 # awk instead of sed -i so it works on both GNU and BSD.
-echo "Renaming distribution in ${PYPROJECT_FILE} to vllm-tpu..."
-awk '!done && /^name = "vllm"[[:space:]]*$/ { print "name = \"vllm-tpu\""; done = 1; next } { print }' \
+echo "Renaming distribution in ${PYPROJECT_FILE} to ${COMBINED_PROJECT}..."
+awk -v name="${COMBINED_PROJECT}" \
+    '!done && /^name = "vllm"[[:space:]]*$/ { print "name = \"" name "\""; done = 1; next } { print }' \
     "$PYPROJECT_FILE" > "${PYPROJECT_FILE}.tmp"
 mv "${PYPROJECT_FILE}.tmp" "$PYPROJECT_FILE"
-grep -q '^name = "vllm-tpu"' "$PYPROJECT_FILE" \
+grep -qx "name = \"${COMBINED_PROJECT}\"" "$PYPROJECT_FILE" \
     || die "could not find 'name = \"vllm\"' in ${PYPROJECT_FILE}."
 
-# Rewrite version('vllm') / metadata('vllm') to use 'vllm-tpu'
+# Rewrite version('vllm') / metadata('vllm') to use COMBINED_PROJECT
 # (both quote styles). `-i.bak` + rm works with GNU and BSD sed.
-echo "Repointing importlib.metadata lookups of 'vllm' to 'vllm-tpu'..."
+echo "Repointing importlib.metadata lookups of 'vllm' to '${COMBINED_PROJECT}'..."
 for f in "${METADATA_FILES[@]}"; do
     if [[ ! -f "$f" ]]; then
         echo "WARNING: ${f} not found in this vLLM ref; skipping." >&2
         continue
     fi
     sed -i.bak \
-        -e "s/importlib.metadata.version(\(['\"]\)vllm\1)/importlib.metadata.version(\1vllm-tpu\1)/g" \
-        -e "s/importlib.metadata.metadata(\(['\"]\)vllm\1)/importlib.metadata.metadata(\1vllm-tpu\1)/g" \
-        -e "s/version(\(['\"]\)vllm\1)/version(\1vllm-tpu\1)/g" \
+        -e "s/importlib.metadata.version(\(['\"]\)vllm\1)/importlib.metadata.version(\1${COMBINED_PROJECT}\1)/g" \
+        -e "s/importlib.metadata.metadata(\(['\"]\)vllm\1)/importlib.metadata.metadata(\1${COMBINED_PROJECT}\1)/g" \
+        -e "s/version(\(['\"]\)vllm\1)/version(\1${COMBINED_PROJECT}\1)/g" \
         "$f"
     rm -f "${f}.bak"
 done
@@ -288,13 +294,16 @@ if [[ -n "$REMAINING" ]]; then
     exit 1
 fi
 
-# --- Step 3: Pin tpu-inference -----------------------------------------------
-# vLLM's tpu.txt already pins some tpu-inference version; replace every
-# tpu-inference line with ours, or append it if there is none.
-REQUIRED_LINE="tpu-inference==${CORE_VERSION}"
+# --- Step 3: Pin CORE_PROJECT ------------------------------------------------
+# vLLM's tpu.txt already pins some version of this repo, under its former
+# name tpu-inference (or CORE_PROJECT once vLLM follows the rename); replace
+# every such line with ours, or append it if there is none.
+REQUIRED_LINE="${CORE_PROJECT}==${CORE_VERSION}"
+# PEP 503: -, _ and . are interchangeable in a project name.
+PIN_NAME_RE="(tpu[-_.]inference|${CORE_PROJECT//-/[-_.]})"
 echo "Pinning '${REQUIRED_LINE}' in ${REQUIREMENTS_FILE}..."
-awk -v line="$REQUIRED_LINE" '
-    /^[[:space:]]*tpu[-_]inference([[:space:]]|[=<>!~@\[;]|$)/ {
+awk -v line="$REQUIRED_LINE" -v name_re="$PIN_NAME_RE" '
+    $0 ~ ("^[[:space:]]*" name_re "([[:space:]]|[=<>!~@\\[;]|$)") {
         if (!done) { print line; done = 1 }
         next
     }
@@ -302,7 +311,7 @@ awk -v line="$REQUIRED_LINE" '
     END { if (!done) print line }
 ' "$REQUIREMENTS_FILE" > "${REQUIREMENTS_FILE}.tmp"
 mv "${REQUIREMENTS_FILE}.tmp" "$REQUIREMENTS_FILE"
-PIN_LINES="$(grep -cE '^[[:space:]]*tpu[-_]inference' "$REQUIREMENTS_FILE" || true)"
+PIN_LINES="$(grep -cE "^[[:space:]]*${PIN_NAME_RE}" "$REQUIREMENTS_FILE" || true)"
 if [[ "${PIN_LINES}" -ne 1 ]] || ! grep -qxF "$REQUIRED_LINE" "$REQUIREMENTS_FILE"; then
     die "expected exactly one '${REQUIRED_LINE}' line in ${REQUIREMENTS_FILE}."
 fi
@@ -315,24 +324,25 @@ echo "Installing build dependencies from ${BUILD_REQUIREMENTS_FILE}..."
 "$PY" -m pip install -r "$BUILD_REQUIREMENTS_FILE" build wheel twine \
     "auditwheel==${AUDITWHEEL_VERSION}"
 
-# Remove old vllm-tpu files only; `vllm_tpu-` never matches tpu_inference-*.
-rm -f "${OUTPUT_DIR}"/vllm_tpu-*.whl "${OUTPUT_DIR}"/vllm_tpu-*.tar.gz
+# Remove old combined-wheel files only; `vllm_jax-` never matches
+# vllm_jax_core-*.
+rm -f "${OUTPUT_DIR}/${COMBINED_FILE_PREFIX}"-*.whl "${OUTPUT_DIR}/${COMBINED_FILE_PREFIX}"-*.tar.gz
 
-echo "Building vllm-tpu sdist and wheel into ${OUTPUT_DIR}..."
+echo "Building ${COMBINED_PROJECT} sdist and wheel into ${OUTPUT_DIR}..."
 VLLM_TARGET_DEVICE=tpu \
 VLLM_VERSION_OVERRIDE="${WHEEL_VERSION}" \
 SETUPTOOLS_SCM_PRETEND_VERSION="${WHEEL_VERSION}" \
     "$PY" -m build --sdist --wheel --no-isolation --outdir "${OUTPUT_DIR}"
 
 shopt -s nullglob
-BUILT_SDISTS=("${OUTPUT_DIR}"/vllm_tpu-*.tar.gz)
-BUILT_WHEELS=("${OUTPUT_DIR}"/vllm_tpu-*.whl)
+BUILT_SDISTS=("${OUTPUT_DIR}/${COMBINED_FILE_PREFIX}"-*.tar.gz)
+BUILT_WHEELS=("${OUTPUT_DIR}/${COMBINED_FILE_PREFIX}"-*.whl)
 shopt -u nullglob
 [[ "${#BUILT_SDISTS[@]}" -eq 1 ]] \
-    || die "expected one vllm_tpu-*.tar.gz in ${OUTPUT_DIR}," \
+    || die "expected one ${COMBINED_FILE_PREFIX}-*.tar.gz in ${OUTPUT_DIR}," \
            "found ${#BUILT_SDISTS[@]}."
 [[ "${#BUILT_WHEELS[@]}" -eq 1 ]] \
-    || die "expected one vllm_tpu-*.whl in ${OUTPUT_DIR}," \
+    || die "expected one ${COMBINED_FILE_PREFIX}-*.whl in ${OUTPUT_DIR}," \
            "found ${#BUILT_WHEELS[@]}."
 BUILT_SDIST="${BUILT_SDISTS[0]}"
 BUILT_WHEEL="${BUILT_WHEELS[0]}"
@@ -376,7 +386,7 @@ echo "Platform tag: $(wheel_platform_tag "$FINAL_WHEEL")" \
     || die "$(basename "$FINAL_WHEEL") does not carry version ${WHEEL_VERSION}."
 
 # --- Step 6: Check metadata --------------------------------------------------
-# Same check as the tpu-inference wheel: catch metadata PyPI would reject.
+# Same check as the vllm-jax-core wheel: catch metadata PyPI would reject.
 echo "--- Checking metadata ---"
 "$PY" -m twine check --strict "$FINAL_WHEEL" "$BUILT_SDIST"
 
