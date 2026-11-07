@@ -233,6 +233,7 @@ class TpuPlatform(Platform):
         "USE_GMM_FUSED_RS_KERNEL",
         "MOE_ALL_GATHER_ACTIVATION_DTYPE",
         "SKIP_MAMBA_SCHEDULER_BLOCKS",
+        "MIXED_HEAD_DIM_SLIDING_WINDOW",
         "TPU_MESH_ATTN_DP_RING",
     ]
 

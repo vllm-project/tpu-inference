@@ -27,6 +27,8 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.sampling_params import SamplingType
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.core.kv_cache_planning import (get_kv_cache_config_from_groups,
+                                            get_kv_cache_groups)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor,
                                         MambaSpec, MLAAttentionSpec,
@@ -332,6 +334,9 @@ class TestKVCacheManager:
         assert self.runner.kv_cache_manager.shared_kv_cache_layers == {
             'layer.20': 'layer.0'
         }
+        # Uniform head dims: no extra page padding.
+        assert self.runner.kv_cache_manager._hybrid_uniform_page_size_bytes \
+            is None
 
     def test_get_kv_cache_spec_with_compilation_cfg_mla(self):
         # tests we create kv cache spec from compilation config with mla
@@ -374,6 +379,395 @@ class TestKVCacheManager:
         assert isinstance(spec, MLAAttentionSpec)
         assert spec.num_kv_heads == 1
         assert spec.head_size == expected_head_size
+
+    # Gemma 4 style layout, scaled down: sliding-window layers with many small
+    # KV heads, full-attention layers with few large KV heads.
+    _SLIDING_KV_HEADS, _SLIDING_HEAD_SIZE = 16, 256
+    _FULL_KV_HEADS, _FULL_HEAD_SIZE = 4, 512
+    _SLIDING_WINDOW = 64
+
+    def _make_mixed_head_dim_layers(self, sliding_window=_SLIDING_WINDOW):
+        """Builds 4 sliding + 2 full-attention layers with different head
+        dims, plus one KV-sharing sliding layer."""
+        layers = {}
+        for i in range(6):
+            is_sliding = i < 4
+            layers[f'layer.{i}'] = MagicMock(
+                spec=Attention,
+                num_kv_heads=(self._SLIDING_KV_HEADS
+                              if is_sliding else self._FULL_KV_HEADS),
+                head_size=(self._SLIDING_HEAD_SIZE
+                           if is_sliding else self._FULL_HEAD_SIZE),
+                attn_type=AttentionType.DECODER,
+                sliding_window=sliding_window if is_sliding else None,
+                kv_sharing_target_layer_name=None,
+            )
+        layers['layer.shared'] = MagicMock(
+            spec=Attention,
+            num_kv_heads=self._SLIDING_KV_HEADS,
+            head_size=self._SLIDING_HEAD_SIZE,
+            attn_type=AttentionType.DECODER,
+            sliding_window=sliding_window,
+            kv_sharing_target_layer_name='layer.0',
+        )
+        return layers
+
+    def _attn_page_size(self, num_kv_heads: int, head_size: int) -> int:
+        return get_attention_page_size_bytes(
+            self.runner.mesh, self.runner.vllm_config.cache_config.block_size,
+            common_utils.get_padded_num_heads(num_kv_heads,
+                                              self.runner.mesh.shape["model"]),
+            common_utils.get_padded_head_dim(head_size),
+            self.runner.kv_cache_dtype, False)
+
+    @pytest.fixture
+    def mixed_head_dims_enabled(self, monkeypatch):
+        """Opts in to keeping sliding window with mixed head dims."""
+        monkeypatch.setenv("MIXED_HEAD_DIM_SLIDING_WINDOW", "1")
+
+    @pytest.mark.usefixtures("mixed_head_dims_enabled")
+    def test_get_kv_cache_spec_mixed_head_dims_keeps_sliding_window(self):
+        layers = self._make_mixed_head_dim_layers()
+        self.runner.vllm_config.compilation_config.static_forward_context = \
+            layers
+
+        kv_cache_spec = self.runner.get_kv_cache_spec()
+
+        sliding_page = self._attn_page_size(self._SLIDING_KV_HEADS,
+                                            self._SLIDING_HEAD_SIZE)
+        full_page = self._attn_page_size(self._FULL_KV_HEADS,
+                                         self._FULL_HEAD_SIZE)
+        assert sliding_page != full_page
+        expected_page = sliding_page + full_page
+        manager = self.runner.kv_cache_manager
+        assert manager._hybrid_uniform_page_size_bytes == expected_page
+
+        assert len(kv_cache_spec) == 6
+        for i in range(4):
+            spec = kv_cache_spec[f'layer.{i}']
+            assert type(spec) is SlidingWindowSpec
+            assert spec.sliding_window == self._SLIDING_WINDOW
+            assert spec.num_kv_heads == self._SLIDING_KV_HEADS
+            assert spec.head_size == self._SLIDING_HEAD_SIZE
+            assert spec.page_size_padded == expected_page
+        for i in range(4, 6):
+            spec = kv_cache_spec[f'layer.{i}']
+            assert type(spec) is FullAttentionSpec
+            assert spec.num_kv_heads == self._FULL_KV_HEADS
+            assert spec.head_size == self._FULL_HEAD_SIZE
+            assert spec.page_size_padded == expected_page
+        # vLLM requires one page size across groups.
+        assert {spec.page_size_bytes
+                for spec in kv_cache_spec.values()} == {expected_page}
+        assert 'layer.shared' not in kv_cache_spec
+        assert self.runner.kv_cache_manager.shared_kv_cache_layers == {
+            'layer.shared': 'layer.0'
+        }
+
+    @pytest.mark.parametrize("reason",
+                             ["default_off", "hybrid_manager_disabled"])
+    def test_get_kv_cache_spec_mixed_head_dims_fallback(
+            self, monkeypatch, reason):
+        # By default (the env var is opt-in), and with a disabled hybrid KV
+        # cache manager even when opted in, sliding window is off and all
+        # layers are full attention with their own page size.
+        if reason == "default_off":
+            monkeypatch.delenv("MIXED_HEAD_DIM_SLIDING_WINDOW", raising=False)
+        else:
+            monkeypatch.setenv("MIXED_HEAD_DIM_SLIDING_WINDOW", "1")
+            monkeypatch.setattr(self.runner.vllm_config.scheduler_config,
+                                "disable_hybrid_kv_cache_manager", True)
+        layers = self._make_mixed_head_dim_layers()
+        self.runner.vllm_config.compilation_config.static_forward_context = \
+            layers
+
+        kv_cache_spec = self.runner.get_kv_cache_spec()
+
+        assert self.runner.kv_cache_manager._hybrid_uniform_page_size_bytes \
+            is None
+        assert len(kv_cache_spec) == 6
+        for i in range(6):
+            spec = kv_cache_spec[f'layer.{i}']
+            assert type(spec) is FullAttentionSpec
+            assert spec.page_size_padded == self._attn_page_size(
+                layers[f'layer.{i}'].num_kv_heads,
+                layers[f'layer.{i}'].head_size)
+            assert layers[f'layer.{i}'].sliding_window is None
+
+    @pytest.mark.usefixtures("mixed_head_dims_enabled")
+    def test_get_kv_cache_spec_mixed_head_dims_without_sliding_window(self):
+        # Mixed head dims but no sliding-window layer: nothing to keep, so the
+        # page sizes are left alone.
+        layers = self._make_mixed_head_dim_layers(sliding_window=None)
+        self.runner.vllm_config.compilation_config.static_forward_context = \
+            layers
+
+        kv_cache_spec = self.runner.get_kv_cache_spec()
+
+        assert self.runner.kv_cache_manager._hybrid_uniform_page_size_bytes \
+            is None
+        for i in range(6):
+            spec = kv_cache_spec[f'layer.{i}']
+            assert type(spec) is FullAttentionSpec
+            assert spec.page_size_padded == self._attn_page_size(
+                layers[f'layer.{i}'].num_kv_heads,
+                layers[f'layer.{i}'].head_size)
+
+    @pytest.mark.usefixtures("mixed_head_dims_enabled")
+    def test_get_kv_cache_spec_mixed_head_dims_mla_unaffected(self):
+        self.runner.kv_cache_manager.use_mla = True
+        mock_hf_text_config = MagicMock()
+        mock_hf_text_config.kv_lora_rank = 512
+        mock_hf_text_config.qk_rope_head_dim = 64
+        mock_hf_text_config.num_kv_shared_layers = 0
+        mock_hf_text_config.layer_types = []
+        self.runner.model_config.hf_text_config = mock_hf_text_config
+        layers = self._make_mixed_head_dim_layers()
+        self.runner.vllm_config.compilation_config.static_forward_context = \
+            layers
+
+        kv_cache_spec = self.runner.get_kv_cache_spec()
+
+        assert self.runner.kv_cache_manager._hybrid_uniform_page_size_bytes \
+            is None
+        assert len(kv_cache_spec) == 6
+        assert all(
+            isinstance(spec, MLAAttentionSpec)
+            for spec in kv_cache_spec.values())
+
+    @pytest.mark.usefixtures("mixed_head_dims_enabled")
+    def test_pad_pages_for_mixed_head_dims_skips_mamba(self):
+        layers = self._make_mixed_head_dim_layers()
+        layers['linear_attn'] = MagicMock(spec=MambaBase)
+
+        manager = self.runner.kv_cache_manager
+        assert not manager._maybe_pad_pages_for_mixed_head_dims(layers)
+        assert manager._hybrid_uniform_page_size_bytes is None
+
+    @pytest.mark.usefixtures("mixed_head_dims_enabled")
+    def test_initialize_kv_cache_mixed_head_dims_matches_num_blocks(self):
+        # The TPU allocation for the padded specs must cover exactly the
+        # blocks vLLM budgets for.
+        layers = self._make_mixed_head_dim_layers()
+        self.runner.vllm_config.compilation_config.static_forward_context = \
+            layers
+        kv_cache_spec = self.runner.get_kv_cache_spec()
+        page_size = self.runner.kv_cache_manager._hybrid_uniform_page_size_bytes
+        sliding_page = self._attn_page_size(self._SLIDING_KV_HEADS,
+                                            self._SLIDING_HEAD_SIZE)
+        full_page = self._attn_page_size(self._FULL_KV_HEADS,
+                                         self._FULL_HEAD_SIZE)
+
+        # vLLM groups 4 sliding + 2 full layers into 2 sliding groups and 1
+        # full group of 2 layers each; every group aliases the same bytes,
+        # sized with the uniform page size.
+        num_blocks = 100
+        layers_per_group = 2
+        group_layers = [['layer.0', 'layer.1'], ['layer.2', 'layer.3'],
+                        ['layer.4', 'layer.5']]
+        kv_cache_groups = [
+            KVCacheGroupSpec(layer_names=names,
+                             kv_cache_spec=kv_cache_spec[names[0]])
+            for names in group_layers
+        ]
+        tensor_size = layers_per_group * num_blocks * page_size
+        kv_cache_tensors = [
+            KVCacheTensor(
+                size=tensor_size,
+                layers=names,
+                layer_stride=num_blocks * page_size,
+                block_stride=page_size,
+                offset=0,
+            ) for names in group_layers
+        ]
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+        )
+
+        self.runner.initialize_kv_cache(kv_cache_config)
+
+        # One array per (layer slot, shape): 2 slots x 2 shapes, each with
+        # num_blocks blocks, filling exactly the bytes vLLM reserved.
+        kv_caches = self.runner.kv_caches
+        assert len(kv_caches) == 2 * layers_per_group
+        assert all(cache.shape[0] == num_blocks for cache in kv_caches)
+        total_bytes = sum(cache.nbytes for cache in kv_caches)
+        assert total_bytes == (num_blocks * layers_per_group *
+                               (sliding_page + full_page))
+        assert total_bytes == tensor_size
+
+        # Same-shape sliding layers in different groups share an array; the
+        # full-attention layers get their own.
+        index = self.runner.layer_name_to_kvcache_index
+        for j in range(layers_per_group):
+            sliding_idx = index[group_layers[0][j]]
+            full_idx = index[group_layers[2][j]]
+            assert index[group_layers[1][j]] == sliding_idx
+            assert full_idx != sliding_idx
+            assert kv_caches[sliding_idx].nbytes == num_blocks * sliding_page
+            assert kv_caches[full_idx].nbytes == num_blocks * full_page
+        assert len({index[name] for name in group_layers[2]}) == 2
+        assert index['layer.shared'] == index['layer.0']
+
+    # Attention layouts as (num_layers, num_kv_heads, head_size, sliding)
+    # per attention type, and whether every layer slot holds every shape
+    # (then the allocation fills vLLM's budget exactly; otherwise it stays
+    # below it).
+    _MIXED_KV_LAYOUTS = {
+        # Gemma 4 ratio: 5 sliding layers per full-attention layer.
+        "gemma4_ratio": ([(10, 16, 256, True), (2, 4, 512, False)], True),
+        # Head dims and head counts that the TPU pads.
+        "padded_dims": ([(4, 3, 80, True), (2, 1, 192, False)], True),
+        # Three distinct shapes: two sliding-window shapes and one full.
+        "three_shapes": ([(4, 8, 128, True), (4, 2, 256, True),
+                          (2, 4, 512, False)], True),
+        # Full-attention layers are the majority and have the smaller pages.
+        "full_majority": ([(2, 4, 512, True), (6, 2, 128, False)], True),
+        # 5 sliding + 2 full: vLLM forms sliding groups of 2, 2 and 1 layers.
+        "single_layer_group": ([(5, 16, 256, True), (2, 4, 512, False)], True),
+        # 4 sliding + 3 full: vLLM pads the full group to 4 layers, so the
+        # last slot holds only the sliding shape.
+        "padded_group": ([(4, 16, 256, True), (3, 4, 512, False)], False),
+    }
+
+    def _make_layers_from_layout(self, layout, sliding_window=64):
+        """Builds attention layers per `layout`, plus a KV-sharing layer."""
+        layers = {}
+        for num_layers, num_kv_heads, head_size, sliding in layout:
+            for _ in range(num_layers):
+                layers[f'layer.{len(layers)}'] = MagicMock(
+                    spec=Attention,
+                    num_kv_heads=num_kv_heads,
+                    head_size=head_size,
+                    attn_type=AttentionType.DECODER,
+                    sliding_window=sliding_window if sliding else None,
+                    kv_sharing_target_layer_name=None,
+                )
+        num_kv_heads, head_size, sliding = layout[0][1:]
+        layers['layer.shared'] = MagicMock(
+            spec=Attention,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            attn_type=AttentionType.DECODER,
+            sliding_window=sliding_window if sliding else None,
+            kv_sharing_target_layer_name='layer.0',
+        )
+        return layers
+
+    @pytest.mark.usefixtures("mixed_head_dims_enabled")
+    @pytest.mark.parametrize("block_size", [16, 64])
+    @pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+    @pytest.mark.parametrize("layout_name", list(_MIXED_KV_LAYOUTS))
+    def test_mixed_head_dims_allocation_within_vllm_budget(
+            self, layout_name, kv_dtype, block_size):
+        """The TPU allocation stays within the bytes vLLM plans for.
+
+        Runs the padded specs through vLLM's own grouping and KV cache
+        planning, then checks the invariant documented in
+        `_maybe_pad_pages_for_mixed_head_dims` on the arrays that
+        `initialize_kv_cache` actually allocates.
+        """
+        layout, every_slot_full = self._MIXED_KV_LAYOUTS[layout_name]
+        vllm_config = self.runner.vllm_config
+        vllm_config.cache_config.block_size = block_size
+        # What vLLM resolves for specs of mixed shapes when the backend does
+        # not declare a layout.
+        vllm_config.cache_config.kv_cache_layout = "LBNHC"
+        self.runner.kv_cache_dtype = kv_dtype
+        layers = self._make_layers_from_layout(layout)
+        vllm_config.compilation_config.static_forward_context = layers
+
+        kv_cache_spec = self.runner.get_kv_cache_spec()
+        manager = self.runner.kv_cache_manager
+        # Specs carry the padded shapes; key the TPU page sizes by them.
+        tp_size = self.runner.mesh.shape["model"]
+        page_size_of = {
+            (common_utils.get_padded_num_heads(heads, tp_size),
+             common_utils.get_padded_head_dim(size)):
+            self._attn_page_size(heads, size)
+            for _, heads, size, _ in layout
+        }
+        padded_page = sum(page_size_of.values())
+        assert manager._hybrid_uniform_page_size_bytes == padded_page
+        assert all(spec.page_size_bytes == padded_page
+                   for spec in kv_cache_spec.values())
+
+        groups = get_kv_cache_groups(vllm_config, kv_cache_spec)
+        max_group_len = max(len(g.layer_names) for g in groups)
+        num_blocks = 8
+        kv_cache_config = get_kv_cache_config_from_groups(
+            vllm_config, groups, num_blocks * max_group_len * padded_page)
+        assert kv_cache_config.num_blocks == num_blocks
+        reserved = max(t.size for t in kv_cache_config.kv_cache_tensors)
+
+        self.runner.initialize_kv_cache(kv_cache_config)
+
+        kv_caches = self.runner.kv_caches
+        index = self.runner.layer_name_to_kvcache_index
+        # Every layer gets an array of its own shape with num_blocks blocks.
+        for name, spec in kv_cache_spec.items():
+            cache = kv_caches[index[name]]
+            assert cache.shape[0] == num_blocks
+            assert cache.nbytes == num_blocks * page_size_of[
+                (spec.num_kv_heads, spec.head_size)]
+        assert index['layer.shared'] == index['layer.0']
+
+        # Group the arrays by the byte region (layer slot) vLLM placed their
+        # layers in; all KV cache groups alias these regions.
+        arrays_per_region = {}
+        for tensor in kv_cache_config.kv_cache_tensors:
+            for j, name in enumerate(tensor.layers):
+                region = tensor.offset + j * tensor.layer_stride
+                arrays_per_region.setdefault(region, set()).add(index[name])
+        assert len(arrays_per_region) == max_group_len
+        region_budget = num_blocks * padded_page
+        all_full = True
+        for region, arrays in arrays_per_region.items():
+            used = sum(kv_caches[i].nbytes for i in arrays)
+            assert used <= region_budget, region
+            all_full &= used == region_budget
+        # Layers in different slots never share an array.
+        assert sum(len(a) for a in arrays_per_region.values()) == len(
+            {index[name]
+             for name in kv_cache_spec})
+        assert all_full == every_slot_full
+
+        total = sum(cache.nbytes for cache in kv_caches)
+        assert total <= reserved
+        assert (total == reserved) == every_slot_full
+
+    @pytest.mark.usefixtures("mixed_head_dims_enabled")
+    def test_mixed_head_dims_budget_check_raises_before_allocating(self):
+        """Any allocation larger than vLLM's plan is rejected up front."""
+        layout = self._MIXED_KV_LAYOUTS["gemma4_ratio"][0]
+        vllm_config = self.runner.vllm_config
+        vllm_config.cache_config.kv_cache_layout = "LBNHC"
+        vllm_config.compilation_config.static_forward_context = \
+            self._make_layers_from_layout(layout)
+        kv_cache_spec = self.runner.get_kv_cache_spec()
+        groups = get_kv_cache_groups(vllm_config, kv_cache_spec)
+        padded_page = \
+            self.runner.kv_cache_manager._hybrid_uniform_page_size_bytes
+        num_blocks = 8
+        kv_cache_config = get_kv_cache_config_from_groups(
+            vllm_config, groups,
+            num_blocks * max(len(g.layer_names) for g in groups) * padded_page)
+
+        # Simulate the allocator using one byte more per page than the specs
+        # report.
+        def larger_page(*args, **kwargs):
+            return get_attention_page_size_bytes(*args, **kwargs) + 1
+
+        with patch('tpu_inference.runner.kv_cache_manager.'
+                   'get_attention_page_size_bytes',
+                   side_effect=larger_page), \
+             patch('tpu_inference.runner.kv_cache_manager.'
+                   'create_kv_caches') as mock_create, \
+             pytest.raises(RuntimeError, match="exceeds the bytes vLLM"):
+            self.runner.initialize_kv_cache(kv_cache_config)
+        mock_create.assert_not_called()
 
     def test_get_kv_cache_spec_without_compilation_cfg(self):
         # tests if there's no compilation config, we use full attention kv
