@@ -127,6 +127,8 @@ def _supports_vllm_config(model_class: Any, vllm_config: VllmConfig) -> bool:
 
     Classes without a ``supports_vllm_config`` hook support every config.
     """
+    if getattr(vllm_config, "lora_config", None) is not None:
+        return False
     hook = getattr(model_class, "supports_vllm_config", None)
     return hook is None or bool(hook(vllm_config))
 
@@ -714,6 +716,12 @@ def get_model(
         case "flax_nnx":
             arch = getattr(vllm_config.model_config.hf_config, "architectures",
                            [None])[0]
+            if getattr(vllm_config, "lora_config", None) is not None:
+                logger.warning(
+                    "LoRA is not supported on JAX flax_nnx %s models yet, "
+                    "fallback to vllm models.", arch)
+                return get_vllm_model(vllm_config, rng, mesh, is_draft_model,
+                                      shared_params)
             if vllm_config.parallel_config.pipeline_parallel_size > 1 and arch in _PP_DISABLED_MODELS:
                 logger.warning(
                     "PP is not fully supported on Jax flax_nnx %s models yet, fallback to vllm models.",
@@ -810,6 +818,11 @@ def resolve_model_architecture(vllm_config: VllmConfig,
     arch = architectures[0]
     impl = "vllm" if arch in _VLLM_PREFERRED_ARCHITECTURES else "flax_nnx"
     if impl == "flax_nnx" and not is_draft_model:
+        if getattr(vllm_config, "lora_config", None) is not None:
+            logger.info(
+                "LoRA is enabled for %s; resolving MODEL_IMPL_TYPE to 'vllm' "
+                "as native JAX models do not support LoRA.", arch)
+            return "vllm"
         # A registered class may decline this configuration (for example a
         # pooling model that only supports some pooler settings); use the
         # vLLM implementation then instead of failing at load time.
