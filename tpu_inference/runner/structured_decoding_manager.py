@@ -73,21 +73,17 @@ class StructuredDecodingManager:
         self.runner.grammar_bitmask_cpu.fill(0)
         self.runner.require_structured_out_cpu.fill(0)
 
-        sorted_struct_requests = sorted(
-            grammar_output.structured_output_request_ids)
-
-        cumulative_mask_idx = 0
-        for req_id in sorted_struct_requests:
-            if req_id not in self.runner.input_batch.req_id_to_index:
+        for mask_idx, req_id in enumerate(
+                grammar_output.structured_output_request_ids):
+            batch_index = self.runner.input_batch.req_id_to_index.get(req_id)
+            if batch_index is None:
                 continue
-            batch_index = self.runner.input_batch.req_id_to_index[req_id]
             self.runner.grammar_bitmask_cpu[batch_index] = grammar_bitmask[
-                cumulative_mask_idx]
+                mask_idx]
             # It's not guaranteed that all requests in this batch require
             # structured output, so create a bool tensor to represent
             # the requests that need structured output.
             self.runner.require_structured_out_cpu[batch_index] = True
-            cumulative_mask_idx += 1
 
         (require_structured_out_cpu,
          grammar_bitmask_cpu, structured_decode_arange) = device_array(
