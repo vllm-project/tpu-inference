@@ -744,8 +744,9 @@ class MambaPoolSyncExecutorMixin:
 
 def maybe_install_hybrid_coordinator_hooks(vllm_config: Any) -> None:
     """Install the hooks when mamba prefix caching (align mode) is on. Called
-    from the executors' `_init_executor`, which runs in the engine-core
-    process; the platform config hook does not."""
+    from the executors' `_init_executor` and from `TPUWorker.__init__`; with
+    UniProcExecutor the worker is the only one of them in the engine-core
+    process. The platform config hook does not run there."""
     cache_config = vllm_config.cache_config
     if (cache_config.enable_prefix_caching
             and getattr(cache_config, "mamba_cache_mode", "none") == "align"):
