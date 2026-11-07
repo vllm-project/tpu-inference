@@ -56,6 +56,19 @@ class QuantizationTest(jtu.JaxTestCase):
 
         self.assertAllClose(dequantized, original, rtol=0.1, atol=0.1)
 
+    @parameterized.parameters(jnp.int4, jnp.int8)
+    def test_integer_quantization_rounds_to_nearest(self, dtype):
+        # Max is 7 (int4) / 127 (int8), so scale is 1 for the max element.
+        dtype_max = jnp.iinfo(dtype).max
+        original = jnp.array([[0.4, 0.6, -0.6, 1.9, -1.9, dtype_max]],
+                             jnp.float32)
+        tensor_q, _ = quantize_tensor(dtype, original, axis=-1)
+        expected = jnp.round(original).astype(dtype)
+        self.assertArraysEqual(tensor_q, expected)
+        # Truncation would map 0.6 -> 0 and 1.9 -> 1.
+        self.assertEqual(int(tensor_q[0, 1]), 1)
+        self.assertEqual(int(tensor_q[0, 3]), 2)
+
     @parameterized.product(dtype=[jnp.float8_e4m3fn, jnp.int8],
                            axis=[-1, 1],
                            block_size=[32, 64])
