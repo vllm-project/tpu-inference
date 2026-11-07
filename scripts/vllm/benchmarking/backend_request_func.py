@@ -6,20 +6,23 @@
 This file implements the request logic needed for serving benchmark requests.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
 import sys
 import time
 import traceback
-from typing import Any, Literal, Optional, Protocol, Union
+from typing import TYPE_CHECKING, Any, Literal, Optional, Protocol, Union
 
 import aiohttp
 import huggingface_hub.constants
 from benchmark_core import BenchmarkContext, RequestFuncOutput, SampleRequest
 from tqdm.asyncio import tqdm
-from transformers import (AutoTokenizer, PreTrainedTokenizer,
-                          PreTrainedTokenizerFast)
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +118,8 @@ async def async_request_openai_chat_completions(
     output = await _openai_fetch(
         ctx=ctx,
         payload=payload,
-        extract_from=lambda choices: choices[0]["delta"]["content"],
+        extract_from=lambda choices:
+        (choices[0]["delta"].get("content") or None),
     )
 
     # XXX: not a good pattern to mutate the field after object creation.
@@ -129,8 +133,8 @@ async def async_request_openai_chat_completions(
 
 class _ExtractFunc(Protocol):
 
-    def __call__(self, choices) -> str:
-        """Given the "choices" field, extract the message payload."""
+    def __call__(self, choices) -> str | None:
+        """Extract text, or return None for a chunk without a token."""
         ...
 
 
@@ -168,10 +172,10 @@ async def _openai_fetch(
                             # NOTE: Some completion API might have a last
                             # usage summary response without a token so we
                             # want to check a token was generated
-                            if choices := data.get("choices"):
+                            if (choices := data.get("choices")) and (
+                                    text := extract_from(choices)) is not None:
                                 # Note that text could be empty here
                                 # e.g. for special tokens
-                                text = extract_from(choices)
                                 timestamp = time.perf_counter()
                                 # First token
                                 if not first_chunk_received:
@@ -235,6 +239,8 @@ def get_tokenizer(
     trust_remote_code: bool = False,
     **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
+    from transformers import AutoTokenizer
+
     if pretrained_model_name_or_path is not None and not os.path.exists(
             pretrained_model_name_or_path):
         pretrained_model_name_or_path = get_model(
