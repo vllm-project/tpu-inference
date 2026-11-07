@@ -99,7 +99,8 @@ def streamindex_topk_ref(
             q_abs_pos = (S_total - T_seq) + t_idx
 
             for s_idx in range(S_valid):
-                if s_idx * comp_ratio > q_abs_pos:
+                # A compressed key is causal only once its last token is visible.
+                if (s_idx + 1) * comp_ratio > q_abs_pos + 1:
                     continue
 
                 score = 0.0
@@ -411,6 +412,64 @@ def test_streamindex_topk_numerical_correctness(
         " padding.\n")
 
 
+@pytest.mark.parametrize("comp_ratio", [1, 2, 4])
+@pytest.mark.parametrize("q_dtype", [jnp.float32, jnp.bfloat16])
+@pytest.mark.parametrize(
+    "T_list, S_list",
+    [
+        pytest.param([12], [12], id="prefill"),
+        pytest.param([7], [11], id="chunked-prefill"),
+        pytest.param([1] * 6, [1, 2, 3, 4, 7, 8], id="batched-decode"),
+    ],
+)
+def test_streamindex_topk_compressed_causality(comp_ratio, q_dtype, T_list,
+                                               S_list):
+    """Only completed compressed groups may appear in the selected indices."""
+    num_tokens = sum(T_list)
+    page_size = 128
+    k = 512
+
+    # Every cache row has the same positive score, so top-k must return all and
+    # only the causal groups. Each sequence has its own physical page.
+    quantized, scales = quantize_fp8_ue8m0(jnp.ones((128, )), 128)
+    record = np.concatenate([
+        np.asarray(_to_byte_lane(quantized)),
+        np.asarray(_to_byte_lane(scales))
+    ])
+    record = np.pad(record, (0, 256 - record.size))
+    cache_kv = jnp.array(np.tile(record, (len(T_list), page_size // 4, 4, 1)))
+    cu_q_lens = np.concatenate([[0], np.cumsum(T_list)]).astype(np.int32)
+    num_decodes = len(T_list) if all(t == 1 for t in T_list) else 0
+
+    actual = np.asarray(
+        streamindex_topk(
+            q=jnp.ones((num_tokens, 2, 128), dtype=q_dtype),
+            indexer_weights=jnp.ones((num_tokens, 2), dtype=jnp.float32),
+            cache_kv=cache_kv,
+            seq_lens=jnp.array(S_list, dtype=jnp.int32),
+            page_indices=jnp.arange(len(T_list), dtype=jnp.int32),
+            cu_q_lens=jnp.array(cu_q_lens),
+            distribution=jnp.array([num_decodes, num_decodes,
+                                    len(T_list)],
+                                   dtype=jnp.int32),
+            k=k,
+            compression_ratio=comp_ratio,
+            num_kv_pages_per_block=1,
+            num_queries_per_block=4,
+        ))
+
+    _verify_padding_at_end(actual)
+    for seq_idx, (q_len, seq_len) in enumerate(zip(T_list, S_list)):
+        for offset in range(q_len):
+            q_pos = seq_len - q_len + offset
+            # Count original tokens visible to this query, then complete groups.
+            num_visible = len(range(comp_ratio - 1, q_pos + 1, comp_ratio))
+            row = actual[cu_q_lens[seq_idx] + offset]
+            np.testing.assert_array_equal(np.sort(row[:num_visible]),
+                                          np.arange(num_visible))
+            np.testing.assert_array_equal(row[num_visible:], -1)
+
+
 def test_streamindex_topk_quantized():
     """Verifies correctness of streamindex_topk on FP8 packed cache."""
     np.random.seed(42)
@@ -467,27 +526,20 @@ def test_streamindex_topk_quantized():
                 lane_idx = s % 4
                 cache_kv[p, w_idx, lane_idx] = record
 
-    # Compute expected top-k using exact dequantized keys
-    seq_kv = np.concatenate([dequantized_kv[p] for p in range(num_pages)],
-                            axis=0)
-
-    naive_scores = np.full((T_seq, max(S_valid, k)), -np.inf, dtype=np.float32)
-
-    for t_idx in range(T_seq):
-        for s_idx in range(S_valid):
-            score = 0.0
-            for h in range(H_I):
-                h_kv = h // (H_I // H_KV)
-                inner = np.dot(q[t_idx, h], seq_kv[s_idx, h_kv])
-                score += max(0.0, inner) * weights[t_idx, h]
-            naive_scores[t_idx, s_idx] = score
-
-    expected_topk = np.argsort(-naive_scores, axis=-1)[:, :k]
-    for t_idx in range(T_seq):
-        for i in range(k):
-            idx = expected_topk[t_idx, i]
-            if naive_scores[t_idx, idx] == -np.inf:
-                expected_topk[t_idx, i] = -1
+    # Compute expected top-k using exact dequantized keys and causal masking.
+    expected_topk = streamindex_topk_ref(
+        q=q,
+        weights=weights,
+        kv=dequantized_kv,
+        block_table=np.arange(num_pages)[None, :],
+        T_list=[T_seq],
+        S_list=[S_seq],
+        cu_q_lens=[0, T_seq],
+        k=k,
+        comp_ratio=comp_ratio,
+        H_I=H_I,
+        H_KV=H_KV,
+    )
 
     # Pallas parameters
     actual_topk = streamindex_topk(
