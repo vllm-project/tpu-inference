@@ -339,10 +339,15 @@ class ShardingConfigManager:
             # When num_kv_heads * 2 / packing < TP, tensor parallelism would
             # duplicate KV heads across devices, wasting kv cache memory.
             # Use attention DP instead to reduce per-device num_kv_heads and
-            # eliminate this waste.
+            # eliminate this waste. When expert_parallelism > 1, clamp to at
+            # least num_kv_heads so FP8 KV cache packing (packing=4) does not
+            # collapse expert_parallelism to 1 and replicate non-MoE weights.
 
             if envs.USE_BATCHED_RPA_KERNEL and envs.USE_BATCHED_RPA_SEQ_ON_LANE:
                 num_kv_heads_per_device_in_kv_cache = max(1, num_kv_heads * 2)
+            elif expert_parallelism > 1:
+                num_kv_heads_per_device_in_kv_cache = max(
+                    1, num_kv_heads, (num_kv_heads * 2) / packing)
             else:
                 num_kv_heads_per_device_in_kv_cache = max(
                     1, (num_kv_heads * 2) / packing)

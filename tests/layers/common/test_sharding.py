@@ -120,6 +120,56 @@ class TestShardingConfigManager(unittest.TestCase):
         self.assertEqual(manager.total_dp_size, 2)  # 1 * 1 * 2
 
     @patch("tpu_inference.layers.common.sharding.envs.NEW_MODEL_DESIGN", True)
+    def test_sharding_config_manager_with_dp_attention_expert_fp8_kv(self):
+        vllm_config = MagicMock()
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+        vllm_config.model_config.use_mla = False
+        vllm_config.model_config.get_total_num_kv_heads.return_value = 2
+        vllm_config.speculative_config = None
+        vllm_config.lora_config = None
+        vllm_config.cache_config.cache_dtype = "fp8"
+
+        vllm_config.additional_config = {
+            "sharding": {
+                "sharding_strategy": {
+                    "enable_dp_attention": True,
+                    "tensor_parallelism": 1,
+                    "expert_parallelism": 8
+                }
+            }
+        }
+
+        manager = ShardingConfigManager.from_vllm_config(vllm_config)
+        # num_kv_heads = 2 (e.g. Qwen3.5-35B-A3B), packing = 4 (FP8), expert_parallelism = 8 > 1
+        # num_kv_heads_per_device_in_kv_cache = max(1, 2, (2 * 2) / 4) = 2
+        # attn_dp_expert = 8 // 2 = 4, expert_parallelism = 2
+        self.assertEqual(manager.tp_size, 1)
+        self.assertEqual(manager.attn_dp_size, 1)
+        self.assertEqual(manager.attn_dp_expert_size, 4)
+        self.assertEqual(manager.expert_size, 2)
+        self.assertEqual(manager.total_dp_size, 4)
+
+        # Dense model (expert_parallelism = 1) with kv=8, TP=8, FP8 still uses packing=4
+        vllm_config.parallel_config.tensor_parallel_size = 8
+        vllm_config.model_config.get_total_num_kv_heads.return_value = 8
+        vllm_config.additional_config = {
+            "sharding": {
+                "sharding_strategy": {
+                    "enable_dp_attention": True,
+                    "tensor_parallelism": 8,
+                    "expert_parallelism": 1
+                }
+            }
+        }
+        dense_manager = ShardingConfigManager.from_vllm_config(vllm_config)
+        self.assertEqual(dense_manager.tp_size, 4)
+        self.assertEqual(dense_manager.attn_dp_size, 2)
+        self.assertEqual(dense_manager.expert_size, 1)
+
+    @patch("tpu_inference.layers.common.sharding.envs.NEW_MODEL_DESIGN", True)
     def test_sharding_config_manager_with_dp_attention_expert_model(self):
         vllm_config = MagicMock()
         vllm_config.parallel_config.tensor_parallel_size = 8
