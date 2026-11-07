@@ -41,7 +41,8 @@ from tpu_inference.layers.jax.quantization.fp8 import (
     Fp8BlockwiseLinearMethod, Fp8FusedMoEMethod, Fp8TensorwiseLinearMethod,
     Fp8TensorwiseMergedLinearMethod)
 from tpu_inference.layers.jax.quantization.unquantized import (
-    UnquantizedFusedMoEMethod, UnquantizedLinearMethod)
+    UnquantizedFusedMoEMethod, UnquantizedLinearMethod,
+    UnquantizedMergedLinearMethod)
 from tpu_inference.layers.jax.quantization.wna16 import (
     WNA16LinearMethod, WNA16MergedLinearMethod)
 
@@ -139,15 +140,17 @@ class CompressedTensorsConfig(QuantizationConfig):
             return None
 
         linear_config = QuantLinearConfig(layer, enable_sp=False)
+        unquantized_method = (UnquantizedMergedLinearMethod if isinstance(
+            layer, JaxMergedColumnParallelLinear) else UnquantizedLinearMethod)
 
         if should_ignore_layer(prefix,
                                ignore=self._ignore,
                                fused_mapping=self._fused_mapping):
-            return UnquantizedLinearMethod(linear_config)
+            return unquantized_method(linear_config)
 
         scheme = self._match_target(layer, prefix)
         if scheme is None:
-            return UnquantizedLinearMethod(linear_config)
+            return unquantized_method(linear_config)
 
         weight_quant = scheme.get("weights")
         input_quant = scheme.get("input_activations")
