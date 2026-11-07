@@ -278,6 +278,22 @@ def test_flatten_pad_mm_embeds_exact_length():
     np.testing.assert_array_equal(result, expected)
 
 
+def test_flatten_pad_mm_embeds_single_exact_length_fast_path():
+    """Tests that a single 2D array matching target_pad_len is returned directly."""
+    single_embed = jnp.ones((5, 128), dtype=jnp.float32)
+    result = flatten_pad_mm_embeds([single_embed], target_pad_len=5)
+    assert result is single_embed
+
+
+def test_flatten_pad_mm_embeds_single_3d_array_uses_jit():
+    """Tests that a single 3D array with shape[0] == target_pad_len is flattened to 2D."""
+    single_3d_embed = jnp.ones((2, 3, 128), dtype=jnp.float32)
+    result = flatten_pad_mm_embeds([single_3d_embed], target_pad_len=6)
+    assert result is not None
+    assert result.ndim == 2
+    assert result.shape == (6, 128)
+
+
 # --- Tests for convert_torch_tensor_to_jax ---
 
 

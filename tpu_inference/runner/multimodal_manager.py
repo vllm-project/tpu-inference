@@ -244,10 +244,18 @@ class MultiModalManager:
 
                     if (is_embed := pos_info.is_embed) is not None:
                         is_embed = is_embed[start_idx:end_idx]
-                        mm_embeds_item = encoder_output[
-                            curr_embeds_start:curr_embeds_end]
+                        if (curr_embeds_start == 0 and curr_embeds_end
+                                == encoder_output.shape[0]):
+                            mm_embeds_item = encoder_output
+                        else:
+                            mm_embeds_item = encoder_output[
+                                curr_embeds_start:curr_embeds_end]
                     else:
-                        mm_embeds_item = encoder_output[start_idx:end_idx]
+                        if (start_idx == 0
+                                and end_idx == encoder_output.shape[0]):
+                            mm_embeds_item = encoder_output
+                        else:
+                            mm_embeds_item = encoder_output[start_idx:end_idx]
 
                     mm_embeds.append(mm_embeds_item)
 
