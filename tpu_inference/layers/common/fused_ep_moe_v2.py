@@ -23,6 +23,11 @@ there is no reduce-scatter.
 The kernel expects a 1-D mesh, so it gets one built from the same devices in
 the same order; no data moves. The weights use the GMM_EP layout
 (w13 = [gate | up], sharded over the expert axes).
+
+With keep_token_sharding (sequence-parallel residual stream, see
+sharding.keeps_tokens_sharded) each device already holds its own share of the
+tokens, so the kernel gets singleton replica groups: no row split before it and
+no gather within the replica group after it.
 """
 
 import jax
@@ -152,7 +157,8 @@ def fused_ep_moe_v2_func(hidden_states: jax.Array,
                          renormalize: bool,
                          mesh: Mesh,
                          scoring_fn: str,
-                         score_bias: jax.Array | None = None) -> jax.Array:
+                         score_bias: jax.Array | None = None,
+                         keep_token_sharding: bool = False) -> jax.Array:
     """Run one MoE layer with tokamax's fused_ep_moe_v2.
 
     hidden_states [num_tokens, hidden] and gating_output [num_tokens, experts]
@@ -160,6 +166,12 @@ def fused_ep_moe_v2_func(hidden_states: jax.Array,
     for fp8, their per-channel scales [E, 1, 1, N] are sharded over the expert
     axes. Returns [num_tokens, hidden], sharded like hidden_states. Assumes
     unsupported_reason() returned None for this layer.
+
+    keep_token_sharding: hidden_states and gating_output arrive token-sharded
+    over EXPERT_DATA instead, and the output stays that way. EXPERT_DATA is
+    `data` followed by the expert axes, and ep_layout only accepts meshes whose
+    used axes are all expert axes, so its rows are already in the 1-D mesh's
+    rank order and every device's rows are distinct.
     """
     from tokamax._src.ops.experimental.fused_moe import host as tk_host
     from tokamax._src.ops.experimental.fused_moe import layer as tk_layer
@@ -171,16 +183,22 @@ def fused_ep_moe_v2_func(hidden_states: jax.Array,
         hidden_states = jnp.pad(hidden_states,
                                 ((0, 0), (0, padded_hidden - hidden_size)))
     fp8 = w1.dtype == jnp.float8_e4m3fn
+    if keep_token_sharding:
+        # One distinct share of the tokens per device: singleton groups.
+        token_axes = ShardingAxisName.EXPERT_DATA
+        groups = None
+    else:
+        token_axes = ShardingAxisName.ATTN_DATA
     logger.info_once(
         "[MoE]: fused_ep_moe_v2 over %d devices, %d experts each, token rows "
         "split over replica groups of %d; %d-row tiles, %s routing plan, %s "
         "weights.", mesh.devices.size, num_experts // mesh.devices.size,
-        len(groups[0]), envs.FUSED_EP_MOE_V2_CAPACITY,
+        1 if groups is None else len(groups[0]), envs.FUSED_EP_MOE_V2_CAPACITY,
         "sharded" if envs.FUSED_EP_MOE_V2_SHARDED_PLAN else "replicated",
         "fp8" if fp8 else "bf16")
-    attn, expert = ShardingAxisName.ATTN_DATA, ShardingAxisName.EXPERT
-    x = _move_rows(hidden_states, mesh, attn, expert)
-    gating = _move_rows(gating_output, mesh, attn, expert)
+    expert = ShardingAxisName.EXPERT
+    x = _move_rows(hidden_states, mesh, token_axes, expert)
+    gating = _move_rows(gating_output, mesh, token_axes, expert)
     # tokamax's shard_map runs over the 1-D mesh, so make it the current mesh
     # while tracing.
     with jax.sharding.use_abstract_mesh(mesh_1d.abstract_mesh):
@@ -206,5 +224,5 @@ def fused_ep_moe_v2_func(hidden_states: jax.Array,
             score_bias=score_bias,
             token_replica_groups=groups,
         )
-    out = _move_rows(out, mesh, expert, attn)
+    out = _move_rows(out, mesh, expert, token_axes)
     return out[:num_tokens, :hidden_size]

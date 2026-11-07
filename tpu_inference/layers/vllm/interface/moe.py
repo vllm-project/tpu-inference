@@ -133,7 +133,8 @@ def vllm_keeps_tokens_sharded(vllm_config: VllmConfig | None,
     """`sharding.keeps_tokens_sharded` for a vLLM model.
 
     The single decision the linear configs and the MoE both use: `enable_sp`
-    set, the MoE backend is GMM_EP (`select_moe_backend`), and the
+    set, the MoE backend is GMM_EP, ROUTING_MOE or FUSED_EP_MOE_V2
+    (`select_moe_backend`; all three honor `keep_token_sharding`), and the
     quantization method has been validated with it
     (`_SP_TOKEN_SHARDING_QUANTIZATIONS`).
     """
@@ -142,9 +143,14 @@ def vllm_keeps_tokens_sharded(vllm_config: VllmConfig | None,
     if (vllm_config.model_config.quantization
             not in _SP_TOKEN_SHARDING_QUANTIZATIONS):
         return False
+    # ROUTING_MOE (USE_ROUTING_MOE=1) keeps the tokens sharded too:
+    # routing_moe_func skips the replica split and remote-scatters each output
+    # row to the device that owns its token. FUSED_EP_MOE_V2
+    # (USE_FUSED_EP_MOE_V2=1) does the same with singleton replica groups.
     gmm_ep = (select_moe_backend(
-        vllm_config.parallel_config.enable_expert_parallel) ==
-              MoEBackend.GMM_EP)
+        vllm_config.parallel_config.enable_expert_parallel)
+              in (MoEBackend.GMM_EP, MoEBackend.ROUTING_MOE,
+                  MoEBackend.FUSED_EP_MOE_V2))
     return keeps_tokens_sharded(mesh,
                                 vllm_config.additional_config.get(
                                     "enable_sp", False),
@@ -201,8 +207,9 @@ def vllm_moe_apply(layer: RoutedExperts,
     extra_kwargs = dict(quant_method_instance.extra_backend_kwargs)
     extra_kwargs["scatter_results"] = is_dp
     # Sequence-parallel residual stream: the linears around the MoE consume
-    # and produce tokens sharded over EXPERT_DATA, so the GMM_EP MoE output
-    # is not resharded back to ATTN_DATA.
+    # and produce tokens sharded over EXPERT_DATA, so the GMM_EP /
+    # ROUTING_MOE / FUSED_EP_MOE_V2 MoE output is not resharded back to
+    # ATTN_DATA.
     keep = vllm_keeps_tokens_sharded(vllm_config, mesh)
     extra_kwargs["keep_token_sharding"] = (sp_token_axes(
         mesh, keep, x.shape[0]) is not None)
