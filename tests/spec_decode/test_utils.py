@@ -18,10 +18,14 @@ import numpy as np
 import pytest
 
 from tpu_inference.layers.jax.sample.rejection_sampler import RejectionSampler
+from tpu_inference.layers.jax.sample.sampling import _apply_sampling_transforms
+from tpu_inference.layers.jax.sample.sampling_metadata import \
+    TPUSupportedSamplingMetadata
 from tpu_inference.runner.utils import SpecDecodeMetadata
 from tpu_inference.spec_decode.jax.utils import (PLACEHOLDER_TOKEN_ID,
                                                  extract_last_sampled_tokens,
-                                                 filter_speculative_logprobs)
+                                                 filter_speculative_logprobs,
+                                                 process_and_extend_logits)
 
 VOCAB_SIZE = 100
 
@@ -29,6 +33,66 @@ VOCAB_SIZE = 100
 def _make_mesh():
     devices = np.array(jax.devices()).reshape((1, len(jax.devices())))
     return jax.sharding.Mesh(devices, axis_names=('data', 'model'))
+
+
+@pytest.mark.parametrize("greedy_temperature", [-1.0, 0.0, 1e-7])
+@pytest.mark.parametrize("greedy_first", [True, False])
+@pytest.mark.parametrize("top_k,top_p", [(0, 1.0), (2, 1.0), (0, 0.7),
+                                         (2, 0.7)])
+def test_processed_speculative_logprobs_mixed_greedy(greedy_temperature,
+                                                     greedy_first, top_k,
+                                                     top_p):
+    """Greedy draft logprobs must stay raw when a sampled request joins."""
+    greedy_logits = jnp.array([[1.0, 3.0, 2.0], [-1.0, 0.0, 2.0]])
+    random_logits = jnp.array([[2.0, 1.0, 0.0]])
+    blocks = ([greedy_logits, random_logits]
+              if greedy_first else [random_logits, greedy_logits])
+    lengths = [2, 1] if greedy_first else [1, 2]
+    temperatures = ([greedy_temperature, 0.7]
+                    if greedy_first else [0.7, greedy_temperature])
+    target_logits = jnp.concatenate(blocks)
+    bonus_logits = jnp.array([[0.5, 1.5, 2.5], [3.0, 2.0, 1.0]])
+    metadata = SpecDecodeMetadata(
+        draft_lengths=jnp.array(lengths, dtype=jnp.int32),
+        target_logits_indices=jnp.arange(3, dtype=jnp.int32),
+        bonus_logits_indices=jnp.arange(2, dtype=jnp.int32),
+        final_logits_indices=jnp.arange(5, dtype=jnp.int32),
+    )
+    sampling_metadata = TPUSupportedSamplingMetadata(
+        temperature=jnp.array(temperatures),
+        top_k=jnp.full((2, ), top_k, dtype=jnp.int32),
+        top_p=jnp.full((2, ), top_p),
+        do_sampling=True,
+        logprobs=True,
+    )
+    mesh = _make_mesh()
+    with jax.set_mesh(mesh):
+        processed = process_and_extend_logits(mesh, target_logits,
+                                              bonus_logits, metadata,
+                                              sampling_metadata)
+
+    greedy_start = 0 if greedy_first else 1
+    greedy_processed = processed[greedy_start:greedy_start + 2]
+    np.testing.assert_array_equal(greedy_processed, greedy_logits)
+    np.testing.assert_allclose(jax.nn.log_softmax(greedy_processed),
+                               jax.nn.log_softmax(greedy_logits),
+                               rtol=1e-6,
+                               atol=1e-6)
+    random_metadata = TPUSupportedSamplingMetadata(
+        temperature=jnp.array([0.7]),
+        top_k=jnp.array([top_k]),
+        top_p=jnp.array([top_p]),
+        do_sampling=True,
+        logprobs=True,
+    )
+    random_index = 2 if greedy_first else 0
+    expected_random = _apply_sampling_transforms(random_logits,
+                                                 random_metadata)
+    np.testing.assert_allclose(processed[random_index:random_index + 1],
+                               expected_random,
+                               rtol=1e-6,
+                               atol=1e-6)
+    np.testing.assert_array_equal(processed[3:], bonus_logits)
 
 
 def _build_inputs(seqs, num_speculative_tokens):
