@@ -31,6 +31,7 @@ from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import LogprobsLists, ModelRunnerOutput
 from vllm.v1.request import Request
 
+from tpu_inference.core.sched import dp_scheduler as dp_scheduler_module
 from tpu_inference.core.sched.dp_scheduler import (
     DPScheduler, DPSchedulerOutput, SchedulerCommand,
     _get_max_cache_hit_length, _resolve_start_method,
@@ -38,10 +39,12 @@ from tpu_inference.core.sched.dp_scheduler import (
 
 
 @pytest.fixture(autouse=True)
-def _default_start_method(monkeypatch):
-    """Tests start from the default start method unless they set one."""
-    monkeypatch.delenv("DP_SCHED_START_METHOD", raising=False)
-    monkeypatch.delenv("VLLM_WORKER_MULTIPROC_METHOD", raising=False)
+def _fork_workers(monkeypatch):
+    """Most tests use MagicMock configs, which cloudpickle cannot serialize
+    for spawned workers, so they exercise the fork path (used under
+    Pathways). Tests of the default spawn path restore the real resolver."""
+    monkeypatch.setattr(dp_scheduler_module, "_resolve_start_method",
+                        lambda: "fork")
 
 
 def _make_mock_mp_context():
@@ -1512,15 +1515,13 @@ class TestDPScheduler:
         assert mock_vllm_config.device_config.slice is unpicklable_slice
         assert gc.isenabled()
 
-    def test_init_uses_fork_start_method_by_default(
+    def test_init_fork_passes_worker_kwargs(
         self,
-        monkeypatch,
         mock_vllm_config,
         mock_kv_cache_config,
         mock_structured_output_manager,
     ):
-        """Test that workers are forked with keyword args by default."""
-        monkeypatch.delenv("DP_SCHED_START_METHOD", raising=False)
+        """Test that forked workers (under Pathways) get keyword args."""
 
         with patch(
                 'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
@@ -1561,13 +1562,16 @@ class TestDPScheduler:
                     is mock_structured_output_manager)
             assert worker_kwargs["block_size"] == 16
 
-    def test_init_spawn_passes_cloudpickled_payload(
+    def test_init_spawns_workers_by_default(
         self,
         monkeypatch,
         mock_structured_output_manager,
     ):
-        """Test that spawn mode sends worker args as cloudpickle bytes."""
-        monkeypatch.setenv("DP_SCHED_START_METHOD", "spawn")
+        """Test that workers are spawned by default, with their args sent as
+        cloudpickle bytes."""
+        monkeypatch.setattr(dp_scheduler_module, "_resolve_start_method",
+                            _resolve_start_method)
+        monkeypatch.delenv("JAX_PLATFORMS", raising=False)
         monkeypatch.setattr(kv_cache_utils,
                             "NONE_HASH",
                             b"parent-none-hash",
@@ -1643,35 +1647,27 @@ class TestDPScheduler:
 
 class TestResolveStartMethod:
 
-    # (DP_SCHED_START_METHOD, VLLM_WORKER_MULTIPROC_METHOD, JAX_PLATFORMS,
-    #  expected start method)
-    _CASES = [
-        (None, None, "", "fork"),
-        (None, "spawn", "", "spawn"),
-        ("spawn", None, "", "spawn"),
-        ("Spawn", None, "", "spawn"),
-        ("fork", "spawn", "", "fork"),
-        ("spawn", None, "proxy", "fork"),
-        (None, "spawn", "proxy", "fork"),
-    ]
-
-    @pytest.mark.parametrize("dp_sched, vllm_method, jax_platforms, expected",
-                             _CASES)
-    def test_resolve_start_method(self, monkeypatch, dp_sched, vllm_method,
-                                  jax_platforms, expected):
-        """DP_SCHED_START_METHOD wins, else vLLM's setting; no spawn under
-        Pathways."""
-        env = {
-            "DP_SCHED_START_METHOD": dp_sched,
-            "VLLM_WORKER_MULTIPROC_METHOD": vllm_method,
-            "JAX_PLATFORMS": jax_platforms,
-        }
-        for name, value in env.items():
-            if value is None:
-                monkeypatch.delenv(name, raising=False)
-            else:
-                monkeypatch.setenv(name, value)
+    @pytest.mark.parametrize("jax_platforms, expected", [
+        (None, "spawn"),
+        ("", "spawn"),
+        ("tpu", "spawn"),
+        ("proxy", "fork"),
+        ("cpu,proxy", "fork"),
+    ])
+    def test_resolve_start_method(self, monkeypatch, jax_platforms, expected):
+        """Workers are spawned, except under Pathways."""
+        if jax_platforms is None:
+            monkeypatch.delenv("JAX_PLATFORMS", raising=False)
+        else:
+            monkeypatch.setenv("JAX_PLATFORMS", jax_platforms)
         assert _resolve_start_method() == expected
+
+    def test_ignores_vllm_worker_multiproc_method(self, monkeypatch):
+        """vLLM's own start method setting does not apply to these
+        workers."""
+        monkeypatch.delenv("JAX_PLATFORMS", raising=False)
+        monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
+        assert _resolve_start_method() == "spawn"
 
 
 class TestSchedulerWorkerTrampoline:
@@ -1699,13 +1695,26 @@ class TestSchedulerWorkerTrampoline:
             "NONE_HASH": b"parent-none-hash"
         }))
         input_conn, output_conn = MagicMock(), MagicMock()
+        calls = []
+        real_loads = cloudpickle.loads
+
+        def recording_loads(data):
+            calls.append("unpickle")
+            return real_loads(data)
 
         with patch(
                 'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
         ) as mock_worker, patch(
                 'tpu_inference.core.sched.dp_scheduler.StructuredOutputManager'
-        ) as mock_manager_cls:
+        ) as mock_manager_cls, patch(
+                'tpu_inference.core.sched.dp_scheduler.load_general_plugins',
+                side_effect=lambda: calls.append("plugins")), patch(
+                    'tpu_inference.core.sched.dp_scheduler.cloudpickle.loads',
+                    side_effect=recording_loads):
             _scheduler_worker_trampoline(1, input_conn, output_conn, payload)
+
+        # Plugins are loaded before the config is unpickled.
+        assert calls == ["plugins", "unpickle"]
 
         mock_manager_cls.assert_called_once()
         (rebuilt_from, ) = mock_manager_cls.call_args.args

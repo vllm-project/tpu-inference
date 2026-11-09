@@ -35,6 +35,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.aux_output_connector.connector import \
     AuxOutputConnectorMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.plugins import load_general_plugins
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (CachedRequestData, GrammarOutput,
@@ -184,22 +185,16 @@ def _set_none_hash_state(state: Dict[str, Any]) -> None:
 def _resolve_start_method() -> str:
     """Returns the multiprocessing start method for the scheduler workers.
 
-    DP_SCHED_START_METHOD wins if set. Otherwise the workers follow vLLM's
-    VLLM_WORKER_MULTIPROC_METHOD, so a deployment that already runs vLLM with
-    spawn gets spawned scheduler workers too. Spawn is not used under
-    Pathways (JAX_PLATFORMS=proxy): a spawned worker re-imports
-    tpu_inference, which initializes Pathways again, and that path is
-    untested.
+    The workers are spawned: by the time they start, the engine process runs
+    JAX/TPU runtime threads, and forking a multi-threaded process can
+    deadlock the child on a lock another thread held at fork time. Under
+    Pathways (JAX_PLATFORMS=proxy) they are still forked, because a spawned
+    worker re-imports tpu_inference, which initializes Pathways again, and
+    that path is untested.
     """
-    method = envs.DP_SCHED_START_METHOD
-    if method is None:
-        method = vllm_envs.VLLM_WORKER_MULTIPROC_METHOD
-    method = method.lower()
-    if method == "spawn" and "proxy" in (envs.JAX_PLATFORMS or ""):
-        logger.warning("DP scheduler workers are not spawned under Pathways "
-                       "(JAX_PLATFORMS=proxy); using fork.")
-        method = "fork"
-    return method
+    if "proxy" in (envs.JAX_PLATFORMS or ""):
+        return "fork"
+    return "spawn"
 
 
 def _scheduler_worker_trampoline(
@@ -220,12 +215,18 @@ def _scheduler_worker_trampoline(
     gets: workers start before any request is added, so the parent's manager
     has no grammar backend or other request state to inherit yet.
 
-    A spawned worker also does not inherit module globals, so the parent's
+    A spawned worker also does not inherit module globals or plugin
+    registrations. vLLM's general plugins are loaded first, and the parent's
     NONE_HASH (the parent hash of every request's first block) is installed
     explicitly; otherwise block hashes computed in the worker (e.g. when
     decoding completes a request's first block) would fail or diverge from
     the ones computed in the engine process.
     """
+    # Plugins can register names the config refers to (e.g. a custom
+    # attention backend, added to AttentionBackendEnum at runtime). Load them
+    # before unpickling, as vLLM's own worker processes do; forked workers
+    # inherit them instead.
+    load_general_plugins()
     worker_kwargs, none_hash_state = cloudpickle.loads(payload)
     _set_none_hash_state(none_hash_state)
     worker_kwargs["structured_output_manager"] = StructuredOutputManager(
@@ -579,9 +580,9 @@ class DPScheduler(SchedulerInterface):
         # multiprocessing.Queue uses background feeder threads for put(),
         # which causes GIL contention and thread convoy effects at high DP
         # sizes. Using raw Pipe connections eliminates all background threads.
-        # The start method is configurable (see _resolve_start_method):
-        # "spawn" avoids forking the engine process after the TPU runtime has
-        # started threads, which can deadlock the forked child.
+        # Workers are spawned rather than forked (see _resolve_start_method):
+        # forking the engine process after the TPU runtime has started
+        # threads can deadlock the forked child.
         self._start_method: str = _resolve_start_method()
         ctx = multiprocessing.get_context(self._start_method)
         self.input_conns: List[Connection] = []  # parent writes, child reads

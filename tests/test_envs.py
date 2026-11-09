@@ -203,22 +203,6 @@ def test_dp_sched_routing(monkeypatch: pytest.MonkeyPatch):
         _ = envs.DP_SCHED_ROUTING
 
 
-def test_dp_sched_start_method(monkeypatch: pytest.MonkeyPatch):
-    """DP_SCHED_START_METHOD is unset by default and accepts fork/spawn."""
-    monkeypatch.delenv("DP_SCHED_START_METHOD", raising=False)
-    assert envs.DP_SCHED_START_METHOD is None
-
-    monkeypatch.setenv("DP_SCHED_START_METHOD", "spawn")
-    assert envs.DP_SCHED_START_METHOD == "spawn"
-
-    monkeypatch.setenv("DP_SCHED_START_METHOD", "Spawn")
-    assert envs.DP_SCHED_START_METHOD == "Spawn"
-
-    monkeypatch.setenv("DP_SCHED_START_METHOD", "forkserver")
-    with pytest.raises(ValueError, match="DP_SCHED_START_METHOD"):
-        _ = envs.DP_SCHED_START_METHOD
-
-
 def test_boolean_env_vars_string_values(monkeypatch: pytest.MonkeyPatch):
     """Test that boolean env vars accept string values like 'True' and 'False'"""
 
