@@ -423,7 +423,7 @@ class TestKVCacheManager:
     @pytest.fixture
     def mixed_head_dims_enabled(self, monkeypatch):
         """Opts in to keeping sliding window with mixed head dims."""
-        monkeypatch.setenv("MIXED_HEAD_DIM_SLIDING_WINDOW", "1")
+        monkeypatch.setenv("USE_FULL_KVCACHE_FOR_SLIDING_WINDOW", "0")
 
     @pytest.mark.usefixtures("mixed_head_dims_enabled")
     def test_get_kv_cache_spec_mixed_head_dims_keeps_sliding_window(self):
@@ -468,13 +468,14 @@ class TestKVCacheManager:
                              ["default_off", "hybrid_manager_disabled"])
     def test_get_kv_cache_spec_mixed_head_dims_fallback(
             self, monkeypatch, reason):
-        # By default (the env var is opt-in), and with a disabled hybrid KV
-        # cache manager even when opted in, sliding window is off and all
-        # layers are full attention with their own page size.
+        # By default (full KV cache for sliding-window layers), and with a
+        # disabled hybrid KV cache manager even when opted in, sliding window
+        # is off and all layers are full attention with their own page size.
         if reason == "default_off":
-            monkeypatch.delenv("MIXED_HEAD_DIM_SLIDING_WINDOW", raising=False)
+            monkeypatch.delenv("USE_FULL_KVCACHE_FOR_SLIDING_WINDOW",
+                               raising=False)
         else:
-            monkeypatch.setenv("MIXED_HEAD_DIM_SLIDING_WINDOW", "1")
+            monkeypatch.setenv("USE_FULL_KVCACHE_FOR_SLIDING_WINDOW", "0")
             monkeypatch.setattr(self.runner.vllm_config.scheduler_config,
                                 "disable_hybrid_kv_cache_manager", True)
         layers = self._make_mixed_head_dim_layers()

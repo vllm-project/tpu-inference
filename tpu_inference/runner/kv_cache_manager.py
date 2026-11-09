@@ -536,7 +536,7 @@ class KVCacheManager:
             `_mixed_head_dim_page_sizes` have been set. False if the caller
             should disable sliding window instead.
         """
-        if not tpu_envs.MIXED_HEAD_DIM_SLIDING_WINDOW:
+        if tpu_envs.USE_FULL_KVCACHE_FOR_SLIDING_WINDOW:
             return False
         # MLA and mamba hybrids have their own page size handling, and with
         # the hybrid KV cache manager disabled vLLM converts sliding-window
@@ -579,7 +579,7 @@ class KVCacheManager:
             "Keeping sliding-window KV cache specs for attention layers with "
             "mixed head dims: padding every attention page to %d bytes, the "
             "sum of the page sizes of each (num_kv_heads, head_dim) shape: %s. "
-            "Unset MIXED_HEAD_DIM_SLIDING_WINDOW to disable.",
+            "Unset USE_FULL_KVCACHE_FOR_SLIDING_WINDOW to disable.",
             self._hybrid_uniform_page_size_bytes,
             ", ".join(f"{heads}x{dim}: {size}"
                       for (heads, dim), size in page_sizes.items()))
@@ -1202,8 +1202,8 @@ class KVCacheManager:
                 f"{total_used} allocated vs {total_reserved} reserved in "
                 f"total; over-budget layer slots (region: (allocated, "
                 f"reserved)): {over}. Per-shape page sizes: "
-                f"{self._mixed_head_dim_page_sizes}. Set "
-                "MIXED_HEAD_DIM_SLIDING_WINDOW=0 to disable this path.")
+                f"{self._mixed_head_dim_page_sizes}. Unset "
+                "USE_FULL_KVCACHE_FOR_SLIDING_WINDOW to disable this path.")
 
     def _log_kv_cache_init(self, kv_cache_config: KVCacheConfig,
                            kv_caches: List[jax.Array],

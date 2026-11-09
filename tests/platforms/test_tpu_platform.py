@@ -120,11 +120,11 @@ class TestTpuPlatform:
                 in TpuPlatform.additional_env_vars)
         assert "MOE_FOLD_ROUTING_INTO_DISPATCH" in envs.environment_variables
 
-    def test_additional_env_vars_covers_mixed_head_dim_sliding_window(self):
+    def test_additional_env_vars_covers_full_kvcache_for_sliding_window(self):
         """The workers build the KV cache specs, so they must see the flag."""
-        assert ("MIXED_HEAD_DIM_SLIDING_WINDOW"
+        assert ("USE_FULL_KVCACHE_FOR_SLIDING_WINDOW"
                 in TpuPlatform.additional_env_vars)
-        assert "MIXED_HEAD_DIM_SLIDING_WINDOW" in envs.environment_variables
+        assert "USE_FULL_KVCACHE_FOR_SLIDING_WINDOW" in envs.environment_variables
 
     @pytest.mark.parametrize(
         "name", ["MOE_TC_PERMUTE", "MOE_TC_PERMUTE_CAPACITY_FACTOR"])
