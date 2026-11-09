@@ -20,8 +20,9 @@ import numpy as np
 import pytest
 from flywheel_tpu.linear_attention.gdn import wrapper as flywheel_gdn
 from jax.sharding import Mesh
+from tokamax._src.ops.causal_conv1d_gated_delta_rule import \
+    wrapper as tokamax_gdn
 
-from tpu_inference.kernels.gdn.v3 import wrapper as v3_gdn
 from tpu_inference.layers.common import attention_backend
 from tpu_inference.layers.common import \
     flywheel_linear_attention as flywheel_linear
@@ -31,7 +32,7 @@ from tpu_inference.layers.common.sharding import MESH_AXIS_NAMES
 NUM_TOKENS, NUM_HEADS, HEAD_DIM, KERNEL_SIZE = 8, 2, 128, 4
 QKV_DIM = 3 * NUM_HEADS * HEAD_DIM
 NUM_STATE_SLOTS, WRITE_SLOT, READ_SLOT = 4, 2, 1
-V3_MARKER, FLYWHEEL_MARKER = 1, 2
+TOKAMAX_MARKER, FLYWHEEL_MARKER = 1, 2
 
 
 @pytest.fixture
@@ -96,15 +97,15 @@ def stub_kernel(marker: int, calls: list[dict]):
 
 
 @pytest.mark.parametrize(("backend_cls", "marker"), [
-    (None, V3_MARKER),
-    (attention_backend.GDNLinearAttentionBackend, V3_MARKER),
+    (None, TOKAMAX_MARKER),
+    (attention_backend.GDNLinearAttentionBackend, TOKAMAX_MARKER),
     (flywheel_linear.FlywheelLinearAttentionBackend, FLYWHEEL_MARKER),
 ])
 def test_gdn_runs_the_selected_backend_kernel(mesh, monkeypatch, backend_cls,
                                               marker):
     calls: list[dict] = []
-    monkeypatch.setattr(v3_gdn, "fused_conv1d_gdn",
-                        stub_kernel(V3_MARKER, calls))
+    monkeypatch.setattr(tokamax_gdn, "fused_conv1d_gdn",
+                        stub_kernel(TOKAMAX_MARKER, calls))
     monkeypatch.setattr(flywheel_gdn, "fused_conv1d_gdn",
                         stub_kernel(FLYWHEEL_MARKER, calls))
     kernel = backend_cls().conv1d_gdn_kernel() if backend_cls else None
