@@ -1694,6 +1694,54 @@ class TestTPUJaxRunnerDisableMM:
         assert entry.block_ids == [7, 8]
         np.testing.assert_array_equal(entry.rows, expert_indices[:2, :, 0, :])
 
+    def test_routed_experts_step_entries_marks_resumed_reqs(self):
+        """_routed_experts_step_entries sets is_resumed=True for requests in
+        scheduled_cached_reqs.resumed_req_ids."""
+        from tpu_inference.runner.tpu_runner import \
+            _routed_experts_step_entries
+
+        runner = SimpleNamespace(
+            dp_size=1,
+            vllm_config=SimpleNamespace(
+                model_config=SimpleNamespace(
+                    enable_return_routed_experts=True),
+                sharding_config=SimpleNamespace(total_dp_size=1),
+            ),
+            routed_experts_attn_gid=0,
+            requests={},
+        )
+        scheduler_output = SimpleNamespace(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=SimpleNamespace(
+                req_ids=["req_resumed", "req_normal"],
+                num_computed_tokens=[10, 20],
+                resumed_req_ids={"req_resumed"},
+            ),
+            num_scheduled_tokens={
+                "req_resumed": 4,
+                "req_normal": 4
+            },
+            scheduled_spec_decode_tokens={},
+        )
+        expert_indices_cpu = np.zeros((2, 8, 3), dtype=np.int32)
+        entries = _routed_experts_step_entries(
+            runner=runner,
+            scheduler_output=scheduler_output,
+            expert_indices_cpu=expert_indices_cpu,
+            req_ids=["req_resumed", "req_normal"],
+            sampled_token_ids=[[1, 2], [3]],
+            req_ids_dp={0: ["req_resumed", "req_normal"]},
+            padded_num_scheduled_tokens_per_dp_rank=8,
+            block_ids_by_req={
+                "req_resumed": [1],
+                "req_normal": [2]
+            },
+        )
+        assert len(entries) == 2
+        by_id = {e.req_id: e for e in entries}
+        assert by_id["req_resumed"].is_resumed is True
+        assert by_id["req_normal"].is_resumed is False
+
     def test_refresh_state_leaves_updates_shared_drafter(self):
         """refresh_state_leaves propagates runner.state_leaves to runner.drafter
         when drafter shares the target model (built-in MTP)."""

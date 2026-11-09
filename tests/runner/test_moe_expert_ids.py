@@ -18,20 +18,9 @@ from vllm import LLM, SamplingParams
 
 LLM.__repr__ = lambda self: "LLM"
 
-# TODO(#3636): unskip once the vLLM LKG carries a platform-aware
-# _verify_aux_output_compatibility. At LKG 0b7f11a1ee the gate requires Model
-# Runner V2 on every platform and MRV2 requires Triton, so constructing an
-# engine with enable_return_routed_experts=True raises ValueError inside
-# VllmConfig.__post_init__ before any tpu-inference code runs. Only the
-# enabled engines are affected; llm_disabled still builds and runs.
-ROUTED_EXPERTS_GATED_ON_TPU = (
-    "TODO(#3636): AuxOutput gate rejects enable_return_routed_experts on TPU "
-    "until the Model-Runner-V2 requirement is CUDA-only upstream.")
-
 
 @pytest.fixture(scope="function")
 def llm_enabled():
-    pytest.skip(ROUTED_EXPERTS_GATED_ON_TPU)
     engine = LLM(
         model="Qwen/Qwen1.5-MoE-A2.7B",
         load_format="dummy",
@@ -79,7 +68,6 @@ def llm_disabled():
 
 @pytest.fixture(scope="function")
 def llm_enabled_sync():
-    pytest.skip(ROUTED_EXPERTS_GATED_ON_TPU)
     # async_scheduling=False routes generation through the sync sampler path
     # (_sample_from_logits), which reconstructs routed experts differently than
     # the async get_output path. continue_decode requires async_scheduling=False,
@@ -104,6 +92,59 @@ def llm_enabled_sync():
         additional_config={
             "enable_continue_decode": True,
             "max_decode_steps": 4
+        },
+    )
+    yield engine
+    engine.llm_engine.engine_core.shutdown()
+    import gc
+    gc.collect()
+
+
+def _shrink_moe_eagle3(hf_config):
+    hf_config.hidden_size = 512
+    hf_config.intermediate_size = 512
+    hf_config.num_attention_heads = 4
+    hf_config.num_key_value_heads = 2
+    hf_config.head_dim = 128
+    hf_config.vocab_size = 151936
+    if getattr(hf_config, "model_type", None) == "llama":
+        hf_config.num_hidden_layers = 1
+        hf_config.target_hidden_size = 512
+        hf_config.draft_vocab_size = 151936
+        hf_config.eagle_aux_hidden_state_layer_ids = [1, 2, 3]
+    else:
+        hf_config.num_hidden_layers = 4
+        hf_config.moe_intermediate_size = 256
+        hf_config.num_experts = 8
+        hf_config.num_experts_per_tok = 2
+    return hf_config
+
+
+@pytest.fixture(scope="function")
+def llm_enabled_async_spec_decode(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("MODEL_IMPL_TYPE", "vllm")
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", "vllm")
+    engine = LLM(
+        model="Qwen/Qwen3-30B-A3B",
+        load_format="dummy",
+        hf_overrides=_shrink_moe_eagle3,
+        trust_remote_code=True,
+        max_model_len=128,
+        max_num_batched_tokens=128,
+        max_num_seqs=16,
+        gpu_memory_utilization=0.95,
+        tensor_parallel_size=1,
+        pipeline_parallel_size=1,
+        enable_prefix_caching=True,
+        kv_cache_dtype="auto",
+        enable_expert_parallel=False,
+        enable_return_routed_experts=True,
+        async_scheduling=True,
+        speculative_config={
+            "method": "eagle3",
+            "model": "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
+            "num_speculative_tokens": 3,
+            "draft_tensor_parallel_size": 1,
         },
     )
     yield engine
@@ -210,3 +251,63 @@ class TestMoEExpertIds:
         assert not (prompt_slice == 0).all(), (
             "prompt routed experts are all zero on the sync path -- slot "
             "start_pos is misaligned with the scheduler-side read")
+
+    def test_moe_expert_ids_async_spec_decode_with_rejections(
+        self,
+        llm_enabled_async_spec_decode: LLM,
+    ):
+        """Verifies routed_experts slot tracking under async_scheduling=True +
+        speculative decoding when draft tokens are proposed and rejected across
+        consecutive decode steps.
+
+        Under async scheduling, step N+1 is scheduled before step N's rejected
+        draft tokens are subtracted from scheduler_output's num_computed_tokens.
+        Without tracking state.emit_cursor / in_decode in TPUAuxOutputWorker,
+        reconstruct_slots writes decode expert rows to the un-reconciled offset
+        and inflates routed_experts.shape[0] beyond P + G - 1.
+        """
+        prompt = (
+            "Keep repeating the sequence: alpha beta gamma alpha beta gamma "
+            "alpha beta gamma alpha beta gamma")
+        sampling_params = SamplingParams(
+            temperature=0,
+            max_tokens=16,
+            ignore_eos=True,
+        )
+        outputs = llm_enabled_async_spec_decode.generate([prompt],
+                                                         sampling_params)
+        req_out = outputs[0]
+        comp_out = req_out.outputs[0]
+
+        assert comp_out.routed_experts is not None, (
+            "routed_experts must be populated under async speculative decoding")
+        re_arr = np.asarray(comp_out.routed_experts)
+        assert re_arr.ndim == 3, (
+            f"Expected 3D routed_experts tensor, got {re_arr.shape}")
+
+        P = len(req_out.prompt_token_ids)
+        G = len(comp_out.token_ids)
+        expected_len = P + G - 1
+        assert re_arr.shape[0] == expected_len, (
+            f"Expected routed_experts token dim P + G - 1 ({expected_len}), "
+            f"got {re_arr.shape[0]} (un-reconciled spec-decode token_start "
+            f"shifts emit_cursor on draft rejections)")
+        assert np.all(re_arr >= 0), (
+            "routed_experts contains negative/uninitialized slot values")
+        assert not (re_arr[P:] == 0).all(), (
+            "decode routed_experts slice is all zero after spec-decode steps")
+
+        # Second turn sharing the prompt prefix (hits prefix cache + spec decode)
+        follow_up = prompt + " delta epsilon"
+        outputs_2 = llm_enabled_async_spec_decode.generate([follow_up],
+                                                           sampling_params)
+        req_out_2 = outputs_2[0]
+        comp_out_2 = req_out_2.outputs[0]
+        assert comp_out_2.routed_experts is not None
+        re_arr_2 = np.asarray(comp_out_2.routed_experts)
+        P2 = len(req_out_2.prompt_token_ids)
+        G2 = len(comp_out_2.token_ids)
+        assert re_arr_2.shape[0] == P2 + G2 - 1
+        np.testing.assert_array_equal(re_arr_2[:P], re_arr[:P])
+
+
