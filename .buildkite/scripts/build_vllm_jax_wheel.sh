@@ -14,17 +14,18 @@
 # limitations under the License.
 #
 # ------------------------------------------------------
-# Build the combined `vllm-jax` release wheel and sdist from upstream vLLM.
+# Build the combined `vllm-jax` release wheel and sdist from upstream vLLM,
+# plus the transitional empty `vllm-tpu` meta-wheel.
 #
 # The result is vLLM renamed to `vllm-jax`, built for its in-tree TPU target,
 # with a pip dependency on `vllm-jax-core` (this repo). vllm-jax-core is not
-# bundled; pip installs it from PyPI. Both names are COMBINED_PROJECT and
-# CORE_PROJECT in .buildkite/release/lib.sh.
+# bundled; pip installs it from PyPI. Names come from COMBINED_PROJECT,
+# LEGACY_COMBINED_PROJECT, and CORE_PROJECT in .buildkite/release/lib.sh.
 #
 # Only vLLM is cloned: this script runs from this repo's checkout, and the
 # combined wheel needs just the vllm-jax-core version, not its source.
 #
-# Steps (all on a temp clone of vLLM, deleted on exit; nothing is committed):
+# Steps (all in a temp workspace, deleted on exit; nothing is committed):
 #   1. Shallow-clone vLLM at the ref in .buildkite/vllm_lkg.version, the
 #      same ref CI tests this repo against.
 #   2. Rename the package "vllm" -> "vllm-jax" in pyproject.toml and in
@@ -40,7 +41,8 @@
 #      auditwheel which glibc level the wheel's binaries need. Stop if that is
 #      newer than WHEEL_MAX_MANYLINUX (.buildkite/release/lib.sh), i.e. the
 #      agent's OS is too new, before anything is published.
-#   6. `twine check --strict` the wheel and sdist (metadata PyPI would reject).
+#   6. Build and verify the transitional empty `vllm-tpu` meta-wheel.
+#   7. `twine check --strict` the wheels and sdist (metadata PyPI would reject).
 #
 # This does the same rename as vLLM's tools/vllm-tpu/build.sh but does not
 # call it: that script patches a fixed list of files, so lookups added
@@ -77,14 +79,15 @@
 #                          release; the result was not tested with this
 #                          repo.
 #   OUTPUT_DIR             Output directory (default: <repo-root>/dist). Old
-#                          vllm_jax-* files are removed; vllm_jax_core-* files
-#                          are kept.
+#                          vllm_jax-* and vllm_tpu-* files are removed;
+#                          vllm_jax_core-* and tpu_inference-* files are kept.
 #   KEEP_VLLM_SRC          Set to 1 to keep the patched clone for debugging.
 #   PYTHON                 Interpreter for the build venv (default: python3).
 #
 # Output:
 #   ${OUTPUT_DIR}/vllm_jax-<version>-cpXY-cpXY-manylinux_<glibc>_x86_64.whl
 #   ${OUTPUT_DIR}/vllm_jax-<version>.tar.gz
+#   ${OUTPUT_DIR}/vllm_tpu-<version>-py3-none-any.whl
 #   (cpXY = the Python that ran the build, e.g. cp312; <glibc> as detected,
 #   e.g. 2_17, at most WHEEL_MAX_MANYLINUX)
 # ------------------------------------------------------
@@ -97,12 +100,14 @@ WHEEL_UTILS="${SCRIPT_DIR}/wheel_utils.py"
 # Provides get_vllm_commit_hash (the vLLM commit in .buildkite/vllm_lkg.version).
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/configs/pipeline_config.sh"
-# Provides CORE_PROJECT, COMBINED_PROJECT, die, is_valid_release_version and
-# check_manylinux_tag.
+# Provides CORE_PROJECT, COMBINED_PROJECT, LEGACY_COMBINED_PROJECT, die,
+# is_valid_release_version and check_manylinux_tag.
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/../release/lib.sh"
-# The combined wheel's file name prefix (PEP 427 normalizes - to _).
+# Wheel file name prefixes (PEP 427 normalizes - to _).
 COMBINED_FILE_PREFIX="${COMBINED_PROJECT//-/_}"
+LEGACY_COMBINED_FILE_PREFIX="${LEGACY_COMBINED_PROJECT//-/_}"
+LEGACY_COMBINED_META_DIR="${REPO_ROOT}/packaging/vllm_tpu_meta"
 
 VLLM_REPO="${VLLM_REPO:-https://github.com/vllm-project/vllm.git}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/dist}"
@@ -190,6 +195,8 @@ require_cmd curl "curl not found (apt-get install curl)."
 require_cmd "${PYTHON}" "${PYTHON} not found; set PYTHON=<interpreter>."
 [[ -f "${BUILD_REQUIREMENTS_FILE}" ]] \
     || die "${BUILD_REQUIREMENTS_FILE} not found; it lists the build deps."
+[[ -f "${LEGACY_COMBINED_META_DIR}/setup.py" ]] \
+    || die "${LEGACY_COMBINED_META_DIR}/setup.py not found."
 # 3.12 matches the CI/Docker images (python:3.12-slim-bookworm); the wheel is
 # tagged cpXY for the Python that builds it.
 "${PYTHON}" -c 'import sys; sys.exit(not ((3, 12) <= sys.version_info < (3, 13)))' \
@@ -324,9 +331,12 @@ echo "Installing build dependencies from ${BUILD_REQUIREMENTS_FILE}..."
 "$PY" -m pip install -r "$BUILD_REQUIREMENTS_FILE" build wheel twine \
     "auditwheel==${AUDITWHEEL_VERSION}"
 
-# Remove old combined-wheel files only; `vllm_jax-` never matches
-# vllm_jax_core-*.
-rm -f "${OUTPUT_DIR}/${COMBINED_FILE_PREFIX}"-*.whl "${OUTPUT_DIR}/${COMBINED_FILE_PREFIX}"-*.tar.gz
+# Remove old combined-wheel and legacy combined meta-wheel files only;
+# `vllm_jax-` / `vllm_tpu-` never match vllm_jax_core-* or tpu_inference-*.
+rm -f \
+    "${OUTPUT_DIR}/${COMBINED_FILE_PREFIX}"-*.whl \
+    "${OUTPUT_DIR}/${COMBINED_FILE_PREFIX}"-*.tar.gz \
+    "${OUTPUT_DIR}/${LEGACY_COMBINED_FILE_PREFIX}"-*.whl
 
 echo "Building ${COMBINED_PROJECT} sdist and wheel into ${OUTPUT_DIR}..."
 VLLM_TARGET_DEVICE=tpu \
@@ -385,12 +395,31 @@ echo "Platform tag: $(wheel_platform_tag "$FINAL_WHEEL")" \
 "$PY" "$WHEEL_UTILS" verify_built_wheel "$FINAL_WHEEL" "$WHEEL_VERSION" 2>/dev/null \
     || die "$(basename "$FINAL_WHEEL") does not carry version ${WHEEL_VERSION}."
 
-# --- Step 6: Check metadata --------------------------------------------------
+# --- Step 6: Build the transitional legacy combined meta-wheel ---------------
+# Copy into WORK_DIR so building leaves no build/ or *.egg-info in REPO_ROOT.
+echo "Building transitional ${LEGACY_COMBINED_PROJECT} meta-wheel into ${OUTPUT_DIR}..."
+cp -R "${LEGACY_COMBINED_META_DIR}" "${WORK_DIR}/vllm_tpu_meta"
+VLLM_VERSION_OVERRIDE="${WHEEL_VERSION}" "$PY" -m build --wheel --no-isolation \
+    --outdir "${OUTPUT_DIR}" "${WORK_DIR}/vllm_tpu_meta"
+
+shopt -s nullglob
+LEGACY_COMBINED_WHEELS=("${OUTPUT_DIR}/${LEGACY_COMBINED_FILE_PREFIX}"-*.whl)
+shopt -u nullglob
+[[ "${#LEGACY_COMBINED_WHEELS[@]}" -eq 1 ]] \
+    || die "expected one ${LEGACY_COMBINED_FILE_PREFIX}-*.whl in ${OUTPUT_DIR}," \
+           "found ${#LEGACY_COMBINED_WHEELS[@]}."
+LEGACY_COMBINED_WHEEL="${LEGACY_COMBINED_WHEELS[0]}"
+
+"$PY" "$WHEEL_UTILS" verify_empty_meta_wheel \
+    "$LEGACY_COMBINED_WHEEL" "$WHEEL_VERSION" "${COMBINED_PROJECT}==${WHEEL_VERSION}"
+
+# --- Step 7: Check metadata --------------------------------------------------
 # Same check as the vllm-jax-core wheel: catch metadata PyPI would reject.
 echo "--- Checking metadata ---"
-"$PY" -m twine check --strict "$FINAL_WHEEL" "$BUILT_SDIST"
+"$PY" -m twine check --strict "$FINAL_WHEEL" "$BUILT_SDIST" "$LEGACY_COMBINED_WHEEL"
 
 echo "--- Build complete! ---"
-ls -lh "$FINAL_WHEEL" "$BUILT_SDIST"
+ls -lh "$FINAL_WHEEL" "$BUILT_SDIST" "$LEGACY_COMBINED_WHEEL"
 echo "Wheel: ${FINAL_WHEEL}"
 echo "Sdist: ${BUILT_SDIST}"
+echo "Legacy meta-wheel: ${LEGACY_COMBINED_WHEEL}"

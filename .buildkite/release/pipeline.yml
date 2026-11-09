@@ -42,8 +42,8 @@ steps:
     commands:
       - bash .buildkite/release/build_images.sh
 
-  # Fails early if this version of CORE_PROJECT or legacy meta-projects is on PyPI.
-  - label: ":package: Build the vllm-jax-core and legacy meta-wheels"
+  # Fails early if this version of CORE_PROJECT or LEGACY_CORE_PROJECT is on PyPI.
+  - label: ":package: Build the vllm-jax-core and legacy tpu-inference wheels"
     key: build_vllm_jax_core_wheel
     depends_on: preflight
     if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
@@ -51,7 +51,7 @@ steps:
     commands:
       - bash .buildkite/scripts/build_vllm_jax_core_wheel.sh
 
-  - label: ":package: Build the vllm-jax wheel"
+  - label: ":package: Build the vllm-jax and legacy vllm-tpu wheels"
     key: build_vllm_jax_wheel
     depends_on: build_vllm_jax_core_wheel
     if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
@@ -63,6 +63,7 @@ steps:
         bash .buildkite/scripts/build_vllm_jax_wheel.sh "$$VERSION"
         buildkite-agent artifact upload "dist/vllm_jax-*.whl"
         buildkite-agent artifact upload "dist/vllm_jax-*.tar.gz"
+        buildkite-agent artifact upload "dist/vllm_tpu-*.whl"
 
   - label: ":mag: Check the wheels install from PyPI"
     key: check_wheels
