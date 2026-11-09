@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Settings for the PR review bot (cbs-oss-review-bot). Every value below is
+# Settings for the PR review bot (tpu-oss-review-bot). Every value below is
 # the bot's default, so this file changes nothing until someone edits it.
 # README.md in this folder explains each setting. REVIEW.md is the guide the
 # bot follows.

@@ -1,6 +1,6 @@
 # Review bot settings and guide
 
-The review bot, `cbs-oss-review-bot`, reviews pull requests in this repo with
+The review bot, `tpu-oss-review-bot`, reviews pull requests in this repo with
 Claude. It posts a GitHub review with a summary and inline comments. It never
 approves a PR or blocks a merge. Repo owners control it with the files in this
 folder.
@@ -98,7 +98,7 @@ Later reviews happen only on request.
 
 ## Other controls
 
-- **Ask for a review:** comment `@cbs-oss-review-bot` in the PR's
+- **Ask for a review:** comment `@tpu-oss-review-bot` in the PR's
   Conversation tab, or request it under Reviewers (its re-request button
   works too). To get an answer on one of its inline comments, tag it in
   your reply there. Repo members, collaborators and allowlisted Google
