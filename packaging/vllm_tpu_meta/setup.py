@@ -29,7 +29,12 @@ setup(
     long_description=(
         "`vllm-tpu` has been renamed to `vllm-jax`.\n"
         "This transitional meta-package installs the matching `vllm-jax` "
-        "release without shipping duplicate files or entry points.\n"),
+        "release without shipping duplicate files or entry points.\n\n"
+        "**Upgrading an existing `pip` environment from `<=0.32.0`:**\n"
+        "Standard `pip install -U vllm-tpu` uninstalls legacy files after "
+        "unpacking `vllm-jax`. Uninstall the legacy package first "
+        "(`pip uninstall -y vllm-tpu && pip install -U vllm-jax`), "
+        "or upgrade with `uv pip install -U vllm-tpu`.\n"),
     long_description_content_type="text/markdown",
     author="vLLM JAX Contributors",
     url="https://github.com/vllm-project/vllm-jax",

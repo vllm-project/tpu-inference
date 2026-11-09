@@ -30,7 +30,12 @@ setup(
     ("`tpu-inference` has been renamed to `vllm-jax-core` "
      "(or `pip install vllm-jax` for the combined vLLM + TPU distribution).\n"
      "This transitional meta-package installs the matching `vllm-jax-core` "
-     "release without shipping duplicate files or entry points.\n"),
+     "release without shipping duplicate files or entry points.\n\n"
+     "**Upgrading an existing `pip` environment from `<=0.32.0`:**\n"
+     "Standard `pip install -U tpu-inference` uninstalls legacy files after "
+     "unpacking `vllm-jax-core`. Uninstall the legacy package first "
+     "(`pip uninstall -y tpu-inference && pip install -U vllm-jax-core`), "
+     "or upgrade with `uv pip install -U tpu-inference`.\n"),
     long_description_content_type="text/markdown",
     author="vLLM JAX Contributors",
     url="https://github.com/vllm-project/vllm-jax",
