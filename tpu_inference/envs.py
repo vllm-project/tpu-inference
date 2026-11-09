@@ -1,4 +1,17 @@
-# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # SPDX-FileCopyrightText: Copyright contributors to the tpu-inference project
 
 import functools
@@ -112,6 +125,8 @@ if TYPE_CHECKING:
     TPU_MOE_ROUTER_TOPK: str = "sort"
     TPU_MOE_LOWTOK: bool = False
     TPU_MOE_LOWTOK_MAX_TOKENS: int = 128
+    USE_FUSED_RMSNORM_QUANT: bool = False
+    FUSED_RMSNORM_BLOCK_M: int = 512
     TPU_MOE_TOPK_WEIGHTS_FLOAT32: bool = False
 
 
@@ -704,6 +719,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("TPU_MOE_LOWTOK", default=False),
     "TPU_MOE_LOWTOK_MAX_TOKENS":
     lambda: int(os.getenv("TPU_MOE_LOWTOK_MAX_TOKENS", "128")),
+    # Fuse RMSNorm and dynamic FP8 activation quantization into a single
+    # Pallas TPU kernel pass for norms that opt in (Qwen2/Qwen3 decoder layers)
+    # while a matching qwix dynamic FP8 activation quantization rule is active.
+    "USE_FUSED_RMSNORM_QUANT":
+    env_bool("USE_FUSED_RMSNORM_QUANT", default=False),
+    "FUSED_RMSNORM_BLOCK_M":
+    lambda: int(os.getenv("FUSED_RMSNORM_BLOCK_M") or "512"),
     # Keep FusedMoE top-k routing weights in float32 precision instead of casting
     # to the activation dtype (e.g. bfloat16) in fused_moe_gmm. Improves numerical
     # parity with training frameworks (e.g. MaxText) in RL and distillation workloads.

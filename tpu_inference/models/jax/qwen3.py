@@ -221,6 +221,10 @@ class Qwen3DecoderLayer(Qwen2DecoderLayer):
                  prefix: str = ""):
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
+        # input_layernorm only feeds the q/k/v projections and
+        # post_attention_layernorm only feeds the gate/up projections, so both
+        # may emit pre-quantized FP8 activations (USE_FUSED_RMSNORM_QUANT=1).
+        fuse_fp8_quant = envs.USE_FUSED_RMSNORM_QUANT
 
         self.input_layernorm = JaxRmsNorm(
             hidden_size,
@@ -231,6 +235,7 @@ class Qwen3DecoderLayer(Qwen2DecoderLayer):
             rngs=rng,
             quant_config=quant_config,
             prefix=prefix + ".input_layernorm",
+            fuse_fp8_quant=fuse_fp8_quant,
         )
         self.self_attn = Qwen3Attention(config=config,
                                         dtype=dtype,
@@ -248,6 +253,7 @@ class Qwen3DecoderLayer(Qwen2DecoderLayer):
             rngs=rng,
             quant_config=quant_config,
             prefix=prefix + ".post_attention_layernorm",
+            fuse_fp8_quant=fuse_fp8_quant,
         )
         self.mlp = Qwen3MLP(
             config=config,
