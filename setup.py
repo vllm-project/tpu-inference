@@ -70,8 +70,8 @@ def get_version():
 
 
 setup(
-    # The distribution is vllm-jax-core; the Python package it installs is
-    # still tpu_inference, which vLLM imports by that name.
+    # The distribution is vllm-jax-core; physical source still lives under
+    # tpu_inference with vllm_jax installed alongside it as a singleton alias.
     name="vllm-jax-core",
     version=get_version(),
     description="TPU backend for vLLM",
@@ -84,7 +84,7 @@ setup(
         "Documentation": "https://docs.vllm.ai/projects/tpu",
         "Source": "https://github.com/vllm-project/vllm-jax",
     },
-    packages=find_packages(),
+    packages=find_packages(exclude=("packaging*", )),
     python_requires=">=3.10",
     install_requires=get_requirements(),
     include_package_data=True,

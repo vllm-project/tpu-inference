@@ -41,10 +41,11 @@ def meta(key):
 
 
 QUEUE = {"queue": os.environ.get("RELEASE_QUEUE", "release-tpu-inference")}
-# PyPI projects of a release; the same as CORE_PROJECT and COMBINED_PROJECT in
-# lib.sh.
+# PyPI projects of a release; the same as in lib.sh.
 CORE_PROJECT = "vllm-jax-core"
+LEGACY_CORE_PROJECT = "tpu-inference"
 COMBINED_PROJECT = "vllm-jax"
+LEGACY_COMBINED_PROJECT = "vllm-tpu"
 
 
 def command_step(label, key, depends_on, commands, **extra):
@@ -65,6 +66,11 @@ def main():
     prerelease = meta("release-prerelease") == "yes"
     branch = os.environ["BUILDKITE_BRANCH"]
     dockerhub_repo = os.environ.get("RELEASE_DOCKERHUB_REPO", "vllm/vllm-jax")
+    legacy_dockerhub_repo = os.environ.get("RELEASE_LEGACY_DOCKERHUB_REPO",
+                                           "vllm/vllm-tpu")
+    dockerhub_targets = f"{dockerhub_repo}:v{version}"
+    if legacy_dockerhub_repo:
+        dockerhub_targets += f" and {legacy_dockerhub_repo}:v{version}"
     steps = []
 
     latest_options = [{"label": "No", "value": "no"}]
@@ -78,8 +84,9 @@ def main():
         "depends_on": ["plan_publish"],
         "prompt":
         (f"Publish {COMBINED_PROJECT} {version} from {branch}: the staged image "
-         f"{staged} to Docker Hub as {dockerhub_repo}:v{version}. "
-         f"{CORE_PROJECT} and {COMBINED_PROJECT} {version} to PyPI. "
+         f"{staged} to Docker Hub as {dockerhub_targets}. "
+         f"{CORE_PROJECT}, {LEGACY_CORE_PROJECT}, {COMBINED_PROJECT}, and "
+         f"{LEGACY_COMBINED_PROJECT} {version} to PyPI. "
          "PyPI releases can't be replaced. "
          "Check that tpu-inference-ci passed on this commit first."),
         "fields": [
@@ -149,8 +156,20 @@ def main():
             concurrency=1,
             concurrency_group=f"{CORE_PROJECT}-publish",
         ))
-    # The combined wheel pins CORE_PROJECT==<version>, so it goes up only
-    # once the core is installable.
+    # Transitional core meta-wheel and combined wheel both pin
+    # CORE_PROJECT==<version>, so publish them only once core is installable.
+    steps.append(
+        command_step(
+            f":package: Publish transitional {LEGACY_CORE_PROJECT} meta-wheel to PyPI",
+            "publish_legacy_core",
+            ["publish_core"],
+            [
+                f"bash .buildkite/scripts/publish_wheel.sh {LEGACY_CORE_PROJECT}"
+            ],
+            env={"PUBLISH_PYPI": LEGACY_CORE_PROJECT},
+            concurrency=1,
+            concurrency_group=f"{LEGACY_CORE_PROJECT}-publish",
+        ))
     steps.append(
         command_step(
             f":package: Publish {COMBINED_PROJECT} to PyPI",
@@ -161,11 +180,27 @@ def main():
             concurrency=1,
             concurrency_group=f"{COMBINED_PROJECT}-publish",
         ))
+    # Transitional combined meta-wheel pins COMBINED_PROJECT==<version>.
     steps.append(
         command_step(
-            ":white_check_mark: Check the published image and wheel",
+            f":package: Publish transitional {LEGACY_COMBINED_PROJECT} meta-wheel to PyPI",
+            "publish_legacy_combined",
+            ["publish_vllm_jax"],
+            [
+                f"bash .buildkite/scripts/publish_wheel.sh {LEGACY_COMBINED_PROJECT}"
+            ],
+            env={"PUBLISH_PYPI": LEGACY_COMBINED_PROJECT},
+            concurrency=1,
+            concurrency_group=f"{LEGACY_COMBINED_PROJECT}-publish",
+        ))
+    steps.append(
+        command_step(
+            ":white_check_mark: Check the published images and wheels",
             "verify_published",
-            ["publish_images", "publish_vllm_jax"],
+            [
+                "publish_images", "publish_legacy_core",
+                "publish_legacy_combined"
+            ],
             ["bash .buildkite/release/verify_published.sh"],
         ))
 

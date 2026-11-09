@@ -41,11 +41,29 @@ grep -E "^(${COMBINED_PROJECT}|${CORE_PROJECT}|torch|torchvision|torchax|jax|jax
   "${WORK}/resolved.txt" | tee "${WORK}/pins.txt"
 grep -qx "${CORE_PROJECT}==${VERSION}" "${WORK}/pins.txt" \
   || die "the combined wheel does not resolve ${CORE_PROJECT}==${VERSION}."
+! grep -qE "^tpu[-_]inference==" "${WORK}/resolved.txt" \
+  || die "${COMBINED_PROJECT}==${VERSION} unexpectedly pulled legacy tpu-inference."
+
+echo "--- :mag: Resolving transitional ${LEGACY_COMBINED_PROJECT}==${VERSION} meta-wheel"
+resolve_requirement "${UV}" "${LEGACY_COMBINED_PROJECT}==${VERSION}" \
+  "${WORK}/resolved_legacy_combined.txt" --find-links "${WORK}/dist"
+grep -qx "${COMBINED_PROJECT}==${VERSION}" "${WORK}/resolved_legacy_combined.txt" \
+  || die "${LEGACY_COMBINED_PROJECT}==${VERSION} does not resolve ${COMBINED_PROJECT}==${VERSION}."
+grep -qx "${CORE_PROJECT}==${VERSION}" "${WORK}/resolved_legacy_combined.txt" \
+  || die "${LEGACY_COMBINED_PROJECT}==${VERSION} does not resolve ${CORE_PROJECT}==${VERSION}."
+! grep -qE "^tpu[-_]inference==" "${WORK}/resolved_legacy_combined.txt" \
+  || die "${LEGACY_COMBINED_PROJECT}==${VERSION} unexpectedly pulled legacy tpu-inference."
+
+echo "--- :mag: Resolving transitional ${LEGACY_CORE_PROJECT}==${VERSION} meta-wheel"
+resolve_requirement "${UV}" "${LEGACY_CORE_PROJECT}==${VERSION}" \
+  "${WORK}/resolved_legacy_core.txt" --find-links "${WORK}/dist"
+grep -qx "${CORE_PROJECT}==${VERSION}" "${WORK}/resolved_legacy_core.txt" \
+  || die "${LEGACY_CORE_PROJECT}==${VERSION} does not resolve ${CORE_PROJECT}==${VERSION}."
 
 NAMES=""
 for f in "${WORK}"/dist/*; do NAMES+="\`$(basename "${f}")\` "; done
 buildkite-agent annotate --style info --context release-wheels <<EOF
-Wheels: ${NAMES}\`${COMBINED_PROJECT}==${VERSION}\` resolves from them plus pypi.org ($(grep -c '==' "${WORK}/resolved.txt") packages):
+Wheels: ${NAMES}\`${COMBINED_PROJECT}==${VERSION}\`, \`${LEGACY_COMBINED_PROJECT}==${VERSION}\`, and \`${LEGACY_CORE_PROJECT}==${VERSION}\` resolve cleanly from them plus pypi.org ($(grep -c '==' "${WORK}/resolved.txt") packages):
 
 \`\`\`
 $(cat "${WORK}/pins.txt")

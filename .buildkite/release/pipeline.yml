@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# tpu-inference-release: builds the vllm/vllm-jax image and the vllm-jax-core
-# and vllm-jax wheels of a release once, waits for approval, then publishes
-# those same files to Docker Hub and PyPI.
+# tpu-inference-release: builds the vllm/vllm-jax image (also published to
+# legacy vllm/vllm-tpu) and the vllm-jax-core, vllm-jax, and transitional
+# tpu-inference / vllm-tpu meta-wheels of a release once, waits for approval,
+# then publishes those same files to Docker Hub and PyPI.
 #
 # The pipeline's settings upload this file from the build's own checkout, for
 # builds of main and releases/v* only, so a release branch runs the release
@@ -41,8 +42,8 @@ steps:
     commands:
       - bash .buildkite/release/build_images.sh
 
-  # Fails early if this version of CORE_PROJECT (lib.sh) is already on PyPI.
-  - label: ":package: Build the vllm-jax-core wheel"
+  # Fails early if this version of CORE_PROJECT or legacy meta-projects is on PyPI.
+  - label: ":package: Build the vllm-jax-core and legacy meta-wheels"
     key: build_vllm_jax_core_wheel
     depends_on: preflight
     if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/

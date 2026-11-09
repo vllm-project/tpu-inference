@@ -15,11 +15,14 @@
 #
 # ------------------------------------------------------
 # Publish a release to PyPI with Trusted Publishing (no stored API token).
-# Run vllm-jax-core first, then vllm-jax (which pins that vllm-jax-core).
+# Run vllm-jax-core first, then tpu-inference (meta) and vllm-jax (which both
+# pin vllm-jax-core), then vllm-tpu (meta, which pins vllm-jax).
 #
 # Usage:
 #   publish_wheel.sh vllm-jax-core   # vllm-jax-core, this repo (wheel only)
+#   publish_wheel.sh tpu-inference   # transitional meta-wheel -> vllm-jax-core
 #   publish_wheel.sh vllm-jax        # vllm-jax, the combined wheel (+ sdist)
+#   publish_wheel.sh vllm-tpu        # transitional meta-wheel -> vllm-jax
 #
 # What it does:
 #   1. Download the files built earlier in this build and check their name
@@ -31,7 +34,7 @@
 #   4. Upload the files and their attestations with twine.
 #   5. Wait until the release is installable from PyPI.
 #
-# One-time PyPI setup, per project (vllm-jax-core, vllm-jax):
+# One-time PyPI setup, per project (vllm-jax-core, tpu-inference, vllm-jax, vllm-tpu):
 #   Project -> Publishing -> Add a new publisher -> Google Cloud ->
 #   email: <service-account>@<project>.iam.gserviceaccount.com
 #   (use a "pending publisher" if the project doesn't exist yet).
@@ -72,13 +75,23 @@ case "${TARGET}" in
         SDIST_GLOB=""   # build_vllm_jax_core_wheel.sh makes no sdist.
         PUBLISHED_KEY="VLLM_JAX_CORE_PUBLISHED_VERSION"
         ;;
+    tpu-inference)
+        WHEEL_GLOB="tpu_inference-*.whl"
+        SDIST_GLOB=""   # transitional empty meta-wheel only.
+        PUBLISHED_KEY="TPU_INFERENCE_PUBLISHED_VERSION"
+        ;;
     vllm-jax)
         WHEEL_GLOB="vllm_jax-*.whl"
         SDIST_GLOB="vllm_jax-*.tar.gz"
         PUBLISHED_KEY="VLLM_JAX_PUBLISHED_VERSION"
         ;;
+    vllm-tpu)
+        WHEEL_GLOB="vllm_tpu-*.whl"
+        SDIST_GLOB=""   # transitional empty meta-wheel only.
+        PUBLISHED_KEY="VLLM_TPU_PUBLISHED_VERSION"
+        ;;
     *)
-        die "usage: $0 <vllm-jax-core|vllm-jax>"
+        die "usage: $0 <vllm-jax-core|tpu-inference|vllm-jax|vllm-tpu>"
         ;;
 esac
 

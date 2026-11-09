@@ -36,18 +36,29 @@ VERSION="$(resolve_release_version)"
 echo "vllm-jax ${VERSION} from ${BUILDKITE_BRANCH} at ${BUILDKITE_COMMIT}"
 
 echo "--- :package: PyPI"
-for project in "${CORE_PROJECT}" "${COMBINED_PROJECT}"; do
+for project in "${CORE_PROJECT}" "${LEGACY_CORE_PROJECT}" "${COMBINED_PROJECT}" "${LEGACY_COMBINED_PROJECT}"; do
   check_not_published "${project}" "${VERSION}"
 done
-echo "--- :docker: ${RELEASE_DOCKERHUB_REPO}:v${VERSION} on Docker Hub"
-EXISTING="$(dockerhub_digest "v${VERSION}")"
-if [[ -n "${EXISTING}" ]]; then
-  DOCKERHUB_LINE="**already exists** (\`${EXISTING}\`): publishing replaces it only if the approver chooses to overwrite"
+
+DOCKERHUB_REPOS=("${RELEASE_DOCKERHUB_REPO}")
+[[ -n "${RELEASE_LEGACY_DOCKERHUB_REPO:-}" ]] && DOCKERHUB_REPOS+=("${RELEASE_LEGACY_DOCKERHUB_REPO}")
+DOCKERHUB_LINES=()
+EXISTING_REPOS=()
+for repo in "${DOCKERHUB_REPOS[@]}"; do
+  echo "--- :docker: ${repo}:v${VERSION} on Docker Hub"
+  EXISTING="$(dockerhub_digest "v${VERSION}" "${repo}")"
+  if [[ -n "${EXISTING}" ]]; then
+    DOCKERHUB_LINES+=("\`${repo}:v${VERSION}\` **already exists** (\`${EXISTING}\`)")
+    EXISTING_REPOS+=("\`${repo}:v${VERSION}\`")
+  else
+    DOCKERHUB_LINES+=("\`${repo}:v${VERSION}\` is not on Docker Hub")
+  fi
+done
+if (( ${#EXISTING_REPOS[@]} > 0 )); then
   buildkite-agent annotate --style warning --context release-dockerhub-exists \
-    "\`${RELEASE_DOCKERHUB_REPO}:v${VERSION}\` is already on Docker Hub."
-else
-  DOCKERHUB_LINE="\`v${VERSION}\` is not on Docker Hub"
+    "${EXISTING_REPOS[*]} already on Docker Hub; publishing replaces only if the approver chooses to overwrite."
 fi
+DOCKERHUB_LINE="$(IFS='; '; echo "${DOCKERHUB_LINES[*]}")"
 echo "${DOCKERHUB_LINE}"
 
 buildkite-agent meta-data set release-version "${VERSION}"
@@ -59,5 +70,5 @@ buildkite-agent annotate --style info --context release-plan <<EOF
 
 - CI: before approving, confirm tpu-inference-ci passed on this commit with \`NIGHTLY=1\` for each \`MODEL_IMPL_TYPE\` (auto, flax_nnx, vllm): https://buildkite.com/vllm/tpu-inference-ci/builds?branch=${BUILDKITE_BRANCH}
 - Docker Hub: ${DOCKERHUB_LINE}
-- PyPI: \`${CORE_PROJECT}\` and \`${COMBINED_PROJECT}\` ${VERSION} not there yet
+- PyPI: \`${CORE_PROJECT}\`, \`${LEGACY_CORE_PROJECT}\`, \`${COMBINED_PROJECT}\`, and \`${LEGACY_COMBINED_PROJECT}\` ${VERSION} not there yet
 EOF

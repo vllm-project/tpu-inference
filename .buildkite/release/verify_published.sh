@@ -14,8 +14,9 @@
 # limitations under the License.
 
 # After the publish, check what users get, without credentials: an anonymous
-# request for RELEASE_DOCKERHUB_REPO:v<version> (vllm/vllm-jax) must return
-# the staged digest.
+# request for RELEASE_DOCKERHUB_REPO:v<version> (vllm/vllm-jax) and
+# RELEASE_LEGACY_DOCKERHUB_REPO:v<version> (vllm/vllm-tpu) must return the
+# staged digest.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
@@ -23,13 +24,19 @@ source "${SCRIPT_DIR}/lib.sh"
 
 VERSION="$(release_version)"
 WANT="$(digest_of "$(buildkite-agent meta-data get release-image)")"
+REPOS=("${RELEASE_DOCKERHUB_REPO}")
+[[ -n "${RELEASE_LEGACY_DOCKERHUB_REPO:-}" ]] && REPOS+=("${RELEASE_LEGACY_DOCKERHUB_REPO}")
 
-echo "--- :docker: Anonymous pull of ${RELEASE_DOCKERHUB_REPO}:v${VERSION}"
-GOT="$(dockerhub_digest "v${VERSION}")"
-[[ -n "${GOT}" ]] || die "${RELEASE_DOCKERHUB_REPO}:v${VERSION} is not on Docker Hub."
-[[ "${GOT}" == "${WANT}" ]] \
-  || die "Docker Hub serves ${GOT} for v${VERSION}, not the staged ${WANT}."
+NOTES=()
+for repo in "${REPOS[@]}"; do
+  echo "--- :docker: Anonymous pull of ${repo}:v${VERSION}"
+  GOT="$(dockerhub_digest "v${VERSION}" "${repo}")"
+  [[ -n "${GOT}" ]] || die "${repo}:v${VERSION} is not on Docker Hub."
+  [[ "${GOT}" == "${WANT}" ]] \
+    || die "Docker Hub serves ${GOT} for ${repo}:v${VERSION}, not the staged ${WANT}."
+  NOTE="- Docker Hub: anonymous pull of \`${repo}:v${VERSION}\` = \`${GOT}\`"
+  echo "${NOTE}"
+  NOTES+=("${NOTE}")
+done
 
-NOTE="Docker Hub: anonymous pull of \`${RELEASE_DOCKERHUB_REPO}:v${VERSION}\` = \`${GOT}\`"
-echo "${NOTE}"
-buildkite-agent annotate --style success --context release-verified "- ${NOTE}"
+printf '%s\n' "${NOTES[@]}" | buildkite-agent annotate --style success --context release-verified
