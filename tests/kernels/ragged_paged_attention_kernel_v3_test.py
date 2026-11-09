@@ -452,6 +452,33 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             sliding_window=sliding_window,
         )
 
+    @parameterized.product(
+        sliding_window=[128, 256],
+        seq_lens=[
+            [(1024, 1024)],  # prefill from position 0
+            [(768, 1000)],  # chunked prefill after a cached prefix
+            [(1, 700), (640, 900)],  # decode next to a long chunk
+        ],
+    )
+    def test_ragged_paged_attention_sliding_window_long_chunk(
+        self,
+        sliding_window: int,
+        seq_lens,
+    ):
+        # q_len > bq_sz + sliding_window: the last bq's SWA starts after the
+        # first bkv holding new KV. Every new token must still be cached;
+        # the harness checks the updated cache against the reference.
+        self._test_ragged_paged_attention(
+            seq_lens,
+            (4, 4),
+            128,
+            16,
+            jnp.float32,
+            jnp.float32,
+            1000,
+            sliding_window=sliding_window,
+        )
+
     @parameterized.product(soft_cap=[None, 50.0], )
     def test_ragged_paged_attention_logit_soft_capping(
         self,
@@ -732,6 +759,30 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         self.assertArraysEqual(out1[:1], out2[:1])
         # Sanity: output is real.
         out1_np = np.asarray(out1[:1]).astype(np.float32)
+        assert np.all(np.isfinite(out1_np))
+        assert float(np.abs(out1_np).max()) > 0.0
+        mask = ~np.isnan(cache_before)
+        np.testing.assert_array_equal(
+            np.asarray(cache_after_1)[mask], cache_before[mask])
+
+    def test_kv_share_sliding_window_long_chunk_input_kv_is_ignored(self):
+        """q_len > bq_sz + sliding_window under a sliding window. With a
+        cache write, the last bq also visits the bkvs before its window to
+        write them. Without one there is nothing to write: the cache stays
+        unchanged and the output still ignores input k,v."""
+        if not jtu.is_device_tpu_at_least(version=4):
+            self.skipTest("Expect TPUv4+")
+        build = dict(q_len=512, kv_len=640, num_pages=48)
+        kwargs = dict(self._kv_share_kwargs(), sliding_window=128)
+        args1 = self._build_kv_share_inputs(kv_input_seed=11, **build)
+        args2 = self._build_kv_share_inputs(kv_input_seed=99, **build)
+        cache_before = np.asarray(args1[3])
+
+        out1, cache_after_1 = ragged_paged_attention(*args1, **kwargs)
+        out2, _ = ragged_paged_attention(*args2, **kwargs)
+
+        self.assertArraysEqual(out1[:512], out2[:512])
+        out1_np = np.asarray(out1[:512]).astype(np.float32)
         assert np.all(np.isfinite(out1_np))
         assert float(np.abs(out1_np).max()) > 0.0
         mask = ~np.isnan(cache_before)
