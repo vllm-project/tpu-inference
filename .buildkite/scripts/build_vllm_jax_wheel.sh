@@ -47,15 +47,15 @@
 # upstream go unpatched, and it installs build deps into the caller's Python.
 #
 # Usage:
-#   ./build_vllm_tpu_wheel.sh <version>
+#   ./build_vllm_jax_wheel.sh <version>
 #
 #   <version>    vllm-jax-core version to pin, built in the same release (the
 #                release pipeline checks the two resolve together before
 #                publishing either); also used as the vllm-jax version.
 #
 # Examples:
-#   ./build_vllm_tpu_wheel.sh 0.31.0
-#   ./build_vllm_tpu_wheel.sh 0.31.0rc1
+#   ./build_vllm_jax_wheel.sh 0.31.0
+#   ./build_vllm_jax_wheel.sh 0.31.0rc1
 #
 # Requirements (checked up front):
 #   - Linux (vLLM forces a CPU build on macOS). No TPU needed.

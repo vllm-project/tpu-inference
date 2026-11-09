@@ -14,7 +14,7 @@
 # limitations under the License.
 """Helper functions for building and publishing the release wheels.
 
-build_tpu_inference_wheel.sh and build_vllm_tpu_wheel.sh use the build
+build_vllm_jax_core_wheel.sh and build_vllm_jax_wheel.sh use the build
 checks. publish_wheel.sh uses the publish checks for vllm-jax-core and the
 combined vllm-jax (wheel and sdist).
 """

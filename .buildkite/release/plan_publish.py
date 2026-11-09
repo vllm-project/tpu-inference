@@ -154,7 +154,7 @@ def main():
     steps.append(
         command_step(
             f":package: Publish {COMBINED_PROJECT} to PyPI",
-            "publish_vllm_tpu",
+            "publish_vllm_jax",
             ["publish_core"],
             [f"bash .buildkite/scripts/publish_wheel.sh {COMBINED_PROJECT}"],
             env={"PUBLISH_PYPI": COMBINED_PROJECT},
@@ -165,7 +165,7 @@ def main():
         command_step(
             ":white_check_mark: Check the published image and wheel",
             "verify_published",
-            ["publish_images", "publish_vllm_tpu"],
+            ["publish_images", "publish_vllm_jax"],
             ["bash .buildkite/release/verify_published.sh"],
         ))
 

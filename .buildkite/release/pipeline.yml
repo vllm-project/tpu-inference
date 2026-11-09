@@ -43,29 +43,29 @@ steps:
 
   # Fails early if this version of CORE_PROJECT (lib.sh) is already on PyPI.
   - label: ":package: Build the vllm-jax-core wheel"
-    key: build_tpu_inference_wheel
+    key: build_vllm_jax_core_wheel
     depends_on: preflight
     if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
     agents: *queue
     commands:
-      - bash .buildkite/scripts/build_tpu_inference_wheel.sh
+      - bash .buildkite/scripts/build_vllm_jax_core_wheel.sh
 
   - label: ":package: Build the vllm-jax wheel"
-    key: build_vllm_tpu_wheel
-    depends_on: build_tpu_inference_wheel
+    key: build_vllm_jax_wheel
+    depends_on: build_vllm_jax_core_wheel
     if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
     agents: *queue
     commands:
       - |
         set -euo pipefail
         VERSION="$$(buildkite-agent meta-data get release-version)"
-        bash .buildkite/scripts/build_vllm_tpu_wheel.sh "$$VERSION"
+        bash .buildkite/scripts/build_vllm_jax_wheel.sh "$$VERSION"
         buildkite-agent artifact upload "dist/vllm_jax-*.whl"
         buildkite-agent artifact upload "dist/vllm_jax-*.tar.gz"
 
   - label: ":mag: Check the wheels install from PyPI"
     key: check_wheels
-    depends_on: build_vllm_tpu_wheel
+    depends_on: build_vllm_jax_wheel
     if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
     agents: *queue
     commands:

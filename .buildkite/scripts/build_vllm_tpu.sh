@@ -14,7 +14,11 @@
 # limitations under the License.
 #
 # ------------------------------------------------------
-# Build vLLM-TPU with vllm-jax-core using either PyPI or a local wheel:
+# Build vLLM-TPU with vllm-jax-core using either PyPI or a local wheel.
+# Used by docker/Dockerfile.pypi, not by the release pipeline. The output
+# wheel is named vllm-tpu by vLLM's tools/vllm-tpu/build.sh; the release
+# wheel vllm-jax is built by build_vllm_jax_wheel.sh.
+#
 # 1. PyPI Build: Uses specified version of vllm-jax-core from PyPI.
 #   ./build_vllm_tpu.sh <vllm-jax-core-version> <vllm-tpu-version> [vllm-branch-tag-or-commit-hash](default: main)
 # 2. Local Build: Uses local .whl file of vllm-jax-core
@@ -28,7 +32,7 @@
 set -e
 
 # --- Argument Parsing & Validation ---
-# TPU_INFERENCE_VERSION: PyPI version or local wheel
+# CORE_VERSION: vllm-jax-core version, from PyPI or the local wheel.
 # VLLM_TPU_VERSION: Version assigned to the output wheel.
 # VLLM_BRANCH: vLLM branch, tag or commit hash to build (default: main).
 if [[ "$1" == "--local" ]]; then
@@ -47,7 +51,7 @@ if [[ "$1" == "--local" ]]; then
         exit 1
     fi
 
-    TPU_INFERENCE_VERSION=$(basename "$WHL_PATH" | cut -d'-' -f2)
+    CORE_VERSION=$(basename "$WHL_PATH" | cut -d'-' -f2)
     VLLM_TPU_VERSION=$1
     VLLM_BRANCH=${2:-"main"}
 else
@@ -58,14 +62,14 @@ else
     fi
 
     # Pypi build requires explicit version for vllm-jax-core
-    TPU_INFERENCE_VERSION=$1
+    CORE_VERSION=$1
     VLLM_TPU_VERSION=$2
     VLLM_BRANCH=${3:-"main"}
 fi
 
 echo "--- Starting vLLM-TPU wheel build ---"
 echo "Mode: $([[ "${WHL_PATH}" ]] && echo "Local Build" || echo "Pypi Build")"
-echo "vllm-jax-core Version: ${TPU_INFERENCE_VERSION}"
+echo "vllm-jax-core Version: ${CORE_VERSION}"
 echo "vLLM-TPU Version: ${VLLM_TPU_VERSION}"
 echo "vLLM Branch/Tag/Commit Hash: ${VLLM_BRANCH}"
 
@@ -93,7 +97,7 @@ git pull || echo "Warning: Failed to pull updates (may be on a tag)."
 # --- Step 2: Update the vllm-jax-core version in requirements ---
 # vLLM's tpu.txt names this repo by its former name (tpu-inference); replace
 # that line too, so pip never installs both names of the same package.
-REQUIRED_LINE="vllm-jax-core==${TPU_INFERENCE_VERSION}"
+REQUIRED_LINE="vllm-jax-core==${CORE_VERSION}"
 REQUIREMENTS_FILE="requirements/tpu.txt"
 BACKUP_FILE="${REQUIREMENTS_FILE}.bak"
 PIN_RE='^(tpu-inference|vllm-jax-core)=='

@@ -1,4 +1,4 @@
-# Build deps for build_vllm_tpu_wheel.sh (vLLM's TPU target, built with
+# Build deps for build_vllm_jax_wheel.sh (vLLM's TPU target, built with
 # --no-isolation). Must satisfy the [build-system] requires in vLLM's
 # pyproject.toml at .buildkite/vllm_lkg.version, or `python -m build` stops
 # with "Missing dependencies"; update it when the LKG moves to a new torch.

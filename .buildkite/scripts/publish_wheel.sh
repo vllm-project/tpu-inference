@@ -69,7 +69,7 @@ TARGET="${1:-}"
 case "${TARGET}" in
     vllm-jax-core)
         WHEEL_GLOB="vllm_jax_core-*.whl"
-        SDIST_GLOB=""   # build_tpu_inference_wheel.sh makes no sdist.
+        SDIST_GLOB=""   # build_vllm_jax_core_wheel.sh makes no sdist.
         PUBLISHED_KEY="VLLM_JAX_CORE_PUBLISHED_VERSION"
         ;;
     vllm-jax)
