@@ -94,19 +94,10 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
                     permute_dims=(1, 0),
                     param_name=layer.prefix + ".weight"))
 
-        # Scale is always per-output-channel (1D).
-        scale_sharding = None
-        if self.batch_features:
-            # For batched weights, the output dim sharding comes from
-            # the weight's non-contracting, non-batch axis.
-            if self.batch_sharding:
-                scale_sharding = None  # replicated scale for simplicity
-        elif isinstance(self.weight_sharding, P) and len(
-                self.weight_sharding) > 0:
-            scale_sharding = P(self.weight_sharding[0])
-        elif isinstance(self.weight_sharding,
-                        (tuple, list)) and len(self.weight_sharding) > 0:
-            scale_sharding = (self.weight_sharding[0], )
+        # Channel scales follow the output axis, like bias. Keep batched
+        # scales replicated as before.
+        scale_sharding = (None if self.batch_features else
+                          self.linear_config.bias_sharding)
 
         layer.weight_scale = create_param(rngs,
                                           shape=(out_features, ),
