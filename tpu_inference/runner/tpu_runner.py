@@ -2423,7 +2423,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self, spec_decode_metadata, next_tokens, logits_indices_selector,
             discard_sampled_tokens_req_indices, num_reqs)
 
-        if self.speculative_config:
+        if self.speculative_config and self.kv_cache_config.has_mamba_layers:
             raw_max_decode = getattr(self.input_batch, "max_decode_tokens",
                                      None)
             max_decode_tokens = (raw_max_decode if isinstance(
