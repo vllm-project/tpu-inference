@@ -453,3 +453,103 @@ class TestVllmGatedDeltaNetAttention:
         np.testing.assert_array_equal(np.array(actual_state_indices), [3, 7])
         np.testing.assert_array_equal(np.array(actual_read_state_indices),
                                       [3, 7])
+        assert "read_offsets" not in call_kwargs
+        assert "num_spec_tokens" not in call_kwargs
+
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.torch_view",
+        side_effect=lambda x: torch.from_numpy(np.array(x)),
+    )
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.jax_view",
+        side_effect=lambda x: jax.numpy.array(x.detach().numpy())
+        if isinstance(x, torch.Tensor) else x,
+    )
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.run_jax_gdn_attention"
+    )
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.get_forward_context"
+    )
+    def test_gdn_attention_core_tpu_spec_decode_forwards_read_offsets(
+            self, mock_get_fc, mock_run_jax, mock_jax_v, mock_torch_v, mesh):
+        from tpu_inference.layers.common.attention_metadata import (
+            AttentionMetadata, MambaMetadata)
+        from tpu_inference.layers.vllm.custom_ops.gdn_attention_op import \
+            gdn_attention_core_tpu
+
+        layer_name = "test_layer"
+        num_tokens = 8
+        n_kq = 2
+        n_v = 4
+        d_k = 16
+        d_v = 16
+        kernel_size = 4
+
+        layer_module = MagicMock()
+        layer_module.num_k_heads = n_kq
+        layer_module.num_v_heads = n_v
+        layer_module.head_k_dim = d_k
+        layer_module.head_v_dim = d_v
+        layer_module.conv_kernel_size = kernel_size
+        layer_module.conv1d.weight = torch.randn((n_kq * d_k) * 2 + n_v * d_v,
+                                                 1, kernel_size)
+        layer_module.conv1d.bias = None
+        layer_module.A_log = torch.randn(n_v)
+        layer_module.dt_bias = torch.randn(n_v)
+        layer_module.cache_config.mamba_cache_mode = "none"
+
+        mamba_state_indices = jax.numpy.array([4, 8], dtype=jax.numpy.int32)
+        read_offsets = jax.numpy.array([2, 1], dtype=jax.numpy.int32)
+        seq_lens = jax.numpy.array([12, 10], dtype=jax.numpy.int32)
+        query_start_loc = jax.numpy.array([0, 4, 8], dtype=jax.numpy.int32)
+        request_distribution = jax.numpy.array([2, 2, 2],
+                                               dtype=jax.numpy.int32)
+
+        attn_metadata = AttentionMetadata(
+            input_positions=jax.numpy.zeros(num_tokens, dtype=jax.numpy.int32),
+            block_tables=None,
+            seq_lens=seq_lens,
+            query_start_loc=query_start_loc,
+            request_distribution=request_distribution,
+            mamba=MambaMetadata(state_indices=mamba_state_indices,
+                                read_offsets=read_offsets),
+            padded_num_reqs=2,
+        )
+
+        fc = MagicMock()
+        fc.attn_metadata = {layer_name: attn_metadata}
+        fc.no_compile_layers = {layer_name: layer_module}
+        mock_get_fc.return_value = fc
+
+        conv_dim = (n_kq * d_k) * 2 + n_v * d_v
+        conv_state = jax.numpy.zeros((30, kernel_size - 1, conv_dim))
+        recurrent_state = jax.numpy.zeros((30, n_v, d_k, d_v))
+        mock_run_jax.return_value = (
+            (conv_state[:2], recurrent_state[:2]),
+            jax.numpy.zeros((num_tokens, n_v * d_v)),
+        )
+
+        mixed_qkv = torch.randn(num_tokens, conv_dim)
+        b = torch.randn(num_tokens, n_v)
+        a = torch.randn(num_tokens, n_v)
+        core_attn_out = torch.zeros(num_tokens, n_v, d_v)
+
+        vllm_config = MagicMock()
+        vllm_config.cache_config.mamba_cache_mode = "none"
+        vllm_config.speculative_config.num_speculative_tokens = 3
+
+        with set_vllm_model_wrapper_context(
+                kv_caches=[(conv_state, recurrent_state)],
+                mesh=mesh,
+                layer_name_to_kvcache_index={layer_name: 0},
+                vllm_config=vllm_config,
+        ):
+            gdn_attention_core_tpu(mixed_qkv, b, a, core_attn_out, layer_name,
+                                   mesh)
+
+        assert mock_run_jax.call_count == 1
+        call_kwargs = mock_run_jax.call_args[1]
+        np.testing.assert_array_equal(np.array(call_kwargs["read_offsets"]),
+                                      [2, 1])
+        assert call_kwargs["num_spec_tokens"] == 3

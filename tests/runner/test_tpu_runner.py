@@ -900,9 +900,9 @@ class TestTPUJaxRunner:
             assert flat_results_b == unordered_devices
 
     @patch('tpu_inference.runner.tpu_runner.TPUSupportedSamplingMetadata')
-    def test_prepare_inputs_populates_gdn_read_offsets_and_num_spec_tokens(
+    def test_prepare_inputs_populates_mamba_read_offsets(
             self, mock_sampling_metadata):
-        """_prepare_inputs populates gdn_read_offsets and num_spec_tokens when has_mamba_layers and speculative_config are enabled."""
+        """_prepare_inputs populates mamba.read_offsets when has_mamba_layers and speculative_config are enabled."""
         self._create_mock_hybrid_kv_cache_config()
         self.runner.kv_cache_config.has_mamba_layers = True
         self.runner.speculative_config = SimpleNamespace(
@@ -944,7 +944,6 @@ class TestTPUJaxRunner:
         attention_metadata = output[2]
 
         for layer_md in attention_metadata.values():
-            assert layer_md.num_spec_tokens == 3
             assert layer_md.mamba is not None
             assert layer_md.mamba.read_offsets is not None
             assert int(np.asarray(layer_md.mamba.read_offsets)[0]) == 2

@@ -101,7 +101,6 @@ class MambaMetadata:
         "pcp_cache_pages",
         "use_causal_mask",
         "is_decode",
-        "num_spec_tokens",
     ],
 )
 @dataclass
@@ -141,9 +140,6 @@ class AttentionMetadata(object):
     # The selected TPU attention backend's own metadata of this step, a pytree
     # of its own type (AttentionBackend.prepare_step); None for RPA.
     backend_metadata: Any = None
-
-    # STATIC: number of speculative draft tokens (K) per verification step.
-    num_spec_tokens: int = 0
 
 
 @functools.partial(

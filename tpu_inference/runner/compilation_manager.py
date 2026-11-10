@@ -536,7 +536,6 @@ class CompilationManager:
                 backend_metadata=attention_backend.backend_metadata(
                     attention_arrays, gid),
                 is_decode=is_decode,
-                num_spec_tokens=num_spec_tokens,
             )
 
             return attention_metadata_gid
@@ -1663,7 +1662,6 @@ class CompilationManager:
                 read_offsets=eagle3_gdn_read_offsets)
         else:
             eagle3_mamba = None
-            eagle3_num_spec_tokens = 0
 
         num_reqs_dp = self._create_dummy_tensor((dp_size, ),
                                                 jnp.int32,
@@ -1682,7 +1680,6 @@ class CompilationManager:
                     request_distribution=request_distribution,
                     mamba=eagle3_mamba,
                     padded_num_reqs=num_reqs,
-                    num_spec_tokens=eagle3_num_spec_tokens,
                 )
 
                 def drafter_propose_warmup(_fn, _args, _call_kwargs):
@@ -1810,7 +1807,6 @@ class CompilationManager:
                                       read_offsets=mtp_gdn_read_offsets)
         else:
             mtp_mamba = None
-            mtp_num_spec_tokens = 0
 
         num_reqs_dp = self._create_dummy_tensor((dp_size, ),
                                                 jnp.int32,
@@ -1837,7 +1833,6 @@ class CompilationManager:
                     request_distribution=request_distribution,
                     mamba=mtp_mamba,
                     padded_num_reqs=num_reqs,
-                    num_spec_tokens=mtp_num_spec_tokens,
                 )
 
                 def drafter_propose_warmup(_fn, _args, _call_kwargs):
@@ -1945,7 +1940,6 @@ class CompilationManager:
                 read_offsets=dflash_gdn_read_offsets)
         else:
             dflash_mamba = None
-            dflash_num_spec_tokens = 0
 
         num_reqs_dp = self._create_dummy_tensor((dp_size, ),
                                                 jnp.int32,
@@ -1983,7 +1977,6 @@ class CompilationManager:
                     request_distribution=request_distribution,
                     mamba=dflash_mamba,
                     padded_num_reqs=num_reqs,
-                    num_spec_tokens=dflash_num_spec_tokens,
                 )
 
                 def drafter_propose_warmup(_fn,
@@ -2043,7 +2036,6 @@ class CompilationManager:
                     request_distribution=request_distribution,
                     mamba=dflash_mamba,
                     padded_num_reqs=num_reqs,
-                    num_spec_tokens=dflash_num_spec_tokens,
                 )
 
                 aux_hidden_states = [

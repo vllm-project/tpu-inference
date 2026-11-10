@@ -3315,7 +3315,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 backend_metadata=self.attention_backend.backend_metadata(
                     metadata, gid),
                 is_decode=is_decode_only,
-                num_spec_tokens=num_spec_tokens,
             )
 
             return attention_metadata_gid
