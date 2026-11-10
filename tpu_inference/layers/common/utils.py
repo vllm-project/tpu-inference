@@ -140,10 +140,15 @@ def general_device_put(tensor: jax.Array,
 
     def _put(t):
         multihost_backend = envs.TPU_MULTIHOST_BACKEND
-        # If we are not in multi-host setup, or the tensor is not fully addressable,
-        # we can use jax.device_put directly.
-        if multihost_backend != "ray" or (isinstance(t, jax.Array)
-                                          and not t.is_fully_addressable):
+        # The multi-host branch below (jax.make_array_from_callback) is pure JAX
+        # SPMD: each process contributes only its locally-addressable shards. It
+        # is correct for any multi-controller deployment -- both "ray" (Ray owns
+        # the hosts) and "spmd" (bare jax.distributed). If we are not in a
+        # multi-host setup, or the tensor is not fully addressable, we can use
+        # jax.device_put directly.
+        is_multihost = multihost_backend in ("ray", "spmd")
+        if (not is_multihost) or (isinstance(t, jax.Array)
+                                  and not t.is_fully_addressable):
             if layout is not None:
                 return jax.device_put(t, Format(layout, sharding))
             else:
@@ -174,9 +179,17 @@ def general_device_put(tensor: jax.Array,
 
 
 def cpu_mesh() -> Mesh:
+    """A one-device mesh on this process's first CPU device.
+
+    Weights are staged here before being placed on the accelerator mesh, so
+    the device must be addressable by this process. Under a multi-process
+    jax.distributed domain jax.devices("cpu") lists the CPU devices of every
+    process, and its first entry belongs to process 0; use this process's
+    local CPU devices instead. With a single process both lists are the same.
+    """
     global _cpu_mesh
     if _cpu_mesh is None:
-        _cpu_mesh = Mesh(jax.devices("cpu")[:1], ("cpu", ))
+        _cpu_mesh = Mesh(jax.local_devices(backend="cpu")[:1], ("cpu", ))
     return _cpu_mesh
 
 

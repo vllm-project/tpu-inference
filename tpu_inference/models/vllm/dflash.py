@@ -122,7 +122,7 @@ class DFlashTorchaxWrapper:
         logger.info("Loading DFlash PyTorch model via AutoModel from %s",
                     draft_model_path)
 
-        with jax.default_device(jax.devices("cpu")[0]):
+        with jax.default_device(jax.local_devices(backend="cpu")[0]):
             hf_model = AutoModel.from_pretrained(
                 draft_model_path,
                 trust_remote_code=True,
