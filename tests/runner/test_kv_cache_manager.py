@@ -2419,3 +2419,154 @@ class TestKVCacheManager:
             self.runner.max_model_len // 256)
         assert block_tables[1].max_num_blocks_per_req == (
             self.runner.max_model_len // (256 * 4))
+
+    def test_fp8_kv_cache_packing_warning_single_kv_head(self):
+        """Test FP8 warning emitted when 1 KV head yields 0% byte savings."""
+        self.runner.kv_cache_dtype = torch.float8_e4m3fn
+        with patch("tpu_inference.runner.kv_cache_manager.logger.warning_once"
+                   ) as mock_warning:
+            spec = self.runner.kv_cache_manager._create_attention_spec(
+                block_size=16, num_kv_heads=1, head_size=256)
+            mock_warning.assert_called_once()
+            args, _ = mock_warning.call_args
+            formatted_msg = args[0] % args[1:]
+            assert "0% memory savings" in formatted_msg
+            # FP8 must remain active (not overridden to auto or bf16)
+            assert spec.dtype == torch.float8_e4m3fn
+
+    def test_fp8_kv_cache_packing_warning_hd64(self):
+        """Test FP8 warning emitted when hd64 sublane packing yields 0% savings."""
+        self.runner.kv_cache_dtype = torch.float8_e4m3fn
+        with patch("tpu_inference.runner.kv_cache_manager.logger.warning_once"
+                   ) as mock_warning:
+            spec = self.runner.kv_cache_manager._create_attention_spec(
+                block_size=16, num_kv_heads=2, head_size=64)
+            mock_warning.assert_called_once()
+            args, _ = mock_warning.call_args
+            formatted_msg = args[0] % args[1:]
+            assert "0% memory savings" in formatted_msg
+            assert spec.dtype == torch.float8_e4m3fn
+
+    def test_fp8_kv_cache_packing_no_warning_when_savings(self):
+        """Test no warning emitted when FP8 yields actual byte savings."""
+        self.runner.kv_cache_dtype = torch.float8_e4m3fn
+        with patch("tpu_inference.runner.kv_cache_manager.logger.warning_once"
+                   ) as mock_warning:
+            spec = self.runner.kv_cache_manager._create_attention_spec(
+                block_size=16, num_kv_heads=2, head_size=256)
+            mock_warning.assert_not_called()
+            assert spec.dtype == torch.float8_e4m3fn
+
+    def test_fp8_kv_cache_packing_no_warning_for_bf16(self):
+        """Test no warning emitted for non-quantized dtypes like bfloat16."""
+        self.runner.kv_cache_dtype = torch.bfloat16
+        with patch("tpu_inference.runner.kv_cache_manager.logger.warning_once"
+                   ) as mock_warning:
+            spec = self.runner.kv_cache_manager._create_attention_spec(
+                block_size=16, num_kv_heads=1, head_size=256)
+            mock_warning.assert_not_called()
+            assert spec.dtype == torch.bfloat16
+
+    def test_fp8_kv_cache_packing_warning_e5m2(self):
+        """Test FP8 warning emitted for float8_e5m2 when 0% byte savings."""
+        self.runner.kv_cache_dtype = torch.float8_e5m2
+        with patch("tpu_inference.runner.kv_cache_manager.logger.warning_once"
+                   ) as mock_warning:
+            spec = self.runner.kv_cache_manager._create_attention_spec(
+                block_size=16, num_kv_heads=1, head_size=256)
+            mock_warning.assert_called_once()
+            args, _ = mock_warning.call_args
+            formatted_msg = args[0] % args[1:]
+            assert "0% memory savings" in formatted_msg
+            assert spec.dtype == torch.float8_e5m2
+
+    def test_fp8_kv_cache_packing_warning_tp2_sharded_to_single_kv_head(self):
+        """Test FP8 warning emitted when GQA num_kv_heads=2 is sharded across TP=2 (1 head/shard)."""
+        self.runner.kv_cache_dtype = torch.float8_e4m3fn
+        mock_mesh = MagicMock()
+        mock_mesh.shape = {"data": 1, "attn_dp": 1, "model": 2, "expert": 1}
+        original_mesh = self.runner.mesh
+        try:
+            self.runner.mesh = mock_mesh
+            with patch(
+                    "tpu_inference.runner.kv_cache_manager.logger.warning_once"
+            ) as mock_warning:
+                spec = self.runner.kv_cache_manager._create_attention_spec(
+                    block_size=16, num_kv_heads=2, head_size=256)
+                mock_warning.assert_called_once()
+                args, _ = mock_warning.call_args
+                formatted_msg = args[0] % args[1:]
+                assert "0% memory savings" in formatted_msg
+                assert "kv_head_shards=2" in formatted_msg
+                assert spec.dtype == torch.float8_e4m3fn
+        finally:
+            self.runner.mesh = original_mesh
+
+    def test_initialize_kv_cache_raises_on_dtype_mismatch(self):
+        """Test initialize_kv_cache raises ValueError if allocated dtype mismatches spec."""
+        block_size = self.runner.vllm_config.cache_config.block_size
+        spec = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=256,
+            dtype=torch.float8_e4m3fn,
+        )
+        num_blocks = 10
+        page_size_bytes = spec.page_size_bytes
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=num_blocks * page_size_bytes,
+                    layers=["layers.0.attn"],
+                    layer_stride=num_blocks * page_size_bytes,
+                    block_stride=page_size_bytes,
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=["layers.0.attn"],
+                    kv_cache_spec=spec,
+                )
+            ],
+        )
+        mock_array = MagicMock()
+        mock_array.dtype = jnp.bfloat16
+        with patch("tpu_inference.runner.kv_cache_manager.create_kv_caches",
+                   return_value=[mock_array]), pytest.raises(
+                       ValueError, match="does not match expected dtype"):
+            self.runner.initialize_kv_cache(kv_cache_config)
+
+    def test_initialize_kv_cache_raises_on_mamba_dtype_mismatch(self):
+        """Test initialize_kv_cache raises ValueError if allocated mamba state dtype mismatches spec."""
+        mamba_spec = MagicMock(spec=MambaSpec)
+        mamba_spec.block_size = 16
+        mamba_spec.shapes = [(4, 128)]
+        mamba_spec.dtypes = [torch.float32]
+        mamba_spec.page_size_bytes = 4 * 128 * 4
+        mamba_spec.page_size_padded = None
+        num_blocks = 10
+        page_size_bytes = mamba_spec.page_size_bytes
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=num_blocks * page_size_bytes,
+                    layers=["layers.0.mamba"],
+                    layer_stride=num_blocks * page_size_bytes,
+                    block_stride=page_size_bytes,
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=["layers.0.mamba"],
+                    kv_cache_spec=mamba_spec,
+                )
+            ],
+        )
+        mock_state = MagicMock()
+        mock_state.dtype = jnp.bfloat16
+        with patch("tpu_inference.runner.kv_cache_manager.create_mamba_cache",
+                   return_value=mock_state), pytest.raises(
+                       ValueError, match="does not match expected dtype"):
+            self.runner.initialize_kv_cache(kv_cache_config)
