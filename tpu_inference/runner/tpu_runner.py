@@ -3251,20 +3251,21 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                            (spec_config
                             and self.kv_cache_config.has_mamba_layers) else 0)
         if num_spec_tokens > 0:
-            gdn_read_offsets_cpu = np.zeros(self.max_num_reqs, dtype=np.int32)
+            mamba_read_offsets_cpu = np.zeros(self.max_num_reqs,
+                                              dtype=np.int32)
             for dp_rank in range(dp_size):
                 _num_reqs = num_req_per_dp_rank[dp_rank]
                 if _num_reqs == 0:
                     continue
                 req_offset = dp_rank * max_num_reqs_per_dp_rank
                 for i, req_id in enumerate(req_ids_dp[dp_rank]):
-                    gdn_read_offsets_cpu[req_offset + i] = (
+                    mamba_read_offsets_cpu[req_offset + i] = (
                         self.requests[req_id].mamba_read_offset)
-            gdn_read_offsets = device_array(self.mesh,
-                                            gdn_read_offsets_cpu,
-                                            sharding=metadata_attn_sharding)
+            mamba_read_offsets = device_array(self.mesh,
+                                              mamba_read_offsets_cpu,
+                                              sharding=metadata_attn_sharding)
         else:
-            gdn_read_offsets = None
+            mamba_read_offsets = None
 
         metadata = common_utils.DeviceBuffer.unpack_arrays(
             dev_arrays_payload, metadata_layout)
@@ -3297,9 +3298,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             == self.input_batch.num_reqs)
 
         mamba_metadata = (MambaMetadata(state_indices=mamba_state_indices,
-                                        read_offsets=gdn_read_offsets) if
+                                        read_offsets=mamba_read_offsets) if
                           (mamba_state_indices is not None
-                           or gdn_read_offsets is not None) else None)
+                           or mamba_read_offsets is not None) else None)
 
         def build_attn(block_tables: jax.Array | None,
                        gid: int) -> AttentionMetadata:

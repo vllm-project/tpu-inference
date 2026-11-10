@@ -499,17 +499,18 @@ class CompilationManager:
                             and self.runner.kv_cache_config.has_mamba_layers)
                            else 0)
         if num_spec_tokens > 0:
-            gdn_read_offsets = device_array(self.runner.mesh,
-                                            np.zeros(self.runner.max_num_reqs,
-                                                     dtype=np.int32),
-                                            sharding=metadata_attn_sharding)
+            mamba_read_offsets = device_array(self.runner.mesh,
+                                              np.zeros(
+                                                  self.runner.max_num_reqs,
+                                                  dtype=np.int32),
+                                              sharding=metadata_attn_sharding)
         else:
-            gdn_read_offsets = None
+            mamba_read_offsets = None
 
         mamba_metadata = (MambaMetadata(state_indices=mamba_state_indices,
-                                        read_offsets=gdn_read_offsets) if
+                                        read_offsets=mamba_read_offsets) if
                           (mamba_state_indices is not None
-                           or gdn_read_offsets is not None) else None)
+                           or mamba_read_offsets is not None) else None)
 
         def build_block_table(kv_cache_gid: int) -> jax.Array:
             block_table_obj = self.runner.input_batch.block_table[kv_cache_gid]
@@ -1653,13 +1654,13 @@ class CompilationManager:
                 sharding=dp_sharding)
             eagle3_num_spec_tokens = (spec_config.num_speculative_tokens
                                       if spec_config else 0)
-            eagle3_gdn_read_offsets = (device_array(
+            eagle3_mamba_read_offsets = (device_array(
                 self.runner.mesh,
                 np.zeros(self.runner.max_num_reqs, dtype=np.int32),
                 sharding=dp_sharding) if eagle3_num_spec_tokens > 0 else None)
             eagle3_mamba = MambaMetadata(
                 state_indices=eagle3_mamba_state_indices,
-                read_offsets=eagle3_gdn_read_offsets)
+                read_offsets=eagle3_mamba_read_offsets)
         else:
             eagle3_mamba = None
 
@@ -1799,12 +1800,12 @@ class CompilationManager:
                                                sharding=dp_sharding)
             mtp_num_spec_tokens = (spec_config.num_speculative_tokens
                                    if spec_config else 0)
-            mtp_gdn_read_offsets = (device_array(
+            mtp_mamba_read_offsets = (device_array(
                 self.runner.mesh,
                 np.zeros(self.runner.max_num_reqs, dtype=np.int32),
                 sharding=dp_sharding) if mtp_num_spec_tokens > 0 else None)
             mtp_mamba = MambaMetadata(state_indices=mamba_state_indices,
-                                      read_offsets=mtp_gdn_read_offsets)
+                                      read_offsets=mtp_mamba_read_offsets)
         else:
             mtp_mamba = None
 
@@ -1931,13 +1932,13 @@ class CompilationManager:
                 sharding=dp_sharding)
             dflash_num_spec_tokens = (spec_config.num_speculative_tokens
                                       if spec_config else 0)
-            dflash_gdn_read_offsets = (device_array(
+            dflash_mamba_read_offsets = (device_array(
                 self.runner.mesh,
                 np.zeros(self.runner.max_num_reqs, dtype=np.int32),
                 sharding=dp_sharding) if dflash_num_spec_tokens > 0 else None)
             dflash_mamba = MambaMetadata(
                 state_indices=dflash_mamba_state_indices,
-                read_offsets=dflash_gdn_read_offsets)
+                read_offsets=dflash_mamba_read_offsets)
         else:
             dflash_mamba = None
 
