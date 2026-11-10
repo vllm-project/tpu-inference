@@ -54,7 +54,8 @@ from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_backend import (
     HostStepInputs, attention_backend_name, create_attention_backend)
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, GroupedAttentionMetadata, SharedAttentionMetadata)
+    AttentionMetadata, GroupedAttentionMetadata, MambaMetadata,
+    SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   MESH_AXIS_NAMES_2D,
                                                   ShardingAxisName,
@@ -3295,6 +3296,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             and self.input_batch.request_distribution[0]
             == self.input_batch.num_reqs)
 
+        mamba_metadata = (MambaMetadata(state_indices=mamba_state_indices,
+                                        read_offsets=gdn_read_offsets) if
+                          (mamba_state_indices is not None
+                           or gdn_read_offsets is not None) else None)
+
         def build_attn(block_tables: jax.Array | None,
                        gid: int) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
@@ -3303,13 +3309,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 seq_lens=seq_lens,
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
-                mamba_state_indices=mamba_state_indices,
+                mamba=mamba_metadata,
                 padded_num_reqs=attn_padded_num_reqs,
                 pcp=pcp_metadata,
                 backend_metadata=self.attention_backend.backend_metadata(
                     metadata, gid),
                 is_decode=is_decode_only,
-                gdn_read_offsets=gdn_read_offsets,
                 num_spec_tokens=num_spec_tokens,
             )
 
@@ -3321,11 +3326,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 seq_lens=seq_lens,
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
-                mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=attn_padded_num_reqs,
                 is_decode=is_decode_only,
-                gdn_read_offsets=gdn_read_offsets,
-                num_spec_tokens=num_spec_tokens,
             )
 
         attention_metadata: AttentionMetadata | dict[str, AttentionMetadata]

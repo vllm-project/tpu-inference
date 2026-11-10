@@ -942,13 +942,12 @@ class TestTPUJaxRunner:
         with patch('jax.device_put', side_effect=lambda x, *a, **kw: x):
             output = self.runner._prepare_inputs(scheduler_output)
         attention_metadata = output[2]
-        shared_attention_metadata = output[11]
 
-        assert shared_attention_metadata.num_spec_tokens == 3
         for layer_md in attention_metadata.values():
             assert layer_md.num_spec_tokens == 3
-            assert layer_md.gdn_read_offsets is not None
-            assert int(np.asarray(layer_md.gdn_read_offsets)[0]) == 2
+            assert layer_md.mamba is not None
+            assert layer_md.mamba.read_offsets is not None
+            assert int(np.asarray(layer_md.mamba.read_offsets)[0]) == 2
 
 
 class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:

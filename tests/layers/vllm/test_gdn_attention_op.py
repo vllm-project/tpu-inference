@@ -366,8 +366,8 @@ class TestVllmGatedDeltaNetAttention:
     def test_gdn_attention_core_tpu_non_align_mode(self, mock_get_fc,
                                                    mock_run_jax, mock_jax_v,
                                                    mock_torch_v, mesh):
-        from tpu_inference.layers.common.attention_metadata import \
-            AttentionMetadata
+        from tpu_inference.layers.common.attention_metadata import (
+            AttentionMetadata, MambaMetadata)
         from tpu_inference.layers.vllm.custom_ops.gdn_attention_op import \
             gdn_attention_core_tpu
 
@@ -406,7 +406,7 @@ class TestVllmGatedDeltaNetAttention:
             seq_lens=seq_lens,
             query_start_loc=query_start_loc,
             request_distribution=request_distribution,
-            mamba_state_indices=mamba_state_indices,
+            mamba=MambaMetadata(state_indices=mamba_state_indices),
             padded_num_reqs=2,
         )
 

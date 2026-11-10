@@ -166,7 +166,7 @@ def gdn_attention_core_tpu(
         #     requests into lower-index slots after earlier ones finish), the
         #     slot id moves with the request so the kernel still reads/writes
         #     the slot that holds this request's real state.
-        state_indices = attn_metadata.mamba_state_indices.astype(jnp.int32)
+        state_indices = attn_metadata.mamba.state_indices.astype(jnp.int32)
         state_indices_sliced = truncate_sharded_tensor(state_indices,
                                                        padded_num_reqs_per_dp,
                                                        dp_size)
