@@ -228,6 +228,9 @@ echo "Creating build venv with $("${PYTHON}" -V 2>&1)..."
 "${PYTHON}" -m venv --without-pip "${WORK_DIR}/venv" \
     || die "could not create a venv with ${PYTHON}."
 PY="${WORK_DIR}/venv/bin/python"
+# Put the build venv first on PATH so `--no-isolation` subprocesses (cmake,
+# ninja) use BUILD_REQUIREMENTS_FILE binaries instead of older host versions.
+export PATH="${WORK_DIR}/venv/bin:${PATH}"
 curl -fsSL --retry 3 -o "${WORK_DIR}/get-pip.py" \
     https://bootstrap.pypa.io/get-pip.py \
     || die "could not download get-pip.py from bootstrap.pypa.io."
