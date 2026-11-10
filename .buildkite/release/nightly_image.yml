@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,19 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The tpu-inference-nightly-image pipeline: its schedule builds main every
-# night and publishes the result whatever the nightly tests say. DOCKERHUB_TOKEN
-# is a cluster secret whose policy admits this pipeline on main only.
+# RELEASE_MODE=nightly. Uploaded by bootstrap.py, which sets RELEASE_QUEUE to
+# the queue it runs on; `?` makes the upload fail if it is unset. The agent
+# doesn't substitute variables in `secrets`, so each cluster that can run this
+# holds the Docker Hub token under this one name.
 steps:
   - label: ":docker: Publish vllm/vllm-tpu nightly image"
-    if: build.branch == "main"
+    key: publish_nightly_image
     agents:
-      queue: cpu
+      queue: "${RELEASE_QUEUE?}"
     secrets:
-      - DOCKERHUB_TOKEN
-    commands:
-      - bash .buildkite/scripts/publish_nightly_image.sh
+      - DOCKERHUB_TOKEN_TPU_INFERENCE
     plugins:
       - docker-login#v3.0.0:
           username: tpuinference
-          password-env: DOCKERHUB_TOKEN
+          password-env: DOCKERHUB_TOKEN_TPU_INFERENCE
+    command: python3 .buildkite/release/publish_image.py nightly
