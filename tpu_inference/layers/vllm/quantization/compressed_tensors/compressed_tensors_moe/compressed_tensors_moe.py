@@ -64,6 +64,15 @@ class VllmCompressedTensorsMoEMethod(CompressedTensorsMoEMethod):
         if quant_config._is_fp8_w8a8(weight_quant, input_quant):
             return VllmCompressedTensorsW8A8Fp8MoEMethod(
                 weight_quant, input_quant, layer.moe_config, quant_config.mesh)
+        # Asymmetric int4 checkpoints (group zero points, e.g. AWQ-style
+        # WNA16) fold the zero points in at load time.
+        elif weight_quant.num_bits == 4 and not weight_quant.symmetric:
+            from .compressed_tensors_moe_w4a16 import \
+                VllmCompressedTensorsW4A16MoEMethod
+            return VllmCompressedTensorsW4A16MoEMethod(weight_quant,
+                                                       input_quant,
+                                                       layer.moe_config,
+                                                       quant_config.mesh)
         # Uses fp8 or int8 activations depending on the TPU generation.
         elif weight_quant.num_bits == 4:
             from .compressed_tensors_moe_w4a8 import \
