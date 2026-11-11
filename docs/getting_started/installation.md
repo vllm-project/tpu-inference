@@ -42,15 +42,18 @@ import vllm
 import importlib.metadata
 from vllm.platforms import current_platform
 
-tpu_version = importlib.metadata.version("tpu_inference")
+try:
+    tpu_version = importlib.metadata.version("vllm-jax-core")
+except importlib.metadata.PackageNotFoundError:  # releases before the rename
+    tpu_version = importlib.metadata.version("tpu-inference")
 print(f"vllm version: {vllm.__version__}")
-print(f"tpu_inference version: {tpu_version}")
+print(f"vllm-jax-core version: {tpu_version}")
 print(f"vllm platform: {current_platform.get_device_name()}")
 print(f"jax backends: {jax.devices()}")
 '
 # Expected output:
 # vllm version: 0.x.x
-# tpu_inference version: 0.x.x
+# vllm-jax-core version: 0.x.x
 # vllm platform: TPU V6E (or your specific TPU architecture)
 # jax backends: [TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), ...]
 ```
