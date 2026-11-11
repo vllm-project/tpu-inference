@@ -22,6 +22,8 @@ from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
 from tpu_inference import envs, utils
+from tpu_inference.core.hybrid_coordinator import \
+    maybe_install_hybrid_coordinator_hooks
 from tpu_inference.distributed import jax_parallel_state
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.distributed.utils import (get_device_topology_order_id,
@@ -199,6 +201,14 @@ class TPUWorker(WorkerBase):
             distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
+
+        # The engine core builds its Scheduler after the executor has created
+        # the workers. With UniProcExecutor (single host, no PP) the worker
+        # lives in the engine-core process and no TPU executor installs the
+        # hooks there, so the Scheduler would get vLLM's
+        # HybridKVCacheCoordinator and hand GDN layers attention-pool block
+        # ids, which the compact mamba pool clips onto shared state slots.
+        maybe_install_hybrid_coordinator_hooks(vllm_config)
 
         self.devices = devices if devices is not None else []
         self.device_ranks = set(device.id for device in self.devices

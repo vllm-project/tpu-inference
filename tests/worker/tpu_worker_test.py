@@ -167,6 +167,26 @@ class TestTPUWorker:
         assert worker.profile_dir is None
         assert worker.devices == ['tpu:0']
 
+    @pytest.mark.parametrize("prefix_caching, mamba_cache_mode, installed",
+                             [(True, "align", True), (True, "none", False),
+                              (False, "align", False)])
+    def test_init_installs_hybrid_coordinator_hooks(self, mock_vllm_config,
+                                                    prefix_caching,
+                                                    mamba_cache_mode,
+                                                    installed):
+        """The worker installs the hybrid coordinator hooks for mamba prefix
+        caching, so a UniProcExecutor engine core has them before it builds
+        the Scheduler (#3735)."""
+        mock_vllm_config.cache_config.enable_prefix_caching = prefix_caching
+        mock_vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+        with patch("tpu_inference.core.hybrid_coordinator."
+                   "install_hybrid_coordinator_hooks") as install:
+            TPUWorker(vllm_config=mock_vllm_config,
+                      local_rank=0,
+                      rank=0,
+                      distributed_init_method="test_method")
+        assert install.called == installed
+
     def test_init_with_profiler_on_rank_zero(self, mock_vllm_config):
         """Tests that the profiler directory is set correctly on rank 0."""
         mock_vllm_config.profiler_config.profiler = "torch"
