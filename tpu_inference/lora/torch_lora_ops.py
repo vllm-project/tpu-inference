@@ -87,12 +87,9 @@ def bgmv_expand_slice(
     outputs = bgmv_torch(inputs, lora_b_weights,
                          lora_indices_tensor)  # [num_tokens, out_features]
 
-    # Create a padded tensor manually to avoid issues with F.pad on sharded tensors.
-    # This is a more robust way to handle padding in a distributed environment.
-    outputs_padded = torch.zeros_like(output_tensor)
-    outputs_padded[:, slice_offset:slice_offset + slice_size] = outputs
-
+    result = output_tensor.clone()
     if add_inputs:
-        return output_tensor + outputs_padded
+        result[:, slice_offset:slice_offset + slice_size] += outputs
     else:
-        return outputs_padded
+        result[:, slice_offset:slice_offset + slice_size] = outputs
+    return result
