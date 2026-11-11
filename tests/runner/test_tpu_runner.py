@@ -1088,6 +1088,47 @@ class TestTPUJaxRunner:
         assert res.logprob_token_ids[:, 0].tolist() == [42, 99]
         assert res.cu_num_generated_tokens == [0, 1, 2]
 
+    def test_init_speculative_decoding_ngram_resizes_buffers_for_dp(self):
+        """With dp_size > 1, _init_speculative_decoding resizes NgramProposer buffers from max_num_seqs to max_num_reqs."""
+        max_num_seqs = 16
+        dp_size = 2
+        max_num_reqs = max_num_seqs * dp_size
+        k = 3
+
+        spec_cfg = SimpleNamespace(
+            method="ngram",
+            prompt_lookup_min=2,
+            prompt_lookup_max=4,
+            num_speculative_tokens=k,
+        )
+        self.runner.vllm_config.speculative_config = spec_cfg
+        self.runner.speculative_config = spec_cfg
+        self.runner.vllm_config.scheduler_config.max_num_seqs = max_num_seqs
+        self.runner.dp_size = dp_size
+        self.runner.max_num_reqs = max_num_reqs
+
+        self.runner._init_speculative_decoding()
+
+        assert self.runner.drafter.valid_ngram_draft.shape == (max_num_reqs, k)
+        assert self.runner.drafter.valid_ngram_num_drafts.shape == (
+            max_num_reqs, )
+
+        # Verify propose() succeeds across all max_num_reqs DP slots without IndexError.
+        sampled_token_ids = [[1] for _ in range(max_num_reqs)]
+        num_tokens_no_spec = np.full(max_num_reqs, 6, dtype=np.int32)
+        token_ids_cpu = np.tile(
+            np.array([10, 20, 30, 40, 10, 20], dtype=np.int32),
+            (max_num_reqs, 1),
+        )
+        drafts = self.runner.drafter.propose(
+            k,
+            sampled_token_ids,
+            num_tokens_no_spec,
+            token_ids_cpu,
+        )
+        assert len(drafts) == max_num_reqs
+        assert drafts[-1] == [30, 40, 10]
+
 
 class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
 

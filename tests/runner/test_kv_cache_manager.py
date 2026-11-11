@@ -404,6 +404,26 @@ class TestKVCacheManager:
             assert kv_cache_spec[f'layer.{i}'] == expected_full_attn_spec
         assert len(self.runner.kv_cache_manager.shared_kv_cache_layers) == 0
 
+    def test_get_kv_cache_spec_without_compilation_cfg_ngram_spec_decode(self):
+        # Model-free speculative decoding (e.g. ngram) sets speculative_config
+        # with draft_model_config=None; get_kv_cache_spec must skip draft layer
+        # registration instead of dereferencing draft_model_config.hf_config.
+        model_config = self.runner.vllm_config.model_config
+        parallel_config = self.runner.vllm_config.parallel_config
+        num_layers = model_config.get_num_layers(parallel_config)
+
+        self.runner.vllm_config.compilation_config.static_forward_context = {}
+        self.runner.speculative_config = MagicMock(
+            method="ngram",
+            draft_model_config=None,
+        )
+        kv_cache_spec = self.runner.get_kv_cache_spec()
+
+        assert len(kv_cache_spec) == num_layers
+        for i in range(num_layers):
+            assert f"layer.{i}" in kv_cache_spec
+        assert len(self.runner.kv_cache_manager.shared_kv_cache_layers) == 0
+
     def test_get_kv_cache_spec_without_compilation_cfg_none_text_config_attrs(
             self):
         # Regression: when the HF text_config declares one of the head-shape

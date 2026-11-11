@@ -865,9 +865,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.is_pooling_model: bool = self.model_config.runner_type == "pooling"
         """Generative model or pooling model select different computations."""
-        self.enable_continue_decode = (self.vllm_config.additional_config.get(
-            "enable_continue_decode", False)
-                                       and self.speculative_config is None)
+        enable_continue_decode = bool(
+            self.vllm_config.additional_config.get("enable_continue_decode",
+                                                   False))
+        if enable_continue_decode and self.speculative_config is not None:
+            logger.warning(
+                "enable_continue_decode is not supported with speculative "
+                "decoding; disabling continue_decode.")
+            enable_continue_decode = False
+        self.enable_continue_decode = enable_continue_decode
         # continue_decode EOS-check interval: how often the fused decode loop
         # observes the any-sequence-hit-EOS early exit (see decode_loop.py). Set
         # via the CONTINUE_DECODE_EOS_CHECK_INTERVAL env var so it can be retuned
@@ -1067,6 +1073,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.speculative_config:
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
+                # vLLM's NgramProposer sizes these buffers by per-rank
+                # max_num_seqs, whereas TPUModelRunner indexes by global
+                # max_num_reqs (max_num_seqs * dp_size) under DP.
                 if (self.drafter.valid_ngram_num_drafts.shape[0]
                         < self.max_num_reqs):
                     self.drafter.valid_ngram_draft = np.zeros(
@@ -1943,6 +1952,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self, scheduler_output: "VllmSchedulerOutput") -> bool:
         if self.enable_continue_decode is not True:
             return False
+        # Also guard here in case enable_continue_decode or speculative_config
+        # is modified after __init__ (e.g. in tests).
         if self.speculative_config is not None:
             return False
         num_reqs = self.input_batch.num_reqs
