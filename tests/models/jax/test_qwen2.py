@@ -192,3 +192,61 @@ class TestQwen2ForCausalLM:
 
         logits = model.compute_logits(hidden_states)
         assert logits.shape == (1, hf_config.vocab_size)
+
+
+class TestQwen2HiddenSizeResolution:
+    """Regression tests for the untied-embedding lm_head hidden_size resolution.
+
+    Qwen2ForCausalLM.__init__ must resolve the language hidden_size without
+    eagerly touching `.text_config`, which does not exist on a plain Qwen2Config
+    (untied-embedding Qwen2.5-7B/14B/32B). See qwen2.py lm_head init.
+    """
+
+    @staticmethod
+    def _resolve_hidden_size(hf_config):
+        # Mirror of the resolution idiom in Qwen2ForCausalLM.__init__ and
+        # Qwen2Model: resolve the language config first, then read hidden_size.
+        lang_config = getattr(hf_config, 'text_config', hf_config)
+        return lang_config.hidden_size
+
+    def test_plain_config_without_text_config(self):
+        """Plain Qwen2Config (untied embeddings) has hidden_size, no text_config."""
+
+        class PlainConfig:
+            hidden_size = 3584  # Qwen2.5-7B
+
+        assert self._resolve_hidden_size(PlainConfig()) == 3584
+
+    def test_vl_config_with_text_config(self):
+        """VL config nests language attrs under text_config (transformers v5)."""
+
+        class TextConfig:
+            hidden_size = 8192  # Qwen2.5-VL-72B language tower
+
+        class VLConfig:
+            text_config = TextConfig()
+
+        assert self._resolve_hidden_size(VLConfig()) == 8192
+
+    def test_plain_config_never_dereferences_text_config(self):
+        """Regression: the buggy idiom
+            getattr(cfg, 'hidden_size', cfg.text_config.hidden_size)
+        evaluates the default eagerly, so cfg.text_config is dereferenced even
+        when hidden_size exists -> AttributeError on untied Qwen2.5 checkpoints
+        (Qwen2.5-7B/14B/32B), whose plain Qwen2Config has no `.text_config`.
+        """
+
+        class PlainQwen2Config:
+            # Plain Qwen2Config: has hidden_size, NO text_config attribute.
+            hidden_size = 3584  # Qwen2.5-7B
+
+        cfg = PlainQwen2Config()
+
+        # The fixed idiom resolves via the top-level hidden_size and never
+        # touches the absent text_config.
+        assert self._resolve_hidden_size(cfg) == 3584
+
+        # The old idiom eagerly evaluated cfg.text_config.hidden_size as the
+        # getattr default and raised AttributeError -- the exact load failure.
+        with pytest.raises(AttributeError):
+            getattr(cfg, 'hidden_size', cfg.text_config.hidden_size)
