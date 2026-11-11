@@ -21,7 +21,7 @@ import pytest
 from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
-from vllm.config import ModelConfig
+from vllm.config import LoadConfig, ModelConfig
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.models.jax.llama3 import LlamaForCausalLM
@@ -33,8 +33,7 @@ class MockVllmConfig:
     def __init__(self, model: str, kv_cache_dtype: str):
         self.model_config = ModelConfig(model)
         self.model_config.dtype = jnp.bfloat16
-        self.load_config = MagicMock()
-        self.load_config.download_dir = None
+        self.load_config = LoadConfig()
         self.speculative_config = None
         self.cache_config = MagicMock(cache_dtype=kv_cache_dtype)
 

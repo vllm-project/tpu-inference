@@ -24,8 +24,8 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import \
     Qwen2_5_VLConfig
-from vllm.config import (CacheConfig, DeviceConfig, MultiModalConfig,
-                         ParallelConfig, SchedulerConfig)
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig,
+                         MultiModalConfig, ParallelConfig, SchedulerConfig)
 
 from tpu_inference.distributed.jax_parallel_state import \
     init_pp_distributed_environment
@@ -112,7 +112,7 @@ class MockVllmConfig:
         self.parallelism_config = MagicMock(spec=ParallelConfig)
         self.scheduler_config = MagicMock(spec=SchedulerConfig)
         self.device_config = MagicMock(spec=DeviceConfig)
-        self.load_config = MagicMock()
+        self.load_config = LoadConfig()
         self.extra_configs = {}
         self.additional_config = {}
         self.quant_config = None

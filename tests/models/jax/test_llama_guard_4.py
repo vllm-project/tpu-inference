@@ -23,7 +23,7 @@ import numpy as np
 import pytest
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
-from vllm.config import AuxOutputConfig, ModelConfig
+from vllm.config import AuxOutputConfig, LoadConfig, ModelConfig
 
 from tpu_inference.models.jax.llama_guard_4 import (LlamaGuard4ForCausalLM,
                                                     LlamaGuard4WeightLoader)
@@ -62,8 +62,7 @@ class MockVllmConfig:
                  tensor_parallelism: int = 1):
         self.model_config = MagicMock(spec=ModelConfig)
         self.aux_output_config = AuxOutputConfig()
-        self.load_config = MagicMock()
-        self.load_config.download_dir = None
+        self.load_config = LoadConfig()
 
         # Downsizing the following to avoid OOM
         self.model_config.get_vocab_size.return_value = 1024

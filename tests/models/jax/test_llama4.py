@@ -24,7 +24,7 @@ import pytest
 from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
-from vllm.config import AuxOutputConfig, ModelConfig
+from vllm.config import AuxOutputConfig, LoadConfig, ModelConfig
 
 from tpu_inference.layers.jax.quantization.unquantized import UnquantizedConfig
 from tpu_inference.models.jax.llama4 import (Llama4ForCausalLM,
@@ -64,8 +64,7 @@ class MockVllmConfig:
                  tensor_parallelism: int = 1):
         self.model_config = MagicMock(spec=ModelConfig)
         self.aux_output_config = AuxOutputConfig()
-        self.load_config = MagicMock()
-        self.load_config.download_dir = None
+        self.load_config = LoadConfig()
 
         # Choose small amount of layers to avoid OOM.
         self.model_config.get_vocab_size.return_value = 202048
