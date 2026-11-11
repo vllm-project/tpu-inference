@@ -633,8 +633,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("ROUTING_MOE_REMOTE_SCATTER", default=True),
     # routing_moe: routing_gmm writes its expert-output rows in float8_e4m3fn
     # with per-lane f32 scales (tokamax's lane-strided format) for
-    # output_reduce to read, instead of bf16. Halves the combine traffic;
-    # changes the output slightly.
+    # output_reduce to read, instead of bf16. With remote scatter this halves
+    # the combine traffic; changes the output slightly.
     "ROUTING_MOE_FP8_COMBINE":
     env_bool("ROUTING_MOE_FP8_COMBINE", default=False),
     # Gap between token-bucket padding sizes for TPU precompilation. When 0,

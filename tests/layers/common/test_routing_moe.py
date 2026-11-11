@@ -158,16 +158,21 @@ def test_local_scatter_matches_dense_reference():
 
 @requires_4_devices
 @pytest.mark.usefixtures("tokamax_kernel")
-def test_fp8_combine_matches_dense_reference():
+@pytest.mark.parametrize("remote_scatter", [True, False],
+                         ids=["remote", "local"])
+def test_fp8_combine_matches_dense_reference(remote_scatter):
     """ROUTING_MOE_FP8_COMBINE=1 (fp8 expert-output rows into output_reduce)
-    stays close to the dense reference and actually changes the output."""
+    stays close to the dense reference and actually changes the output, with
+    remote scatter and in tokamax's local mode."""
     mesh = _make_mesh(**_SUPPORTED_MESHES[0])
     x, gating = _inputs(mesh, 2048)
     w = _weights(mesh, True)
     want = _dense_reference(x, gating, *w)
-    bf16_combine = _run_kernel(mesh, x, gating, *w)
-    with mock.patch("tpu_inference.envs.ROUTING_MOE_FP8_COMBINE", True):
-        out = _run_kernel(mesh, x, gating, *w)
+    with mock.patch("tpu_inference.envs.ROUTING_MOE_REMOTE_SCATTER",
+                    remote_scatter):
+        bf16_combine = _run_kernel(mesh, x, gating, *w)
+        with mock.patch("tpu_inference.envs.ROUTING_MOE_FP8_COMBINE", True):
+            out = _run_kernel(mesh, x, gating, *w)
     assert out.shape == x.shape and out.dtype == x.dtype
     assert out.sharding.is_equivalent_to(x.sharding, x.ndim)
     assert not np.array_equal(np.asarray(out), np.asarray(bf16_combine))

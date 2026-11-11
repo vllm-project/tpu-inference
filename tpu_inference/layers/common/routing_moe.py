@@ -33,6 +33,12 @@ experts are picked by moe_router.select_experts, as on the GMM path.
 ROUTING_MOE_REMOTE_SCATTER=0 selects tokamax's local mode instead of the remote
 scatter above: each device sums its experts' rows into a partial result for
 every token, and a reduce-scatter combines the partial results.
+
+ROUTING_MOE_FP8_COMBINE=1 has routing_gmm write its expert-output rows in fp8
+with per-lane f32 scales (tokamax's lane-strided format) instead of bf16, and
+output_reduce dequantizes them while summing each token's top-k rows. With
+remote scatter this halves the bytes sent to the token owners; in local mode
+the rows stay on the device, so it saves only local memory traffic.
 """
 
 import jax
@@ -174,20 +180,19 @@ def routing_moe_func(
     if padded_hidden != hidden_size:
         hidden_states = jnp.pad(hidden_states,
                                 ((0, 0), (0, padded_hidden - hidden_size)))
-    logger.info_once(
-        "[MoE]: routing_moe over %d devices, %d experts each, token rows "
-        "split over replica axes %s; %s weights, %s scatter.",
-        mesh.devices.size, num_experts // mesh.devices.size, replica,
-        "fp8" if w1.dtype == jnp.float8_e4m3fn else "bf16",
-        "remote" if envs.ROUTING_MOE_REMOTE_SCATTER else "local")
     # ROUTING_MOE_FP8_COMBINE: routing_gmm sends its output rows to
     # output_reduce in fp8 with per-lane scales instead of bf16.
     scatter_format = None
     if envs.ROUTING_MOE_FP8_COMBINE:
         scatter_format = tk_out_format.ActivationFormat(
             dtype=jnp.float8_e4m3fn, quant=tk_out_format.LaneStrided())
-    logger.info_once("[MoE]: routing_moe combine rows in %s.",
-                     "fp8" if scatter_format is not None else "bf16")
+    logger.info_once(
+        "[MoE]: routing_moe over %d devices, %d experts each, token rows "
+        "split over replica axes %s; %s weights, %s scatter, %s combine rows.",
+        mesh.devices.size, num_experts // mesh.devices.size, replica,
+        "fp8" if w1.dtype == jnp.float8_e4m3fn else "bf16",
+        "remote" if envs.ROUTING_MOE_REMOTE_SCATTER else "local",
+        "fp8" if scatter_format is not None else "bf16")
     num_replicas = get_mesh_shape_product(mesh, list(replica))
     num_local_rows = num_tokens * num_replicas // mesh.devices.size
     x = _to_ep_rows(hidden_states, mesh, replica)
