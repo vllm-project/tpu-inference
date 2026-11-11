@@ -703,3 +703,64 @@ class TestGetModel:
         with set_current_vllm_config(cfg), pytest.raises(SentinelError):
             model_loader.get_model(cfg, rng, mesh)
         assert captured == [Gemma4ForSequenceClassification]
+
+    @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "auto"}, clear=True)
+    @patch("tpu_inference.models.common.model_loader.get_vllm_model")
+    @patch("tpu_inference.models.common.model_loader.get_flax_model")
+    def test_get_model_auto_resolves_to_vllm_when_lora_enabled(
+            self, mock_get_flax, mock_get_vllm, vllm_config, rng, mesh):
+        """Regression test for #2207: When LoRA is enabled, 'auto' must resolve
+        to 'vllm' implementation as native JAX flax_nnx models do not support LoRA."""
+        vllm_config.lora_config = MagicMock()
+        vllm_config.model_config.hf_config.architectures = ["Qwen3ForCausalLM"]
+        mock_get_vllm.return_value = "vllm_model_sentinel"
+
+        result = model_loader.get_model(vllm_config, rng, mesh)
+
+        mock_get_flax.assert_not_called()
+        mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh, False,
+                                              None)
+        assert result == "vllm_model_sentinel"
+
+    @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "flax_nnx"}, clear=True)
+    @patch("tpu_inference.models.common.model_loader.get_vllm_model")
+    @patch("tpu_inference.models.common.model_loader.get_flax_model")
+    def test_get_model_flax_fallback_when_lora_enabled(self, mock_get_flax,
+                                                       mock_get_vllm,
+                                                       vllm_config, rng, mesh):
+        """Regression test for #2207: Explicit 'flax_nnx' with LoRA enabled
+        must fall back to 'vllm' with a warning rather than crashing on capture."""
+        vllm_config.lora_config = MagicMock()
+        vllm_config.model_config.hf_config.architectures = ["Qwen3ForCausalLM"]
+        mock_get_vllm.return_value = "vllm_model_sentinel"
+
+        result = model_loader.get_model(vllm_config, rng, mesh)
+
+        mock_get_flax.assert_not_called()
+        mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh, False,
+                                              None)
+        assert result == "vllm_model_sentinel"
+
+
+def test_supports_vllm_config_rejects_lora():
+    """Regression test for #2207: _supports_vllm_config returns False when
+    lora_config is present because native JAX models do not support LoRA."""
+    mock_class = MagicMock()
+    mock_class.supports_vllm_config.return_value = True
+
+    cfg_no_lora = MagicMock(lora_config=None)
+    assert model_loader._supports_vllm_config(mock_class, cfg_no_lora) is True
+
+    cfg_with_lora = MagicMock(lora_config=MagicMock())
+    assert model_loader._supports_vllm_config(mock_class,
+                                              cfg_with_lora) is False
+
+
+def test_resolve_model_architecture_lora_resolves_to_vllm(vllm_config):
+    """Regression test for #2207: resolve_model_architecture resolves to 'vllm'
+    when LoRA is enabled even if the architecture is registered in JAX."""
+    vllm_config.model_config.hf_config.architectures = ["Qwen3ForCausalLM"]
+    vllm_config.lora_config = MagicMock()
+    impl = model_loader.resolve_model_architecture(vllm_config,
+                                                   is_draft_model=False)
+    assert impl == "vllm"
