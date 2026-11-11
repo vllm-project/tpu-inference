@@ -159,6 +159,8 @@ def routing_moe_func(
     like hidden_states. Assumes unsupported_reason() returned None for this
     layer.
     """
+    from tokamax._src.ops.experimental.routing_moe.common import \
+        out_format as tk_out_format
     from tokamax._src.ops.experimental.routing_moe.layer import \
         modular as tk_modular
     from tokamax._src.ops.experimental.routing_moe.layer import plan as tk_plan
@@ -178,6 +180,14 @@ def routing_moe_func(
         mesh.devices.size, num_experts // mesh.devices.size, replica,
         "fp8" if w1.dtype == jnp.float8_e4m3fn else "bf16",
         "remote" if envs.ROUTING_MOE_REMOTE_SCATTER else "local")
+    # ROUTING_MOE_FP8_COMBINE: routing_gmm sends its output rows to
+    # output_reduce in fp8 with per-lane scales instead of bf16.
+    scatter_format = None
+    if envs.ROUTING_MOE_FP8_COMBINE:
+        scatter_format = tk_out_format.ActivationFormat(
+            dtype=jnp.float8_e4m3fn, quant=tk_out_format.LaneStrided())
+    logger.info_once("[MoE]: routing_moe combine rows in %s.",
+                     "fp8" if scatter_format is not None else "bf16")
     num_replicas = get_mesh_shape_product(mesh, list(replica))
     num_local_rows = num_tokens * num_replicas // mesh.devices.size
     x = _to_ep_rows(hidden_states, mesh, replica)
@@ -211,7 +221,8 @@ def routing_moe_func(
         ep_axis=ep_axes,
         use_sp=True,
         moe_plan=tk_plan.RoutingMoEPlan(
-            remote_scatter=envs.ROUTING_MOE_REMOTE_SCATTER),
+            remote_scatter=envs.ROUTING_MOE_REMOTE_SCATTER,
+            scatter_format=scatter_format),
     )
     out = _from_ep_rows(out, mesh, replica, num_local_rows)
     return out[:, :hidden_size]

@@ -158,6 +158,49 @@ def test_local_scatter_matches_dense_reference():
 
 @requires_4_devices
 @pytest.mark.usefixtures("tokamax_kernel")
+def test_fp8_combine_matches_dense_reference():
+    """ROUTING_MOE_FP8_COMBINE=1 (fp8 expert-output rows into output_reduce)
+    stays close to the dense reference and actually changes the output."""
+    mesh = _make_mesh(**_SUPPORTED_MESHES[0])
+    x, gating = _inputs(mesh, 2048)
+    w = _weights(mesh, True)
+    want = _dense_reference(x, gating, *w)
+    bf16_combine = _run_kernel(mesh, x, gating, *w)
+    with mock.patch("tpu_inference.envs.ROUTING_MOE_FP8_COMBINE", True):
+        out = _run_kernel(mesh, x, gating, *w)
+    assert out.shape == x.shape and out.dtype == x.dtype
+    assert out.sharding.is_equivalent_to(x.sharding, x.ndim)
+    assert not np.array_equal(np.asarray(out), np.asarray(bf16_combine))
+    error = _rel_l2(out, want)
+    assert error < 0.07, error
+
+
+@pytest.mark.usefixtures("tokamax_kernel")
+@pytest.mark.parametrize("fp8_combine", [False, True])
+def test_fp8_combine_sets_scatter_format(fp8_combine):
+    """The flag passes tokamax an fp8 lane-strided scatter_format, and no
+    scatter_format (bf16 rows) when it's off."""
+    from tokamax._src.ops.experimental.routing_moe.common import out_format
+    from tokamax._src.ops.experimental.routing_moe.layer import modular
+    mesh = _make_mesh()
+    x, gating = _inputs(mesh, 512)
+    w = _weights(mesh, True)
+    with (mock.patch("tpu_inference.envs.ROUTING_MOE_FP8_COMBINE",
+                     fp8_combine),
+          mock.patch.object(modular,
+                            "routing_moe",
+                            side_effect=lambda x, *a, **k: x) as kernel):
+        _run_kernel(mesh, x, gating, *w)
+    fmt = kernel.call_args.kwargs["moe_plan"].scatter_format
+    if fp8_combine:
+        assert fmt.dtype == jnp.float8_e4m3fn
+        assert isinstance(fmt.quant, out_format.LaneStrided)
+    else:
+        assert fmt is None
+
+
+@requires_4_devices
+@pytest.mark.usefixtures("tokamax_kernel")
 def test_rows_not_divisible_by_replicas():
     """150 tokens leave 75 rows per attention-data shard, so the rows are
     padded before each replica takes its half."""
