@@ -1381,12 +1381,6 @@ class TestTPUJaxRunnerDisableMM:
         assert TPUModelRunner._can_use_continue_decode(runner,
                                                        sched_out) is True
 
-        # 1b. Speculative decoding enabled -> False
-        runner.speculative_config = MagicMock()
-        assert TPUModelRunner._can_use_continue_decode(runner,
-                                                       sched_out) is False
-        runner.speculative_config = None
-
         # 2. Disabled flag -> False
         runner.enable_continue_decode = False
         assert TPUModelRunner._can_use_continue_decode(runner,

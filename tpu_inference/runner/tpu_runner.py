@@ -865,15 +865,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.is_pooling_model: bool = self.model_config.runner_type == "pooling"
         """Generative model or pooling model select different computations."""
-        enable_continue_decode = bool(
-            self.vllm_config.additional_config.get("enable_continue_decode",
-                                                   False))
-        if enable_continue_decode and self.speculative_config is not None:
-            logger.warning(
-                "enable_continue_decode is not supported with speculative "
-                "decoding; disabling continue_decode.")
-            enable_continue_decode = False
-        self.enable_continue_decode = enable_continue_decode
+        self.enable_continue_decode = self.vllm_config.additional_config.get(
+            "enable_continue_decode", False)
         # continue_decode EOS-check interval: how often the fused decode loop
         # observes the any-sequence-hit-EOS early exit (see decode_loop.py). Set
         # via the CONTINUE_DECODE_EOS_CHECK_INTERVAL env var so it can be retuned
@@ -1951,10 +1944,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _can_use_continue_decode(
             self, scheduler_output: "VllmSchedulerOutput") -> bool:
         if self.enable_continue_decode is not True:
-            return False
-        # Also guard here in case enable_continue_decode or speculative_config
-        # is modified after __init__ (e.g. in tests).
-        if self.speculative_config is not None:
             return False
         num_reqs = self.input_batch.num_reqs
         if num_reqs <= 0 or self.input_batch.request_distribution[
