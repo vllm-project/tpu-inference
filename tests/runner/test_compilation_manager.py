@@ -62,7 +62,6 @@ class TestDescribeSignature:
                 seq_lens=ones,
                 query_start_loc=ones,
                 request_distribution=jnp.zeros((3, ), dtype=jnp.int32),
-                mamba_state_indices=None,
                 padded_num_reqs=num_reqs,
             ),
         }

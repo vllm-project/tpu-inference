@@ -30,7 +30,8 @@ import tpu_inference.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, GroupedAttentionMetadata, SharedAttentionMetadata)
+    AttentionMetadata, GroupedAttentionMetadata, MambaMetadata,
+    SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (
     compute_and_gather_logprobs, compute_and_gather_prompt_logprobs,
@@ -492,6 +493,25 @@ class CompilationManager:
         else:
             mamba_state_indices = None
 
+        spec_config = getattr(self.runner, "speculative_config", None)
+        num_spec_tokens = (spec_config.num_speculative_tokens if
+                           (spec_config
+                            and self.runner.kv_cache_config.has_mamba_layers)
+                           else 0)
+        if num_spec_tokens > 0:
+            mamba_read_offsets = device_array(self.runner.mesh,
+                                              np.zeros(
+                                                  self.runner.max_num_reqs,
+                                                  dtype=np.int32),
+                                              sharding=metadata_attn_sharding)
+        else:
+            mamba_read_offsets = None
+
+        mamba_metadata = (MambaMetadata(state_indices=mamba_state_indices,
+                                        read_offsets=mamba_read_offsets) if
+                          (mamba_state_indices is not None
+                           or mamba_read_offsets is not None) else None)
+
         def build_block_table(kv_cache_gid: int) -> jax.Array:
             block_table_obj = self.runner.input_batch.block_table[kv_cache_gid]
             shape = (self.runner.max_num_reqs,
@@ -511,7 +531,7 @@ class CompilationManager:
                 seq_lens=seq_lens,
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
-                mamba_state_indices=mamba_state_indices,
+                mamba=mamba_metadata,
                 padded_num_reqs=num_reqs,
                 pcp=pcp,
                 backend_metadata=attention_backend.backend_metadata(
@@ -527,7 +547,6 @@ class CompilationManager:
                 seq_lens=seq_lens,
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
-                mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=num_reqs,
                 is_decode=is_decode,
             )
@@ -1627,13 +1646,23 @@ class CompilationManager:
         # ForbidCompile guard inside `Eagle3Proposer.propose` raises. None for
         # pure-attention models (the common eagle3 case) so the field stays
         # absent end-to-end.
+        spec_config = getattr(self.runner, "speculative_config", None)
         if self.runner.kv_cache_config.has_mamba_layers:
             eagle3_mamba_state_indices = device_array(
                 self.runner.mesh,
                 np.zeros(self.runner.max_num_reqs, dtype=np.int32),
                 sharding=dp_sharding)
+            eagle3_num_spec_tokens = (spec_config.num_speculative_tokens
+                                      if spec_config else 0)
+            eagle3_mamba_read_offsets = (device_array(
+                self.runner.mesh,
+                np.zeros(self.runner.max_num_reqs, dtype=np.int32),
+                sharding=dp_sharding) if eagle3_num_spec_tokens > 0 else None)
+            eagle3_mamba = MambaMetadata(
+                state_indices=eagle3_mamba_state_indices,
+                read_offsets=eagle3_mamba_read_offsets)
         else:
-            eagle3_mamba_state_indices = None
+            eagle3_mamba = None
 
         num_reqs_dp = self._create_dummy_tensor((dp_size, ),
                                                 jnp.int32,
@@ -1650,7 +1679,7 @@ class CompilationManager:
                     seq_lens=seq_lens,
                     query_start_loc=query_start_loc,
                     request_distribution=request_distribution,
-                    mamba_state_indices=eagle3_mamba_state_indices,
+                    mamba=eagle3_mamba,
                     padded_num_reqs=num_reqs,
                 )
 
@@ -1762,14 +1791,23 @@ class CompilationManager:
         # ForbidCompile guard inside `Eagle3Proposer.propose` raises. None for
         # pure-attention models (the common eagle3 case) so the field stays
         # absent end-to-end.
+        spec_config = getattr(self.runner, "speculative_config", None)
         if self.runner.kv_cache_config.has_mamba_layers:
             mamba_state_indices = device_array(self.runner.mesh,
                                                np.zeros(
                                                    self.runner.max_num_reqs,
                                                    dtype=np.int32),
                                                sharding=dp_sharding)
+            mtp_num_spec_tokens = (spec_config.num_speculative_tokens
+                                   if spec_config else 0)
+            mtp_mamba_read_offsets = (device_array(
+                self.runner.mesh,
+                np.zeros(self.runner.max_num_reqs, dtype=np.int32),
+                sharding=dp_sharding) if mtp_num_spec_tokens > 0 else None)
+            mtp_mamba = MambaMetadata(state_indices=mamba_state_indices,
+                                      read_offsets=mtp_mamba_read_offsets)
         else:
-            mamba_state_indices = None
+            mtp_mamba = None
 
         num_reqs_dp = self._create_dummy_tensor((dp_size, ),
                                                 jnp.int32,
@@ -1794,7 +1832,7 @@ class CompilationManager:
                     seq_lens=seq_lens,
                     query_start_loc=query_start_loc,
                     request_distribution=request_distribution,
-                    mamba_state_indices=mamba_state_indices,
+                    mamba=mtp_mamba,
                     padded_num_reqs=num_reqs,
                 )
 
@@ -1886,13 +1924,23 @@ class CompilationManager:
                                             request_distribution,
                                             sharding=dp_sharding)
 
+        spec_config = getattr(self.runner, "speculative_config", None)
         if self.runner.kv_cache_config.has_mamba_layers:
             dflash_mamba_state_indices = device_array(
                 self.runner.mesh,
                 np.zeros(self.runner.max_num_reqs, dtype=np.int32),
                 sharding=dp_sharding)
+            dflash_num_spec_tokens = (spec_config.num_speculative_tokens
+                                      if spec_config else 0)
+            dflash_mamba_read_offsets = (device_array(
+                self.runner.mesh,
+                np.zeros(self.runner.max_num_reqs, dtype=np.int32),
+                sharding=dp_sharding) if dflash_num_spec_tokens > 0 else None)
+            dflash_mamba = MambaMetadata(
+                state_indices=dflash_mamba_state_indices,
+                read_offsets=dflash_mamba_read_offsets)
         else:
-            dflash_mamba_state_indices = None
+            dflash_mamba = None
 
         num_reqs_dp = self._create_dummy_tensor((dp_size, ),
                                                 jnp.int32,
@@ -1928,7 +1976,7 @@ class CompilationManager:
                     seq_lens=seq_lens,
                     query_start_loc=query_start_loc,
                     request_distribution=request_distribution,
-                    mamba_state_indices=dflash_mamba_state_indices,
+                    mamba=dflash_mamba,
                     padded_num_reqs=num_reqs,
                 )
 
@@ -1987,7 +2035,7 @@ class CompilationManager:
                     seq_lens=seq_lens,
                     query_start_loc=query_start_loc,
                     request_distribution=request_distribution,
-                    mamba_state_indices=dflash_mamba_state_indices,
+                    mamba=dflash_mamba,
                     padded_num_reqs=num_reqs,
                 )
 
@@ -2115,8 +2163,10 @@ class CompilationManager:
                     self.runner.mesh,
                     np.zeros(self.runner.max_num_reqs, dtype=np.int32),
                     sharding=dp_sharding)
+                mamba_metadata = MambaMetadata(
+                    state_indices=mamba_state_indices)
             else:
-                mamba_state_indices = None
+                mamba_metadata = None
 
             def build_block_table(kv_cache_gid: int) -> jax.Array:
                 block_table_obj = self.runner.input_batch.block_table[
@@ -2141,7 +2191,7 @@ class CompilationManager:
                     seq_lens=seq_lens,
                     query_start_loc=query_start_loc,
                     request_distribution=request_distribution,
-                    mamba_state_indices=mamba_state_indices,
+                    mamba=mamba_metadata,
                     padded_num_reqs=attn_padded_num_reqs,
                 )
             else:
@@ -2153,7 +2203,7 @@ class CompilationManager:
                             seq_lens=seq_lens,
                             query_start_loc=query_start_loc,
                             request_distribution=request_distribution,
-                            mamba_state_indices=mamba_state_indices,
+                            mamba=mamba_metadata,
                             padded_num_reqs=attn_padded_num_reqs,
                         ) for gid in range(
                             len(self.runner.kv_cache_config.kv_cache_groups))),
