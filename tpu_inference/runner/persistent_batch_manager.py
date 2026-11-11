@@ -134,6 +134,7 @@ class PersistentBatchManager:
                 req_state = finished_req_states.get(req_id)
                 if req_state is not None:
                     req_state.mamba_state_slot = None
+                    req_state.mamba_read_offset = 0
                 removed_req_indices.append(req_index)
             else:
                 req_state = finished_req_states.get(req_id)
@@ -141,6 +142,7 @@ class PersistentBatchManager:
                     self.input_batch.release_mamba_slot(
                         req_state.mamba_state_slot)
                     req_state.mamba_state_slot = None
+                    req_state.mamba_read_offset = 0
 
         # Free the cached encoder outputs.
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
@@ -173,6 +175,7 @@ class PersistentBatchManager:
                 continue
             self.input_batch.release_mamba_slot(req_state.mamba_state_slot)
             req_state.mamba_state_slot = None
+            req_state.mamba_read_offset = 0
 
         # Usually resumed requests are not present in the persistent batch.
         # Forced preemption can make a resumed request still appear there; clear
@@ -192,6 +195,7 @@ class PersistentBatchManager:
                 if reset_mamba_slot:
                     if req_state is not None:
                         req_state.mamba_state_slot = None
+                        req_state.mamba_read_offset = 0
                 else:
                     self.requests[req_id].mamba_state_slot = int(
                         self.input_batch.mamba_state_indices_cpu[req_index])

@@ -101,7 +101,7 @@ class KVCacheManager:
         # `initialize_kv_cache` allocates this many slots per mamba layer
         # while attention layers keep the full `num_blocks` from the
         # (correspondingly enlarged) attention pool. The GDN op indexes
-        # mamba state with `attn_metadata.mamba_state_indices` (in
+        # mamba state with `attn_metadata.mamba.state_indices` (in
         # `[0, max_num_reqs]`) so it stays in-bounds for the smaller arrays.
         self._mamba_num_blocks: int | None = None
         self.actual_mamba_num_blocks: int | None = None
@@ -744,6 +744,8 @@ class KVCacheManager:
                 pin_memory=False,
                 vocab_size=self.runner.model_config.get_vocab_size(),
                 block_sizes=block_sizes,
+                is_spec_decode=bool(
+                    self.runner.vllm_config.speculative_config),
                 num_speculative_tokens=num_speculative_tokens,
                 dp_size=self.runner.dp_size,
             )
