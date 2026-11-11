@@ -53,6 +53,10 @@ trap 'exit 143' TERM
 dockerhub_login "${DOCKER_CONFIG}" "${RELEASE_DOCKERHUB_USERNAME}"
 
 STAGED_DIGEST="$(digest_of "${STAGED}")"
+# Set outside the array assignment below: an assignment holding $(...) takes
+# its exit status, which would stop this script under set -e.
+LATEST_NOTE=""
+[[ "${MOVE_LATEST}" == "yes" ]] && LATEST_NOTE=" and \`:latest\`"
 PUBLISHED_NOTES=()
 for repo in "${REPOS[@]}"; do
   DEST="docker.io/${repo}"
@@ -68,7 +72,7 @@ for repo in "${REPOS[@]}"; do
     | python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])')"
   [[ "${got}" == "${STAGED_DIGEST}" ]] \
     || die "${DEST}:${TAG} is ${got}, not the staged ${STAGED_DIGEST}."
-  PUBLISHED_NOTES+=("\`${DEST}:${TAG}\`$([[ "${MOVE_LATEST}" == "yes" ]] && echo " and \`:latest\`")")
+  PUBLISHED_NOTES+=("\`${DEST}:${TAG}\`${LATEST_NOTE}")
 done
 
 SUMMARY="$(IFS=', '; echo "${PUBLISHED_NOTES[*]}")"
