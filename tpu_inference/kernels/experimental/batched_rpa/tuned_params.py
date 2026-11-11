@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from dataclasses import asdict, dataclass
 from typing import Literal
 
@@ -250,28 +251,44 @@ def calculate_block_sizes(
         # costs. Therefore, we conservatively only use 80% of the VMEM budget.
         capped_vmem_limit_bytes = vmem_limit_bytes * 0.8
 
-        # To maximize MXU, we want bkv_sz to be at least MXU size.
-        bkv_default = mxu_column_size
-        if serve_cfgs.kv_layout == configs.KVLayout.SEQ_ALONG_LANE:
-            # SEQ-ALONG-LANE does not support intra-page DMA offset.
-            # TODO(kyuyeunk): Reduce granularity to lane size.
-            bkv_default = utils.align_to(bkv_default, serve_cfgs.page_size)
-        bkv_sz = bkv_stride = bkv_default
+        # Both SEQ_ALONG_LANE and HEAD_ALONG_SUBLANE schedule cached KV DMAs at
+        # whole-page boundaries (kv_p_start = k_idx * bkv_p with no intra-page
+        # source offset), so bkv_sz must be a multiple of both page_size and
+        # mxu_column_size. Query tiles are contiguous in HBM and only require
+        # mxu_column_size alignment.
+        bkv_sz = bkv_stride = math.lcm(mxu_column_size, serve_cfgs.page_size)
+        if max_bq_sz is not None:
+            max_bq_sz = utils.align_to(max(mxu_column_size, max_bq_sz),
+                                       mxu_column_size)
         if fixed_bq_sz is None:
-            bq_sz = bq_stride = bkv_sz
+            bq_sz = bq_stride = (min(bkv_sz, max_bq_sz)
+                                 if max_bq_sz is not None else bkv_sz)
         else:
             bq_sz = fixed_bq_sz
             bq_stride = 0
+        if (sliding_window :=
+                model_cfgs.sliding_window) is not None and sliding_window > 0:
+            sw_max_bkv_sz = (bkv_stride
+                             if fixed_bq_sz is not None else utils.align_to(
+                                 max(bkv_stride, sliding_window), bkv_stride))
+            max_bkv_sz = (sw_max_bkv_sz if max_bkv_sz is None else min(
+                max_bkv_sz, sw_max_bkv_sz))
+        if max_bkv_sz is not None:
+            max_bkv_sz = utils.align_to(max(bkv_stride, max_bkv_sz),
+                                        bkv_stride)
         batch_size = max_batch_size
 
-        # Step 1: Lower batch_size if even the smallest bq and bkv size can trigger
-        # OOM.
-
-        # If current batch size triggers OOM, decrease batch size until the kernel
-        # fits within VMEM limit.
+        # Step 1: Lower batch_size (and bq_sz if needed for large page_size) if
+        # even the starting tile size triggers OOM.
         while (batch_size > 1 and calculate_vmem_usage(
                 batch_size, bq_sz, bkv_sz) > capped_vmem_limit_bytes):
             batch_size -= 1
+
+        if fixed_bq_sz is None:
+            while (bq_sz > mxu_column_size and calculate_vmem_usage(
+                    batch_size, bq_sz, bkv_sz) > capped_vmem_limit_bytes):
+                bq_sz = max(mxu_column_size, bq_sz - mxu_column_size)
+                bq_stride = mxu_column_size
 
         # Indicates OOM was triggered even when batch_size=1.
         # NOTE: If the function does not exit at this point even when the value is
@@ -279,6 +296,10 @@ def calculate_block_sizes(
         if batch_size == 0:
             raise ValueError(
                 "Cannot find batch size that fits within VMEM limit.")
+        if calculate_vmem_usage(batch_size, bq_sz,
+                                bkv_sz) > capped_vmem_limit_bytes:
+            raise ValueError(
+                "Cannot find block sizes that fit within VMEM limit.")
 
         # Step 2: Increase block sizes until the kernel is unable to fit into VMEM.
         max_seq_len = serve_cfgs.pages_per_seq * serve_cfgs.page_size
@@ -308,7 +329,7 @@ def calculate_block_sizes(
         if max_bkv_sz is not None and bkv_sz > max_bkv_sz:
             bkv_sz = max_bkv_sz
             if fixed_bq_sz is None:
-                bq_sz = max_bkv_sz
+                bq_sz = min(bq_sz, max_bkv_sz)
         if fixed_bq_sz is None and max_bq_sz is not None and bq_sz > max_bq_sz:
             bq_sz = max_bq_sz
 
