@@ -202,6 +202,7 @@ def _scheduler_worker_trampoline(
     input_conn: Connection,
     output_conn: Connection,
     payload: bytes,
+    start_method: Optional[str] = None,
 ) -> None:
     """Entry point of scheduler workers started with the "spawn" method.
 
@@ -221,7 +222,16 @@ def _scheduler_worker_trampoline(
     explicitly; otherwise block hashes computed in the worker (e.g. when
     decoding completes a request's first block) would fail or diverge from
     the ones computed in the engine process.
+
+    Finally, a spawned process uses "spawn" as its own default start method,
+    while the engine process typically uses the platform default ("fork" on
+    Linux). Libraries that start helper processes with the default method
+    can rely on that: older tpu_info versions, for instance, start a canary
+    process when imported, and under "spawn" the canary fails with a
+    RuntimeError. The parent's default (start_method, None if unset) is
+    restored before anything else is imported.
     """
+    multiprocessing.set_start_method(start_method, force=True)
     # Plugins can register names the config refers to (e.g. a custom
     # attention backend, added to AttentionBackendEnum at runtime). Load them
     # before unpickling, as vLLM's own worker processes do; forked workers
@@ -585,6 +595,8 @@ class DPScheduler(SchedulerInterface):
         # threads can deadlock the forked child.
         self._start_method: str = _resolve_start_method()
         ctx = multiprocessing.get_context(self._start_method)
+        # Default start method of this process, restored in spawned workers.
+        parent_start_method = multiprocessing.get_start_method(allow_none=True)
         self.input_conns: List[Connection] = []  # parent writes, child reads
         self.output_conns: List[Connection] = []  # child writes, parent reads
         self.processes: List[Process] = []
@@ -637,7 +649,7 @@ class DPScheduler(SchedulerInterface):
                     process = ctx.Process(
                         target=_scheduler_worker_trampoline,
                         args=(rank, input_child_conn, output_child_conn,
-                              payload),
+                              payload, parent_start_method),
                     )
                 else:
                     process = ctx.Process(
