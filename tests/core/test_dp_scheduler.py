@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import multiprocessing
 import threading
 import types
 from unittest.mock import MagicMock, patch
@@ -1598,7 +1597,6 @@ class TestDPScheduler:
         )
         kv_cache_config = types.SimpleNamespace(num_blocks=100)
 
-        parent_start_method = multiprocessing.get_start_method(allow_none=True)
         with patch('multiprocessing.get_context') as mock_get_context:
             mock_ctx = _make_mock_mp_context()
             mock_get_context.return_value = mock_ctx
@@ -1620,11 +1618,9 @@ class TestDPScheduler:
             assert (process_call.kwargs["target"]
                     is _scheduler_worker_trampoline)
             args = process_call.kwargs["args"]
-            assert len(args) == 5
+            assert len(args) == 4
             assert args[0] == rank
             assert isinstance(args[3], bytes)
-            # The worker restores this process's default start method.
-            assert args[4] == parent_start_method
 
             worker_kwargs, none_hash_state = cloudpickle.loads(args[3])
             assert set(worker_kwargs) == {
@@ -1720,12 +1716,11 @@ class TestSchedulerWorkerTrampoline:
                                    side_effect=record_start_method)
         with worker_patch as mock_worker, manager_patch as mock_manager_cls, \
                 plugins_patch, loads_patch, start_method_patch:
-            _scheduler_worker_trampoline(1, input_conn, output_conn, payload,
-                                         "fork")
+            _scheduler_worker_trampoline(1, input_conn, output_conn, payload)
 
-        # The parent's default start method is restored first, then plugins
+        # The platform default start method is restored first, then plugins
         # are loaded, and only then is the config unpickled.
-        assert calls == [("start_method", "fork", True), "plugins", "unpickle"]
+        assert calls == [("start_method", None, True), "plugins", "unpickle"]
 
         mock_manager_cls.assert_called_once()
         (rebuilt_from, ) = mock_manager_cls.call_args.args
