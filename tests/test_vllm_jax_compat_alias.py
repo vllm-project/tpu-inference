@@ -64,6 +64,9 @@ def test_import_vllm_jax_first_preserves_singleton_identity() -> None:
         assert vllm_jax is tpu_inference
         assert sys.modules["vllm_jax"] is sys.modules["tpu_inference"]
         assert vj_envs is ti_envs
+        # `from vllm_jax import envs` reads the existing attribute and
+        # registers no sys.modules entry; import the submodule to check it.
+        import vllm_jax.envs
         assert sys.modules["vllm_jax.envs"] is sys.modules["tpu_inference.envs"]
         assert vj_init_logger is ti_init_logger
         assert vllm_jax.__name__ == "tpu_inference"
@@ -90,6 +93,9 @@ def test_import_tpu_inference_first_preserves_singleton_identity() -> None:
         assert tpu_inference is vllm_jax
         assert sys.modules["vllm_jax"] is sys.modules["tpu_inference"]
         assert ti_envs is vj_envs
+        # `from vllm_jax import envs` reads the existing attribute and
+        # registers no sys.modules entry; import the submodule to check it.
+        import vllm_jax.envs
         assert sys.modules["vllm_jax.envs"] is sys.modules["tpu_inference.envs"]
     """)
 

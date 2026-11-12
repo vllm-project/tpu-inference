@@ -13,10 +13,11 @@
 # limitations under the License.
 """Transitional compatibility package aliasing ``vllm_jax`` to ``tpu_inference``.
 
-While physical source files remain under ``tpu_inference/`` until the source moves from tpu_inference/ to vllm_jax/,
-importing ``vllm_jax`` (or any ``vllm_jax.*`` submodule) resolves to the exact
-same module object in ``sys.modules`` as ``tpu_inference`` so module-level
-state, plugin registration, and XLA/JAX compilation caches are never duplicated.
+While the source stays under ``tpu_inference/`` (until it moves to
+``vllm_jax/``), importing ``vllm_jax`` (or any ``vllm_jax.*`` submodule)
+resolves to the exact same module object in ``sys.modules`` as
+``tpu_inference`` so module-level state, plugin registration, and XLA/JAX
+compilation caches are never duplicated.
 """
 
 import importlib
