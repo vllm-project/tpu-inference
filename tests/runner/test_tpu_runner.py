@@ -683,7 +683,7 @@ class TestTPUJaxRunner:
         # Verify generated tokens are trimmed at EOS and placed in output
         output = runner._continue_decode_output
         assert output is not None
-        assert output.req_id_to_index == {"req1": 0, "req2": 1, "req3": 2}
+        assert output.req_ids == ["req1", "req2", "req3"]
 
         # req1: [101, 102, 999] (length 3)
         assert output.sampled_token_ids[0] == [101, 102, 999]
@@ -1276,7 +1276,6 @@ class TestTPUJaxRunnerDisableMM:
             req_ids=["req1"],
             num_computed_tokens=[10],  # Stale, should be updated to 25
             num_output_tokens=[0],  # Stale, should be updated to 5
-            resumed_req_ids=set(),
         )
         scheduler_output = MagicMock()
         scheduler_output.total_num_scheduled_tokens = 1

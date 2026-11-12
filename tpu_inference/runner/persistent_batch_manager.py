@@ -151,19 +151,27 @@ class PersistentBatchManager:
         # Remove the unscheduled requests from the persistent batch.
         # NOTE(woosuk): The unscheduled requests are either preempted requests
         # or running requests that are not scheduled in this step. We remove
-        # them from the persistent batch but keep their cached states since
-        # they will be scheduled again sometime in the future.
+        # them from the persistent batch; running requests keep their cached
+        # states since they will be scheduled again sometime in the future.
+        #
+        # Since vllm-project/vllm#63373 a preempted request's worker state is
+        # dropped (it is listed in preempted_req_ids), and when it is scheduled
+        # again it is re-sent in full as a new request whose prefill_token_ids
+        # holds the prompt plus every token generated before preemption.
         scheduled_req_ids = scheduler_output.num_scheduled_tokens.keys()
         cached_req_ids = self.input_batch.req_id_to_index.keys()
-        resumed_req_ids = set(
-            getattr(scheduler_output.scheduled_cached_reqs, "resumed_req_ids",
-                    ()) or ())
-        preempted_req_ids = set(
-            getattr(scheduler_output, "preempted_req_ids", ()) or ())
-        reset_mamba_req_ids = preempted_req_ids | resumed_req_ids
+        new_req_ids = {
+            req.req_id
+            for req in scheduler_output.scheduled_new_reqs
+        }
+        preempted_req_ids = set(scheduler_output.preempted_req_ids or ())
+        # A re-sent (resumed) request may still have state from before it was
+        # preempted; it must not reuse that state's recurrent slot.
+        resent_req_ids = new_req_ids & self.requests.keys()
+        reset_mamba_req_ids = preempted_req_ids | resent_req_ids
 
         # A request can be temporarily removed from the persistent batch while
-        # keeping its physical mamba slot. If it is then preempted or resumed
+        # keeping its physical mamba slot. If it is then preempted or re-sent
         # before being re-added, the active-batch removal loop below cannot see
         # it. Reset the preserved slot here so a recomputed request cannot read
         # stale recurrent state from its old slot.
@@ -177,19 +185,18 @@ class PersistentBatchManager:
             req_state.mamba_state_slot = None
             req_state.mamba_read_offset = 0
 
-        # Usually resumed requests are not present in the persistent batch.
-        # Forced preemption can make a resumed request still appear there; clear
-        # it first so it is re-added through the normal resumed-request path.
+        # Usually re-sent requests are not present in the persistent batch.
+        # Forced preemption can make one still appear there; clear it first so
+        # it is re-added through the normal new-request path.
         unscheduled_req_ids = cached_req_ids - (scheduled_req_ids -
-                                                resumed_req_ids)
+                                                new_req_ids)
         # NOTE(woosuk): The persistent batch optimization assumes that
         # consecutive batches contain mostly the same requests. If batches
         # have low request overlap (e.g., alternating between two distinct
         # sets of requests), this optimization becomes very inefficient.
         for req_id in unscheduled_req_ids:
             req_index = self.input_batch.req_id_to_index.get(req_id)
-            reset_mamba_slot = (req_id in preempted_req_ids
-                                or req_id in resumed_req_ids)
+            reset_mamba_slot = req_id in reset_mamba_req_ids
             if req_index is not None:
                 req_state = self.requests.get(req_id)
                 if reset_mamba_slot:
@@ -204,22 +211,36 @@ class PersistentBatchManager:
             assert req_index is not None
             removed_req_indices.append(req_index)
 
+        # Drop the worker state of preempted requests. Their blocks were freed;
+        # if they are scheduled again they come back as new requests.
+        for req_id in preempted_req_ids:
+            if req_id not in self.input_batch.req_id_to_index:
+                self.requests.pop(req_id, None)
+
         req_ids_to_add: list[str] = []
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
             sampling_params = new_req_data.sampling_params
+            prompt_token_ids = new_req_data.prompt_token_ids
+            # prefill_token_ids is the prompt plus, for a request resumed after
+            # preemption, the tokens it had already generated.
+            num_prompt_tokens = (len(prompt_token_ids)
+                                 if prompt_token_ids is not None else 0)
+            output_token_ids = list(
+                new_req_data.prefill_token_ids[num_prompt_tokens:])
 
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
-                prompt_token_ids=new_req_data.prompt_token_ids,
+                prompt_token_ids=prompt_token_ids,
                 mm_features=new_req_data.mm_features,
                 sampling_params=sampling_params,
                 pooling_params=new_req_data.pooling_params,
                 generator=None,
                 block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
-                output_token_ids=[],
+                prefill_token_ids=new_req_data.prefill_token_ids,
+                output_token_ids=output_token_ids,
                 lora_request=new_req_data.lora_request,
             )
 
@@ -233,13 +254,12 @@ class PersistentBatchManager:
                         self.requests[req_id].mm_features,
                     )
 
-        # Update the states of the running/resumed requests.
+        # Update the states of the running requests.
         req_data = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
             num_computed_tokens = req_data.num_computed_tokens[i]
             new_block_ids = req_data.new_block_ids[i]
-            resumed_from_preemption = req_id in req_data.resumed_req_ids
             num_output_tokens = req_data.num_output_tokens[i]
 
             # Update the cached states.
@@ -268,22 +288,16 @@ class PersistentBatchManager:
                     self.input_batch.num_tokens[req_index] = end_idx
                     self.input_batch.num_tokens_no_spec[req_index] = end_idx
 
-            # Update the block IDs.
-            if not resumed_from_preemption:
-                if new_block_ids is not None:
-                    # Append the new blocks to the existing block IDs.
-                    for block_ids, new_ids in zip(req_state.block_ids,
-                                                  new_block_ids):
-                        block_ids.extend(new_ids)
-            else:
-                assert new_block_ids is not None
-                # The request is resumed from preemption.
-                # Replace the existing block IDs with the new ones.
-                req_state.block_ids = new_block_ids
+            # Update the block IDs: append the new blocks to the existing ones.
+            # (Resumed requests arrive as new requests, so cached requests never
+            # replace their block IDs.)
+            if new_block_ids is not None:
+                for block_ids, new_ids in zip(req_state.block_ids,
+                                              new_block_ids):
+                    block_ids.extend(new_ids)
 
             if req_index is None:
-                # The request is not in the persistent batch.
-                # The request was either preempted and resumed later, or was not
+                # The request is not in the persistent batch: it was not
                 # scheduled in the previous step and needs to be added again.
                 req_ids_to_add.append(req_id)
                 continue

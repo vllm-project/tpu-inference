@@ -1242,8 +1242,10 @@ class TPUOffloadConnectorScheduler():
             # tokens' kv may not be generated in the current step
             num_total_tokens_for_tracker = min(num_total_tokens_for_tracker,
                                                _request.num_tokens)
-            tokens_for_tracker = request.prompt_token_ids[:
-                                                          num_total_tokens_for_tracker]
+            # prefill_token_ids also holds the tokens a resumed request had
+            # generated before it was preempted.
+            tokens_for_tracker = request.prefill_token_ids[:
+                                                           num_total_tokens_for_tracker]
             logger.debug(
                 f"    - num_new_scheduled_tokens: {num_new_scheduled_tokens}, num_vllm_computed: {request.num_computed_tokens}, num_external_hits: {num_external_hits}"
             )
@@ -1258,7 +1260,12 @@ class TPUOffloadConnectorScheduler():
 
             # Create and store the tracker, which will maintain the request's
             # state for its entire lifetime.
-            assert req_id not in self._request_trackers, f"Request {req_id} already has a tracker."
+            # A request resumed after preemption is re-sent as a new request
+            # (vllm-project/vllm#63373) and gets all of its blocks reallocated,
+            # so its old tracker is stale.
+            if req_id in self._request_trackers:
+                logger.debug(f"  - Resetting tracker of resumed req: {req_id}")
+                self._request_trackers.pop(req_id)
             # TODO(jcgu): reduce duplicated info in request tracker
             tracker = RequestTracker(
                 req_id=req_id,
@@ -1298,10 +1305,6 @@ class TPUOffloadConnectorScheduler():
                 continue
 
             tracker = self._request_trackers[req_id]
-            # resumed request gets all blocks reallocated,
-            # therefore, blocks in the tracker should be reset.
-            if req_id in cached_reqs.resumed_req_ids:
-                tracker.reset_after_preempt()
 
             # Update request tracker
             # collect new tokens and new blocks
@@ -1319,12 +1322,6 @@ class TPUOffloadConnectorScheduler():
             new_blocks = cached_reqs.new_block_ids[i]
             if new_blocks is None:
                 new_blocks = []
-
-            # debug
-            if req_id in cached_reqs.resumed_req_ids:
-                logger.debug(
-                    f"- cached requests({req_id}): cur_iter new_tokens: {num_new_tokens}, new_token_ids:{len(new_token_ids)}, new_blocks: {new_blocks}"
-                )
 
             # 2. update
             tracker.update(new_blocks, new_token_ids)

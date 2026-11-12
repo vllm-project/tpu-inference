@@ -1181,9 +1181,7 @@ class DPScheduler(SchedulerInterface):
             self, rank_outputs: List[SchedulerOutput]) -> CachedRequestData:
         """Combine cached request data from all DP rank schedulers."""
         combined_req_ids = []
-        combined_resumed_req_ids = []
         combined_new_token_ids = []
-        combined_all_token_ids = {}
         combined_new_block_ids = []
         combined_num_computed_tokens = []
         combined_num_output_tokens = []
@@ -1192,9 +1190,7 @@ class DPScheduler(SchedulerInterface):
             cached_data = output.scheduled_cached_reqs
 
             combined_req_ids.extend(cached_data.req_ids)
-            combined_resumed_req_ids.extend(cached_data.resumed_req_ids)
             combined_new_token_ids.extend(cached_data.new_token_ids)
-            combined_all_token_ids.update(cached_data.all_token_ids)
             combined_new_block_ids.extend(cached_data.new_block_ids)
             combined_num_computed_tokens.extend(
                 cached_data.num_computed_tokens)
@@ -1202,9 +1198,7 @@ class DPScheduler(SchedulerInterface):
 
         return CachedRequestData(
             req_ids=combined_req_ids,
-            resumed_req_ids=combined_resumed_req_ids,
             new_token_ids=combined_new_token_ids,
-            all_token_ids=combined_all_token_ids,
             new_block_ids=combined_new_block_ids,
             num_computed_tokens=combined_num_computed_tokens,
             num_output_tokens=combined_num_output_tokens,
@@ -1493,17 +1487,17 @@ class DPScheduler(SchedulerInterface):
         aux_output = g.aux_output_connector_output
 
         outputs = []
+        # ModelRunnerOutput fields are indexed by position in req_ids.
+        global_req_id_to_index = {rid: i for i, rid in enumerate(g.req_ids)}
 
         for rank in range(self.dp_size):
             req_ids = scheduler_output.req_ids_per_rank.get(rank, [])
 
             # Map each rank-local index to the corresponding global index.
-            global_indices = [g.req_id_to_index[rid] for rid in req_ids]
-            rank_req_id_to_index = {rid: i for i, rid in enumerate(req_ids)}
+            global_indices = [global_req_id_to_index[rid] for rid in req_ids]
 
             rank_model_runner_output = ModelRunnerOutput(
                 req_ids=req_ids,
-                req_id_to_index=rank_req_id_to_index,
                 sampled_token_ids=(
                     [g.sampled_token_ids[i]
                      for i in global_indices] if g.sampled_token_ids else []),

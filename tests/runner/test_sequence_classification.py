@@ -50,10 +50,6 @@ def _make_runner(mesh, pooler_fn):
     batch = SimpleNamespace(
         num_reqs=2,
         req_ids=["req-done", "req-partial"],
-        req_id_to_index={
-            "req-done": 0,
-            "req-partial": 1
-        },
         num_computed_tokens_cpu=np.array([4, 2], dtype=np.int32),
         num_prompt_tokens=np.array([8, 8], dtype=np.int32),
         get_pooling_metadata=lambda: "meta",

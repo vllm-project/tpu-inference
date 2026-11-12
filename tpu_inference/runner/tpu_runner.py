@@ -1711,7 +1711,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
-            req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=[],
             logprobs=None,
             prompt_logprobs_dict={},
@@ -1742,9 +1741,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             cached_reqs = getattr(scheduler_output, "scheduled_cached_reqs",
                                   None)
             if cached_reqs is not None:
-                resumed = getattr(cached_reqs, "resumed_req_ids", None) or ()
                 for i, req_id in enumerate(cached_reqs.req_ids):
-                    if req_id in pre_req_ids and req_id not in resumed:
+                    if req_id in pre_req_ids:
                         req_state = self.requests.get(req_id)
                         if req_state is not None:
                             cached_reqs.num_computed_tokens[
@@ -2082,7 +2080,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             model_runner_output = ModelRunnerOutput(
                 req_ids=cast(list[str], self.input_batch.req_ids[:num_reqs]),
-                req_id_to_index=self.input_batch.req_id_to_index.copy(),
                 sampled_token_ids=[],
                 logprobs=None,
                 prompt_logprobs_dict={},
@@ -2158,7 +2155,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids[:num_reqs],
-            req_id_to_index=self.input_batch.req_id_to_index.copy(),
             sampled_token_ids=sampled_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict={},
@@ -2387,7 +2383,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Return Model output to executor
             model_runner_output = ModelRunnerOutput(
                 req_ids=req_ids,
-                req_id_to_index=self.input_batch.req_id_to_index.copy(),
                 sampled_token_ids=[],  # Fill in async get
                 logprobs=None,
                 prompt_logprobs_dict=prompt_logprobs_dict,
@@ -2478,7 +2473,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
-            req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=(

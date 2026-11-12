@@ -108,6 +108,7 @@ class TestMultiModalManager:
         req_state = CachedRequestState(
             req_id="req-1",
             prompt_token_ids=[1, 2, 3],
+            prefill_token_ids=[1, 2, 3],
             output_token_ids=[],
             sampling_params=MagicMock(),
             block_ids=(),
@@ -188,6 +189,7 @@ class TestMultiModalManager:
         req_state_1 = CachedRequestState(
             req_id="req-1",
             prompt_token_ids=[],
+            prefill_token_ids=[],
             output_token_ids=[],
             sampling_params=MagicMock(),
             block_ids=(),
@@ -215,6 +217,7 @@ class TestMultiModalManager:
         req_state_2 = CachedRequestState(
             req_id="req-2",
             prompt_token_ids=[],
+            prefill_token_ids=[],
             output_token_ids=[],
             sampling_params=MagicMock(),
             block_ids=(),
@@ -295,6 +298,7 @@ class TestMultiModalManager:
         req_state = CachedRequestState(
             req_id=req_id,
             prompt_token_ids=list(range(prompt_token_len)),
+            prefill_token_ids=list(range(prompt_token_len)),
             output_token_ids=[],
             sampling_params=mock_sampling_params,
             block_ids=([], ),
@@ -427,6 +431,7 @@ class TestMultiModalManager:
         req_state = CachedRequestState(
             req_id=req_id,
             prompt_token_ids=list(range(prompt_len)),
+            prefill_token_ids=list(range(prompt_len)),
             output_token_ids=[],
             sampling_params=mock_sampling_params,
             block_ids=([], ),
@@ -507,6 +512,7 @@ class TestMultiModalManager:
             return CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=list(range(20)),
+                prefill_token_ids=list(range(20)),
                 output_token_ids=[],
                 sampling_params=mock_sampling_params,
                 block_ids=([], ),
@@ -600,6 +606,7 @@ class TestMultiModalManager:
             return CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=list(range(prompt_len)),
+                prefill_token_ids=list(range(prompt_len)),
                 output_token_ids=[],
                 sampling_params=mock_sampling_params,
                 block_ids=([], ),

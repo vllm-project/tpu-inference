@@ -533,7 +533,10 @@ class RaidenOffloadConnectorScheduler:
 
             num_total = min(request.num_computed_tokens + num_new_tokens,
                             _request.num_tokens)
-            tokens_for_tracker = request.prompt_token_ids[:num_total]
+            # prefill_token_ids also holds the tokens a resumed request had
+            # generated before it was preempted; its old tracker (if any) is
+            # replaced below since all of its blocks were reallocated.
+            tokens_for_tracker = request.prefill_token_ids[:num_total]
             initial_save = max(request.num_computed_tokens, num_external_hits)
 
             tracker = RaidenRequestTracker(
@@ -558,8 +561,6 @@ class RaidenOffloadConnectorScheduler:
             if _request is None:
                 continue
             tracker = self._request_trackers[req_id]
-            if req_id in cached_reqs.resumed_req_ids:
-                tracker.reset_after_preempt()
 
             num_new = scheduler_output.num_scheduled_tokens[req_id]
             cur_total = min(_request.num_computed_tokens + num_new,
