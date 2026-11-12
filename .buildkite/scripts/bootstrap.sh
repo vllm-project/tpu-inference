@@ -432,12 +432,19 @@ else
     echo "Sleeping for 5 seconds to ensure GitHub API is updated..."
     sleep 5
 
-    API_URL="https://api.github.com/repos/vllm-project/tpu-inference/pulls/$BUILDKITE_PULL_REQUEST"
+    # Derive owner/repo from BUILDKITE_REPO (HTTPS or SSH) so PR checks work
+    # both before and after the tpu-inference -> vllm-jax rename; curl -L
+    # follows HTTP 301 redirects while the pipeline still uses the legacy URL.
+    REPO_SLUG="${BUILDKITE_REPO:-https://github.com/vllm-project/tpu-inference.git}"
+    REPO_SLUG="${REPO_SLUG%/}"
+    REPO_SLUG="${REPO_SLUG%.git}"
+    REPO_SLUG="${REPO_SLUG#*github.com[:/]}"
+    API_URL="https://api.github.com/repos/${REPO_SLUG}/pulls/$BUILDKITE_PULL_REQUEST"
     echo "Fetching PR details from: $API_URL"
 
     # Fetch the response body and save to a temporary file
     GITHUB_PR_RESPONSE_FILE="github_api_logs.json"
-    curl -s "$API_URL" -o "$GITHUB_PR_RESPONSE_FILE"
+    curl -fsSL "$API_URL" -o "$GITHUB_PR_RESPONSE_FILE"
     
     # Upload the full response body as a Buildkite artifact
     echo "Uploading GitHub API response as artifact..."
