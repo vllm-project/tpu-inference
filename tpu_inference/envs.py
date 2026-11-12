@@ -108,6 +108,7 @@ if TYPE_CHECKING:
     ENABLE_TOPK_PREFILTER: bool = False
     RAIDEN_H2D_SETTLE: bool = True
     SKIP_MAMBA_SCHEDULER_BLOCKS: bool = False
+    USE_FULL_KVCACHE_FOR_SLIDING_WINDOW: bool = True
     TPU_MOE_SINGLE_SORT: bool = False
     TPU_MOE_ROUTER_TOPK: str = "sort"
     TPU_MOE_LOWTOK: bool = False
@@ -690,6 +691,22 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # See core/runner_slot_mamba.py.
     "SKIP_MAMBA_SCHEDULER_BLOCKS":
     env_bool("SKIP_MAMBA_SCHEDULER_BLOCKS", default=False),
+    # Applies to models whose sliding-window and full-attention layers have
+    # different padded head dims (e.g. Gemma 4); models with a single KV cache
+    # shape always keep their sliding window. On (default): sliding-window
+    # layers use a full KV cache, i.e. all layers are treated as full
+    # attention. Off (0): keep sliding-window KV cache specs, so those layers
+    # only keep their window of KV. Every attention page is then padded to the
+    # sum of the distinct per-shape page sizes so vLLM's block budget covers
+    # what the TPU allocates. Each block reserves a page of every shape while
+    # only one is used, so turning this off pays off only when requests are
+    # well beyond the sliding window: for Gemma 4 31B (window 1024) the
+    # break-even is about 2K-2.4K tokens per request. Long-context workloads
+    # gain (+18% req/s at 4K-16K input tokens); short ones lose (-26% req/s at
+    # 1K input tokens). Read by the model runner;
+    # TpuPlatform.additional_env_vars carries it to Ray workers on other hosts.
+    "USE_FULL_KVCACHE_FOR_SLIDING_WINDOW":
+    env_bool("USE_FULL_KVCACHE_FOR_SLIDING_WINDOW", default=True),
     # Build the MoE permutation, its inverse, and the sorted token ids from
     # one packed sort instead of three.
     "TPU_MOE_SINGLE_SORT":
