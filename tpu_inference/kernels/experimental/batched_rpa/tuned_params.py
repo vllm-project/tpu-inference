@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Literal
 
 import jax
@@ -22,6 +22,7 @@ from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.experimental.batched_rpa import configs, utils
 from tpu_inference.logger import init_logger
+from tpu_inference.utils import get_device_name
 
 logger = init_logger(__name__)
 
@@ -34,10 +35,16 @@ class TuningKey:
     head_dim: int
 
     # serve config parameters
-    num_seqs: int
+    # num_seqs, total_q_tokens, num_page_indices and scale_{q,k,v} describe the
+    # exact kernel invocation and are used by the offline kernel tuner
+    # (tools/kernel/tuner/v1/batched_rpa_kernel_tuner.py) to generate inputs.
+    # In tuned_params_mapping they can be set to None to make an entry apply to
+    # every padded bucket, KV cache size and quantization scale, see
+    # TuningKey.shape_only().
+    num_seqs: int | None
     page_size: int
-    total_q_tokens: int
-    num_page_indices: int
+    total_q_tokens: int | None
+    num_page_indices: int | None
     dtype_q: str
     dtype_kv: str
     dtype_out: str
@@ -48,25 +55,59 @@ class TuningKey:
     # model config default params
     sliding_window: int | None = None
 
+    # kernel variant parameters
+    # Normalized device name from tpu_inference.utils.get_device_name(), e.g.
+    # 'TPU v8i', as used by the RPA v3 tuned block size tables.
+    device_name: str | None = None
+    decode_query_size: int = 1
+    # Plain str (KVLayout value) so keys stay JSON- and repr()-serializable for
+    # the kernel tuner tooling.
+    kv_layout: str = configs.KVLayout.HEAD_ALONG_SUBLANE.value
+    per_token_scale: bool = False
+    return_lse: bool = False
+
     @staticmethod
     def from_config(model_config: configs.ModelConfigs,
                     serve_config: configs.ServingConfigs,
-                    case: Literal['decode', 'prefill']) -> 'TuningKey':
-        return TuningKey(num_q_heads=model_config.num_q_heads,
-                         num_kv_heads=model_config.num_kv_heads,
-                         head_dim=model_config.head_dim,
-                         sliding_window=model_config.sliding_window,
-                         num_seqs=serve_config.num_seqs,
-                         page_size=serve_config.page_size,
-                         total_q_tokens=serve_config.total_q_tokens,
-                         num_page_indices=serve_config.num_page_indices,
-                         dtype_q=jnp.dtype(serve_config.dtype_q).name,
-                         dtype_kv=jnp.dtype(serve_config.dtype_kv).name,
-                         dtype_out=jnp.dtype(serve_config.dtype_out).name,
-                         scale_q=serve_config.scale_q,
-                         scale_k=serve_config.scale_k,
-                         scale_v=serve_config.scale_v,
-                         case=case)
+                    case: Literal['decode', 'prefill'],
+                    decode_query_size: int = 1) -> 'TuningKey':
+        return TuningKey(
+            case=case,
+            num_q_heads=model_config.num_q_heads,
+            num_kv_heads=model_config.num_kv_heads,
+            head_dim=model_config.head_dim,
+            sliding_window=model_config.sliding_window,
+            num_seqs=serve_config.num_seqs,
+            page_size=serve_config.page_size,
+            total_q_tokens=serve_config.total_q_tokens,
+            num_page_indices=serve_config.num_page_indices,
+            dtype_q=jnp.dtype(serve_config.dtype_q).name,
+            dtype_kv=jnp.dtype(serve_config.dtype_kv).name,
+            dtype_out=jnp.dtype(serve_config.dtype_out).name,
+            scale_q=serve_config.scale_q,
+            scale_k=serve_config.scale_k,
+            scale_v=serve_config.scale_v,
+            device_name=get_device_name(),
+            decode_query_size=decode_query_size if case == 'decode' else 1,
+            kv_layout=configs.KVLayout(serve_config.kv_layout).value,
+            per_token_scale=bool(serve_config.per_token_scale),
+            return_lse=serve_config.return_lse,
+        )
+
+    def shape_only(self) -> 'TuningKey':
+        """Returns this key with per-invocation fields cleared.
+
+        The cleared fields change with the padded token bucket, the KV cache
+        size and the per-layer quantization scales, none of which change the
+        best block sizes for a given model shape, dtype and chip.
+        """
+        return replace(self,
+                       num_seqs=None,
+                       total_q_tokens=None,
+                       num_page_indices=None,
+                       scale_q=None,
+                       scale_k=None,
+                       scale_v=None)
 
 
 @dataclass(frozen=True)
@@ -400,20 +441,62 @@ def get_tuned_params(model_config: configs.ModelConfigs,
                      vmem_limit_bytes: int | None = None,
                      case: Literal['decode', 'prefill'] = 'decode',
                      decode_query_size: int = 1) -> configs.BlockSizes:
+    hw_vmem_bytes: int | None = None
+    try:
+        hw_vmem_bytes = pltpu.get_tpu_info().vmem_capacity_bytes
+    except Exception:
+        pass
     if vmem_limit_bytes is None:
         vmem_limit_bytes = pltpu.get_tpu_info().vmem_capacity_bytes
-    tuning_key = TuningKey.from_config(model_config, serve_config, case=case)
-    if tuning_key not in tuned_params_mapping:
-        decode_block_sizes, prefill_block_sizes = calculate_block_sizes(
-            model_config,
-            serve_config,
-            vmem_limit_bytes,
-            decode_query_size=decode_query_size)
-        block_sizes = decode_block_sizes if case == 'decode' else prefill_block_sizes
-    else:
-        block_sizes = tuned_params_mapping[tuning_key].to_block_sizes()
-    return block_sizes
+
+    tuning_key = TuningKey.from_config(model_config,
+                                       serve_config,
+                                       case=case,
+                                       decode_query_size=decode_query_size)
+    max_seq_len = serve_config.pages_per_seq * serve_config.page_size
+    has_reduced_vmem = (hw_vmem_bytes is not None
+                        and vmem_limit_bytes < hw_vmem_bytes)
+    # 1. Exact match, e.g. entries written by the offline kernel tuner.
+    tuned = tuned_params_mapping.get(tuning_key)
+    if tuned is not None:
+        return tuned.to_block_sizes()
+
+    # 2. Shape-only match, valid for every bucket and quantization scale. Such
+    # entries assume the full VMEM budget and that the KV block fits within the
+    # max sequence length, so skip them otherwise.
+    tuned = tuned_params_mapping.get(tuning_key.shape_only())
+    if (tuned is not None and not has_reduced_vmem
+            and tuned.bkv_sz <= max_seq_len):
+        return tuned.to_block_sizes()
+
+    decode_block_sizes, prefill_block_sizes = calculate_block_sizes(
+        model_config,
+        serve_config,
+        vmem_limit_bytes,
+        decode_query_size=decode_query_size)
+    return decode_block_sizes if case == 'decode' else prefill_block_sizes
 
 
-# This is a placeholder as we haven't found better tuned block sizes for the cases
-tuned_params_mapping: dict[TuningKey, TunableParams] = {}
+tuned_params_mapping: dict[TuningKey, TunableParams] = {
+    # Qwen3.8-2.4T-A95B-FP8 TP=2 decode on TPU v8i (Sunfish).
+    TuningKey(
+        case='decode',
+        num_q_heads=32,
+        num_kv_heads=2,
+        head_dim=256,
+        num_seqs=None,
+        page_size=256,
+        total_q_tokens=None,
+        num_page_indices=None,
+        dtype_q='bfloat16',
+        dtype_kv='float8_e4m3fn',
+        dtype_out='bfloat16',
+        device_name='TPU v8i',
+    ):
+    TunableParams(
+        bq_sz=1,
+        bq_c_sz=1,
+        bkv_sz=2048,
+        batch_size=4,
+    ),
+}
