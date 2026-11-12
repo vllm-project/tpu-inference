@@ -98,6 +98,7 @@ if TYPE_CHECKING:
     FUSED_EP_MOE_V2_SHARDED_PLAN: bool = True
     USE_ROUTING_MOE: bool = False
     ROUTING_MOE_REMOTE_SCATTER: bool = True
+    GDN_FP32_4D_CONV_STATE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
@@ -630,6 +631,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # How routing_moe returns the expert outputs (remote or local).
     "ROUTING_MOE_REMOTE_SCATTER":
     env_bool("ROUTING_MOE_REMOTE_SCATTER", default=True),
+    # Opt-in: allocate GDN conv_state natively in float32 4-D
+    # [num_blocks, K-1, 1, dim] so kernels/gdn/v3/wrapper.py donates it
+    # in-place without full-pool copies. Off by default: it doubles the
+    # conv_state footprint (bf16 -> f32) for every GDN model. With
+    # disaggregated prefill/decode, both sides must use the same value: the
+    # transferred conv_state arrays take their shape and dtype from it.
+    "GDN_FP32_4D_CONV_STATE":
+    env_bool("GDN_FP32_4D_CONV_STATE", default=False),
     # Gap between token-bucket padding sizes for TPU precompilation. When 0,
     # buckets grow as powers of two; otherwise buckets increase by this gap
     # once past the power-of-two ramp. Previously provided by vllm.envs, which

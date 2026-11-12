@@ -275,7 +275,7 @@ def fused_conv1d_gdn(
     qkv: jax.Array,  # [batch_size, n_kq * d_k * 2 + n_v * d_v = dim_size]
     b: jax.Array,  # [batch_size, n_v]
     a: jax.Array,  # [batch_size, n_v]
-    conv_state: jax.Array,  # [num_seqs + 1, kernel_size - 1, dim_size]
+    conv_state: jax.Array,  # [num_seqs + 1, kernel_size - 1, (1,) dim_size]
     recurrent_state: jax.Array,  # [num_seqs + 1, nv, dk, dv]
     conv_weight: jax.Array,  # [kernel_size - 1, dim_size]
     conv_bias: jax.Array | None,  # [dim_size]
@@ -308,7 +308,9 @@ def fused_conv1d_gdn(
         b: b tensor (for beta) of shape [batch_size, n_v].
         a: a tensor (for g) of shape [batch_size, n_v].
         conv_state: Convolution state cache tensor of shape [num_seqs + 1,
-            kernel_size - 1, dim_size] containing the last (kernel_size - 1) tokens
+            kernel_size - 1, 1, dim_size] (native float32 layout enabling
+            in-place buffer donation) or [num_seqs + 1, kernel_size - 1,
+            dim_size] containing the last (kernel_size - 1) tokens
             from the last sequence invocation. The first slot is a null block used for
             padded or invalid tokens. It may contain garbage data if it is a first
             invocation of a sequence.
@@ -432,6 +434,8 @@ def fused_conv1d_gdn(
     # TODO(kyuyeunk): To eliminate runtime cost, move this logic into model
     # loading stage.
     conv_state_shape = conv_state.shape
+    # No-op (no copy, donation preserved) when conv_state is already
+    # float32 [num_seqs + 1, kernel_size - 1, 1, dim].
     conv_state = conv_state.reshape(-1, kernel_size - 1, 1, dim)
     conv_weight = conv_weight.swapaxes(0, 2).astype(jnp.float32)
     conv_bias = conv_bias.astype(
