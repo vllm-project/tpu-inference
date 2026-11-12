@@ -183,31 +183,32 @@ def shared_expert_is_replicated(shared_experts) -> bool:
 
 
 def keeps_tokens_sharded(mesh: Mesh | None, enable_sp: bool, *,
-                         gmm_ep: bool) -> bool:
+                         moe_keeps_tokens: bool) -> bool:
     """Whether the residual stream stays token-sharded over EXPERT_DATA.
 
-    Sequence parallelism (`enable_sp`) under attention DP with GMM_EP
-    (`expert_parallel_gmm`): the MoE consumes and produces tokens sharded over
-    all devices (EXPERT_DATA), so instead of resharding to ATTN_DATA around
-    every linear and the MoE, the activations outside attention stay
-    token-sharded: column-parallel projections all-gather (FP8) tokens over the
-    attention TP axis, row-parallel ones reduce-scatter, and router / shared
-    expert / norms run on the local token slice.
+    Sequence parallelism (`enable_sp`) under attention DP when the MoE layer
+    consumes and produces tokens sharded over all devices (EXPERT_DATA):
+    instead of resharding to ATTN_DATA around every linear and the MoE, the
+    activations outside attention stay token-sharded: column-parallel
+    projections all-gather (FP8) tokens over the attention TP axis,
+    row-parallel ones reduce-scatter, and router / shared expert / norms run on
+    the local token slice.
 
-    Only under attention DP with attention TP > 1 and GMM_EP; otherwise
-    `enable_sp` keeps its MLP_TENSOR input / output sharding:
+    Only under attention DP with attention TP > 1 and a compatible MoE backend;
+    otherwise `enable_sp` keeps its MLP_TENSOR input / output sharding:
 
-    - `gmm_ep`: the MoE backend must be GMM_EP. GMM_TP (expert parallelism
-      off) and the other EP backends (USE_MOE_EP_KERNEL, USE_FUSED_EP_MOE_V2,
-      USE_ROUTING_MOE) ignore `keep_token_sharding`. vLLM callers decide this
-      with `select_moe_backend` via `vllm_keeps_tokens_sharded`.
+    - `moe_keeps_tokens`: the MoE backend must honor `keep_token_sharding`:
+      GMM_EP (`expert_parallel_gmm`) or ROUTING_MOE (`USE_ROUTING_MOE`). GMM_TP
+      (expert parallelism off) and the other EP backends (USE_MOE_EP_KERNEL,
+      USE_FUSED_EP_MOE_V2) ignore it. vLLM callers decide this with
+      `select_moe_backend` via `vllm_keeps_tokens_sharded`.
     - The `expert` and `pcp` mesh axes must be size 1. The linears gather and
       reduce-scatter tokens over ATTN_HEAD (`model`, `expert`, `dcp`) inside
       each ATTN_DATA block, but EXPERT_DATA orders `expert` before `model` and
       puts `pcp` last, so with either axis > 1 the token rows would not line
       up with EXPERT_DATA.
     """
-    if not enable_sp or not gmm_ep:
+    if not enable_sp or not moe_keeps_tokens:
         return False
     if mesh is None or not is_attn_dp(mesh):
         return False
