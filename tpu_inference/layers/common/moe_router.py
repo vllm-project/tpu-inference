@@ -53,8 +53,8 @@ def select_experts(
         renormalize: make each token's top-k weights sum to 1.
         scoring_fn: scoring function applied to gating_output.
         hash_based_topk_indices: if set, the experts to use [num_tokens, topk].
-        expert_score_correction_bias: added to the scores to pick the experts
-            by exact top-k, but not to their weights [num_experts].
+        expert_score_correction_bias: added to the scores to pick the experts,
+            but not to their weights [num_experts].
         num_valid_tokens: if set, the tokens from this index on are padding.
 
     Returns:
@@ -65,16 +65,17 @@ def select_experts(
     if hash_based_topk_indices is not None:
         topk_indices = hash_based_topk_indices
         topk_weights = jnp.take_along_axis(topk_weights, topk_indices, axis=-1)
-    elif envs.MOE_APPROX_TOPK:
-        topk_weights, topk_indices = jax.lax.approx_max_k(
-            topk_weights,
-            k=topk,
-            recall_target=envs.MOE_APPROX_TOPK_RECALL_TARGET)
     else:
-        # TPU_MOE_ROUTER_TOPK=rowmax: k row-max passes instead of a sort.
-        select_topk = (functools.partial(router_topk, k=topk)
-                       if envs.TPU_MOE_ROUTER_TOPK == "rowmax" else
-                       functools.partial(jax.lax.top_k, k=topk))
+        if envs.MOE_APPROX_TOPK:
+            select_topk = functools.partial(
+                jax.lax.approx_max_k,
+                k=topk,
+                recall_target=envs.MOE_APPROX_TOPK_RECALL_TARGET)
+        elif envs.TPU_MOE_ROUTER_TOPK == "rowmax":
+            # k row-max passes instead of a sort.
+            select_topk = functools.partial(router_topk, k=topk)
+        else:
+            select_topk = functools.partial(jax.lax.top_k, k=topk)
         if expert_score_correction_bias is not None:
             _, topk_indices = select_topk(
                 topk_weights + expert_score_correction_bias[None, :])
