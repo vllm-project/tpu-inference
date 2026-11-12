@@ -43,9 +43,6 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, KVConnectorOutput, LogprobsLists,
                              LogprobsTensors, ModelRunnerOutput)
 from vllm.v1.request import Request
-from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-from vllm.v1.worker.kv_connector_model_runner_mixin import \
-    KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 import tpu_inference.envs as envs
@@ -77,6 +74,8 @@ from tpu_inference.runner.compilation_manager import CompilationManager
 from tpu_inference.runner.decode_loop import TpuSamplingState, continue_decode
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 from tpu_inference.runner.kv_cache_manager import KVCacheManager
+from tpu_inference.runner.kv_connector_model_runner_mixin import \
+    KVConnectorModelRunnerMixin
 from tpu_inference.runner.lora_utils import LoraUtils
 from tpu_inference.runner.multimodal_manager import MultiModalManager
 from tpu_inference.runner.pcp_utils import (PCPPreprocessor, pcp_buffer_tokens,
@@ -96,6 +95,7 @@ from tpu_inference.spec_decode.jax.utils import (
     concat_last_sampled_tokens_and_draft_tokens, extend_logits_simple,
     extract_last_sampled_tokens, filter_speculative_logprobs,
     process_and_extend_logits)
+from tpu_inference.spec_decode.ngram_proposer import NgramProposer
 from tpu_inference.utils import (device_array, make_optimized_mesh,
                                  time_function, to_jax_dtype, to_torch_dtype)
 
