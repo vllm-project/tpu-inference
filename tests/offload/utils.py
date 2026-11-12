@@ -96,6 +96,7 @@ def create_vllm_config(
     attention_backend: str | None = None,
     kv_load_failure_policy: Literal["recompute", "fail"] = "fail",
     kv_connector: str = "NixlConnector",
+    kv_connector_module_path: str | None = None,
     kv_role: str = "kv_both",
     disable_hybrid_kv_cache_manager: bool | None = None,
 ) -> VllmConfig:
@@ -124,6 +125,7 @@ def create_vllm_config(
     )
     kv_transfer_config = KVTransferConfig(
         kv_connector=kv_connector,
+        kv_connector_module_path=kv_connector_module_path,
         kv_role=kv_role,
         enable_permute_local_kv=enable_permute_local_kv,
         kv_connector_extra_config=kv_connector_extra_config or {},
@@ -158,14 +160,13 @@ class TPURequestRunner:
             block_size=block_size,
             max_num_batched_tokens=1000,
             disable_hybrid_kv_cache_manager=False,
+            # vLLM resolves the connector class when VllmConfig is built, so an
+            # external connector needs its module path (as in production).
             kv_connector="TPUOffloadConnector",
+            kv_connector_module_path=
+            "tpu_inference.offload.tpu_offload_connector",
         )
         vllm_config.scheduler_config.async_scheduling = async_scheduling
-        vllm_config.kv_transfer_config = KVTransferConfig(
-            kv_connector=
-            "tpu_inference.offload.tpu_offload_connector.TPUOffloadConnector",
-            kv_role="kv_both",
-        )
         kv_cache_groups = [
             KVCacheGroupSpec(
                 ["layer"],
