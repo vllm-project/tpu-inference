@@ -1366,7 +1366,6 @@ class TestTPUJaxRunnerDisableMM:
         """_can_use_continue_decode checks enable flag, distribution, structured outputs, and prompt chunking."""
         runner = MagicMock()
         runner.enable_continue_decode = True
-        runner.speculative_config = None
         runner.input_batch.num_reqs = 2
         runner.input_batch.request_distribution = [2, 0, 2]  # decode only
         runner.input_batch.num_computed_tokens_cpu = np.array([10, 20],
