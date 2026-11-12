@@ -12,13 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import threading
+import types
 from unittest.mock import MagicMock, patch
 
+import cloudpickle
 import numpy as np
 import pytest
 from vllm.config import VllmConfig
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata, AuxRequestOutput)
+from vllm.v1.core import kv_cache_utils
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -27,9 +31,20 @@ from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import LogprobsLists, ModelRunnerOutput
 from vllm.v1.request import Request
 
+from tpu_inference.core.sched import dp_scheduler as dp_scheduler_module
 from tpu_inference.core.sched.dp_scheduler import (
     DPScheduler, DPSchedulerOutput, SchedulerCommand,
-    _get_max_cache_hit_length, update_vllm_config_for_dp_scheduler)
+    _get_max_cache_hit_length, _resolve_start_method,
+    _scheduler_worker_trampoline, update_vllm_config_for_dp_scheduler)
+
+
+@pytest.fixture(autouse=True)
+def _fork_workers(monkeypatch):
+    """Most tests use MagicMock configs, which cloudpickle cannot serialize
+    for spawned workers, so they exercise the fork path (used under
+    Pathways). Tests of the default spawn path restore the real resolver."""
+    monkeypatch.setattr(dp_scheduler_module, "_resolve_start_method",
+                        lambda: "fork")
 
 
 def _make_mock_mp_context():
@@ -1403,7 +1418,7 @@ class TestDPScheduler:
         observed_during_spawn = []
 
         def inspect_process(*args, **kwargs):
-            spawn_vllm_config = kwargs["args"][3]
+            spawn_vllm_config = kwargs["kwargs"]["vllm_config"]
             # The full vllm_config payload must be picklable while detached during worker spawn,
             # with static_all_moe_layers (list[str]) kept intact.
             pickle.dumps(spawn_vllm_config)
@@ -1491,6 +1506,231 @@ class TestDPScheduler:
         }
         assert mock_vllm_config.device_config.slice is unpicklable_slice
         assert gc.isenabled()
+
+    def test_init_fork_passes_worker_kwargs(
+        self,
+        mock_vllm_config,
+        mock_kv_cache_config,
+        mock_structured_output_manager,
+    ):
+        """Test that forked workers (under Pathways) get keyword args."""
+
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ) as mock_worker:
+            with patch('multiprocessing.get_context') as mock_get_context:
+                mock_ctx = _make_mock_mp_context()
+                mock_get_context.return_value = mock_ctx
+
+                DPScheduler(
+                    vllm_config=mock_vllm_config,
+                    kv_cache_config=mock_kv_cache_config,
+                    structured_output_manager=mock_structured_output_manager,
+                    block_size=16,
+                    log_stats=False,
+                )
+
+        mock_get_context.assert_called_once_with("fork")
+        assert mock_ctx.Process.call_count == 2
+        for rank, process_call in enumerate(mock_ctx.Process.call_args_list):
+            assert process_call.kwargs["target"] is mock_worker
+            args = process_call.kwargs["args"]
+            assert len(args) == 3
+            assert args[0] == rank
+            worker_kwargs = process_call.kwargs["kwargs"]
+            assert set(worker_kwargs) == {
+                "vllm_config",
+                "kv_cache_config",
+                "structured_output_manager",
+                "block_size",
+                "hash_block_size",
+                "mm_registry",
+                "include_finished_set",
+                "log_stats",
+                "original_scheduler_cls",
+            }
+            assert worker_kwargs["vllm_config"] is mock_vllm_config
+            assert (worker_kwargs["structured_output_manager"]
+                    is mock_structured_output_manager)
+            assert worker_kwargs["block_size"] == 16
+
+    def test_init_spawns_workers_by_default(
+        self,
+        monkeypatch,
+        mock_structured_output_manager,
+    ):
+        """Test that workers are spawned by default, with their args sent as
+        cloudpickle bytes."""
+        monkeypatch.setattr(dp_scheduler_module, "_resolve_start_method",
+                            _resolve_start_method)
+        monkeypatch.delenv("JAX_PLATFORMS", raising=False)
+        monkeypatch.setattr(kv_cache_utils,
+                            "NONE_HASH",
+                            b"parent-none-hash",
+                            raising=False)
+
+        unpicklable_attn = threading.Lock()
+        vllm_config = types.SimpleNamespace(
+            sharding_config=types.SimpleNamespace(total_dp_size=2),
+            scheduler_config=types.SimpleNamespace(
+                _original_scheduler_cls=Scheduler,
+                max_num_seqs=8,
+                max_num_batched_tokens=1024,
+                async_scheduling=False,
+            ),
+            cache_config=types.SimpleNamespace(
+                enable_prefix_caching=False,
+                prefix_caching_hash_algo="sha256",
+                mamba_num_blocks=None,
+            ),
+            compilation_config=types.SimpleNamespace(
+                static_forward_context={"layer_0": unpicklable_attn}),
+            device_config=types.SimpleNamespace(slice=None),
+        )
+        kv_cache_config = types.SimpleNamespace(num_blocks=100)
+
+        with patch('multiprocessing.get_context') as mock_get_context:
+            mock_ctx = _make_mock_mp_context()
+            mock_get_context.return_value = mock_ctx
+
+            DPScheduler(
+                vllm_config=vllm_config,
+                kv_cache_config=kv_cache_config,
+                # A MagicMock cannot be pickled, so this also checks that
+                # the manager is never part of the payload.
+                structured_output_manager=mock_structured_output_manager,
+                block_size=16,
+                mm_registry="mm_registry",
+                log_stats=True,
+            )
+
+        mock_get_context.assert_called_once_with("spawn")
+        assert mock_ctx.Process.call_count == 2
+        for rank, process_call in enumerate(mock_ctx.Process.call_args_list):
+            assert (process_call.kwargs["target"]
+                    is _scheduler_worker_trampoline)
+            args = process_call.kwargs["args"]
+            assert len(args) == 4
+            assert args[0] == rank
+            assert isinstance(args[3], bytes)
+
+            worker_kwargs, none_hash_state = cloudpickle.loads(args[3])
+            assert set(worker_kwargs) == {
+                "vllm_config", "kv_cache_config", "block_size",
+                "hash_block_size", "mm_registry", "include_finished_set",
+                "log_stats", "original_scheduler_cls"
+            }
+            assert worker_kwargs["kv_cache_config"].num_blocks == 50
+            assert worker_kwargs["block_size"] == 16
+            assert worker_kwargs["hash_block_size"] == 16
+            assert worker_kwargs["mm_registry"] == "mm_registry"
+            assert worker_kwargs["include_finished_set"] is False
+            assert worker_kwargs["log_stats"] is True
+            assert worker_kwargs["original_scheduler_cls"] is Scheduler
+            # Unpicklable compiled state is detached while pickling.
+            assert (worker_kwargs["vllm_config"].compilation_config.
+                    static_forward_context == {})
+            assert none_hash_state["NONE_HASH"] == b"parent-none-hash"
+
+        assert vllm_config.compilation_config.static_forward_context == {
+            "layer_0": unpicklable_attn
+        }
+
+
+class TestResolveStartMethod:
+
+    @pytest.mark.parametrize("jax_platforms, expected", [
+        (None, "spawn"),
+        ("", "spawn"),
+        ("tpu", "spawn"),
+        ("proxy", "fork"),
+        ("cpu,proxy", "fork"),
+    ])
+    def test_resolve_start_method(self, monkeypatch, jax_platforms, expected):
+        """Workers are spawned, except under Pathways."""
+        if jax_platforms is None:
+            monkeypatch.delenv("JAX_PLATFORMS", raising=False)
+        else:
+            monkeypatch.setenv("JAX_PLATFORMS", jax_platforms)
+        assert _resolve_start_method() == expected
+
+    def test_ignores_vllm_worker_multiproc_method(self, monkeypatch):
+        """vLLM's own start method setting does not apply to these
+        workers."""
+        monkeypatch.delenv("JAX_PLATFORMS", raising=False)
+        monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
+        assert _resolve_start_method() == "spawn"
+
+
+class TestSchedulerWorkerTrampoline:
+    """Test the entry point of spawned scheduler worker processes."""
+
+    def test_trampoline_unpacks_payload_and_rebuilds_manager(
+            self, monkeypatch):
+        """Test that the trampoline restores worker args and NONE_HASH."""
+        monkeypatch.setattr(kv_cache_utils,
+                            "NONE_HASH",
+                            b"child-none-hash",
+                            raising=False)
+        vllm_config = types.SimpleNamespace(name="vllm_config")
+        worker_kwargs = dict(
+            vllm_config=vllm_config,
+            kv_cache_config=types.SimpleNamespace(num_blocks=50),
+            block_size=16,
+            hash_block_size=32,
+            mm_registry="mm_registry",
+            include_finished_set=False,
+            log_stats=True,
+            original_scheduler_cls=Scheduler,
+        )
+        payload = cloudpickle.dumps((worker_kwargs, {
+            "NONE_HASH": b"parent-none-hash"
+        }))
+        input_conn, output_conn = MagicMock(), MagicMock()
+        calls = []
+        real_loads = cloudpickle.loads
+
+        def recording_loads(data):
+            calls.append("unpickle")
+            return real_loads(data)
+
+        def record_start_method(method, force):
+            calls.append(("start_method", method, force))
+
+        dp = 'tpu_inference.core.sched.dp_scheduler'
+        worker_patch = patch(f'{dp}._scheduler_worker_process')
+        manager_patch = patch(f'{dp}.StructuredOutputManager')
+        plugins_patch = patch(f'{dp}.load_general_plugins',
+                              side_effect=lambda: calls.append("plugins"))
+        loads_patch = patch(f'{dp}.cloudpickle.loads',
+                            side_effect=recording_loads)
+        start_method_patch = patch(f'{dp}.multiprocessing.set_start_method',
+                                   side_effect=record_start_method)
+        with worker_patch as mock_worker, manager_patch as mock_manager_cls, \
+                plugins_patch, loads_patch, start_method_patch:
+            _scheduler_worker_trampoline(1, input_conn, output_conn, payload)
+
+        # The platform default start method is restored first, then plugins
+        # are loaded, and only then is the config unpickled.
+        assert calls == [("start_method", None, True), "plugins", "unpickle"]
+
+        mock_manager_cls.assert_called_once()
+        (rebuilt_from, ) = mock_manager_cls.call_args.args
+        assert rebuilt_from.name == "vllm_config"
+
+        mock_worker.assert_called_once()
+        assert mock_worker.call_args.args == (1, input_conn, output_conn)
+        called_kwargs = mock_worker.call_args.kwargs
+        assert (called_kwargs["structured_output_manager"]
+                is mock_manager_cls.return_value)
+        # The manager is built from the same config the scheduler gets.
+        assert called_kwargs["vllm_config"] is rebuilt_from
+        assert called_kwargs["kv_cache_config"].num_blocks == 50
+        assert called_kwargs["hash_block_size"] == 32
+        assert called_kwargs["log_stats"] is True
+        assert called_kwargs["original_scheduler_cls"] is Scheduler
+
+        assert kv_cache_utils.NONE_HASH == b"parent-none-hash"
 
 
 class TestUpdateVllmConfigForDPScheduler:
