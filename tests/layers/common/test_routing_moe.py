@@ -18,6 +18,7 @@ it to a dense f32 reference instead of matching the GMM path bit for bit.
 moe_apply raises for layers the kernel can't run.
 """
 
+from types import SimpleNamespace
 from unittest import mock
 
 import jax
@@ -194,7 +195,11 @@ def test_fp8_combine_sets_scatter_format(fp8_combine, hidden):
     from tokamax._src.ops.experimental.routing_moe.common import out_format
     from tokamax._src.ops.experimental.routing_moe.layer import modular
     mesh = _make_mesh()
+    # The kernel is mocked, so this also runs off TPU; give the fp8 chunk
+    # check TPU lane info.
     with (mock.patch.object(fused_v2_test, "HIDDEN", hidden),
+          mock.patch("jax.experimental.pallas.tpu.get_tpu_info",
+                     return_value=SimpleNamespace(num_lanes=128)),
           mock.patch("tpu_inference.envs.ROUTING_MOE_FP8_COMBINE",
                      fp8_combine),
           mock.patch.object(modular,
