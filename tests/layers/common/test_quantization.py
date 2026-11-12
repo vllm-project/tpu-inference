@@ -21,7 +21,8 @@ from jax._src import test_util as jtu
 
 from tpu_inference.layers.common.quantization import (
     dequantize_tensor, dequantize_tensor_from_mxfp4_packed, quantize_kv,
-    quantize_tensor, quantize_tensor_to_mxfp4_packed)
+    quantize_tensor, quantize_tensor_to_mxfp4_packed,
+    static_per_tensor_quantize_tensor)
 
 
 @jtu.with_config(jax_numpy_dtype_promotion="standard")
@@ -55,6 +56,45 @@ class QuantizationTest(jtu.JaxTestCase):
         dequantized = dequantize_tensor(tensor_q, scale, axis)
 
         self.assertAllClose(dequantized, original, rtol=0.1, atol=0.1)
+
+    @parameterized.product(dtype=[jnp.int4, jnp.int8])
+    def test_integer_quantization_rounds_to_nearest(self, dtype):
+        dtype_max = float(jnp.iinfo(dtype).max)
+        # The first column holds the absolute max, so the scale is 1 and each
+        # value maps to itself before the integer cast.
+        original = jnp.array([[dtype_max, 0.6, 1.5, -1.6, 2.4, -0.4]],
+                             jnp.float32)
+
+        tensor_q, scale = quantize_tensor(dtype, original, axis=-1)
+
+        self.assertArraysEqual(scale, jnp.array([1.0], jnp.float32))
+        self.assertArraysEqual(tensor_q,
+                               jnp.array([[dtype_max, 1, 2, -2, 2, 0]], dtype))
+
+    def test_int4_block_quantization_is_unbiased(self):
+        key = jax.random.key(0)
+
+        shape = (256, 1024)
+        original = jax.random.normal(key, shape, jnp.float32)
+
+        tensor_q, scale = quantize_tensor(jnp.int4, original, -1, 32)
+        dequantized = dequantize_tensor(tensor_q, scale, -1)
+
+        # Truncation toward zero shrinks every magnitude, so the mean
+        # magnitude ratio would sit well below 1 (about 0.85 for int4).
+        ratio = jnp.abs(dequantized).sum() / jnp.abs(original).sum()
+        self.assertAllClose(ratio, 1.0, rtol=0.02, atol=0.02)
+
+    @parameterized.product(dtype=[jnp.int4, jnp.int8])
+    def test_static_per_tensor_integer_quantization_rounds_to_nearest(
+            self, dtype):
+        original = jnp.array([0.6, 1.5, -1.6, 2.4, -0.4, 1000.0], jnp.float32)
+
+        tensor_q = static_per_tensor_quantize_tensor(dtype, original, 1.0)
+
+        dtype_max = jnp.iinfo(dtype).max
+        self.assertArraysEqual(tensor_q,
+                               jnp.array([1, 2, -2, 2, 0, dtype_max], dtype))
 
     @parameterized.product(dtype=[jnp.float8_e4m3fn, jnp.int8],
                            axis=[-1, 1],
