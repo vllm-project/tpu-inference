@@ -33,6 +33,12 @@ experts are picked by moe_router.select_experts, as on the GMM path.
 ROUTING_MOE_REMOTE_SCATTER=0 selects tokamax's local mode instead of the remote
 scatter above: each device sums its experts' rows into a partial result for
 every token, and a reduce-scatter combines the partial results.
+
+ROUTING_MOE_FP8_COMBINE=1 has routing_gmm write its expert-output rows in fp8
+with per-lane f32 scales (tokamax's lane-strided format) instead of bf16, and
+output_reduce dequantizes them while summing each token's top-k rows. With
+remote scatter this halves the bytes sent to the token owners; in local mode
+the rows stay on the device, so it saves only local memory traffic.
 """
 
 import jax
@@ -159,6 +165,11 @@ def routing_moe_func(
     like hidden_states. Assumes unsupported_reason() returned None for this
     layer.
     """
+    from jax.experimental.pallas import tpu as pltpu
+    from tokamax._src.ops.experimental.routing_moe.common import \
+        layout_util as tk_layout_util
+    from tokamax._src.ops.experimental.routing_moe.common import \
+        out_format as tk_out_format
     from tokamax._src.ops.experimental.routing_moe.layer import \
         modular as tk_modular
     from tokamax._src.ops.experimental.routing_moe.layer import plan as tk_plan
@@ -172,12 +183,30 @@ def routing_moe_func(
     if padded_hidden != hidden_size:
         hidden_states = jnp.pad(hidden_states,
                                 ((0, 0), (0, padded_hidden - hidden_size)))
+    # ROUTING_MOE_FP8_COMBINE: routing_gmm sends its output rows to
+    # output_reduce in fp8 with per-lane scales instead of bf16.
+    scatter_format = None
+    if envs.ROUTING_MOE_FP8_COMBINE:
+        # routing_gmm writes fp8 output rows in whole chunks of (fp8 values per
+        # 32-bit word) x lanes; tokamax's routing_moe/gmm/config.py rejects
+        # other output widths, so compute the chunk the same way it does.
+        fp8_chunk_cols = (tk_layout_util.get_packing(jnp.float8_e4m3fn) *
+                          pltpu.get_tpu_info().num_lanes)
+        if padded_hidden % fp8_chunk_cols == 0:
+            scatter_format = tk_out_format.ActivationFormat(
+                dtype=jnp.float8_e4m3fn, quant=tk_out_format.LaneStrided())
+        else:
+            logger.warning_once(
+                "[MoE]: ROUTING_MOE_FP8_COMBINE ignored: hidden size %d is "
+                "not a multiple of %d; combine rows stay bf16.", padded_hidden,
+                fp8_chunk_cols)
     logger.info_once(
         "[MoE]: routing_moe over %d devices, %d experts each, token rows "
-        "split over replica axes %s; %s weights, %s scatter.",
+        "split over replica axes %s; %s weights, %s scatter, %s combine rows.",
         mesh.devices.size, num_experts // mesh.devices.size, replica,
         "fp8" if w1.dtype == jnp.float8_e4m3fn else "bf16",
-        "remote" if envs.ROUTING_MOE_REMOTE_SCATTER else "local")
+        "remote" if envs.ROUTING_MOE_REMOTE_SCATTER else "local",
+        "fp8" if scatter_format is not None else "bf16")
     num_replicas = get_mesh_shape_product(mesh, list(replica))
     num_local_rows = num_tokens * num_replicas // mesh.devices.size
     x = _to_ep_rows(hidden_states, mesh, replica)
@@ -211,7 +240,8 @@ def routing_moe_func(
         ep_axis=ep_axes,
         use_sp=True,
         moe_plan=tk_plan.RoutingMoEPlan(
-            remote_scatter=envs.ROUTING_MOE_REMOTE_SCATTER),
+            remote_scatter=envs.ROUTING_MOE_REMOTE_SCATTER,
+            scatter_format=scatter_format),
     )
     out = _from_ep_rows(out, mesh, replica, num_local_rows)
     return out[:, :hidden_size]

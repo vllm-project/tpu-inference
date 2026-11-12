@@ -18,6 +18,7 @@ it to a dense f32 reference instead of matching the GMM path bit for bit.
 moe_apply raises for layers the kernel can't run.
 """
 
+from types import SimpleNamespace
 from unittest import mock
 
 import jax
@@ -26,6 +27,7 @@ import numpy as np
 import pytest
 from jax.sharding import Mesh
 
+from tests.layers.common import test_fused_ep_moe_v2 as fused_v2_test
 from tests.layers.common.test_fused_ep_moe_v2 import (INTER, NUM_EXPERTS, TOPK,
                                                       _dense_reference,
                                                       _inputs, _layer, _rel_l2,
@@ -154,6 +156,64 @@ def test_local_scatter_matches_dense_reference():
     assert out.sharding.is_equivalent_to(x.sharding, x.ndim)
     error = _rel_l2(out, want)
     assert error < 0.07, error
+
+
+@requires_4_devices
+@pytest.mark.usefixtures("tokamax_kernel")
+@pytest.mark.parametrize("remote_scatter", [True, False],
+                         ids=["remote", "local"])
+def test_fp8_combine_matches_dense_reference(remote_scatter):
+    """ROUTING_MOE_FP8_COMBINE=1 (fp8 expert-output rows into output_reduce)
+    stays close to the dense reference and actually changes the output, with
+    remote scatter and in tokamax's local mode."""
+    mesh = _make_mesh(**_SUPPORTED_MESHES[0])
+    # fp8 output rows need hidden % 512 == 0 (fp8 packing x 128 lanes); the
+    # shared helpers read HIDDEN at call time.
+    with (mock.patch.object(fused_v2_test, "HIDDEN", 512),
+          mock.patch("tpu_inference.envs.ROUTING_MOE_REMOTE_SCATTER",
+                     remote_scatter)):
+        x, gating = _inputs(mesh, 2048)
+        w = _weights(mesh, True)
+        want = _dense_reference(x, gating, *w)
+        bf16_combine = _run_kernel(mesh, x, gating, *w)
+        with mock.patch("tpu_inference.envs.ROUTING_MOE_FP8_COMBINE", True):
+            out = _run_kernel(mesh, x, gating, *w)
+    assert out.shape == x.shape and out.dtype == x.dtype
+    assert out.sharding.is_equivalent_to(x.sharding, x.ndim)
+    assert not np.array_equal(np.asarray(out), np.asarray(bf16_combine))
+    error = _rel_l2(out, want)
+    assert error < 0.07, error
+
+
+@pytest.mark.usefixtures("tokamax_kernel")
+@pytest.mark.parametrize("fp8_combine, hidden", [(False, 512), (True, 512),
+                                                 (True, 256)])
+def test_fp8_combine_sets_scatter_format(fp8_combine, hidden):
+    """The flag passes tokamax an fp8 lane-strided scatter_format, and no
+    scatter_format (bf16 rows) when it's off or the hidden size isn't a
+    multiple of 512."""
+    from tokamax._src.ops.experimental.routing_moe.common import out_format
+    from tokamax._src.ops.experimental.routing_moe.layer import modular
+    mesh = _make_mesh()
+    # The kernel is mocked, so this also runs off TPU; give the fp8 chunk
+    # check TPU lane info.
+    with (mock.patch.object(fused_v2_test, "HIDDEN", hidden),
+          mock.patch("jax.experimental.pallas.tpu.get_tpu_info",
+                     return_value=SimpleNamespace(num_lanes=128)),
+          mock.patch("tpu_inference.envs.ROUTING_MOE_FP8_COMBINE",
+                     fp8_combine),
+          mock.patch.object(modular,
+                            "routing_moe",
+                            side_effect=lambda x, *a, **k: x) as kernel):
+        x, gating = _inputs(mesh, 512)
+        w = _weights(mesh, True)
+        _run_kernel(mesh, x, gating, *w)
+    fmt = kernel.call_args.kwargs["moe_plan"].scatter_format
+    if fp8_combine and hidden % 512 == 0:
+        assert fmt.dtype == jnp.float8_e4m3fn
+        assert isinstance(fmt.quant, out_format.LaneStrided)
+    else:
+        assert fmt is None
 
 
 @requires_4_devices
