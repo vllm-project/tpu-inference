@@ -28,12 +28,14 @@ def quantize_tensor_to_mxfp4_packed(
 ) -> Tuple[jax.Array, jax.Array]:
     """Quantize a tensor to mxfp4 and pack it into uint8."""
 
-    # Perform regular block quantization.
+    # Perform block quantization with power of two scales, since the scale is
+    # stored as an e8m0 exponent below.
     tensor_q, scale = quantize_tensor(
         jnp.float4_e2m1fn,
         tensor,
         axis,
         MXFP4_BLOCK_SIZE,
+        pow2_scale=True,
     )
 
     # last two e2m1 elements will be packed into a single uint8 element.
@@ -230,6 +232,7 @@ def quantize_tensor(
     tensor: jax.Array,
     axis: int | tuple | None = -1,
     block_size: int | None = None,
+    pow2_scale: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     """Quantize tensor.
 
@@ -238,6 +241,8 @@ def quantize_tensor(
         tensor: Unquantized tensor
         axis: Axis to perform quantization. None denotes per-tensor.
         block_size: Specify block quantization size.
+        pow2_scale: Round each scale up to a power of two, e.g. for formats
+            that store the scale as an exponent only (e8m0).
 
     Returns:
         Tensor quantized to dtype.
@@ -286,6 +291,10 @@ def quantize_tensor(
 
     abs_max = jnp.max(jnp.abs(tensor), axis=axis, keepdims=True)
     scale = abs_max / dtype_max
+    if pow2_scale:
+        # Rounding up keeps abs_max / scale <= dtype_max, so nothing clips.
+        scale = jnp.exp2(
+            jnp.ceil(jnp.log2(abs_max.astype(jnp.float32) / dtype_max)))
 
     # If scale=0, scale_inv=1/scale=1/0=NaN. Since NaN will cause numeric error
     # during inference, we convert them to inf.

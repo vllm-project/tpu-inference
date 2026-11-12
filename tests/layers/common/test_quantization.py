@@ -43,6 +43,50 @@ class QuantizationTest(jtu.JaxTestCase):
 
         self.assertAllClose(dequantized, original, rtol=0.5, atol=0.5)
 
+    def _skip_if_mxfp4_unsupported(self):
+        if (jtu.test_device_matches(["tpu"])
+                and not jtu.is_device_tpu_at_least(version=7)):
+            self.skipTest("mxfp4 is only supported in TPUv7+")
+
+    def test_mxfp4_quantization_uses_stored_scale(self):
+        self._skip_if_mxfp4_unsupported()
+
+        # abs max 8 gives an exact scale of 8 / 6. The e8m0 scale has to be a
+        # power of two, and the values have to be quantized with that same
+        # scale (2 here) to come back unchanged.
+        original = jnp.zeros((2, 32), jnp.float32)
+        original = original.at[0, :4].set(jnp.array([8.0, 3.0, -1.0, 1.0]))
+
+        tensor_q, scale = quantize_tensor_to_mxfp4_packed(original)
+        dequantized = dequantize_tensor_from_mxfp4_packed(
+            tensor_q, scale, out_dtype=jnp.float32)
+
+        self.assertArraysEqual(dequantized, original)
+
+    @parameterized.product(axis=[-1, 0, (0, 1)])
+    def test_mxfp4_quantization_keeps_magnitude(self, axis):
+        self._skip_if_mxfp4_unsupported()
+
+        key = jax.random.key(0)
+
+        shape = (128, 128, 128)
+        original = jax.random.normal(key, shape, jnp.float32)
+
+        tensor_q, scale = quantize_tensor_to_mxfp4_packed(original, axis)
+        dequantized = dequantize_tensor_from_mxfp4_packed(
+            tensor_q, scale, axis, out_dtype=jnp.float32)
+
+        # Quantizing with the exact scale but storing a smaller power of two
+        # shrinks every block by up to 2x (mean magnitude ratio about 0.65).
+        ratio = jnp.abs(dequantized).sum() / jnp.abs(original).sum()
+        self.assertAllClose(ratio, 1.0, rtol=0.02, atol=0.02)
+        # Rounding the scale up means no element is clipped, so the error is
+        # at most half of the largest fp4 step (4 to 6), i.e. one scale, and
+        # each scale is below 2 * abs_max / 6.
+        abs_max = jnp.abs(original).max()
+        self.assertLessEqual(float(jnp.abs(dequantized - original).max()),
+                             float(abs_max) / 6 * 2)
+
     @parameterized.product(dtype=[jnp.float8_e4m3fn, jnp.int8],
                            axis=[None, -1, 1, (0, 1)])
     def test_quantization(self, dtype, axis):
