@@ -20,7 +20,8 @@ import numpy as np
 from jax.sharding import PartitionSpec
 
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.jax.sample.sampling import _apply_sampling_transforms
+from tpu_inference.layers.jax.sample.sampling import (
+    _SAMPLING_EPS, _apply_sampling_transforms)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.runner.utils import SpecDecodeMetadata
@@ -331,6 +332,10 @@ def process_and_extend_logits(
             logprobs=tpu_sampling_metadata.logprobs,
         )
         processed_target = _apply_sampling_transforms(local_target, local_meta)
+        # Match sample(): greedy rows report logprobs from the raw logits.
+        is_greedy = temp < _SAMPLING_EPS
+        processed_target = jnp.where(is_greedy[:, None], local_target,
+                                     processed_target)
         return jnp.concatenate([processed_target, local_bonus], axis=0)
 
     return jax.shard_map(
