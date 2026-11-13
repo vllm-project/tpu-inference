@@ -162,7 +162,15 @@ class _TorchaxEncoderModelAdapter:
         # ops (e.g. ``vllm_ir.rms_norm`` in the ViT block norms) reach torchax
         # as opaque OpOverloads it has no lowering for, and dispatch dies with
         # "torchax Tensors can only do math within the torchax environment".
-        with torchax.default_env(), enable_torch_wrap(False):
+        # ``inference_mode(False)`` + ``no_grad``: vLLM's _execute_local calls
+        # this under ``torch.inference_mode()`` (vllm-project/vllm#65227).
+        # Inference mode skips the autograd dispatch keys where composite ops
+        # (chunk, split, view, layer_norm, ...) decompose, so on the weights
+        # (torchax tensors created outside inference mode) they reach torchax
+        # undecomposed and fail with "aten::chunk has no lowering". torchax
+        # does not use torch autograd, so plain no_grad keeps the same intent.
+        with torch.inference_mode(False), torch.no_grad(), \
+                torchax.default_env(), enable_torch_wrap(False):
             torchax_kwargs = {
                 k: jax.tree.map(self._torchax_view_if_torch, v)
                 for k, v in mm_kwargs.items()
