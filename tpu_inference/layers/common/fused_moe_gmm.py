@@ -325,7 +325,11 @@ def gmm_wrapper(lhs,
                 group_sizes,
                 group_offset,
                 fuse_act=None,
-                preferred_element_type=None):
+                preferred_element_type=None,
+                quantize_lhs: bool = True):
+    # quantize_lhs=False keeps the activations in their own dtype (W8A16 /
+    # W4A16 with float32 accumulation) instead of gmm_v2's default dynamic
+    # per-row FP8 LHS quantization (W8A8 / W4A8) for quantized weights.
     gmm_res = gmm_v2(
         lhs=lhs,
         rhs=rhs,
@@ -337,6 +341,7 @@ def gmm_wrapper(lhs,
         zero_initialize=False,
         fuse_act=fuse_act,
         preferred_element_type=preferred_element_type,
+        maybe_quantize_lhs=quantize_lhs,
     )
     return gmm_res
 
@@ -543,7 +548,7 @@ def _tc_local_moe(tokens: jax.Array, topk_argsort_indices: jax.Array,
                   group_sizes: jax.Array, group_offset: jax.Array,
                   topk_argsort_revert_indices: jax.Array,
                   topk_weights: jax.Array, *, activation: str, topk: int,
-                  capacity: int) -> jax.Array:
+                  capacity: int, quantize_lhs: bool = True) -> jax.Array:
     """Runs this shard's experts, gathering and combining on the TensorCore.
 
     1. Gather: copy the shard's rows (its slice of the expert-sorted order)
@@ -611,10 +616,16 @@ def _tc_local_moe(tokens: jax.Array, topk_argsort_indices: jax.Array,
                                chunk_group_sizes,
                                group_offset,
                                fuse_act=activation,
-                               preferred_element_type=x.dtype)
+                               preferred_element_type=x.dtype,
+                               quantize_lhs=quantize_lhs)
         gmm1_res = gmm1_res[:, :w2.shape[1]]
-        gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias,
-                               chunk_group_sizes, group_offset)
+        gmm2_res = gmm_wrapper(gmm1_res,
+                               w2,
+                               w2_scale,
+                               w2_bias,
+                               chunk_group_sizes,
+                               group_offset,
+                               quantize_lhs=quantize_lhs)
         # gmm_v2 runs with zero_initialize=False: rows past the chunk's are
         # stale HBM, and 0 * NaN in the matmul below would spread.
         valid = jnp.arange(capacity) < end - start - lo
@@ -678,7 +689,8 @@ def moe_gmm_local(
         defer_all_reduce: bool = False,
         hierarchical_collect: tuple | None = None,
         tc_capacity: int = 0,
-        ragged_gather_reduce_version: str | None = None) -> jax.Array:
+        ragged_gather_reduce_version: str | None = None,
+        quantize_lhs: bool = True) -> jax.Array:
     """Main MoE logic on a local shard can run in TP or EP mode.
 
     Set parallelism for "tp" or "ep"
@@ -705,6 +717,7 @@ def moe_gmm_local(
         group_offset,
         fuse_act=activation,
         preferred_element_type=x.dtype,
+        quantize_lhs=quantize_lhs,
     )
 
     # When the parallelism is TP since w2_bias is not sharded, we should only apply bias
@@ -715,8 +728,13 @@ def moe_gmm_local(
         w2_bias = jnp.where(shard_id == 0, w2_bias, 0)
     if not use_tc_permute:
         gmm1_res = gmm1_res[:, :w2.shape[1]]  # trim to hidden size if padded
-        gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
-                               group_offset)
+        gmm2_res = gmm_wrapper(gmm1_res,
+                               w2,
+                               w2_scale,
+                               w2_bias,
+                               group_sizes,
+                               group_offset,
+                               quantize_lhs=quantize_lhs)
 
     # Not gmm2_res.shape[0]: x may carry padding rows past the last group
     # (RAGGED_GATHER_TRIM_ROWS=False).
@@ -810,7 +828,8 @@ def moe_gmm_local(
                                          topk_weights,
                                          activation=activation,
                                          topk=topk,
-                                         capacity=tc_capacity)
+                                         capacity=tc_capacity,
+                                         quantize_lhs=quantize_lhs)
         elif local_group_size < group_sizes.size:
             cur_mask = mask[start_tok:end_tok]
             if onehot_moe_permute_threshold > 0 and batch_size <= onehot_moe_permute_threshold:
@@ -878,6 +897,7 @@ def tensor_parallel_gmm(
     moe_chunk_size: int = 0,
     defer_all_reduce: bool = False,
     ragged_gather_reduce_version: str | None = None,
+    quantize_lhs: bool = True,
 ) -> jax.Array:
     data_p_spec = P(ShardingAxisName.MLP_DATA)
     attn_data_p_spec = P(ShardingAxisName.ATTN_DATA)
@@ -913,6 +933,7 @@ def tensor_parallel_gmm(
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
             ragged_gather_reduce_version=ragged_gather_reduce_version,
+            quantize_lhs=quantize_lhs,
         ),
         mesh=mesh,
         in_specs=(
@@ -967,6 +988,7 @@ def expert_parallel_gmm(
     defer_all_reduce: bool = False,
     topk_argsort_indices: jax.Array | None = None,
     ragged_gather_reduce_version: str | None = None,
+    quantize_lhs: bool = True,
 ) -> jax.Array:
     """Runs the MoE experts with expert parallelism (see moe_gmm_local).
 
@@ -1033,6 +1055,7 @@ def expert_parallel_gmm(
             defer_all_reduce=defer_all_reduce,
             hierarchical_collect=hierarchical_collect,
             ragged_gather_reduce_version=ragged_gather_reduce_version,
+            quantize_lhs=quantize_lhs,
         ),
         mesh=mesh,
         in_specs=(
@@ -1406,6 +1429,7 @@ def _apply_hierarchical_dispatch_gather(hidden_states: jax.Array,
     "defer_all_reduce",
     "keep_token_sharding",
     "ragged_gather_reduce_version",
+    "quantize_lhs",
 ))
 def fused_moe_func(
     hidden_states: jax.Array,
@@ -1434,6 +1458,7 @@ def fused_moe_func(
     num_valid_tokens: jax.Array | None = None,
     keep_token_sharding: bool = False,
     ragged_gather_reduce_version: str | None = None,
+    quantize_lhs: bool = True,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -1458,6 +1483,11 @@ def fused_moe_func(
             (sequence-parallel residual stream, see
             sharding.keeps_tokens_sharded) instead of resharding it to
             ATTN_DATA / MLP_DATA.
+        quantize_lhs: for quantized (FP8 / FP4 / int) expert weights, let
+            gmm_v2 dynamically quantize the activations per row (W8A8 /
+            W4A8, the default). False keeps the activations in their own
+            dtype with float32 accumulation (W8A16 / W4A16), e.g. so an RL
+            rollout matches a trainer that does not quantize activations.
 
     Returns:
         Output of moe operation [num_tokens, hidden_size]
@@ -1477,6 +1507,10 @@ def fused_moe_func(
             "expert-parallel GMM path without the fused reduce-scatter kernel "
             "(use_ep=%s, use_gmm_fused_rs_kernel=%s).", use_ep,
             use_gmm_fused_rs_kernel)
+
+    if use_ep and use_gmm_fused_rs_kernel and not quantize_lhs:
+        raise ValueError(
+            "quantize_lhs=False is not supported with use_gmm_fused_rs_kernel.")
 
     if use_ep and use_gmm_fused_rs_kernel:
         from tpu_inference.kernels.experimental.fused_moe.fused_moe_rs import \
@@ -1550,7 +1584,9 @@ def fused_moe_func(
 
     # TPU_MOE_LOWTOK: small decode batches under EP run one Pallas kernel per
     # shard instead of permute + GMM.
-    if use_ep:
+    # The experimental EP decode kernels pick their own LHS handling, so
+    # quantize_lhs=False always takes the gmm_v2 path below.
+    if use_ep and quantize_lhs:
         local_num_experts = global_num_experts // get_mesh_shape_product(
             mesh, ShardingAxisName.EXPERT)
         ep_kernel = _select_ep_kernel(hidden_states,
@@ -1714,6 +1750,7 @@ def fused_moe_func(
             defer_all_reduce=defer_all_reduce,
             topk_argsort_indices=topk_argsort_indices,
             ragged_gather_reduce_version=ragged_gather_reduce_version,
+            quantize_lhs=quantize_lhs,
         )
     else:
         x = tensor_parallel_gmm(
@@ -1736,6 +1773,7 @@ def fused_moe_func(
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
             ragged_gather_reduce_version=ragged_gather_reduce_version,
+            quantize_lhs=quantize_lhs,
         )
 
     return x[:num_tokens, :hidden_size]
