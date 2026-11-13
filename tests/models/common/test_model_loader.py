@@ -23,7 +23,7 @@ import pytest
 import torch
 from jax.sharding import Mesh
 from transformers import PretrainedConfig
-from vllm.config import (ModelConfig, ParallelConfig, VllmConfig,
+from vllm.config import (LoadConfig, ModelConfig, ParallelConfig, VllmConfig,
                          set_current_vllm_config)
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
@@ -70,10 +70,7 @@ def vllm_config() -> MagicMock:
     mock_config = MagicMock(spec=VllmConfig)
     mock_config.model_config = ModelConfig(model)
     mock_config.model_config.dtype = jnp.bfloat16
-    mock_config.load_config = MagicMock()
-    mock_config.load_config.download_dir = None
-    mock_config.load_config.load_format = "auto"
-    mock_config.load_config.model_loader_extra_config = dict()
+    mock_config.load_config = LoadConfig()
     mock_config.additional_config = dict()
     mock_config.cache_config = MagicMock(cache_dtype="auto")
     mock_config.parallel_config = ParallelConfig(pipeline_parallel_size=1)
