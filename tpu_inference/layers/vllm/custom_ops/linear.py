@@ -170,7 +170,12 @@ class VllmQKVParallelLinear(QKVParallelLinear):
         if self.num_kv_head_replicas == 1:
             return super().forward(x)
 
-        out, bias = super().forward(x)
+        # With return_bias=False (as vLLM's Transformers backend builds its
+        # linear layers) the parent returns only the output tensor.
+        if self.return_bias:
+            out, bias = super().forward(x)
+        else:
+            out, bias = super().forward(x), None
         out_jax = jax_view(out)
 
         out_jax = reorder_concatenated_tensor_for_sharding(
@@ -238,4 +243,6 @@ class VllmQKVParallelLinear(QKVParallelLinear):
             v_jax = _mark_kv_head_replicated(v_jax)
 
         out_jax = jnp.concatenate([q_jax, k_jax, v_jax], axis=-1)
+        if not self.return_bias:
+            return torch_view(out_jax)
         return torch_view(out_jax), bias
