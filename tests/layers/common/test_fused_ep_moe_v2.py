@@ -193,13 +193,21 @@ def test_matches_dense_reference(sizes, fp8):
     assert error < (0.07 if fp8 else 0.01), error
 
 
-@requires_8_devices
+# model=2 is the smallest case: the two devices form one replica group on the
+# ATTN_DATA path but hold distinct rows over EXPERT_DATA. It needs only 2
+# devices, so it also runs on a single dual-core chip.
+_SP_MESHES = [dict(model=2)] + _SUPPORTED_MESHES
+
+
 @pytest.mark.usefixtures("tokamax_kernel")
-@pytest.mark.parametrize("sizes", _SUPPORTED_MESHES, ids=lambda v: _mesh_id(v))
+@pytest.mark.parametrize("sizes", _SP_MESHES, ids=lambda v: _mesh_id(v))
 def test_keep_token_sharding_matches_replicated(sizes):
     """With keep_token_sharding the tokens arrive and leave sharded over
     EXPERT_DATA (sequence parallelism), and the output matches the
     ATTN_DATA-sharded path row for row."""
+    needed = int(np.prod(list(sizes.values())))
+    if len(jax.devices()) < needed:
+        pytest.skip(f"needs {needed} devices")
     mesh = _make_mesh(**sizes)
     x, gating = _inputs(mesh, 2048)
     w = _weights(mesh, fp8=True)
