@@ -1540,6 +1540,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 req_id = pre_req_ids[pre_req_idx]
                 if req_id not in self.input_batch.req_id_to_index:
                     continue
+                # Re-sent after preemption: the previous step's tokens
+                # belong to the dropped state (see below).
+                if self.requests.get(req_id) is not req_state:
+                    continue
                 req_idx = self.input_batch.req_id_to_index[req_id]
 
                 actual_len = int(valid_lens[pre_req_idx])
@@ -1576,9 +1580,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             if req_id not in self.input_batch.req_id_to_index:
                 continue
 
+            # A request preempted and re-sent as a new request in this step
+            # (vllm-project/vllm#63373) is back in the batch, but update_states
+            # replaced its state, which is being re-prefilled from
+            # prefill_token_ids. The previous step's sampled tokens belong to
+            # the dropped state, so don't write them into the new one.
+            if self.requests.get(req_id) is not req_state:
+                continue
+
             req_idx = self.input_batch.req_id_to_index[req_id]
-            assert req_state is self.requests[
-                req_id], "The req_state should be valid and identical"
 
             # Updated on previous execute
             pre_num_placeholder_tokens = 1

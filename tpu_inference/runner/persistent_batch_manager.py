@@ -212,10 +212,10 @@ class PersistentBatchManager:
             removed_req_indices.append(req_index)
 
         # Drop the worker state of preempted requests. Their blocks were freed;
-        # if they are scheduled again they come back as new requests.
+        # if they are scheduled again they come back as new requests. (The loop
+        # above already removed every preempted request from the batch.)
         for req_id in preempted_req_ids:
-            if req_id not in self.input_batch.req_id_to_index:
-                self.requests.pop(req_id, None)
+            self.requests.pop(req_id, None)
 
         req_ids_to_add: list[str] = []
         # Add new requests to the cached states.

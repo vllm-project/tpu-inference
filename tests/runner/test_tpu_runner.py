@@ -27,6 +27,7 @@ from vllm.distributed.aux_output_connector.connector import \
 
 from tpu_inference.models.common.interface import (ModelInterface,
                                                    MultiModalInterface)
+from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.routed_experts import TPUAuxOutputWorker
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
@@ -1473,3 +1474,59 @@ class TestTPUJaxRunnerDisableMM:
                 assert entry["dummy_shape"] == (1 if logprobs else 2, )
                 assert entry["temp_shape"] == ((num_reqs, )
                                                if do_sampling else None)
+
+
+def _modify_prev_results_runner(req_state_in_prev_step, current_req_state):
+    """A minimal runner for TPUModelRunner._modify_prev_results: request
+    "req" was in the previous async step (with one placeholder token) and is
+    in the current batch at index 0."""
+    input_batch = SimpleNamespace(
+        req_id_to_index={"req": 0},
+        num_tokens_no_spec=np.array([4], dtype=np.int32),
+        num_tokens=np.array([4], dtype=np.int32),
+        token_ids_cpu=np.zeros((1, 8), dtype=np.int32),
+    )
+    pre = SimpleNamespace(
+        req_ids=["req"],
+        next_tokens=None,
+        request_seq_lens=[(0, req_state_in_prev_step, 3)],
+        discard_sampled_tokens_req_indices=[],
+        logits_indices_selector=None,
+        spec_decode_metadata=None,
+        scheduler_output=SimpleNamespace(scheduled_spec_decode_tokens={}),
+        is_continue_decode=False,
+    )
+    return SimpleNamespace(_pre_async_results=pre,
+                           input_batch=input_batch,
+                           requests={"req": current_req_state},
+                           max_model_len=8)
+
+
+def test_modify_prev_results_writes_sampled_token():
+    req_state = SimpleNamespace(output_token_ids=[0])  # 0 = placeholder
+    runner = _modify_prev_results_runner(req_state, req_state)
+    with patch.object(runner_utils,
+                      "host_extract_sampled_tokens",
+                      return_value=[[42]]):
+        TPUModelRunner._modify_prev_results(runner)
+    assert req_state.output_token_ids == [42]
+    assert runner.input_batch.token_ids_cpu[0, 3] == 42
+
+
+def test_modify_prev_results_skips_request_resent_after_preemption():
+    """Under async scheduling a request can be preempted and re-sent as a new
+    request (vllm-project/vllm#63373) in the step right after it ran.
+    update_states then gives it a new CachedRequestState that is re-prefilled
+    from prefill_token_ids; the previous step's sampled token belongs to the
+    dropped state and must not be written into the new one (this used to trip
+    an identity assert and crash the worker)."""
+    old_state = SimpleNamespace(output_token_ids=[0])
+    new_state = SimpleNamespace(output_token_ids=[7, 8])
+    runner = _modify_prev_results_runner(old_state, new_state)
+    with patch.object(runner_utils,
+                      "host_extract_sampled_tokens",
+                      return_value=[[42]]):
+        TPUModelRunner._modify_prev_results(runner)
+    assert new_state.output_token_ids == [7, 8]
+    assert runner.input_batch.token_ids_cpu[0].tolist() == [0] * 8
+    assert runner.input_batch.num_tokens_no_spec[0] == 4

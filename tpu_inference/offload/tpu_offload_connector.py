@@ -298,15 +298,6 @@ class RequestTracker:
         if len(new_token_ids) == 1:
             self.is_decode_phase = True
 
-    def reset_after_preempt(self):
-        """ reset when a preempted request gets scheduled / resumed
-            1. block_id
-            2. execution phase (prefill, decode)
-        """
-        self.block_ids = []
-        self.token_ids = []
-        self.is_decode_phase = False
-
     def __repr__(self) -> str:
         output_str = "    - RequestTracker: " + \
                         f"req_id={self.req_id}, " + \

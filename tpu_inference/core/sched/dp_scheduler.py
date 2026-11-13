@@ -1065,6 +1065,13 @@ class DPScheduler(SchedulerInterface):
         for output in rank_outputs:
             combined_finished_req_ids.update(output.finished_req_ids)
 
+        # Combine preempted request IDs: the worker drops a preempted
+        # request's state (and mamba slot) when it sees it here.
+        combined_preempted_req_ids: set[str] = set()
+        for output in rank_outputs:
+            combined_preempted_req_ids.update(
+                getattr(output, "preempted_req_ids", None) or ())
+
         # Create DP rank assignment mapping for scheduled requests
         assigned_dp_rank = {}
         for req_id in combined_num_scheduled_tokens.keys():
@@ -1139,6 +1146,7 @@ class DPScheduler(SchedulerInterface):
             scheduled_spec_decode_tokens=combined_spec_decode_tokens,
             scheduled_encoder_inputs=combined_encoder_inputs,
             finished_req_ids=combined_finished_req_ids,
+            preempted_req_ids=combined_preempted_req_ids,
             free_encoder_mm_hashes=set(),
             assigned_dp_rank=assigned_dp_rank,
             max_num_scheduled_tokens_per_dp_rank=max_scheduled_tokens_per_rank,

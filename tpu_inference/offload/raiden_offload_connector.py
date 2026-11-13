@@ -200,11 +200,6 @@ class RaidenRequestTracker:
         if len(new_token_ids) == 1:
             self.is_decode_phase = True
 
-    def reset_after_preempt(self):
-        self.block_ids = []
-        self.token_ids = []
-        self.is_decode_phase = False
-
 
 class RaidenOffloadConnector(KVConnectorBase_V1):
     """Manages KV cache offloading via Raiden libraries."""

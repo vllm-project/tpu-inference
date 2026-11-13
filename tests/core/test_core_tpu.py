@@ -397,9 +397,14 @@ class TestDisaggOrchestrator(unittest.TestCase):
 
         # Mock model output
         mock_model_output = MagicMock()
-        mock_model_output.req_id_to_index = {"test_req": 0}
+        # ModelRunnerOutput is indexed by position in req_ids.
+        mock_model_output.req_ids = ["test_req"]
         mock_model_output.sampled_token_ids = [[1]]
-        self.mock_prefill_engine.model_executor.execute_model.return_value = mock_model_output
+        # _prefill calls execute_model(..., non_block=True) and then
+        # future.result(), so the output must come from the future.
+        mock_future = MagicMock()
+        mock_future.result.return_value = mock_model_output
+        self.mock_prefill_engine.model_executor.execute_model.return_value = mock_future
 
         # Mock request
         mock_request = MagicMock()
@@ -417,6 +422,9 @@ class TestDisaggOrchestrator(unittest.TestCase):
         self.mock_prefill_engine.model_executor.execute_model.assert_called_once(
         )
         self.assertTrue(orchestrator._transfer_backlogs[0].qsize() > 0)
+        # The prefilled request's KV cache was queued for transfer.
+        kv_cache_map = orchestrator._transfer_backlogs[0].get_nowait()
+        self.assertIn("test_req", kv_cache_map)
 
     def test_transfer_logic(self):
         """Tests the transfer logic of the orchestrator."""
