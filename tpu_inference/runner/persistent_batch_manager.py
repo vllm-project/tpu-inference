@@ -307,17 +307,8 @@ class PersistentBatchManager:
                     req_index] = end_token_index
                 self.input_batch.num_tokens[req_index] = end_token_index
 
-            # Add spec_token_ids to token_ids_cpu.
-            spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
-                req_id, ())
-            if spec_token_ids:
-                num_spec_tokens = len(spec_token_ids)
-                start_index = self.input_batch.num_tokens_no_spec[req_index]
-                end_token_index = start_index + num_spec_tokens
-                self.input_batch.token_ids_cpu[
-                    req_index, start_index:end_token_index] = spec_token_ids
-                # NOTE(woosuk): `num_tokens` here may include spec tokens.
-                self.input_batch.num_tokens[req_index] += num_spec_tokens
+            self._apply_scheduled_spec_tokens(scheduler_output, req_id,
+                                              req_index)
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
@@ -335,6 +326,11 @@ class PersistentBatchManager:
                 req_index = None
             dp_rank = dp_rank_map.get(req_id, 0) if dp_rank_map else 0
             self.input_batch.add_request(req_state, req_index, dp_rank=dp_rank)
+            self._apply_scheduled_spec_tokens(
+                scheduler_output,
+                req_id,
+                self.input_batch.req_id_to_index[req_id],
+            )
 
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
@@ -349,3 +345,21 @@ class PersistentBatchManager:
             self.input_batch.assert_mamba_state_invariants(
                 self.requests, dp_rank_map)
         return batch_changed
+
+    def _apply_scheduled_spec_tokens(
+        self,
+        scheduler_output: "VllmSchedulerOutput",
+        req_id: str,
+        req_index: int,
+    ) -> None:
+        # Add spec_token_ids to token_ids_cpu.
+        spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
+            req_id, ())
+        if spec_token_ids:
+            num_spec_tokens = len(spec_token_ids)
+            start_index = self.input_batch.num_tokens_no_spec[req_index]
+            end_token_index = start_index + num_spec_tokens
+            self.input_batch.token_ids_cpu[
+                req_index, start_index:end_token_index] = spec_token_ids
+            # NOTE(woosuk): `num_tokens` here may include spec tokens.
+            self.input_batch.num_tokens[req_index] += num_spec_tokens

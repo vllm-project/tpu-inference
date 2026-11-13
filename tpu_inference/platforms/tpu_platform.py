@@ -550,6 +550,10 @@ class TpuPlatform(Platform):
             if is_pooling_model:
                 raise ValueError(
                     "continue_decode is not supported for pooling models")
+            if vllm_config.speculative_config is not None:
+                raise ValueError(
+                    "continue_decode is not supported with speculative decoding"
+                )
 
             from tpu_inference.core.sched.utils import \
                 patch_vllm_scheduler_for_continue_decode
