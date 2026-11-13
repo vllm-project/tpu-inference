@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 
 from tpu_inference.layers.jax.sample.rejection_sampler import (
-    PLACEHOLDER_TOKEN_ID, RejectionSampler)
+    PLACEHOLDER_TOKEN_ID, RejectionSampler, _compute_probs)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 
@@ -500,6 +500,78 @@ def test_factory():
 
 
 # ======================== TEST CLASSES ========================
+
+
+@pytest.mark.parametrize("top_k", [-1, 2])
+@pytest.mark.parametrize("top_p", [1.0, 0.5])
+def test_compute_probs_mixed_greedy(test_helper, top_k, top_p):
+    metadata = test_helper.create_sampling_metadata(all_greedy=False,
+                                                    batch_size=2,
+                                                    top_k=top_k,
+                                                    top_p=top_p)
+    metadata.temperature = jnp.array([-1.0, 0.7])
+    logits = jnp.array([[1.0, 3.0, 2.0], [1.0, 2.0, 3.0]])
+    probs = jax.jit(_compute_probs)(logits, jnp.array([1, 1]), metadata)
+
+    np.testing.assert_array_equal(probs[0], [0.0, 1.0, 0.0])
+    random_metadata = test_helper.create_sampling_metadata(all_greedy=False,
+                                                           temperature=0.7,
+                                                           top_k=top_k,
+                                                           top_p=top_p)
+    random_probs = jax.jit(_compute_probs)(logits[1:], jnp.array([1]),
+                                           random_metadata)
+    np.testing.assert_allclose(probs[1:], random_probs, rtol=1e-6, atol=1e-7)
+
+
+@pytest.mark.parametrize("greedy_first", [True, False])
+@pytest.mark.parametrize("all_accepted", [True, False])
+@pytest.mark.parametrize("has_draft_probs", [True, False])
+@pytest.mark.parametrize("top_k,top_p", [(-1, 1.0), (1, 0.5)])
+def test_rejection_sampler_mixed_greedy(rejection_sampler, test_helper,
+                                        greedy_first, all_accepted,
+                                        has_draft_probs, top_k, top_p):
+    """Batching a random request must not change a greedy request's output."""
+    greedy_drafts = [1, 1 if all_accepted else 0]
+    greedy_logits = [[0.0, 100.0, -100.0]] * 2
+    random_logits = [[100.0, 0.0, -100.0]]
+    greedy_expected = [1, 1, 2] if all_accepted else [1, 1]
+    if greedy_first:
+        draft_ids = greedy_drafts + [0]
+        logits = greedy_logits + random_logits
+        lengths = [2, 1]
+        temperatures = [-1.0, 1.0]
+        expected = [greedy_expected, [0, 2]]
+    else:
+        draft_ids = [0] + greedy_drafts
+        logits = random_logits + greedy_logits
+        lengths = [1, 2]
+        temperatures = [1.0, -1.0]
+        expected = [[0, 2], greedy_expected]
+
+    metadata = test_helper.create_sampling_metadata(all_greedy=False,
+                                                    batch_size=2,
+                                                    top_k=top_k,
+                                                    top_p=top_p)
+    metadata.temperature = jnp.array(temperatures)
+    draft_ids = jnp.array(draft_ids, dtype=jnp.int32)
+    draft_probs = (jax.nn.one_hot(draft_ids, 3) if has_draft_probs else None)
+    output = rejection_sampler(
+        draft_token_ids=draft_ids,
+        num_draft_tokens=jnp.array(lengths, dtype=jnp.int32),
+        draft_probs=draft_probs,
+        target_logits=jnp.array(logits),
+        bonus_token_ids=jnp.array([2, 2], dtype=jnp.int32),
+        sampling_metadata=metadata,
+        key=jax.random.PRNGKey(0),
+    )
+    parsed = rejection_sampler.parse_output(
+        output,
+        vocab_size=3,
+        num_draft_tokens_cpu=np.array(lengths),
+        batch_size=2,
+        padded_tokens_length=3,
+    )
+    assert parsed == expected
 
 
 class TestRejectionSampler:
