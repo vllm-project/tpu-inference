@@ -154,6 +154,15 @@ RELEASE_TAG_PREFIX="release-"
 RELEASE_DOCKERHUB_REPO="${RELEASE_DOCKERHUB_REPO:-vllm/vllm-tpu}"
 RELEASE_DOCKERHUB_USERNAME="${RELEASE_DOCKERHUB_USERNAME:-tpuinference}"
 
+# The wheel carrier for the TPU check (VLLM_SERVE_TEST=1): python:3.12-slim
+# with the built wheels as plain files. It is never published, and it has its
+# own repository and tag prefix, so nothing that selects the release image or
+# its release-* tags can select a carrier.
+# shellcheck disable=SC2034 # Read by build_wheel_carrier.sh.
+RELEASE_WHEEL_CARRIER="${RELEASE_GAR}/vllm-tpu-wheel-carrier"
+# shellcheck disable=SC2034 # Read by build_wheel_carrier.sh.
+WHEEL_CARRIER_TAG_PREFIX="wheels-"
+
 # The digest part of <repo>@sha256:<hex>.
 digest_of() {
   echo "${1##*@}"
@@ -192,4 +201,43 @@ dockerhub_login() {
     | DOCKER_CONFIG="${config_dir}" docker login -u "${username}" --password-stdin >/dev/null 2>&1 \
     || die "Docker Hub login failed for ${username}."
   unset DOCKERHUB_TOKEN_TPU_INFERENCE
+}
+
+# --- tpu-inference-release-verify ---------------------------------------------
+
+# Meta-data <key> of the release build that triggered this build. Fails if no
+# release build triggered it.
+triggering_build_meta() {
+  local key="$1"
+  [[ -n "${BUILDKITE_TRIGGERED_FROM_BUILD_ID:-}" ]] \
+    || die "not triggered by a release build, so there is no ${key} to read."
+  buildkite-agent meta-data get "${key}" --build "${BUILDKITE_TRIGGERED_FROM_BUILD_ID}" \
+    || die "could not read meta-data ${key} of release build ${BUILDKITE_TRIGGERED_FROM_BUILD_ID}."
+}
+
+# The image to verify: <override> if set (RELEASE_IMAGE_REF or
+# WHEEL_CARRIER_REF, for a build started by hand), otherwise meta-data <key>
+# (release-image or release-wheel-carrier) of the triggering release build.
+# It must be pinned by digest, so the check runs exactly what the release
+# build staged.
+release_build_image() {
+  local key="$1" override="$2" ref
+  if [[ -n "${override}" ]]; then
+    ref="${override}"
+  else
+    ref="$(triggering_build_meta "${key}")" || exit 1
+  fi
+  [[ "${ref}" == *@sha256:* ]] || die "the ${key} image '${ref}' is not pinned by digest."
+  echo "${ref}"
+}
+
+# The release version under test, for the log: meta-data release-version of
+# the triggering release build, e.g. 0.1.0rc1 for releases/v0.1.0 with
+# RELEASE_VERSION=v0.1.0rc1.
+release_build_version() {
+  if [[ -n "${BUILDKITE_TRIGGERED_FROM_BUILD_ID:-}" ]]; then
+    triggering_build_meta release-version
+  else
+    echo "unknown (not triggered by a release build)"
+  fi
 }
