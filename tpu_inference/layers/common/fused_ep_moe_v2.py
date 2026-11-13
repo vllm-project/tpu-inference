@@ -40,6 +40,7 @@ import tpu_inference.envs as envs
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import as_axes
 from tpu_inference.logger import init_logger
+from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
 
@@ -167,8 +168,10 @@ def fused_ep_moe_v2_func(hidden_states: jax.Array,
     axes. Returns [num_tokens, hidden], sharded like hidden_states. Assumes
     unsupported_reason() returned None for this layer.
 
-    keep_token_sharding: hidden_states and gating_output arrive token-sharded
-    over EXPERT_DATA instead, and the output stays that way. EXPERT_DATA is
+    keep_token_sharding: when num_tokens divides EXPERT_DATA, hidden_states
+    and gating_output arrive token-sharded over EXPERT_DATA instead, and the
+    output stays that way (otherwise falls back to the ATTN_DATA path, matching
+    sharding.sp_token_axes). EXPERT_DATA is
     `data` followed by the expert axes, and ep_layout only accepts meshes whose
     used axes are all expert axes, so its rows are already in the 1-D mesh's
     rank order and every device's rows are distinct.
@@ -183,17 +186,23 @@ def fused_ep_moe_v2_func(hidden_states: jax.Array,
         hidden_states = jnp.pad(hidden_states,
                                 ((0, 0), (0, padded_hidden - hidden_size)))
     fp8 = w1.dtype == jnp.float8_e4m3fn
+    if keep_token_sharding and (num_tokens % get_mesh_shape_product(
+            mesh, ShardingAxisName.EXPERT_DATA)):
+        keep_token_sharding = False
     if keep_token_sharding:
-        # One distinct share of the tokens per device: singleton groups.
+        # One distinct share of the tokens per device: singleton groups
+        # (tokamax reads token_replica_groups=None that way).
         token_axes = ShardingAxisName.EXPERT_DATA
         groups = None
+        rows = "sharded over EXPERT_DATA"
     else:
         token_axes = ShardingAxisName.ATTN_DATA
+        group_size = 1 if groups is None else len(groups[0])
+        rows = f"split over replica groups of {group_size}"
     logger.info_once(
         "[MoE]: fused_ep_moe_v2 over %d devices, %d experts each, token rows "
-        "split over replica groups of %d; %d-row tiles, %s routing plan, %s "
-        "weights.", mesh.devices.size, num_experts // mesh.devices.size,
-        1 if groups is None else len(groups[0]), envs.FUSED_EP_MOE_V2_CAPACITY,
+        "%s; %d-row tiles, %s routing plan, %s weights.", mesh.devices.size,
+        num_experts // mesh.devices.size, rows, envs.FUSED_EP_MOE_V2_CAPACITY,
         "sharded" if envs.FUSED_EP_MOE_V2_SHARDED_PLAN else "replicated",
         "fp8" if fp8 else "bf16")
     expert = ShardingAxisName.EXPERT
