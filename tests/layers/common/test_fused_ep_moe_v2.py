@@ -193,9 +193,6 @@ def test_matches_dense_reference(sizes, fp8):
     assert error < (0.07 if fp8 else 0.01), error
 
 
-# model=2 is the smallest case: the two devices form one replica group on the
-# ATTN_DATA path but hold distinct rows over EXPERT_DATA. It needs only 2
-# devices, so it also runs on a single dual-core chip.
 _SP_MESHES = [dict(model=2)] + _SUPPORTED_MESHES
 
 
