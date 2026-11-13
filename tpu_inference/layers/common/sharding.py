@@ -198,9 +198,9 @@ def keeps_tokens_sharded(mesh: Mesh | None, enable_sp: bool, *,
     otherwise `enable_sp` keeps its MLP_TENSOR input / output sharding:
 
     - `moe_keeps_tokens`: the MoE backend must honor `keep_token_sharding`:
-      GMM_EP (`expert_parallel_gmm`) or ROUTING_MOE (`USE_ROUTING_MOE`). GMM_TP
-      (expert parallelism off) and the other EP backends (USE_MOE_EP_KERNEL,
-      USE_FUSED_EP_MOE_V2) ignore it. vLLM callers decide this with
+      GMM_EP (`expert_parallel_gmm`), ROUTING_MOE (`USE_ROUTING_MOE`) or
+      FUSED_EP_MOE_V2 (`USE_FUSED_EP_MOE_V2`). GMM_TP (expert parallelism off)
+      and USE_MOE_EP_KERNEL ignore it. vLLM callers decide this with
       `select_moe_backend` via `vllm_keeps_tokens_sharded`.
     - The `expert` and `pcp` mesh axes must be size 1. The linears gather and
       reduce-scatter tokens over ATTN_HEAD (`model`, `expert`, `dcp`) inside

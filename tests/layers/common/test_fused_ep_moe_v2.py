@@ -118,10 +118,15 @@ def _dense_reference(x, gating, w1, w2, s1, s2):
     return out
 
 
-def _run_kernel(mesh: Mesh, x, gating, w1, w2, s1, s2):
+def _run_kernel(mesh: Mesh, x, gating, w1, w2, s1, s2, keep=False):
     with jax.set_mesh(mesh):
         f = jax.jit(lambda *a: fused_ep_moe_v2.fused_ep_moe_v2_func(
-            *a, topk=TOPK, renormalize=True, mesh=mesh, scoring_fn="softmax"))
+            *a,
+            topk=TOPK,
+            renormalize=True,
+            mesh=mesh,
+            scoring_fn="softmax",
+            keep_token_sharding=keep))
         return jax.block_until_ready(f(x, w1, w2, s1, s2, None, None, gating))
 
 
@@ -186,6 +191,39 @@ def test_matches_dense_reference(sizes, fp8):
     assert out.sharding.is_equivalent_to(x.sharding, x.ndim)
     error = _rel_l2(out, want)
     assert error < (0.07 if fp8 else 0.01), error
+
+
+_SP_MESHES = [dict(model=2)] + _SUPPORTED_MESHES
+
+
+@pytest.mark.usefixtures("tokamax_kernel")
+@pytest.mark.parametrize("sizes", _SP_MESHES, ids=lambda v: _mesh_id(v))
+def test_keep_token_sharding_matches_replicated(sizes):
+    """With keep_token_sharding the tokens arrive and leave sharded over
+    EXPERT_DATA (sequence parallelism), and the output matches the
+    ATTN_DATA-sharded path row for row."""
+    needed = int(np.prod(list(sizes.values())))
+    if len(jax.devices()) < needed:
+        pytest.skip(f"needs {needed} devices")
+    mesh = _make_mesh(**sizes)
+    x, gating = _inputs(mesh, 2048)
+    w = _weights(mesh, fp8=True)
+    ref = _run_kernel(mesh, x, gating, *w)
+    sp = NamedSharding(mesh, P(ShardingAxisName.EXPERT_DATA, None))
+    out = _run_kernel(mesh,
+                      jax.device_put(x, sp),
+                      jax.device_put(gating, sp),
+                      *w,
+                      keep=True)
+    assert out.shape == x.shape and out.dtype == x.dtype
+    assert out.sharding.is_equivalent_to(sp, x.ndim), out.sharding
+    # Each token is routed and computed the same way on both paths; only
+    # which device runs it changes, so allow bf16 accumulation-order noise.
+    np.testing.assert_allclose(np.asarray(out, np.float32),
+                               np.asarray(ref, np.float32),
+                               rtol=2e-2,
+                               atol=2e-2)
+    assert _rel_l2(out, _dense_reference(x, gating, *w)) < 0.07
 
 
 @requires_8_devices
