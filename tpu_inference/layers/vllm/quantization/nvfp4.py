@@ -44,7 +44,8 @@ from vllm.model_executor.layers.quantization import (
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizeMethodBase
 from vllm.model_executor.layers.quantization.modelopt import (
-    ModelOptNvFp4Config, ModelOptNvFp4FusedMoE, ModelOptNvFp4LinearMethod)
+    ACT, WEIGHT, CkptCtx, KNvfp4Dynamic, KNvfp4Static, ModelOptNvFp4Config,
+    ModelOptNvFp4FusedMoE, Shapes)
 from vllm.model_executor.utils import set_weight_attrs
 
 import tpu_inference.envs as envs
@@ -115,35 +116,33 @@ class VllmNvfp4Config(ModelOptNvFp4Config, VllmQuantConfig):
 class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
     """NVFP4 linear for TPU.
 
-    Reuses upstream ModelOptNvFp4LinearMethod.create_weights for parameter
-    registration. process_weights_after_loading unpacks FP4 and computes
-    block scales. apply routes to vllm_linear_apply for OTF dequantization.
+    Reuses upstream KNvfp4Static and KNvfp4Dynamic for parameter registration.
+    process_weights_after_loading unpacks FP4 and computes block scales.
+    apply routes to vllm_linear_apply for OTF dequantization.
     """
 
     def __init__(self, quant_config: 'VllmNvfp4Config',
                  linear_config: VllmQuantLinearConfig):
-        # Monkeypatch expose_input_quant_key in modelopt module safely on TPU
-        from vllm.model_executor.layers.quantization import \
-            modelopt as vllm_modelopt
-        original_expose = vllm_modelopt.expose_input_quant_key
-
-        def safe_expose_input_quant_key(layer, kernel):
-            if kernel is None:
-                return
-            original_expose(layer, kernel)
-
-        vllm_modelopt.expose_input_quant_key = safe_expose_input_quant_key
-
         VllmUnquantizedLinearMethod.__init__(self, linear_config)
         self.quant_config = quant_config
-        self.kernel = None
 
     def create_weights(self, layer, input_size_per_partition,
                        output_partition_sizes, input_size, output_size,
                        params_dtype, **extra_weight_attrs):
-        ModelOptNvFp4LinearMethod.create_weights(
-            self, layer, input_size_per_partition, output_partition_sizes,
-            input_size, output_size, params_dtype, **extra_weight_attrs)
+        del input_size, output_size
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        layer.logical_widths = output_partition_sizes
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = sum(output_partition_sizes)
+        layer.output_partition_sizes = output_partition_sizes
+        shapes = Shapes(output_partition_sizes, input_size_per_partition,
+                        params_dtype)
+        group_size = getattr(self.quant_config, "group_size", 16)
+        ctx = CkptCtx(group_size=group_size)
+
+        KNvfp4Static().create_weights(layer, WEIGHT, ctx, shapes,
+                                      weight_loader)
+        KNvfp4Dynamic().create_weights(layer, ACT, ctx, shapes, weight_loader)
 
         def scalar_weight_loader(param, loaded_weight, *args, **kwargs):
             assert loaded_weight.numel() == 1

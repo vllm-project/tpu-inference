@@ -13,6 +13,8 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from tpu_inference.kernels.flash_attention.tuned_params import (
+    TuningKey, get_tuned_params)
 from tpu_inference.utils import align_to
 
 DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
@@ -187,6 +189,69 @@ def encoder_only_flash_attention(
     return output
 
 
+def calculate_vmem_usage_bytes(block_sizes: BlockSizes,
+                               q_dtype,
+                               kv_dtype,
+                               d_model: int,
+                               kv_seq_len: int,
+                               ab=None,
+                               segment_ids=None) -> int:
+    """Estimates VMEM usage in bytes for the Flash Attention kernel.
+
+    Args:
+        block_sizes: Tile sizes parameterizing the kernel.
+        q_dtype: Data type of the Query tensor (Q).
+        kv_dtype: Data type of the Key (K) and Value (V) tensors.
+        d_model: Core residual stream feature dimension (head dimension).
+        kv_seq_len: Total sequence length of Key/Value.
+        ab: Optional attention bias tensor.
+        segment_ids: Optional segment IDs for masked attention.
+
+    Returns:
+        Estimated VMEM usage in bytes.
+    """
+
+    # 1. Get Hardware Info (Avoid hardcoded 128)
+    tpu_info = pltpu.get_tpu_info()
+    lane_count = tpu_info.num_lanes
+    sublane_count = tpu_info.num_sublanes
+
+    # 2. Derive Bytes programmatically (Robust against precision changes)
+    q_bytes = jnp.dtype(q_dtype).itemsize
+    kv_bytes = jnp.dtype(kv_dtype).itemsize
+    logit_bytes = jnp.dtype(
+        jnp.float32).itemsize  # Logits stay FP32 for precision
+
+    # 3. Account for Hardware Padding/Tiling
+    aligned_d_model = align_to(d_model, lane_count)
+
+    # 4. Calculate Elements (Aligned)
+    q_o_elements = block_sizes.block_b * block_sizes.block_q * aligned_d_model
+    kv_elements = block_sizes.block_b * kv_seq_len * aligned_d_model
+    logits_elements = block_sizes.block_q * kv_seq_len  # Often acts as a tile
+
+    # 5. Convert to Bytes
+    q_o_vmem = (q_o_elements * q_bytes) * 2  # Q and O
+    kv_vmem = (kv_elements * kv_bytes) * 2  # K and V
+    logits_vmem = (logits_elements * logit_bytes) * 2  # S and P
+
+    # 6. Optional Inputs
+    ab_vmem = 0
+    if ab is not None:
+        ab_bytes = jnp.dtype(ab.dtype).itemsize
+        # Align according to actual kernel layout if tiled
+        ab_vmem = block_sizes.block_b * block_sizes.block_q * kv_seq_len * ab_bytes
+
+    segment_vmem = 0
+    if segment_ids is not None:
+        # Segment IDs are int32 (4 bytes)
+        seg_bytes = jnp.dtype(jnp.int32).itemsize
+        segment_vmem = (block_sizes.block_b * block_sizes.block_q * lane_count * seg_bytes) + \
+                       (block_sizes.block_b * sublane_count * kv_seq_len * seg_bytes)
+
+    return q_o_vmem + kv_vmem + logits_vmem + ab_vmem + segment_vmem
+
+
 @jax.jit(static_argnames=[
     "causal",
     "sm_scale",
@@ -244,15 +309,37 @@ def flash_attention(
                 f"KV segment ids shape mismatch: expected ({batch_size=},"
                 f" {kv_seq_len=},), got {segment_ids.kv.shape}")
     if block_sizes is None:
-        block_sizes = BlockSizes.get_default(batch_size, num_heads, q_seq_len,
-                                             kv_seq_len, d_model)
-        # TODO (KWang1998 & hfan): tune the block sizes properly.
-        if kv_seq_len <= 92800:
-            # Override block_k/block_k_major to use `_flash_attention_kernel_single_batch_single_step`.
-            block_sizes = BlockSizes(block_q=block_sizes.block_q,
-                                     block_b=block_sizes.block_b,
-                                     block_k_major=kv_seq_len,
-                                     block_k=kv_seq_len)
+        tuned_params = get_tuned_params(
+            TuningKey(
+                batch_size=batch_size,
+                num_heads=num_heads,
+                q_seq_len=q_seq_len,
+                kv_seq_len=kv_seq_len,
+                head_dim=d_model,
+                q_dtype=q.dtype.name,
+                kv_dtype=k.dtype.name,
+            ))
+        if tuned_params is not None:
+            block_sizes = BlockSizes(block_q=tuned_params.block_q,
+                                     block_k_major=tuned_params.block_k_major,
+                                     block_k=tuned_params.block_k,
+                                     block_b=tuned_params.block_b)
+        else:
+            block_sizes = BlockSizes.get_default(batch_size, num_heads,
+                                                 q_seq_len, kv_seq_len,
+                                                 d_model)
+            # Dynamically estimate VMEM to decide if we can use the single-step optimization.
+            estimated_vmem = calculate_vmem_usage_bytes(
+                block_sizes, q.dtype, k.dtype, d_model, kv_seq_len, ab,
+                segment_ids)
+            vmem_limit = pltpu.get_tpu_info(
+            ).vmem_capacity_bytes if vmem_limit_bytes is None else vmem_limit_bytes
+            if estimated_vmem <= vmem_limit * 0.9:
+                # Override block_k/block_k_major to use `_flash_attention_kernel_single_batch_single_step`.
+                block_sizes = BlockSizes(block_q=block_sizes.block_q,
+                                         block_b=block_sizes.block_b,
+                                         block_k_major=kv_seq_len,
+                                         block_k=kv_seq_len)
     return _flash_attention(q, k, v, ab, segment_ids, False, causal, sm_scale,
                             block_sizes, vmem_limit_bytes, debug)
 

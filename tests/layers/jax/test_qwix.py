@@ -12,6 +12,7 @@ from jax.sharding import PartitionSpec as P
 from qwix._src.providers import ptq
 
 import tpu_inference.models.jax.utils.qwix.qwix_utils as quantize_qwix  # noqa: E402
+from tpu_inference import utils as real_utils
 from tpu_inference.models.common.model_loader import apply_qwix_quantization
 from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     DEFAULT_MAX_NUM_BLOCKS_PER_REQ, DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS,
@@ -371,6 +372,7 @@ class TestApplyQwixQuantizationLogic(unittest.TestCase):
         mock_utils.get_mesh_shape_product.return_value = 1
         mock_utils.get_padded_head_dim.side_effect = lambda x: x
         mock_utils.get_padded_num_heads.side_effect = lambda h, s: h
+        mock_utils.get_layer_kv_params.side_effect = real_utils.get_layer_kv_params
 
         mock_abstract_model = MagicMock(name="abstract_model")
         mock_model_fn = MagicMock(name="model_factory",

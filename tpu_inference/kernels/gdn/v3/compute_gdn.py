@@ -265,7 +265,14 @@ def chunked_gdn(
     dt_bias: jax.Array,
     cfg: config.GDNConfig,
 ) -> tuple[jax.Array, jax.Array]:
-    """Perform chunked GDN over input [seq, num_heads, chunk, head_dim]."""
+    """Perform chunked GDN over input [seq, num_heads, chunk, head_dim].
+
+    The returned state is [seq, 1, num_v_heads, kq_head_dim, v_head_dim]: the
+    chunked path only produces the final state, so it is never taken when
+    more than one checkpoint per sequence is required.
+    """
+
+    assert not cfg.use_recurrent
 
     mask_dtype = get_mask_dtype(cfg.dtypes.compute)
     iota = jax.lax.broadcasted_iota(mask_dtype,
@@ -316,7 +323,8 @@ def chunked_gdn(
         out_list.append(out.swapaxes(0, 1))
         state_list.append(state)
     out = jnp.stack(out_list, axis=0)
-    state = jnp.stack(state_list, axis=0)
+    # Single checkpoint per sequence, laid out like the recurrent path.
+    state = jnp.stack(state_list, axis=0)[:, jnp.newaxis]
     return out, state
 
 
@@ -330,9 +338,16 @@ def recurrent_gdn_per_seq(
     state: jax.Array,  # [num_v_heads, kq_head_dim, v_head_dim]
     cfgs: config.GDNConfig,
 ) -> tuple[jax.Array, jax.Array]:
-    """Perform recurrent GDN over input [num_heads, chunk, 1, head_dim]."""
+    """Perform recurrent GDN over input [num_heads, chunk, 1, head_dim].
+
+    The returned state stacks the post-token state of the last
+    `cfgs.window_size` window positions ([window_size, num_v_heads,
+    kq_head_dim, v_head_dim]); with `window_size == 1` that is just the final
+    state.
+    """
 
     out_list = []
+    state_list = []
     for c_idx in range(cfgs.chunk_size):
         # [num_v_heads, 1, kq_head_dim]
         q_curr = q_compact[:, c_idx]
@@ -382,8 +397,14 @@ def recurrent_gdn_per_seq(
         ).astype(cfgs.dtypes.compute)
 
         out_list.append(out[:, 0, :])
+        # NOTE: Rows past real_sizes are masked out by the caller, so the state
+        # stops changing there and trailing checkpoints simply repeat the state
+        # of the last real token. Checkpoints of the positions dropped here are
+        # dead code the compiler eliminates.
+        if c_idx >= cfgs.chunk_size - cfgs.window_size:
+            state_list.append(state)
 
-    return jnp.stack(out_list, axis=0), state
+    return jnp.stack(out_list, axis=0), jnp.stack(state_list, axis=0)
 
 
 def recurrent_gdn(
@@ -398,7 +419,13 @@ def recurrent_gdn(
     dt_bias: jax.Array,
     cfg: config.GDNConfig,
 ) -> tuple[jax.Array, jax.Array]:
-    """Perform recurrent GDN over input [seq, num_heads, chunk, 1, head_dim]."""
+    """Perform recurrent GDN over input [seq, num_heads, chunk, 1, head_dim].
+
+    The returned state has one checkpoint per window position: [seq,
+    window_size, num_v_heads, kq_head_dim, v_head_dim]. Positions >=
+    real_sizes repeat the last valid state; they are never written back to
+    HBM.
+    """
 
     mask_dtype = get_mask_dtype(cfg.dtypes.compute)
     iota = jax.lax.broadcasted_iota(

@@ -24,7 +24,7 @@ import pytest
 from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
-from vllm.config import ModelConfig
+from vllm.config import AuxOutputConfig, ModelConfig
 
 from tpu_inference.layers.jax.quantization.unquantized import UnquantizedConfig
 from tpu_inference.models.jax.llama4 import (Llama4ForCausalLM,
@@ -63,6 +63,7 @@ class MockVllmConfig:
                  random_weights: bool = False,
                  tensor_parallelism: int = 1):
         self.model_config = MagicMock(spec=ModelConfig)
+        self.aux_output_config = AuxOutputConfig()
         self.load_config = MagicMock()
         self.load_config.download_dir = None
 

@@ -38,7 +38,7 @@ from safetensors import safe_open
 from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
-from vllm.model_executor.models.utils import AutoWeightsLoader
+from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 
 from tpu_inference import envs, utils
 from tpu_inference.layers.common.utils import (cpu_mesh_context,
@@ -46,6 +46,9 @@ from tpu_inference.layers.common.utils import (cpu_mesh_context,
 from tpu_inference.layers.jax import JaxModule, JaxModuleList
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.logger import init_logger
+from tpu_inference.models.common.layer_filter import (
+    filter_safetensors_by_layer, num_hidden_layers_override,
+    should_skip_layer_weight)
 from tpu_inference.models.jax.utils import file_utils
 from tpu_inference.utils import t2j
 
@@ -329,7 +332,11 @@ def _load_and_shard_weight(vllm_config,
                            keep_hf_weight_suffix_when_match: list[str],
                            keep_original_dtype_keys_regex: list[str]
                            | None = None,
-                           pp_missing_layers: list[str] | None = None):
+                           pp_missing_layers: list[str] | None = None,
+                           num_hidden_layers: int | None = None):
+    if should_skip_layer_weight(hf_key, num_hidden_layers):
+        return
+
     name_map = metadata_map.name_map
     reshape_keys = metadata_map.reshape_map
     bias_reshape_keys = metadata_map.bias_reshape_map
@@ -479,6 +486,7 @@ def _load_hf_weights_on_thread(
     filter_regex: Optional[str] = None,
     keep_original_dtype_keys_regex: Optional[list[str]] = None,
     pp_missing_layers: list[str] | None = None,
+    num_hidden_layers: int | None = None,
 ):
     """Loads weights from a single weights file."""
     try:
@@ -499,6 +507,7 @@ def _load_hf_weights_on_thread(
             keep_original_dtype_keys_regex=keep_original_dtype_keys_regex,
             pp_missing_layers=pp_missing_layers,
             keep_hf_weight_suffix_when_match=keep_hf_weight_suffix_when_match,
+            num_hidden_layers=num_hidden_layers,
         )
 
 
@@ -527,6 +536,11 @@ def load_hf_weights(
         shardings = nnx.get_named_sharding(params, mesh)
     except TypeError:
         shardings = params
+    if is_draft_model:
+        model_config = vllm_config.speculative_config.draft_model_config
+    else:
+        model_config = vllm_config.model_config
+    num_hidden_layers = num_hidden_layers_override(model_config)
     weights_iterator = None
     if hasattr(vllm_config.model_config, "runai_model_weights_iterator"):
         weights_iterator = vllm_config.model_config.runai_model_weights_iterator
@@ -553,15 +567,17 @@ def load_hf_weights(
                 pp_missing_layers=pp_missing_layers,
                 keep_hf_weight_suffix_when_match=
                 keep_hf_weight_suffix_when_match,
+                num_hidden_layers=num_hidden_layers,
             )
     else:
         # File-based path (multi-threaded)
-        if is_draft_model:
-            model_path = vllm_config.speculative_config.draft_model_config.model
-        else:
-            model_path = vllm_config.model_config.model
+        model_path = model_config.model
         weights_files = get_model_weights_files(
             model_path, vllm_config.load_config.download_dir)
+        if num_hidden_layers is not None and os.path.isdir(model_path):
+            # Skip shards that only hold pruned layers.
+            weights_files = filter_safetensors_by_layer(
+                model_path, weights_files, num_hidden_layers)
         max_workers = min(64, len(weights_files))
         # NOTE(xiang): Disable multi-threading mode if running on multi-host.
         # Because multi-threading would cause different JAX processes to load
@@ -583,6 +599,7 @@ def load_hf_weights(
                     pp_missing_layers=pp_missing_layers,
                     keep_hf_weight_suffix_when_match=
                     keep_hf_weight_suffix_when_match,
+                    num_hidden_layers=num_hidden_layers,
                 ) for weights_file in weights_files
             ]
             for future in futures:
@@ -874,6 +891,10 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
     def __init__(self,
                  model,
                  pytorch_pooler: Optional[torch.nn.Module] = None,
+                 skip_prefixes: Optional[list[str]] = None,
+                 skip_substrs: Optional[list[str]] = None,
+                 ignore_unexpected_prefixes: Optional[list[str]] = None,
+                 ignore_unexpected_suffixes: Optional[list[str]] = None,
                  **kwargs):
         assert isinstance(model, JaxModule)
         self.pytorch_pooler = pytorch_pooler
@@ -920,7 +941,26 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                                       permute_dims=permute_dims,
                                       param_name=name))
 
-        super().__init__(model, **kwargs)
+        loader_kwargs = {}
+        if ignore_unexpected_prefixes is not None:
+            loader_kwargs[
+                "ignore_unexpected_prefixes"] = ignore_unexpected_prefixes
+        if ignore_unexpected_suffixes is not None:
+            loader_kwargs[
+                "ignore_unexpected_suffixes"] = ignore_unexpected_suffixes
+        for k, v in kwargs.items():
+            if k not in ("skip_prefixes", "skip_substrs"):
+                loader_kwargs[k] = v
+
+        super().__init__(model, **loader_kwargs)
+        # Older vLLM AutoWeightsLoader versions still own skip_prefixes /
+        # skip_substrs and reset them in __init__ (newer versions removed the
+        # kwargs and never touch the attributes), so ours must be assigned
+        # after super().__init__ and merged with whatever it set.
+        self.skip_prefixes = getattr(self, "skip_prefixes", []) + (
+            list(skip_prefixes) if skip_prefixes else [])
+        self.skip_substrs = getattr(self, "skip_substrs", []) + (
+            list(skip_substrs) if skip_substrs else [])
         # Book mark those already done processing, skip if visited.
         self._process_weights_after_loading_per_module = defaultdict(
             lambda: False)
@@ -943,7 +983,10 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                 remap.append((fused_name, shard_name, shard_id))
         return remap
 
-    def load_weights(self, weights: Iterable, **kwargs) -> set:
+    def load_weights(self,
+                     weights: Iterable,
+                     mapper: Optional[WeightsMapper] = None,
+                     **kwargs) -> set:
         """Route packed (e.g. fused gate_up_proj) checkpoint weights, then
         delegate the rest to the standard recursive auto-loader.
 
@@ -954,13 +997,23 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
         and fuses them. Weights whose fused param does not exist (e.g. the
         vision tower's unfused gate/up projections) fall through unchanged.
         """
+        if self.skip_prefixes or self.skip_substrs:
+            skip_prefix_dict = {p: None for p in self.skip_prefixes}
+            skip_substr_dict = {s: None for s in self.skip_substrs}
+            skip_mapper = WeightsMapper(
+                orig_to_new_prefix=skip_prefix_dict,
+                orig_to_new_substr=skip_substr_dict,
+            )
+            mapper = (mapper
+                      | skip_mapper) if mapper is not None else skip_mapper
+
         remap = self._packed_remap()
         if not remap:
             # No packed/fused params to route. Skip building the full param
             # dict: materializing the entire parameter tree up front
             # transiently doubles device HBM, so go straight to the streaming
             # recursive loader.
-            return super().load_weights(weights, **kwargs)
+            return super().load_weights(weights, mapper=mapper, **kwargs)
         params_dict = dict(self.module.named_parameters())
         routed_loaded: set = set()
 
@@ -981,7 +1034,9 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                 else:
                     yield name, weight
 
-        autoloaded = super().load_weights(_route(weights), **kwargs)
+        autoloaded = super().load_weights(_route(weights),
+                                          mapper=mapper,
+                                          **kwargs)
 
         # Routed weights are written directly into their fused param via
         # `weight_loader` above and never re-enter the streaming weights
@@ -1088,8 +1143,16 @@ class LoadableWithIterator:
             # Use next parent class in MRO.
             return super().load_weights(weights)
 
-        pytorch_pooler = getattr(getattr(self, "vllm_config", None),
-                                 "pytorch_pooler", None)
+        vllm_config = getattr(self, "vllm_config", None)
+        pytorch_pooler = getattr(vllm_config, "pytorch_pooler", None)
+        # The iterator comes from vLLM's model loader and yields every layer
+        # in the checkpoint; drop layers the truncated model never built.
+        num_hidden_layers = (num_hidden_layers_override(
+            vllm_config.model_config) if vllm_config is not None else None)
+        if num_hidden_layers is not None:
+            weights = (
+                (name, w) for name, w in weights
+                if not should_skip_layer_weight(name, num_hidden_layers))
         loader = JaxAutoWeightsLoader(
             self,
             pytorch_pooler=pytorch_pooler,

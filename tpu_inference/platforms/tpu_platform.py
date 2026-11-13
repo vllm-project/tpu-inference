@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
+import importlib
 import os
 import random
 from typing import TYPE_CHECKING, Optional, Tuple, Union
@@ -24,9 +26,64 @@ if hasattr(torch, "accelerator") and hasattr(torch.accelerator, "empty_cache"):
                 raise e
 
     torch.accelerator.empty_cache = _patched_empty_cache
+
+# Monkeypatch torch.accelerator.get_memory_info to answer from the JAX devices.
+# torchax registers "jax" as a PrivateUse1 device, and torch.accelerator's memory
+# APIs resolve the device via torch._C._accelerator_getDeviceIndex(), which
+# raises "PyTorch is not linked with support for jax devices". vLLM model code
+# on the torchax path calls get_memory_info() to size work by free HBM (e.g.
+# Gemma4ForConditionalGeneration._process_image_input chunks the vision
+# encoder by it), and an unhandled raise there kills the EngineCore mid-request.
+# Delegate to TpuPlatform.mem_get_info() so the numbers stay SPMD-aggregated
+# across local devices, matching the global tensor dimensions the budget math
+# is expressed in.
+if hasattr(torch, "accelerator") and hasattr(torch.accelerator,
+                                             "get_memory_info"):
+    _orig_get_memory_info = torch.accelerator.get_memory_info
+
+    def _patched_get_memory_info(*args, **kwargs) -> Tuple[int, int]:
+        try:
+            return _orig_get_memory_info(*args, **kwargs)
+        except RuntimeError as e:
+            if "jax" not in str(e):
+                raise
+            try:
+                return TpuPlatform.mem_get_info()
+            except AttributeError:
+                # Backend exposes no memory stats; callers that derive a budget
+                # from this take their minimum-work path instead of crashing.
+                # `logger` is resolved from module globals at call time, so it
+                # is defined by the time any caller reaches this branch.
+                logger.warning(
+                    "JAX backend exposes no memory stats; reporting 0 bytes "
+                    "free/total from torch.accelerator.get_memory_info(). "
+                    "Callers that size work by free HBM will fall back to "
+                    "their minimum-work path, which may hurt performance.")
+                return 0, 0
+
+    torch.accelerator.get_memory_info = _patched_get_memory_info
+
+# Monkeypatch torch.accelerator.synchronize to wait for JAX work to complete.
+# Similar to get_memory_info, torch.accelerator.synchronize() calls
+# torch._C._accelerator_getDeviceIndex() which raises "PyTorch is not linked with
+# support for jax devices".
+if hasattr(torch, "accelerator") and hasattr(torch.accelerator, "synchronize"):
+    _orig_synchronize = torch.accelerator.synchronize
+
+    def _patched_synchronize(*args, **kwargs):
+        try:
+            _orig_synchronize(*args, **kwargs)
+        except RuntimeError as e:
+            if "jax" not in str(e):
+                raise
+            jax.effects_barrier()
+
+    torch.accelerator.synchronize = _patched_synchronize
 from vllm.platforms.interface import Platform, PlatformEnum
 
 from tpu_inference import envs
+from tpu_inference.layers.common.attention_backend import (
+    check_attention_backend_config, is_registered_attention_backend)
 from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 
@@ -99,6 +156,33 @@ else:
 logger = init_logger(__name__)
 
 
+@contextlib.contextmanager
+def _no_uniproc_startup_threads(*args, **kwargs):
+    yield
+
+
+def _disable_uniproc_startup_thread_cap() -> None:
+    """Undo vllm-project/vllm#58946 for the TPU UniProcExecutor path.
+
+    vllm#58946 wraps EngineCore process start in `torch.set_num_threads(n)`
+    plus `OMP_NUM_THREADS=n` when the executor is a UniProcExecutor. On TPU
+    the processes forked after that (EngineCore, then the DPScheduler workers)
+    hang inside libgomp, so e.g. Mistral-Small-4 with DP attention never
+    finishes its first step. Keep the pre-#58946 behavior on TPU.
+    """
+    try:
+        engine_utils = importlib.import_module("vllm.v1.engine.utils")
+    except ImportError:
+        return
+    if getattr(engine_utils, "_configure_uniproc_startup_threads",
+               None) in (None, _no_uniproc_startup_threads):
+        return
+    engine_utils._configure_uniproc_startup_threads = (
+        _no_uniproc_startup_threads)
+    logger.info("Disabled vLLM UniProc EngineCore startup thread cap "
+                "(vllm#58946) on TPU.")
+
+
 class TpuPlatform(Platform):
     _enum = PlatformEnum.TPU
     device_name: str = "tpu"
@@ -120,6 +204,18 @@ class TpuPlatform(Platform):
 
     additional_env_vars: list[str] = [
         "PHASED_PROFILING_DIR",
+        "MOE_HIERARCHICAL_DISPATCH",
+        "MOE_HIERARCHICAL_COLLECT",
+        "MOE_FOLD_ROUTING_INTO_DISPATCH",
+        "RAGGED_GATHER_MAX_ROW_SUBCHUNKS",
+        "RAGGED_GATHER_TRIM_ROWS",
+        "MOE_TC_PERMUTE",
+        "MOE_TC_PERMUTE_CAPACITY_FACTOR",
+        "USE_FUSED_EP_MOE_V2",
+        "FUSED_EP_MOE_V2_CAPACITY",
+        "FUSED_EP_MOE_V2_SHARDED_PLAN",
+        "USE_ROUTING_MOE",
+        "ROUTING_MOE_REMOTE_SCATTER",
         "TPU_CHIPS_PER_HOST_BOUNDS",
         "TPU_HOST_BOUNDS",
         "TPU_MULTIHOST_BACKEND",
@@ -130,10 +226,15 @@ class TpuPlatform(Platform):
         "VLLM_DISABLE_SHARED_EXPERTS_STREAM",
         "MOE_REQUANTIZE_BLOCK_SIZE",
         "MOE_REQUANTIZE_WEIGHT_DTYPE",
+        "MOE_STAGE_WEIGHTS_ON_HOST",
         "USE_JAX_PROFILER_SERVER",
         "JAX_PROFILER_SERVER_PORT",
         "ENABLE_RS_KERNEL",
+        "USE_GMM_FUSED_RS_KERNEL",
         "MOE_ALL_GATHER_ACTIVATION_DTYPE",
+        "SKIP_MAMBA_SCHEDULER_BLOCKS",
+        "USE_FULL_KVCACHE_FOR_SLIDING_WINDOW",
+        "TPU_MESH_ATTN_DP_RING",
     ]
 
     @classmethod
@@ -144,7 +245,16 @@ class TpuPlatform(Platform):
 
         use_mla = attn_selector_config.use_mla
         if use_mla:
+            # MLA layers do not run a registered backend.
+            if is_registered_attention_backend(selected_backend):
+                raise ValueError(
+                    f"--attention-backend {selected_backend.name.lower()} "
+                    "does not support MLA models.")
             selected_backend = AttentionBackendEnum.FLASH_ATTN_MLA
+        elif is_registered_attention_backend(selected_backend):
+            # A registered TPU backend; its name resolves to its own vLLM
+            # attention backend class.
+            pass
         elif selected_backend != AttentionBackendEnum.FLASH_ATTN:
             logger.info("Cannot use %s backend on TPU. Setting to FLASH_ATTN.",
                         selected_backend)
@@ -284,6 +394,69 @@ class TpuPlatform(Platform):
         cls._initialize_sharding_config(vllm_config)
 
         cache_config = vllm_config.cache_config
+        if (cache_config and getattr(cache_config, "mamba_cache_mode", "none")
+                == "all"):
+            raise NotImplementedError(
+                "mamba_cache_mode 'all' is not supported on TPU; the mamba "
+                "pool is sized for resident state only. Use 'align' (the "
+                "default when prefix caching is enabled) or 'none'.")
+
+        # Hybrid (mamba/linear-attention) models cannot use prefix caching with
+        # speculative decoding because verify windows need consecutive state slots.
+        if (cache_config and getattr(cache_config, "mamba_cache_mode", "none")
+                == "align"):
+            if vllm_config.speculative_config is not None:
+                logger.warning(
+                    "[tpu_platform] Disabling prefix caching: hybrid "
+                    "(mamba/linear-attention) models do not support cached "
+                    "prefixes with speculative decoding on TPU.")
+                cache_config.enable_prefix_caching = False
+                cache_config.mamba_cache_mode = "none"
+                if (getattr(cache_config, "mamba_block_size", None) is not None
+                        and
+                        not getattr(cache_config,
+                                    "user_specified_mamba_block_size", False)):
+                    cache_config.mamba_block_size = (
+                        vllm_config.model_config.max_model_len)
+            elif (cache_config.prefix_match_unit is not None and
+                  cache_config.prefix_match_unit < cache_config.block_size):
+                # Mamba prefix caching asks the worker to copy state between
+                # blocks when a request partially hits a cached block, which
+                # only arises when block hashes are finer than the block size
+                # (DCP, or an explicit --prefix-match-unit). Nothing on the TPU
+                # side performs those copies, and skipping them would resume a
+                # request from an unwritten block.
+                raise NotImplementedError(
+                    "Prefix match unit smaller than the block size is not "
+                    "supported on TPU with mamba prefix caching because the "
+                    "TPU runner does not implement KV cache block copies; "
+                    "leave --prefix-match-unit unset.")
+            elif cache_config.enable_prefix_caching:
+                from tpu_inference.core.hybrid_coordinator import \
+                    install_hybrid_coordinator_hooks
+                install_hybrid_coordinator_hooks(vllm_config)
+
+        # vLLM's mm_device_do_normalize skips do_rescale/do_normalize in the
+        # CPU processor and instead normalizes inside the vLLM model's vision
+        # tower (FusedInputNorm). JAX-native multimodal models consume the
+        # processor's pixel_values directly and have no device-side norm, so
+        # they would silently run the ViT on unnormalized pixels. Keep the
+        # normalization in the CPU processor for the JAX-native path.
+        mm_cfg = getattr(vllm_config.model_config, "multimodal_config", None) \
+            if vllm_config.model_config else None
+        if mm_cfg is not None and getattr(mm_cfg, "mm_device_do_normalize",
+                                          False):
+            from tpu_inference.models.common.model_loader import \
+                resolve_model_impl_type
+            impl = resolve_model_impl_type(vllm_config)
+            if impl != "vllm":
+                logger.warning(
+                    "[tpu_platform] Disabling mm_device_do_normalize: the "
+                    "JAX-native multimodal path normalizes images in the CPU "
+                    "processor; device-side FusedInputNorm only exists in the "
+                    "vLLM model implementation.")
+                mm_cfg.mm_device_do_normalize = False
+
         # For v0, the default block size is 16.
         if cache_config and not cache_config.user_specified_block_size:
             if vllm_config.model_config:
@@ -307,6 +480,8 @@ class TpuPlatform(Platform):
                         )
                         cache_config.block_size = min_page_size  # type: ignore[assignment]
 
+        check_attention_backend_config(vllm_config)
+
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         parallel_config.worker_cls = \
@@ -318,6 +493,7 @@ class TpuPlatform(Platform):
                 logger.info("Force using UniProcExecutor for JAX on "
                             "single host without pipeline parallelism.")
                 parallel_config.distributed_executor_backend = "uni"
+                _disable_uniproc_startup_thread_cap()
             else:
                 logger.info("Force using MultiprocExecutor for JAX on "
                             "single host with pipeline parallelism.")
@@ -325,20 +501,13 @@ class TpuPlatform(Platform):
                     MultiprocExecutor
                 parallel_config.distributed_executor_backend = MultiprocExecutor
         elif multihost_backend == "ray":
-            # Check if we should use Ray Executor V2 (V1-multiproc compatible)
-            if vllm_envs.VLLM_USE_RAY_V2_EXECUTOR_BACKEND:
-                from tpu_inference.executors.ray_distributed_executor_v2 import \
-                    RayDistributedExecutorV2
-                parallel_config.distributed_executor_backend = RayDistributedExecutorV2
-                logger.info(
-                    "Force using RayDistributedExecutorV2 for JAX on multihost."
-                )
-            else:
-                from tpu_inference.executors.ray_distributed_executor import \
-                    RayDistributedExecutor
-                parallel_config.distributed_executor_backend = RayDistributedExecutor
-                logger.info(
-                    "Force using RayDistributedExecutor for JAX on multihost.")
+            # RayDistributedExecutorV2 is the only Ray executor; upstream vLLM
+            # removed the legacy compiled-graph RayDistributedExecutor.
+            from tpu_inference.executors.ray_distributed_executor_v2 import \
+                RayDistributedExecutorV2
+            parallel_config.distributed_executor_backend = RayDistributedExecutorV2
+            logger.info(
+                "Force using RayDistributedExecutorV2 for JAX on multihost.")
         else:
             logger.warning(
                 f"Unknown TPU multihost backend: {multihost_backend}. "
@@ -390,12 +559,35 @@ class TpuPlatform(Platform):
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
         # TODO: TPU still sets block_size in check_and_update_config.
         # Move that logic here so block_size is chosen by the backend.
+        cache_config = vllm_config.cache_config
         logger.info(f"Using cache_config.block_size: "
-                    f"{vllm_config.cache_config.block_size} "
+                    f"{cache_config.block_size} "
                     f"instead of overriding with _align_hybrid_block_size() "
                     f"since we set mamba_page_size_padded in "
                     f"kv_cache_manager.py")
-        pass
+
+        # `_align_hybrid_block_size` is where upstream ties the mamba block
+        # size to the (now final) attention block size in align mode. Skipping
+        # that function leaves `mamba_block_size` at whatever it was when
+        # `MambaModelConfig` ran, which is the pre-TPU default rather than the
+        # block size we settled on. The two must agree: a mamba group whose
+        # block size divides the attention one drives `hash_block_size` below
+        # the block size, which turns on partial prefix-cache hits and their
+        # copy-on-write state copies (unimplemented on TPU).
+        if getattr(cache_config, "mamba_cache_mode", "none") == "align":
+            if cache_config.mamba_block_size != cache_config.block_size:
+                logger.info(
+                    "Setting mamba_block_size to %d to match the attention "
+                    "block size (was %d) for mamba prefix caching.",
+                    cache_config.block_size, cache_config.mamba_block_size)
+                cache_config.mamba_block_size = cache_config.block_size
+            if (cache_config.prefix_match_unit is not None and
+                    cache_config.prefix_match_unit < cache_config.block_size):
+                raise NotImplementedError(
+                    "Prefix match unit smaller than the block size is not "
+                    "supported on TPU with mamba prefix caching because the "
+                    "TPU runner does not implement KV cache block copies; "
+                    "leave --prefix-match-unit unset.")
 
     @classmethod
     def is_pin_memory_available(cls):
@@ -443,6 +635,14 @@ class TpuPlatform(Platform):
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         return True
+
+    @classmethod
+    def register_custom_kv_cache_specs(cls, vllm_config: VllmConfig) -> None:
+        # Unconditional: the manager is only used for specs the runner emits
+        # under SKIP_MAMBA_SCHEDULER_BLOCKS.
+        from tpu_inference.core.runner_slot_mamba import \
+            register_runner_slot_mamba_spec
+        register_runner_slot_mamba_spec()
 
     @classmethod
     def current_device(cls) -> torch.device:

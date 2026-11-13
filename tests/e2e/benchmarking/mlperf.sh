@@ -75,9 +75,16 @@ helpFunction()
    exit 1
 }
 
-# print all sets environment variables
+# Print the variables this script actually reads. A full `printenv` was ~100
+# lines of mostly-irrelevant container environment in every job that runs it.
 echo "Environment variables:"
-printenv
+for _var in TPU_VERSION DEVICE_COUNT USE_V6E8_QUEUE USE_V7X8_QUEUE \
+            MODEL_IMPL_TYPE NEW_MODEL_DESIGN QUANTIZATION \
+            SKIP_ACCURACY_TESTS TARGET_ROUGE1 TARGET_THROUGHPUT \
+            TIMEOUT_SECONDS LOG_FILE BENCHMARK_LOG_FILE EXPECTED_SHA256; do
+  echo "  ${_var}=${!_var-}"
+done
+unset _var
 
 # Access shared benchmarking functionality
 # shellcheck disable=SC1091

@@ -69,15 +69,15 @@
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
-      <td>Speculative Decoding: DFlash</td>
+      <td>Speculative Decoding: Ngram</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
-      <td>Speculative Decoding: Ngram</td>
+      <td>Speculative Decoding: DFlash</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>

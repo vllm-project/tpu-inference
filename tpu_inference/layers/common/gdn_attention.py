@@ -22,7 +22,8 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
-from tpu_inference.kernels.gdn.v3 import wrapper
+from tpu_inference.layers.common.attention_backend import (
+    Conv1dGDNKernel, GDNLinearAttentionBackend)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
 
@@ -47,6 +48,10 @@ def run_jax_gdn_attention(
     d_v: int,
     kernel_size: int,
     mesh: jax.sharding.Mesh,
+    read_state_indices: Optional[jnp.ndarray] = None,
+    conv1d_gdn_kernel: Optional[Conv1dGDNKernel] = None,
+    read_offsets: Optional[jnp.ndarray] = None,
+    num_spec_tokens: int = 0,
 ) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
     """Runs the Jax GDN attention mechanism.
 
@@ -81,6 +86,14 @@ def run_jax_gdn_attention(
         kernel_size: Convolution kernel size.
         mesh: The device mesh for distributed computation.
         config: Configuration for implementation selection.
+        read_state_indices: Optional tensor of shape `(max_reqs,)` mapping
+          request index to the state index its initial state is read from.
+          Defaults to `state_indices` (read and write the same slot). Mamba
+          prefix caching passes a different slot here, since a request
+          resumes from the cached state block of the last block boundary and
+          checkpoints into the block covering its current position.
+        conv1d_gdn_kernel: The linear attention backend's fused conv1d + GDN
+          kernel. Defaults to the GDN v3 kernel.
 
     Returns:
         A tuple containing:
@@ -89,6 +102,12 @@ def run_jax_gdn_attention(
           - new_recurrent_state: `(num_blocks, n_v, d_k, d_v)`
         - The output tensor of shape `(num_tokens, n_v * d_v)`.
     """
+    if read_state_indices is None:
+        read_state_indices = state_indices
+    if num_spec_tokens > 0:
+        assert read_offsets is not None, (
+            "read_offsets is required when num_spec_tokens > 0")
+
     in_specs = (
         P(ShardingAxisName.ATTN_DATA,
           ShardingAxisName.ATTN_HEAD),  # j_mixed_qkv
@@ -107,7 +126,12 @@ def run_jax_gdn_attention(
         P(ShardingAxisName.ATTN_DATA),  # state_indices
         P(ShardingAxisName.ATTN_DATA),  # distribution
         P(ShardingAxisName.ATTN_DATA),  # seq_lens
+        P(ShardingAxisName.ATTN_DATA),  # read_state_indices
     )
+    if read_offsets is not None:
+        in_specs = in_specs + (
+            P(ShardingAxisName.ATTN_DATA),  # read_offsets
+        )
 
     out_specs = (
         (
@@ -121,13 +145,19 @@ def run_jax_gdn_attention(
 
     tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
 
-    p_run_jax_gdn_attention_local = functools.partial(
-        wrapper.fused_conv1d_gdn,
+    partial_kwargs = dict(
         n_kq=n_kq // tp_size,
         n_v=n_v // tp_size,
         d_k=d_k,
         d_v=d_v,
         kernel_size=kernel_size,
+    )
+    if read_offsets is not None:
+        partial_kwargs["num_spec_tokens"] = num_spec_tokens
+
+    p_run_jax_gdn_attention_local = functools.partial(
+        conv1d_gdn_kernel or GDNLinearAttentionBackend().conv1d_gdn_kernel(),
+        **partial_kwargs,
     )
 
     mapped_fn = jax.shard_map(
@@ -138,7 +168,7 @@ def run_jax_gdn_attention(
         check_vma=False,
     )
 
-    (new_conv_state, new_recurrent_state), output = mapped_fn(
+    mapped_args = (
         j_mixed_qkv,
         j_b,
         j_a,
@@ -152,6 +182,11 @@ def run_jax_gdn_attention(
         state_indices,
         distribution,
         seq_lens,
+        read_state_indices,
     )
+    if read_offsets is not None:
+        mapped_args = mapped_args + (read_offsets, )
+
+    (new_conv_state, new_recurrent_state), output = mapped_fn(*mapped_args)
 
     return (new_conv_state, new_recurrent_state), output

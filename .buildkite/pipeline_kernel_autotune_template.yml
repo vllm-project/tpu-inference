@@ -90,7 +90,7 @@ steps:
         branch_name="kernel_autotune.update_tuned_params_$${KERNEL_TUNING_AUTOTUNE_ID}"
         repo_url="github.com/vllm-project/tpu-inference.git"
         authenticated_repo_url="https://x-access-token:$${GITHUB_CI_BOT_TOKEN}@$${repo_url}"
-        pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt
+        pip install -r tools/kernel/tuner/v1/storage_management/requirements.txt
         apt install git -y
         git remote set-url origin $${authenticated_repo_url}
         git config user.name "Buildkite Bot"
@@ -155,7 +155,7 @@ steps:
           branch_name="kernel_autotune.update_tuned_params_$${KERNEL_TUNING_AUTOTUNE_ID}"
           repo_url="github.com/vllm-project/tpu-inference.git"
           authenticated_repo_url="https://x-access-token:$${GITHUB_CI_BOT_TOKEN}@$${repo_url}"
-          pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt
+          pip install -r tools/kernel/tuner/v1/storage_management/requirements.txt
           apt install git -y
           
           # Disable tracing temporarily to avoid leaking the token in the logs

@@ -21,7 +21,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 
 from tpu_inference.layers.common.moe import MoEBackend
-from tpu_inference.layers.common.sharding import ShardingAxisName, is_attn_dp
+from tpu_inference.layers.common.sharding import (ShardingAxisName, is_attn_dp,
+                                                  shared_expert_is_replicated)
 from tpu_inference.layers.vllm.interface.moe import \
     select_moe_backend_from_fused_moe_config
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
@@ -39,13 +40,17 @@ def _get_mesh() -> Mesh | None:
         return None
 
 
-def _all_reduce_over_tp(t: torch.Tensor, mesh: Mesh) -> torch.Tensor:
+def _all_reduce_over_tp(t: torch.Tensor,
+                        mesh: Mesh,
+                        axis_name=None) -> torch.Tensor:
     """All-reduce an unreduced local sum over the TP axis."""
+    if axis_name is None:
+        axis_name = ShardingAxisName.MLP_TENSOR
     spec = P(ShardingAxisName.ATTN_DATA, None)
 
     @shard_map(mesh=mesh, in_specs=spec, out_specs=spec, check_vma=False)
     def _reduce(x):
-        return jax.lax.psum(x, axis_name=ShardingAxisName.MLP_TENSOR)
+        return jax.lax.psum(x, axis_name=axis_name)
 
     return torch_view(_reduce(jax_view(t)))
 
@@ -112,6 +117,7 @@ class VllmMoERunner(MoERunner):
     def _maybe_reduce_shared_expert_output(
         self,
         shared_output: torch.Tensor | None,
+        fused_output_is_reduced: bool | None = None,
     ) -> torch.Tensor | None:
         """Early all-reduce path: reduce the shared-expert output on its own.
 
@@ -126,16 +132,22 @@ class VllmMoERunner(MoERunner):
         if mesh is None:
             return shared_output
 
-        if (shared_output is not None and self._fused_output_is_reduced
+        if fused_output_is_reduced is None:
+            fused_output_is_reduced = self._fused_output_is_reduced
+
+        if (shared_output is not None and fused_output_is_reduced
                 and not self.moe_config.is_sequence_parallel
-                and not is_attn_dp(mesh)):
-            shared_output = _all_reduce_over_tp(shared_output, mesh)
+                and not shared_expert_is_replicated(self._shared_experts)):
+            axis_name = (ShardingAxisName.ATTN_HEAD
+                         if is_attn_dp(mesh) else ShardingAxisName.MLP_TENSOR)
+            shared_output = _all_reduce_over_tp(shared_output, mesh, axis_name)
         return shared_output
 
     def _maybe_reduce_final_output(
         self,
         states: torch.Tensor,
         trunc_size: int,
+        output_is_reduced: bool | None = None,
     ) -> torch.Tensor:
         """Late all-reduce path: reduce the combined (shared + fused) output.
 
@@ -149,10 +161,12 @@ class VllmMoERunner(MoERunner):
         if mesh is None:
             return states[..., :trunc_size]
 
+        if output_is_reduced is None:
+            output_is_reduced = self._fused_output_is_reduced
+
         is_dp = is_attn_dp(mesh)
         is_sequence_parallel = self.moe_config.is_sequence_parallel
-        is_fused_output_reduced = self._fused_output_is_reduced
 
-        if not is_dp and not is_sequence_parallel and not is_fused_output_reduced:
+        if not is_dp and not is_sequence_parallel and not output_is_reduced:
             states = _all_reduce_over_tp(states, mesh)
         return states[..., :trunc_size]

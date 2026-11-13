@@ -4,6 +4,7 @@ import logging
 import os
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, mock_open, patch
 
 import jax
@@ -14,11 +15,13 @@ from jax._src.interpreters import pxla
 from jax._src.pallas.utils import next_power_of_2
 
 from tpu_inference.runner.utils import (
-    PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR, AggregatedStatsLogger,
-    ForbidCompile, InferencePhase, LatencyTracker, PhasedBasedProfiler,
-    determine_phase_from_batch_composition_stats, get_batch_composition_stats,
-    get_padded_num_reqs_with_upper_limit, get_padded_token_len,
-    get_req_paddings, get_token_paddings)
+    MAX_TRACED_REQUEST_IDS, PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR,
+    AggregatedStatsLogger, ForbidCompile, InferencePhase, LatencyTracker,
+    PhasedBasedProfiler, build_token_paddings,
+    determine_phase_from_batch_composition_stats,
+    extract_request_ids_for_tracing, get_batch_composition_stats,
+    get_eos_token_id, get_padded_num_reqs_with_upper_limit,
+    get_padded_token_len, get_req_paddings, get_token_paddings)
 
 
 def test_min_token_size_alignment():
@@ -98,6 +101,67 @@ def test_get_paddings():
     actual_paddings = get_token_paddings(min_token_size, max_token_size,
                                          padding_gap)
     assert actual_paddings == expected_paddings
+
+
+def test_build_token_paddings_caps_at_budget():
+    # Budget 16640 with the exponential gap: the stock list ends ..., 16384,
+    # 32768; the runner list ends at the budget itself.
+    assert build_token_paddings(
+        256, 16640, 0) == [256, 512, 1024, 2048, 4096, 8192, 16384, 16640]
+    # A budget that is already a bucket yields the stock list.
+    assert build_token_paddings(16, 512, 0) == get_token_paddings(16, 512, 0)
+    # Bucketed gap: the last bucket is the budget, not the overshoot.
+    assert build_token_paddings(16, 317,
+                                64) == [16, 32, 64, 128, 192, 256, 320]
+    # The budget is rounded up to a multiple of min_token_size.
+    assert build_token_paddings(32, 16640 * 16, 0)[-1] == 266240
+
+
+def test_build_token_paddings_keeps_compilation_sizes():
+    # User-supplied sizes are merged as given (even above the budget) and
+    # deduplicated against the generated buckets.
+    assert build_token_paddings(256,
+                                16640,
+                                0,
+                                additional_sizes=[4096, 12288, 32768]) == [
+                                    256, 512, 1024, 2048, 4096, 8192, 12288,
+                                    16384, 16640, 32768
+                                ]
+
+
+def _tracing_batch(num_reqs):
+    input_batch = MagicMock()
+    input_batch.num_reqs = num_reqs
+    input_batch.req_ids = [f"cmpl-{i}" for i in range(num_reqs)]
+    scheduler_output = MagicMock()
+    scheduler_output.num_scheduled_tokens = {
+        rid: 1
+        for rid in input_batch.req_ids
+    }
+    return input_batch, scheduler_output
+
+
+def test_extract_request_ids_for_tracing():
+    input_batch, scheduler_output = _tracing_batch(3)
+    scheduler_output.num_scheduled_tokens["cmpl-1"] = 0
+    kwargs = extract_request_ids_for_tracing(input_batch, scheduler_output)
+    # Requests with nothing scheduled this step are skipped; numbering is
+    # contiguous over the traced ones.
+    assert kwargs == {"request_id1": "cmpl-0", "request_id2": "cmpl-2"}
+
+
+def test_extract_request_ids_for_tracing_caps_kwargs():
+    num_reqs = MAX_TRACED_REQUEST_IDS + 500
+    input_batch, scheduler_output = _tracing_batch(num_reqs)
+    kwargs = extract_request_ids_for_tracing(input_batch, scheduler_output)
+    assert len(kwargs) == MAX_TRACED_REQUEST_IDS
+    assert kwargs["request_id1"] == "cmpl-0"
+    assert kwargs[f"request_id{MAX_TRACED_REQUEST_IDS}"] == (
+        f"cmpl-{MAX_TRACED_REQUEST_IDS - 1}")
+    # nanobind rejects calls with more than 1024 keyword arguments; the
+    # capped mapping must still be accepted by TraceAnnotation.
+    with jax.profiler.TraceAnnotation("execute_model", **kwargs):
+        pass
 
 
 def test_get_padded_token_len():
@@ -867,3 +931,64 @@ def test_merge_profile_directories_ignores_stale_prior_run_data(tmp_path):
     # New data lands in its own canonical dir.
     new_dst = phase_dir / "plugins" / "profile" / "2026_05_06_04_47_36"
     assert (new_dst / "new.xplane.pb").read_text() == "NEW"
+
+
+class TestGetEosTokenId:
+    """Tests for get_eos_token_id config extraction, deduplication, and fallbacks."""
+
+    def test_single_eos_from_hf_config(self):
+        cfg = SimpleNamespace(hf_config=SimpleNamespace(eos_token_id=151643))
+        assert get_eos_token_id(cfg) == (151643, )
+
+    def test_list_eos_from_hf_config(self):
+        cfg = SimpleNamespace(hf_config=SimpleNamespace(
+            eos_token_id=[151643, 151645]))
+        assert get_eos_token_id(cfg) == (151643, 151645)
+
+    def test_eos_from_hf_text_config(self):
+        cfg = SimpleNamespace(hf_text_config=SimpleNamespace(eos_token_id=42))
+        assert get_eos_token_id(cfg) == (42, )
+
+    def test_eos_from_generation_config(self):
+        cfg = SimpleNamespace(
+            try_get_generation_config=lambda: {"eos_token_id": [100, 200]})
+        assert get_eos_token_id(cfg) == (100, 200)
+
+    def test_deduplication_and_order_preservation(self):
+        cfg = SimpleNamespace(
+            hf_config=SimpleNamespace(eos_token_id=[10, 20]),
+            hf_text_config=SimpleNamespace(eos_token_id=20),
+            try_get_generation_config=lambda: {"eos_token_id": [30, 10]},
+        )
+        assert get_eos_token_id(cfg) == (10, 20, 30)
+
+    def test_filters_invalid_types_and_mocks(self):
+        cfg = SimpleNamespace(
+            hf_config=SimpleNamespace(eos_token_id=MagicMock()),
+            hf_text_config=SimpleNamespace(
+                eos_token_id=["invalid", True, False, None, 99]),
+            try_get_generation_config=lambda: {"eos_token_id": "bad"},
+        )
+        assert get_eos_token_id(cfg) == (99, )
+
+    def test_fallback_to_vocab_size(self):
+        cfg = SimpleNamespace(
+            hf_config=SimpleNamespace(eos_token_id=None),
+            get_vocab_size=lambda: 32000,
+        )
+        assert get_eos_token_id(cfg) == (31999, )
+
+    def test_fallback_to_empty_when_no_config(self):
+        cfg = SimpleNamespace()
+        assert get_eos_token_id(cfg) == ()
+
+    def test_generation_config_exception_handled(self):
+
+        def bad_gen():
+            raise RuntimeError("corrupted")
+
+        cfg = SimpleNamespace(
+            try_get_generation_config=bad_gen,
+            get_vocab_size=lambda: 1000,
+        )
+        assert get_eos_token_id(cfg) == (999, )

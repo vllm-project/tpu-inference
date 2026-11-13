@@ -18,6 +18,16 @@ x-run-condition: &run-on-nightly-or-tag
 steps:
    - label: "Upload Tests for Models & Features (${MODEL_IMPL_TYPE:-auto})"
      <<: *run-on-nightly-or-tag
+     env:
+       # Which fleet's suites to send up: bootstrap.sh's choice, which can come
+       # from the commit message rather than the build's env.
+       CI_FLEET: "${CI_FLEET:-bare}"
+       # Interpolated at upload time from bootstrap.sh's env, which this job
+       # does not otherwise see: the build's priority and the author's
+       # concurrency group that caps the suites' TPU steps the same way as the
+       # ones bootstrap.sh uploads itself.
+       JOB_PRIORITY: "${JOB_PRIORITY:-1}"
+       PR_TPU_CONCURRENCY_GROUP: "${PR_TPU_CONCURRENCY_GROUP:-}"
      agents:
        queue: cpu
      commands:
@@ -68,17 +78,17 @@ steps:
   
    - label: "Commit support matrices if is nightly build or release tag specified"
      # commit_support_matrices and record_verified_commit_hashes push to the repo via
-     # GITHUB_PAT, which is only provisioned for main / release tags. Gate them off
-     # release-branch nightlies (branch != main, no tag) to avoid a "secrets" failure.
-     if: (build.env("NIGHTLY") == "1" && build.branch == "main") || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
+     # GitHub App credentials, which are only provisioned for main / release tags. Gate
+     # them off release-branch nightlies (branch != main, no tag) to avoid a "secrets" failure.
+     # One fleet commits: bare metal, or kube once its schedules set
+     # KUBE_OWNS_NIGHTLY=1 (and the bare-metal nightly schedules are off).
+     if: ((build.env("NIGHTLY") == "1" && build.branch == "main") || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/) && ("${CI_FLEET:-bare}" != "kube" || "${KUBE_OWNS_NIGHTLY:-0}" == "1")
      key: commit_support_matrices
      depends_on:
        - "v6_generate_matrices"
        - "v7_generate_matrices"
      agents:
        queue: cpu
-     secrets:
-      - GITHUB_PAT
      command:
        - bash .buildkite/scripts/commit_support_matrices.sh
 
@@ -95,8 +105,8 @@ steps:
        - bash .buildkite/scripts/notify_test_results.sh
 
    - label: "Record verified commit hashes"
-     # GITHUB_PAT is main/tag-only - see commit_support_matrices above.
-     if: build.env("NIGHTLY") == "1" && build.branch == "main"
+     # GitHub App credentials are main/tag-only - see commit_support_matrices above.
+     if: build.env("NIGHTLY") == "1" && build.branch == "main" && "${MODEL_IMPL_TYPE:-auto}" == "auto" && ("${CI_FLEET:-bare}" != "kube" || "${KUBE_OWNS_NIGHTLY:-0}" == "1")
      key: record_verified_commit_hashes
      depends_on:
        - notify_test_results
@@ -104,7 +114,5 @@ steps:
        - tpu7x_tpu_test_notification
      agents:
        queue: cpu
-     secrets:
-      - GITHUB_PAT
      command:
        - bash .buildkite/scripts/commit_verified_commit_hashes.sh

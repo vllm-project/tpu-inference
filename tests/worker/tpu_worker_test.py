@@ -32,6 +32,7 @@ def mock_vllm_config():
     # Create mocks for the nested config objects first
     mock_cache_conf = MagicMock()
     mock_cache_conf.gpu_memory_utilization = 0.9
+    mock_cache_conf.resolved_gpu_memory_utilization = 0.9
     mock_cache_conf.num_gpu_blocks = 0
     mock_cache_conf.num_cpu_blocks = 0
 
@@ -354,6 +355,30 @@ class TestTPUWorker:
         expected_mem = 1500 * 1024**3
         assert available_mem == expected_mem
 
+    @patch('tpu_inference.worker.tpu_worker.utils')
+    def test_determine_available_memory_none_utilization(
+            self, mock_utils, mock_vllm_config):
+        """Tests available HBM memory calculation when gpu_memory_utilization is None (vLLM >= 0.33.0)."""
+        mock_utils.hbm_usage_bytes.return_value = [
+            (100 * 1024**3, 1000 * 1024**3), (200 * 1024**3, 1000 * 1024**3)
+        ]
+        mock_devices = ['tpu:0', 'tpu:1']
+        mock_vllm_config.cache_config.gpu_memory_utilization = None
+        mock_vllm_config.cache_config.resolved_gpu_memory_utilization = 0.92
+        worker = TPUWorker(vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test_method",
+                           devices=mock_devices)
+
+        available_mem = worker.determine_available_memory()
+        # Total limit: 2000 GiB
+        # Total cap: 2000 * 0.92 = 1840 GiB
+        # Total used: 300 GiB
+        # Total free = 1840 - 300 = 1540 GiB
+        expected_mem = int(2000 * 1024**3 * 0.92 - 300 * 1024**3)
+        assert available_mem == expected_mem
+
     #
     # --- Core Logic Tests ---
     #
@@ -667,3 +692,147 @@ class TestTPUWorker:
             assert os.environ["TPU_PROCESS_ADDRESSES"] == "localhost:9999"
             assert os.environ["TPU_PROCESS_PORT"] == "9999"
             assert os.environ["CLOUD_TPU_TASK_ID"] == "0"
+
+    #
+    # --- Weight Update Tests ---
+    #
+
+    def _weight_update_worker(self, mock_vllm_config):
+        """A worker with a stub model runner."""
+        worker = TPUWorker(vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test_method",
+                           devices=['tpu:0'])
+        worker.model_runner = MagicMock()
+        return worker
+
+    def test_full_update_cycle(self, mock_vllm_config):
+        """Tests that a weight update cycles the KV cache and closes cleanly."""
+        worker = self._weight_update_worker(mock_vllm_config)
+        runner = worker.model_runner
+
+        worker.start_weight_update()
+        worker.update_weights({})
+        worker.finish_weight_update()
+
+        runner.delete_kv_cache.assert_called_once()
+        runner.reinitialize_kv_cache.assert_called_once()
+        assert worker._weight_update_active is False
+
+    def test_kv_cache_untouched_when_not_freed(self, mock_vllm_config):
+        """Tests that free_kv_cache=False leaves the KV cache alone."""
+        worker = self._weight_update_worker(mock_vllm_config)
+        runner = worker.model_runner
+
+        # Also exercised after a session that did free it.
+        worker.start_weight_update()
+        worker.finish_weight_update()
+        runner.reset_mock()
+
+        worker.start_weight_update(free_kv_cache=False)
+        worker.finish_weight_update()
+
+        runner.delete_kv_cache.assert_not_called()
+        runner.reinitialize_kv_cache.assert_not_called()
+
+    def test_bind_raiden_sync_and_deferred_h2d(self, mock_vllm_config):
+        """Tests RaidenWorkerSync auto_h2d=False binding, metadata, and deferred h2d."""
+        from types import SimpleNamespace
+
+        from tpu_inference.rl import raiden_worker_sync
+
+        worker = self._weight_update_worker(mock_vllm_config)
+        fake_mesh = SimpleNamespace(
+            axis_names=("data", ),
+            shape={"data": 1},
+            local_mesh=SimpleNamespace(devices=SimpleNamespace(shape=(1, ))),
+        )
+
+        class FakeDevice:
+            platform = "tpu"
+
+        fake_device = FakeDevice()
+        fake_sharding = SimpleNamespace(
+            mesh=fake_mesh,
+            spec=("data", ),
+            shard_shape=lambda shape: shape,
+            devices_indices_map=lambda shape:
+            {fake_device: (slice(0, 2), slice(0, 2))},
+        )
+        fake_arr = SimpleNamespace(
+            shape=(2, 2),
+            ndim=2,
+            size=4,
+            nbytes=16,
+            dtype=raiden_worker_sync.jnp.dtype(raiden_worker_sync.jnp.float32),
+            devices=lambda: [fake_device],
+            sharding=fake_sharding,
+            addressable_shards=[
+                SimpleNamespace(
+                    device=fake_device,
+                    data=SimpleNamespace(nbytes=16),
+                )
+            ],
+        )
+        worker.model_runner.state = {"w": fake_arr}
+        worker.model_runner.model = SimpleNamespace()
+
+        calls = []
+
+        class FakeNativeSync:
+
+            def __init__(self, arrays, **kwargs):
+                self.arrays = arrays
+                self.kwargs = kwargs
+                self.local_port = 5555
+                self.listener_port = 6666
+                self.num_shards = 1
+
+            def wait_for_transfer_completion(self, uuid):
+                calls.append(("wait", uuid))
+
+            def h2d(self):
+                calls.append(("h2d", None))
+
+        with patch.object(
+                raiden_worker_sync,
+                "_ws_lib",
+                SimpleNamespace(WeightSynchronizer=FakeNativeSync),
+        ), patch.object(
+                raiden_worker_sync.jax, "block_until_ready"), patch.object(
+                    raiden_worker_sync.envs, "RAIDEN_H2D_SETTLE",
+                    False), patch(
+                        "tpu_inference.worker.tpu_worker.envs.VERIFY_WEIGHTS",
+                        False):
+            md = worker.bind_raiden_sync(
+                worker_index=2,
+                parallelism=4,
+                job_name="rollout_w2",
+                auto_h2d=False,
+            )
+            assert md["auto_h2d"] is False
+            assert worker._raiden_rl_weight_sync._sync.kwargs[
+                "auto_h2d"] is False
+
+            # Valid uuid triggers wait_for_transfer_completion(uuid) followed by h2d()
+            worker.raiden_h2d(uuid=9)
+            assert calls == [("wait", 9), ("h2d", None)]
+
+            # Missing or non-positive uuid raises ValueError when auto_h2d=False
+            for invalid_uuid in (None, 0, -1):
+                with pytest.raises(ValueError):
+                    worker.raiden_h2d(uuid=invalid_uuid)
+
+    def test_bind_raiden_sync_falls_back_to_rank(self, mock_vllm_config):
+        """Tests that bind_raiden_sync falls back to worker rank when worker_index is 0."""
+        worker = self._weight_update_worker(mock_vllm_config)
+        worker.rank = 3
+        with patch("tpu_inference.rl.raiden_worker_sync.RaidenWorkerSync"
+                   ) as mock_sync_cls:
+            mock_sync = MagicMock()
+            mock_sync_cls.return_value = mock_sync
+            worker.get_weights_state = MagicMock(return_value={})
+            worker.bind_raiden_sync(worker_index=0)
+            mock_sync_cls.assert_called_once()
+            assert mock_sync_cls.call_args.kwargs["worker_index"] == 3

@@ -1,0 +1,129 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The kube steps for ../google_gemma-4-E2B-it.yml, with the same keys. See README.md.
+
+steps:
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Unit tests for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_UnitTest"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: "${KUBE_SHAPE_SINGLE:-ct6e-standard-1t/1x1}"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          bash -c 'JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 python /workspace/tpu_inference/examples/offline_inference.py --model google/gemma-4-E2B-it --tensor-parallel-size 1 --max-num-batched-tokens 4096 --max-model-len 4096 --use-chat-template'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_UnitTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_UnitTest"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-4-E2B-it"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "multimodal"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_UnitTest
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Accuracy for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_UnitTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: "${KUBE_SHAPE_SINGLE:-ct6e-standard-1t/1x1}"
+      TEST_MODEL: "google/gemma-4-E2B-it"
+      TENSOR_PARALLEL_SIZE: "1"
+      USE_CHAT_TEMPLATE: "1"
+      MINIMUM_ACCURACY_THRESHOLD: "0.35"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash -c 'bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record integration test result for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_Accuracy"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Accuracy"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-4-E2B-it"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "multimodal"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Accuracy
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance benchmarks for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_Accuracy"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: "${KUBE_SHAPE_SINGLE:-ct6e-standard-1t/1x1}"
+      TEST_MODEL: "google/gemma-4-E2B-it"
+      TENSOR_PARALLEL_SIZE: "1"
+      MAX_MODEL_LEN: "4096"
+      MAX_NUM_SEQS: "64"
+      GPU_MEMORY_UTILIZATION: "0.94"
+      MINIMUM_THROUGHPUT_THRESHOLD: "0.0"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash -c 'TIMEOUT_SECONDS=960 JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_Benchmark"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Benchmark"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-4-E2B-it"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "multimodal"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Benchmark

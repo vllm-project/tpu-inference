@@ -12,30 +12,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Engine-first XLA load. Each Raiden module statically links its own XLA and its
+# own copy of `xla/pjrt/proto/execute_options.proto`; whichever is dlopened first
+# wins the protobuf registry and a later one aborts the process. Must precede
+# env_override, which does `import vllm` and brings up jaxlib's XLA. All modules,
+# not just the engine: the FFI ones are imported at module scope by tunix's
+# synchronizer, so they would otherwise land mid-run. The wheel is distributed
+# as `tpu_raiden_jax` but installs `tpu_sync`.
+for _mod in ("_tpu_raiden_jax", "_weight_synchronizer_ffi",
+             "_kv_cache_manager_ffi"):
+    try:
+        __import__(f"tpu_sync.frameworks.jax.{_mod}")
+    except ImportError:
+        # Raiden absent (e.g. the benchmark client), or an older build that
+        # does not ship this module. Only EngineCore workers need the load.
+        pass
+
 # The environment variables override should be imported before any other
 # modules to ensure that the environment variables are set before any
 # other modules are imported.
-import tpu_inference.env_override  # noqa: F401
-from tpu_inference import envs
-
-# Engine-first XLA load: import Raiden's engine extension here -- the earliest
-# tpu_inference entry point, before any submodule (e.g. platforms/tpu_platform.py)
-# runs `import jax` and loads jaxlib's libjax_common.so. This ensures Raiden's
-# embedded XLA runtime comes up before jaxlib's so the two XLA copies don't collide
-# in static initializers.
-try:
-    import tpu_raiden.frameworks.jax._tpu_raiden_jax  # noqa: F401
-except ModuleNotFoundError:
-    # Expected in processes without tpu_raiden on the path (e.g. the benchmark
-    # client). Only the EngineCore workers need the engine-first load; skip quietly.
-    pass
-except Exception as _raiden_exc:  # pragma: no cover - best-effort preload
-    import sys as _sys
-    print(f"[tpu_raiden] engine preload failed: {_raiden_exc}",
-          file=_sys.stderr)
-
-from tpu_inference import tpu_info as ti
-from tpu_inference.logger import init_logger
+import tpu_inference.env_override  # noqa: F401,E402
+from tpu_inference import envs  # noqa: E402
+from tpu_inference import tpu_info as ti  # noqa: E402
+from tpu_inference.logger import init_logger  # noqa: E402
 
 logger = init_logger(__name__)
 

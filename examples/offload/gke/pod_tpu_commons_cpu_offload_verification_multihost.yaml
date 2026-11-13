@@ -1,0 +1,152 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: tpu-offload-verification-multihost
+spec:
+  replicas: 1
+  leaderWorkerTemplate:
+    size: 2
+    restartPolicy: RecreateGroupOnPodRestart
+    leaderTemplate:
+      metadata:
+        labels:
+          role: leader
+      spec:
+        nodeSelector:
+          cloud.google.com/gke-tpu-accelerator: tpu7x
+          cloud.google.com/gke-tpu-topology: 2x2x2
+        containers:
+          - name: vllm-leader
+            image: <your-tpu-inference-image>
+            imagePullPolicy: Always
+            env:
+            - name: TPU_MULTIHOST_BACKEND
+              value: ray
+            - name: RAY_health_check_timeout_ms
+              value: "30000"
+            - name: RAY_health_check_failure_threshold
+              value: "10"
+            - name: TPU_BACKEND_TYPE
+              value: jax
+            - name: MODEL_IMPL_TYPE
+              value: vllm
+            - name: JAX_PLATFORMS
+              value: ""
+            - name: IS_TPU_MULTIHOST
+              value: "true"
+            - name: VLLM_LOGGING_LEVEL
+              value: "DEBUG"
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+            command: ["/bin/sh", "-c"]
+            args:
+              - |
+                bash /workspace/vllm/examples/ray_serving/multi-node-serving.sh leader --ray_cluster_size=$(LWS_GROUP_SIZE);
+                
+                echo "=== Running TP Only Verification ==="
+                python3 /workspace/tpu_inference/examples/offload/offline_inference_kv_cache_verification.py \
+                  --model=meta-llama/Llama-3.1-8B \
+                  --tensor-parallel-size=16 \
+                  --max_model_len=1024 \
+                  --seed=42 \
+                  --kv-transfer-config '{"kv_connector":"TPUOffloadConnector","kv_connector_module_path":"tpu_inference.offload.tpu_offload_connector","kv_role":"kv_both"}'
+            resources:
+              limits:
+                google.com/tpu: "4"
+            volumeMounts:
+              - mountPath: /dev/shm
+                name: dshm
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+    workerTemplate:
+      spec:
+        nodeSelector:
+          cloud.google.com/gke-tpu-accelerator: tpu7x
+          cloud.google.com/gke-tpu-topology: 2x2x2
+        containers:
+          - name: vllm-worker
+            image: <your-tpu-inference-image>
+            imagePullPolicy: Always
+            command: ["/bin/sh", "-c"]
+            args:
+              - |
+                bash /workspace/vllm/examples/ray_serving/multi-node-serving.sh worker --ray_address=$(LWS_LEADER_ADDRESS)
+            resources:
+              limits:
+                google.com/tpu: "4"
+            env:
+            - name: TPU_MULTIHOST_BACKEND
+              value: ray
+            - name: RAY_health_check_timeout_ms
+              value: "30000"
+            - name: RAY_health_check_failure_threshold
+              value: "10"
+            - name: TPU_BACKEND_TYPE
+              value: jax
+            - name: MODEL_IMPL_TYPE
+              value: vllm
+            - name: JAX_PLATFORMS
+              value: ""
+            - name: IS_TPU_MULTIHOST
+              value: "true"
+            - name: VLLM_LOGGING_LEVEL
+              value: "DEBUG"
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+            volumeMounts:
+              - mountPath: /dev/shm
+                name: dshm
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+---
+# This headless service is CRITICAL for multi-host pod-to-pod communication (e.g., Ray).
+# It enables DNS resolution for individual pods in the format:
+# <pod-name>.<service-name>.<namespace>.svc.cluster.local
+apiVersion: v1
+kind: Service
+metadata:
+  name: tpu-offload-verification-multihost
+  namespace: default
+spec:
+  clusterIP: None
+  # publishNotReadyAddresses is required because workers need to resolve the leader's
+  # hostname to join the Ray cluster BEFORE the leader passes its readiness probe.
+  # Without this, a circular dependency deadlock occurs.
+  publishNotReadyAddresses: true
+  ports:
+  - name: vllm
+    port: 8000
+    protocol: TCP
+    targetPort: 8000
+  - name: ray-gcs
+    port: 6379
+    protocol: TCP
+    targetPort: 6379
+  selector:
+    leaderworkerset.sigs.k8s.io/name: tpu-offload-verification-multihost
+  sessionAffinity: None
+  type: ClusterIP

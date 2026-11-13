@@ -41,6 +41,38 @@ steps:
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_rl_integration_CorrectnessTest
 
   # ------------------------------------------------------------------
+  # Pause/resume tests (nightly)
+  #
+  # Covers the weight-sync window an async RL trainer relies on: mode="keep"
+  # freezing in-flight rollouts without corrupting them, requests submitted
+  # during a pause surviving to resume, and cache_salt rotation stopping a new
+  # policy from reusing the previous policy's KV. Nightly rather than
+  # per-push because it stands up its own AsyncLLM engine.
+  # ------------------------------------------------------------------
+  - label: "${TPU_VERSION:-tpu6e} Pause/resume tests for rl_integration"
+    key: "${TPU_VERSION:-tpu6e}_rl_integration_PauseResumeTest"
+    soft_fail: true
+    if: build.env("NIGHTLY") == "1"
+    agents:
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    commands:
+      - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_rl_pause_resume.py
+  - label: "${TPU_VERSION:-tpu6e} Record pause/resume test result for rl_integration"
+    key: "${TPU_VERSION:-tpu6e}_record_rl_integration_PauseResumeTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_rl_integration_PauseResumeTest"
+    if: build.env("NIGHTLY") == "1"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "rl_integration"
+      CI_STAGE: "Single-Host CorrectnessTest"
+      CI_CATEGORY: "rl support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_rl_integration_PauseResumeTest
+
+  # ------------------------------------------------------------------
   # Performance tests
   # ------------------------------------------------------------------
   - label: "${TPU_VERSION:-tpu6e} Performance tests for rl_integration"

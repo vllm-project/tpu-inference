@@ -49,24 +49,43 @@ class PersistentBatchManager:
         swap_cnt = 0
         if num_reqs <= 0:
             return swap_cnt
-        # If total_num_scheduled_tokens == num_reqs, every request
-        # is scheduled for exactly 1 token (all decode). No reordering needed.
-        if scheduler_output.total_num_scheduled_tokens == num_reqs:
+        max_decode_tokens = self.input_batch.max_decode_tokens
+
+        if (max_decode_tokens == 1
+                and scheduler_output.total_num_scheduled_tokens == num_reqs):
             num_decode = num_reqs
             self.input_batch.request_distribution = [
                 num_decode, num_decode, num_reqs
             ]
             return swap_cnt
+
+        # Check if all scheduled requests match the decode threshold
+        all_decode = True
+        for req_id in self.input_batch.req_ids[:num_reqs]:
+            if scheduler_output.num_scheduled_tokens[
+                    req_id] > max_decode_tokens:
+                all_decode = False
+                break
+
+        if all_decode:
+            num_decode = num_reqs
+            self.input_batch.request_distribution = [
+                num_decode, num_decode, num_reqs
+            ]
+            return swap_cnt
+
         # Use two-pointer approach to reorder the decode requests to front.
         i, j = 0, num_reqs - 1
         while i < j:
             i_req_id = self.input_batch.req_ids[i]
             j_req_id = self.input_batch.req_ids[j]
 
-            if scheduler_output.num_scheduled_tokens[i_req_id] == 1:
+            if scheduler_output.num_scheduled_tokens[
+                    i_req_id] <= max_decode_tokens:
                 # i is a decode request, move to the next one.
                 i += 1
-            elif scheduler_output.num_scheduled_tokens[j_req_id] > 1:
+            elif scheduler_output.num_scheduled_tokens[
+                    j_req_id] > max_decode_tokens:
                 # j is a prefill request, move to the previous one.
                 j -= 1
             else:
@@ -77,7 +96,7 @@ class PersistentBatchManager:
                 swap_cnt += 1
 
         num_decode = i + int(scheduler_output.num_scheduled_tokens[
-            self.input_batch.req_ids[i]] == 1)
+            self.input_batch.req_ids[i]] <= max_decode_tokens)
 
         self.input_batch.request_distribution = [
             num_decode, num_decode, num_reqs
@@ -115,6 +134,7 @@ class PersistentBatchManager:
                 req_state = finished_req_states.get(req_id)
                 if req_state is not None:
                     req_state.mamba_state_slot = None
+                    req_state.mamba_read_offset = 0
                 removed_req_indices.append(req_index)
             else:
                 req_state = finished_req_states.get(req_id)
@@ -122,6 +142,7 @@ class PersistentBatchManager:
                     self.input_batch.release_mamba_slot(
                         req_state.mamba_state_slot)
                     req_state.mamba_state_slot = None
+                    req_state.mamba_read_offset = 0
 
         # Free the cached encoder outputs.
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
@@ -154,6 +175,7 @@ class PersistentBatchManager:
                 continue
             self.input_batch.release_mamba_slot(req_state.mamba_state_slot)
             req_state.mamba_state_slot = None
+            req_state.mamba_read_offset = 0
 
         # Usually resumed requests are not present in the persistent batch.
         # Forced preemption can make a resumed request still appear there; clear
@@ -173,6 +195,7 @@ class PersistentBatchManager:
                 if reset_mamba_slot:
                     if req_state is not None:
                         req_state.mamba_state_slot = None
+                        req_state.mamba_read_offset = 0
                 else:
                     self.requests[req_id].mamba_state_slot = int(
                         self.input_batch.mamba_state_indices_cpu[req_index])

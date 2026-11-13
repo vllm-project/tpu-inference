@@ -12,6 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
+
+def get_subprocess_env() -> dict[str, str]:
+    """Builds standard environment dict for tuner subprocesses (PYTHONUNBUFFERED=1 and working directory in PYTHONPATH)."""
+    env = os.environ.copy()
+    env['PYTHONUNBUFFERED'] = '1'
+    cwd = os.getcwd()
+    pythonpath = env.get('PYTHONPATH', '')
+    env['PYTHONPATH'] = f'{cwd}:{pythonpath}' if pythonpath else cwd
+    return env
+
 
 # Keep in sync with the logic in bootstrap_kernel_tuning.sh:set_jax_envs
 def get_tpu_queue_by_version_and_cores(tpu_version: str,
@@ -31,3 +43,16 @@ def get_tpu_queue_by_version_and_cores(tpu_version: str,
     expected_queue = _queue_by_version_and_cores[(tpu_version, tpu_cores)]
     assert not tpu_queue_multi or tpu_queue_multi == expected_queue, f'Inconsistent TPU queue {tpu_queue_multi} for version {tpu_version} and cores {tpu_cores}. Expected queue is {expected_queue}. Please check your flags.'
     return tpu_queue_multi or expected_queue
+
+
+def get_worker_id(worker_id: str | int | None = None) -> str:
+    """Returns a clean worker_id string representing the kernel_tuner_worker process.
+
+    If a non-empty worker_id is provided, returns it as a string.
+    Otherwise resolves from environment variables (TPU_WORKER_ID, HOST_NAME, HOSTNAME)
+    or defaults to '0'.
+    """
+    if worker_id is not None and str(worker_id).strip() != '':
+        return str(worker_id)
+    return (os.getenv('TPU_WORKER_ID') or os.getenv('HOST_NAME')
+            or os.getenv('HOSTNAME') or '0')

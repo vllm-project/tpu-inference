@@ -106,6 +106,9 @@ class TestGemma4MTPForCausalLM:
         # For HF loader testing, we redirect the model to point to the real assistant draft checkpoint
         if load_format == "skip_layers_model_loader_for_test":
             vllm_config.model_config.model = "google/gemma-4-31B-it-assistant"
+            # The resolved revision belongs to the original repo; clear it so
+            # the redirected repo resolves its own.
+            vllm_config.model_config.revision = None
 
         # Construct Speculative Draft Config using solid, concrete Python classes to avoid MagicMock leakages
         vllm_config.speculative_config = MagicMock()

@@ -66,9 +66,11 @@ class TPUSupportedSamplingMetadata:
         dummy_shape = (1 if needs_logprobs else 2, )
         cache_collision_dummy = np.zeros(dummy_shape, dtype=np.int32)
         # Use replicated sharding for dummy tensor.
-        cache_collision_dummy = device_array(mesh,
-                                             cache_collision_dummy,
-                                             sharding=None)
+        cache_collision_dummy = device_array(
+            mesh,
+            cache_collision_dummy,
+            sharding=jax.sharding.NamedSharding(mesh,
+                                                jax.sharding.PartitionSpec()))
 
         if input_batch.all_greedy:
             return cls(do_sampling=False,

@@ -19,6 +19,8 @@ from vllm.v1.attention.backends.registry import (AttentionBackendEnum,
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from tpu_inference import utils
+from tpu_inference.layers.common.attention_backend import (
+    RPAAttentionBackend, create_attention_backend)
 from tpu_inference.layers.common.attention_interface import (
     attention, encoder_only_attention)
 from tpu_inference.layers.common.attention_metadata import (
@@ -145,6 +147,10 @@ class PallasAttentionBackend(AttentionBackend):
 
 class PallasAttentionBackendImpl(AttentionImpl):
 
+    # The name of the TPU attention backend this impl runs. The vLLM backend
+    # class of a registered backend returns an impl that overrides it.
+    attention_backend: str = RPAAttentionBackend.name
+
     def __init__(
         self,
         num_heads: int,
@@ -251,15 +257,23 @@ class PallasAttentionBackendImpl(AttentionImpl):
 
                 q_scale = k_scale = v_scale = None
                 if self.kv_cache_quantized_dtype:
-                    # Quantize K and V views
-                    k_jax, v_jax = quantize_kv(self.kv_cache_quantized_dtype,
-                                               k_jax, v_jax,
-                                               layer._k_scale_float,
-                                               layer._v_scale_float)
+                    if k_jax is not None:
+                        # Quantize K and V views
+                        k_jax, v_jax = quantize_kv(
+                            self.kv_cache_quantized_dtype, k_jax, v_jax,
+                            layer._k_scale_float, layer._v_scale_float)
                     k_scale = layer._k_scale_float
                     v_scale = layer._v_scale_float
 
                 sinks = jax_view(self.sinks)
+
+                # KV-shared layers (kv_sharing_target_layer_name set, e.g.
+                # gemma-4 E2B/E4B cross-decoder) read the target layer's
+                # cache and must NOT write to it: layer_name_to_kvcache_index
+                # maps them to the target's cache index, so an unconditional
+                # write would overwrite the target's entries with this
+                # layer's discarded K/V and corrupt every subsequent step.
+                update_kv_cache = self.kv_sharing_target_layer_name is None
 
                 new_kv_cache, outputs = _jax_attn_func(
                     kv_cache,
@@ -278,7 +292,12 @@ class PallasAttentionBackendImpl(AttentionImpl):
                     k_scale,
                     v_scale,
                     self.sliding_window,
+                    update_kv_cache=update_kv_cache,
+                    attention_backend=self.attention_backend,
                 )
+                # With update_kv_cache=False the kernel returns the cache
+                # unchanged; still store the returned array (kv_cache is a
+                # donated argument, so the old reference must not be reused).
                 vllm_model_wrapper_context.kv_caches[
                     kv_cache_index] = new_kv_cache
             case _:
@@ -333,14 +352,17 @@ def _format_attention_output(
         "k_scale",
         "v_scale",
         "sliding_window",
+        "soft_cap",
+        "update_kv_cache",
+        "attention_backend",
     ),
     donate_argnames=("kv_cache"),
 )
 def _jax_attn_func(
     kv_cache: jax.Array,
     q: jax.Array,
-    k: jax.Array,
-    v: jax.Array,
+    k: jax.Array | None,
+    v: jax.Array | None,
     sinks: jax.Array | None,
     attention_metadata: AttentionMetadata,
     shared_attention_metadata: SharedAttentionMetadata,
@@ -353,8 +375,15 @@ def _jax_attn_func(
     k_scale: float | None = None,
     v_scale: float | None = None,
     sliding_window: int | None = None,
+    soft_cap: float | None = None,
+    update_kv_cache: bool = True,
+    attention_backend: str = RPAAttentionBackend.name,
 ) -> Tuple[jax.Array, jax.Array]:
     q_len = q.shape[0]
+    if k is None or v is None:
+        assert not update_kv_cache, "only KV-shared layers may omit k/v"
+        k = v = jnp.zeros((q_len, num_kv_heads * head_size),
+                          dtype=kv_cache.dtype)
     q, k, v = _prepare_qkv_layout(q, k, v, num_heads, num_kv_heads, head_size)
 
     new_kv_cache, outputs = attention(
@@ -370,7 +399,10 @@ def _jax_attn_func(
         v_scale=v_scale,
         sinks=sinks,
         attention_chunk_size=sliding_window,
+        attn_logits_soft_cap=soft_cap,
+        update_kv_cache=update_kv_cache,
         shared_attention_metadata=shared_attention_metadata,
+        attention_backend=create_attention_backend(attention_backend),
     )
 
     formatted_outputs = _format_attention_output(outputs, q_len, num_heads,

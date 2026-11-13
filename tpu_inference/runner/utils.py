@@ -14,7 +14,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import jax
 import jax.numpy as jnp
@@ -23,6 +23,7 @@ from jax._src.interpreters import pxla
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
 from tpu_inference import envs
+from tpu_inference import utils as common_utils
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.input_batch import InputBatch
 
@@ -62,11 +63,20 @@ def get_kv_transfer_metadata(kv: list[Any]) -> tuple[str, int]:
     return dims_str, kv_size_bytes
 
 
+# jax.profiler.TraceAnnotation is a nanobind function, and nanobind rejects
+# calls with more than 1024 keyword arguments. Keep the per-request kwargs
+# below that so a large batch cannot fail execute_model while tracing is on.
+MAX_TRACED_REQUEST_IDS = 1000
+
+
 def extract_request_ids_for_tracing(
     input_batch: InputBatch,
     scheduler_output: Optional[Any] = None,
 ) -> dict[str, str]:
-    """Extracts request IDs from an InputBatch and formats them for XProf tracing."""
+    """Extracts request IDs from an InputBatch and formats them for XProf tracing.
+
+    At most MAX_TRACED_REQUEST_IDS ids are returned (in batch order).
+    """
     req_id_kwargs = {}
     try:
         num_reqs = input_batch.num_reqs
@@ -84,6 +94,10 @@ def extract_request_ids_for_tracing(
                     continue
             active_req_ids.append(rid)
 
+        if len(active_req_ids) > MAX_TRACED_REQUEST_IDS:
+            logger.debug(f"Tracing only the first {MAX_TRACED_REQUEST_IDS} of "
+                         f"{len(active_req_ids)} active request IDs.")
+            active_req_ids = active_req_ids[:MAX_TRACED_REQUEST_IDS]
         trimmed_req_ids = [
             trim_request_id_suffix(rid) for rid in active_req_ids
         ]
@@ -210,6 +224,33 @@ def get_token_paddings(min_token_size: int, max_token_size: int,
             paddings.append(num)
     logger.info(f"Prepared token paddings: {paddings}")
     return paddings
+
+
+def build_token_paddings(
+    min_token_size: int,
+    max_token_size: int,
+    padding_gap: int,
+    additional_sizes: Sequence[int] = ()) -> list[int]:
+    """Token buckets for the runner: never pad a step past the budget.
+
+    `get_token_paddings` grows buckets until one covers `max_token_size`, so
+    a budget that is not itself a bucket (e.g. 16640 with the default
+    exponential gap) lands a full chunked-prefill step on the next bucket,
+    up to ~2x the scheduler's own limit (16640 -> 32768 tokens per rank).
+    The scheduler never schedules more than the budget, so buckets above it
+    are unreachable: they only cost a compile each and size the runner's
+    preallocated token buffers.
+
+    This returns the generated buckets capped at the budget (rounded up to a
+    multiple of `min_token_size`), the budget itself, and any user-supplied
+    `compilation_sizes`, which are kept as given even when above the budget.
+    A budget that is already a bucket yields the stock list.
+    """
+    budget = -(-max_token_size // min_token_size) * min_token_size
+    generated = get_token_paddings(min_token_size, max_token_size, padding_gap)
+    sizes = {p for p in generated if p <= budget} | {budget}
+    sizes.update(int(x) for x in additional_sizes)
+    return sorted(sizes)
 
 
 def get_padded_token_len(paddings: list[int], x: int) -> int:
@@ -907,7 +948,7 @@ def host_extract_sampled_tokens(
     """host retrieve the sampled tokens for the current step."""
     next_tokens = sampled_output
     if spec_decode_metadata is None:
-        next_tokens = np.asarray(jax.device_get(next_tokens))
+        next_tokens = common_utils.safe_device_get(next_tokens)
         # Map tokens back to the pre-dp shuffling order
         if logits_indices_selector is not None:
             next_tokens = next_tokens[logits_indices_selector]
@@ -915,7 +956,8 @@ def host_extract_sampled_tokens(
         valid_sampled_token_ids = selected_token_ids.tolist()
     else:
         valid_sampled_token_ids = runner.rejection_sampler.parse_output(
-            next_tokens, runner.input_batch.vocab_size,
+            common_utils.safe_device_get(next_tokens),
+            runner.input_batch.vocab_size,
             spec_decode_metadata.draft_lengths_cpu, num_reqs,
             spec_decode_metadata.final_logits_indices.shape[0], runner.dp_size,
             spec_decode_metadata.req_indices_dp)
@@ -928,21 +970,45 @@ def host_extract_sampled_tokens(
 
 def get_eos_token_id(model_config: Any) -> tuple[int, ...]:
     """Extract EOS token ID from the model configuration with fallback."""
-    eos_token_id = model_config.get_vocab_size() - 1
-    if hasattr(model_config, "hf_config"):
-        eos_token_id = getattr(model_config.hf_config, "eos_token_id",
-                               eos_token_id)
-        if eos_token_id is None:
-            eos_token_id = model_config.get_vocab_size() - 1
+    eos_ids: list[int] = []
 
-    if isinstance(eos_token_id, int):
-        return (eos_token_id, )
-    elif isinstance(eos_token_id, list):
-        return tuple(eos_token_id)
-    elif eos_token_id is None:
-        return ()
-    else:
-        return tuple(eos_token_id)
+    def _add_eos(val: Any) -> None:
+        if isinstance(val, int) and not isinstance(val, bool):
+            if val not in eos_ids:
+                eos_ids.append(val)
+        elif isinstance(val, (list, tuple, set)):
+            for item in val:
+                if isinstance(item, int) and not isinstance(item, bool):
+                    if item not in eos_ids:
+                        eos_ids.append(item)
+
+    if hasattr(model_config, "hf_config"):
+        _add_eos(getattr(model_config.hf_config, "eos_token_id", None))
+
+    if hasattr(model_config, "hf_text_config"):
+        _add_eos(getattr(model_config.hf_text_config, "eos_token_id", None))
+
+    if hasattr(model_config, "try_get_generation_config"):
+        try:
+            gen_cfg = model_config.try_get_generation_config()
+            if isinstance(gen_cfg, dict):
+                _add_eos(gen_cfg.get("eos_token_id"))
+        except Exception:
+            pass
+
+    if eos_ids:
+        return tuple(eos_ids)
+
+    if hasattr(model_config, "get_vocab_size"):
+        try:
+            vocab_size = model_config.get_vocab_size()
+            if isinstance(vocab_size,
+                          int) and not isinstance(vocab_size, bool):
+                return (vocab_size - 1, )
+        except Exception:
+            pass
+
+    return ()
 
 
 def get_pad_token_id(model_config: Any) -> int:

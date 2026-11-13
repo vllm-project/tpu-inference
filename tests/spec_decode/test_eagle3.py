@@ -368,3 +368,60 @@ def test_update_inputs_for_loop_speculation_mrope():
     assert new_seq_lens[0] == 6
     assert new_block_tables[0] == 1
     assert new_block_tables[1] == 2
+
+
+def test_get_draft_block_tables_dp_reordering():
+    """Verify draft block tables are reordered per DP rank and zero-padded."""
+    from tpu_inference.spec_decode.jax.utils import get_draft_block_tables
+
+    mock_runner = mock.MagicMock()
+    mock_runner.dp_size = 2
+    mock_runner.max_num_reqs = 4
+    mock_runner.kv_cache_config.kv_cache_groups = [
+        mock.MagicMock(),
+        mock.MagicMock(),
+    ]
+
+    # Simulate 2 active requests in input_batch (row 0 on DP rank 0, row 1 on
+    # DP rank 1) plus stale non-zero block IDs in unused rows 2 and 3.
+    raw_block_table = np.array(
+        [
+            [11, 12],  # req_idx 0 (DP rank 0)
+            [21, 22],  # req_idx 1 (DP rank 1)
+            [91, 92],  # stale row 2
+            [93, 94],  # stale row 3
+        ],
+        dtype=np.int32,
+    )
+    mock_block_table = mock.MagicMock()
+    mock_block_table.get_cpu_tensor.return_value = raw_block_table
+    mock_runner.input_batch.block_table = [mock.MagicMock(), mock_block_table]
+
+    # Unbalanced / non-offset DP assignment: DP rank 0 has [0], DP rank 1 has [1].
+    req_indices_dp = {0: [0], 1: [1]}
+    reordered = get_draft_block_tables(mock_runner, req_indices_dp)
+    expected = np.array(
+        [
+            [11, 12],  # DP rank 0 slot 0
+            [0, 0],  # DP rank 0 slot 1 (padded, zeroed)
+            [21, 22],  # DP rank 1 slot 0 (offset = 2)
+            [0, 0],  # DP rank 1 slot 1 (padded, zeroed)
+        ],
+        dtype=np.int32,
+    ).reshape(-1)
+    assert np.array_equal(reordered, expected)
+
+    # Interleaved DP assignment across all 4 slots.
+    req_indices_dp_interleaved = {0: [0, 2], 1: [1, 3]}
+    reordered_interleaved = get_draft_block_tables(mock_runner,
+                                                   req_indices_dp_interleaved)
+    expected_interleaved = np.array(
+        [
+            [11, 12],  # DP rank 0 slot 0 (req_idx 0)
+            [91, 92],  # DP rank 0 slot 1 (req_idx 2)
+            [21, 22],  # DP rank 1 slot 0 (req_idx 1)
+            [93, 94],  # DP rank 1 slot 1 (req_idx 3)
+        ],
+        dtype=np.int32,
+    ).reshape(-1)
+    assert np.array_equal(reordered_interleaved, expected_interleaved)

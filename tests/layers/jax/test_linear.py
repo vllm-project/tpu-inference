@@ -164,7 +164,10 @@ class TestJaxLinear(unittest.TestCase):
                 rngs=nnx.Rngs(0),
             )
 
-        self.assertSequenceEqual(jax_linear.weight.sharding, (None, "model"))
+        # eager_sharding is False
+        self.assertSequenceEqual(jax_linear.weight.sharding.spec, jax.P())
+        self.assertSequenceEqual(jax_linear.weight.out_sharding,
+                                 (None, "model"))
         self.assertEqual(f"{jax.typeof(jax_linear.weight.value)}",
                          "float32[16,32]")
 
@@ -215,7 +218,9 @@ class TestJaxLinear(unittest.TestCase):
                 prefix="mlp.gate_up_proj",
             )
 
-        self.assertSequenceEqual(jax_merged.weight.sharding, (None, "model"))
+        self.assertEqual(jax_merged.weight.sharding.spec, jax.P())
+        self.assertSequenceEqual(jax_merged.weight.out_sharding,
+                                 (None, "model"))
         self.assertEqual(f"{jax.typeof(jax_merged.weight.value)}",
                          "float32[16,64]")
 

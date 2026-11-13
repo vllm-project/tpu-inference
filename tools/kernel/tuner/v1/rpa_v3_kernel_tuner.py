@@ -161,7 +161,7 @@ class RpaV3KernelTuner(KernelTunerBase):
     # not based on any real computation, but rather is just a placeholder to
     # demonstrate the tuning pipeline.
 
-    def __init__(self, run_config: RunConfig):
+    def __init__(self, run_config: RunConfig, lightweight: bool = False):
         self.tuner_config = TunerConfig(
             tuning_key_class=TuningKey,
             tunable_params_class=TunableParams,
@@ -169,7 +169,8 @@ class RpaV3KernelTuner(KernelTunerBase):
         self.run_config = run_config
 
         super().__init__(tuner_config=self.tuner_config,
-                         run_config=self.run_config)
+                         run_config=self.run_config,
+                         lightweight=lightweight)
 
         self.max_model_len = 2048
         self.max_num_seqs = 128

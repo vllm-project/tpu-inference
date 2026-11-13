@@ -14,6 +14,7 @@
 
 import json
 import math
+import re
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, List, Optional
 
@@ -30,7 +31,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 MESH_AXIS_NAMES = ("data", "attn_dp", "attn_dp_expert", "expert", "model",
-                   "dcp")
+                   "dcp", "pcp")
 MESH_AXIS_NAMES_2D = ('data', 'model')
 
 
@@ -41,17 +42,18 @@ class ShardingAxisNameBase:
         'attn_dp',
         'attn_dp_expert',
     )
-    ATTN_DATA = ('data', 'attn_dp', 'attn_dp_expert')
+    ATTN_DATA = ('data', 'pcp', 'attn_dp', 'attn_dp_expert')
     ATTN_DATA_EXPERT = ('attn_dp_expert', 'expert')
     MLP_DATA = 'data'
-    ATTN_HEAD = ('model', 'expert', 'dcp')
+    ATTN_HEAD = ('model', 'expert', 'dcp')  # Q heads
+    KV_HEAD = ('model', 'expert')
     ATTN_TENSOR = None
-    MLP_TENSOR = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp')
-    MOE_TENSOR = ('attn_dp', 'model', 'dcp')
-    EXPERT = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp')
+    MLP_TENSOR = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp', 'pcp')
+    MOE_TENSOR = ('attn_dp', 'model', 'dcp', 'pcp')
+    EXPERT = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp', 'pcp')
     EXPERT_DATA = ('data', 'attn_dp', 'attn_dp_expert', 'expert', 'model',
-                   'dcp')
-    VOCAB = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp')
+                   'dcp', 'pcp')
+    VOCAB = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp', 'pcp')
     MODEL_1 = 'model'
     MODEL_2 = 'expert'
 
@@ -60,8 +62,10 @@ class ShardingAxisNameBase:
 
     # These axes are used in KV caches management.
     BATCH = ('data', 'attn_dp', 'attn_dp_expert')
-    CONTEXT = 'dcp'
-    KV_CACHE_HEAD = ('model', 'expert')
+    KV_CONTEXT = ('pcp', 'dcp')
+
+    # PCP input sharding
+    PREFILL_CONTEXT = 'pcp'
 
     # Vision encoder sharding axes
     VIT_BATCH = ('data', 'attn_dp', 'attn_dp_expert')
@@ -78,6 +82,7 @@ class ShardingAxisName2D:
     ATTN_DATA = 'data'
     MLP_DATA = 'data'
     ATTN_HEAD = 'model'
+    KV_HEAD = 'model'
     ATTN_TENSOR = None
     MLP_TENSOR = 'model'
     MOE_TENSOR = 'model'
@@ -85,8 +90,9 @@ class ShardingAxisName2D:
     EXPERT_DATA = ('data', 'model')
     VOCAB = ('data', 'model')
     BATCH = 'data'
-    CONTEXT = None
-    KV_CACHE_HEAD = 'model'
+    KV_CONTEXT = None
+    PREFILL_CONTEXT = None
+
     MODEL = 'model'
 
     # Vision encoder sharding axes
@@ -146,6 +152,89 @@ def is_attn_dp(mesh: Mesh) -> bool:
     return (attn_dp_size // dp_size) > 1
 
 
+def is_shared_expert_prefix(prefix: str) -> bool:
+    """Whether a linear layer's prefix names a MoE shared expert.
+
+    Covers both checkpoint namings: `.shared_expert.` (Qwen) and
+    `.shared_experts.` (DeepSeek V2/V3 style).
+    """
+    return re.search(r"\.shared_experts?\.", prefix) is not None
+
+
+def shared_expert_is_replicated(shared_experts) -> bool:
+    """Whether every linear of the shared expert has replicated weights.
+
+    VllmQuantLinearConfig replicates the shared expert under the
+    sequence-parallel residual stream (`sharding.keeps_tokens_sharded`); it
+    then runs on the local token slice and its output is already complete.
+    Reads the linears' actual weight sharding, so it can't disagree with the
+    linear configs.
+    """
+    modules_fn = getattr(shared_experts, "modules", None)
+    if not callable(modules_fn):
+        return False
+    configs = [
+        m.quant_method.linear_config for m in modules_fn()
+        if getattr(getattr(m, "quant_method", None), "linear_config", None)
+        is not None
+    ]
+    return bool(configs) and all(
+        all(axis is None for axis in c.weight_sharding) for c in configs)
+
+
+def keeps_tokens_sharded(mesh: Mesh | None, enable_sp: bool, *,
+                         moe_keeps_tokens: bool) -> bool:
+    """Whether the residual stream stays token-sharded over EXPERT_DATA.
+
+    Sequence parallelism (`enable_sp`) under attention DP when the MoE layer
+    consumes and produces tokens sharded over all devices (EXPERT_DATA):
+    instead of resharding to ATTN_DATA around every linear and the MoE, the
+    activations outside attention stay token-sharded: column-parallel
+    projections all-gather (FP8) tokens over the attention TP axis,
+    row-parallel ones reduce-scatter, and router / shared expert / norms run on
+    the local token slice.
+
+    Only under attention DP with attention TP > 1 and a compatible MoE backend;
+    otherwise `enable_sp` keeps its MLP_TENSOR input / output sharding:
+
+    - `moe_keeps_tokens`: the MoE backend must honor `keep_token_sharding`:
+      GMM_EP (`expert_parallel_gmm`) or ROUTING_MOE (`USE_ROUTING_MOE`). GMM_TP
+      (expert parallelism off) and the other EP backends (USE_MOE_EP_KERNEL,
+      USE_FUSED_EP_MOE_V2) ignore it. vLLM callers decide this with
+      `select_moe_backend` via `vllm_keeps_tokens_sharded`.
+    - The `expert` and `pcp` mesh axes must be size 1. The linears gather and
+      reduce-scatter tokens over ATTN_HEAD (`model`, `expert`, `dcp`) inside
+      each ATTN_DATA block, but EXPERT_DATA orders `expert` before `model` and
+      puts `pcp` last, so with either axis > 1 the token rows would not line
+      up with EXPERT_DATA.
+    """
+    if not enable_sp or not moe_keeps_tokens:
+        return False
+    if mesh is None or not is_attn_dp(mesh):
+        return False
+    if any(
+            utils.get_mesh_shape_product(mesh, axis) > 1
+            for axis in ("expert", "pcp")):
+        return False
+    return (utils.get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD) > 1
+            and utils.get_mesh_shape_product(mesh,
+                                             ShardingAxisName.EXPERT_DATA) > 1)
+
+
+def sp_token_axes(mesh: Mesh, keep_tokens_sharded: bool, num_tokens: int):
+    """EXPERT_DATA if `num_tokens` tokens stay sharded over it, else None.
+
+    Requires the token count to divide EXPERT_DATA; otherwise the linears use
+    the usual ATTN_DATA token sharding (XLA reshards around them).
+    """
+    if not keep_tokens_sharded:
+        return None
+    if num_tokens % utils.get_mesh_shape_product(mesh,
+                                                 ShardingAxisName.EXPERT_DATA):
+        return None
+    return ShardingAxisName.EXPERT_DATA
+
+
 @dataclass
 class ShardingStrategy:
     """Defines the high-level parallelism strategy.
@@ -169,6 +258,7 @@ class ShardingStrategy:
     attention_data_parallelism: int = 1
     attention_data_expert_parallelism: int = 1
     decode_context_parallelism: int = 1
+    prefill_context_parallelism: int = 1
 
 
 class ShardingConfigManager:
@@ -217,6 +307,7 @@ class ShardingConfigManager:
         device_indexes = sharding_strategy.get("device_indexes", None)
 
         decode_context_parallelism = parallel_config.decode_context_parallel_size
+        prefill_context_parallelism = parallel_config.prefill_context_parallel_size
 
         if pc_tensor_parallelism != ss_tensor_parallelsim and ss_tensor_parallelsim:
             # The user has explicitly set the tensor parallelism in the sharding config.
@@ -294,7 +385,8 @@ class ShardingConfigManager:
             sequence_parallelism=sequence_parallelism,
             attention_data_parallelism=attn_dp,
             attention_data_expert_parallelism=attn_dp_expert,
-            decode_context_parallelism=decode_context_parallelism)
+            decode_context_parallelism=decode_context_parallelism,
+            prefill_context_parallelism=prefill_context_parallelism)
 
         # Must override here to avoid vLLM spinning up multiple DP engines.
         if (not envs.TPU_MULTIPROCESS_DP
@@ -329,6 +421,24 @@ class ShardingConfigManager:
                 raise ValueError(
                     "Must run Context Parallelism with NEW_MODEL_DESIGN enabled. Please set "
                     "NEW_MODEL_DESIGN=True")
+        if sharding_strategy.prefill_context_parallelism > 1:
+            if not envs.NEW_MODEL_DESIGN:
+                raise ValueError(
+                    "Must run Prefill Context Parallelism with NEW_MODEL_DESIGN "
+                    "enabled. Please set NEW_MODEL_DESIGN=True")
+            if sharding_strategy.prefill_context_parallelism % 2 != 0:
+                raise ValueError(
+                    "Prefill context parallelism size must be even: the ring "
+                    "cache phase rotates KV shards between rank pairs, got "
+                    f"{sharding_strategy.prefill_context_parallelism}.")
+            if sharding_strategy.decode_context_parallelism > 1:
+                raise ValueError(
+                    "Only one of prefill/decode context parallelism may be "
+                    "enabled at a time.")
+            if sharding_strategy.data_parallelism > 1:
+                raise ValueError(
+                    "Prefill context parallelism is not compatible with data parallelism yet."
+                )
 
     @property
     def total_dp_size(self) -> int:
@@ -361,6 +471,10 @@ class ShardingConfigManager:
     @property
     def decode_cp_size(self) -> int:
         return self.sharding_strategy.decode_context_parallelism
+
+    @property
+    def prefill_cp_size(self) -> int:
+        return self.sharding_strategy.prefill_context_parallelism
 
     @property
     def total_devices(self) -> int:
@@ -527,6 +641,7 @@ def build_mesh(devices, strategy: dict[str, int]) -> Mesh:
         "seq": strategy.get("sequence_parallelism", 1),
         "model": strategy.get("tensor_parallelism", 1),
         "dcp": strategy.get("decode_context_parallelism", 1),
+        "pcp": strategy.get("prefill_context_parallelism", 1),
     }
     # TODO: add logic to infer axis when the degree is -1
     mesh_axis_names = []

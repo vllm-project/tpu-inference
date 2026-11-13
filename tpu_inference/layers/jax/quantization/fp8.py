@@ -257,7 +257,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                                       permute_dims=None,
                                       param_name=layer.prefix + ".weight"),
                 eager_sharding=False)
-            layer.weight.set_metadata('sharding', self.weight_sharding)
+            layer.weight.set_metadata('out_sharding', self.weight_sharding)
 
             # Per-output-channel scale (1D, covers the free weight dim).
             scale_param = nnx.Param(jnp.ones((out_features, ),
@@ -269,7 +269,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                                         self.weight_scale_name,
                                     ),
                                     eager_sharding=False)
-            scale_param.set_metadata('sharding', ())
+            scale_param.set_metadata('out_sharding', ())
             setattr(layer, self.weight_scale_name, scale_param)
             return
 
@@ -282,7 +282,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                                   permute_dims=(1, 0),
                                   param_name=layer.prefix + ".weight"),
             eager_sharding=False)
-        layer.weight.set_metadata('sharding', self.weight_sharding)
+        layer.weight.set_metadata('out_sharding', self.weight_sharding)
 
         # Block-wise quantization scale
         block_n, block_k = self.quant_config.weight_block_size[
@@ -300,7 +300,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                                     self.weight_scale_name,
                                 ),
                                 eager_sharding=False)
-        scale_param.set_metadata('sharding', self.weight_sharding)
+        scale_param.set_metadata('out_sharding', self.weight_sharding)
         setattr(layer, self.weight_scale_name, scale_param)
 
         # Force the parameters to be loaded onto CPU, such that in `process_weights_after_loading`

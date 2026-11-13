@@ -15,18 +15,24 @@
 from vllm.v1.executor.multiproc_executor import \
     MultiprocExecutor as MultiprocExecutorV1
 
+from tpu_inference.core.hybrid_coordinator import (
+    MambaPoolSyncExecutorMixin, maybe_install_hybrid_coordinator_hooks)
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
 
 
-class MultiprocExecutor(MultiprocExecutorV1):
+class MultiprocExecutor(MambaPoolSyncExecutorMixin, MultiprocExecutorV1):
     """
     MultiprocExecutor override to support TPU inference.
 
     The main change is to support MPMD for Pipeline Parallelism, while keeping
     SPMD for the rest of parallelisms (TP, CP, EP, DP).
     """
+
+    def _init_executor(self) -> None:
+        maybe_install_hybrid_coordinator_hooks(self.vllm_config)
+        super()._init_executor()
 
     def _get_parallel_sizes(self) -> tuple[int, int, int]:
         self.world_size = self.parallel_config.pipeline_parallel_size

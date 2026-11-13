@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest import mock
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -19,6 +21,7 @@ import pytest
 from jax.sharding import Mesh
 
 import tpu_inference.layers.common.attention_interface as attention_interface
+import tpu_inference.layers.vllm.ops.scaled_dot_product_attention as sdpa_ops
 from tpu_inference.layers.vllm.ops.scaled_dot_product_attention import (
     scaled_dot_product_attention, vllm_vit_sdpa)
 
@@ -72,3 +75,71 @@ class TestAttnDpBatchAxisFix:
             out = vllm_vit_sdpa(q, k, v, cu_seqlens=[0, 64, 128])
 
         assert out.shape == (1, 128, 2, 64)
+
+
+class TestVitSdpaPadSegments:
+    """`vllm_vit_sdpa` must hand the kernel segment ids in which every padded
+    position (kernel 128-alignment padding AND mm-encoder budget padding) sits
+    in its own trailing segment."""
+
+    def _capture_seg_ids(self, q_seq_len, cu_seqlens):
+        q = k = v = jnp.ones((1, q_seq_len, 2, 64), dtype=jnp.float32)
+        with mock.patch.object(sdpa_ops,
+                               'sharded_flash_attention') as mock_sfa:
+            mock_sfa.return_value = mock.MagicMock(
+                return_value=jnp.ones((1, 2, q_seq_len,
+                                       64), dtype=jnp.float32))
+            vllm_vit_sdpa(q, k, v, cu_seqlens=cu_seqlens)
+        attn_fn = mock_sfa.return_value
+        seg_ids = attn_fn.call_args[0][3]
+        return np.asarray(seg_ids.q[0]), np.asarray(seg_ids.kv[0])
+
+    def test_budget_padding_gets_dedicated_segment(self):
+        """Full batch (no empty trailing cu_seqlens entry) with padded q/k/v:
+        the tail must NOT inherit the last image's segment id."""
+        # 2 images covering [0, 64) and [64, 192); 192..255 is budget padding.
+        q_seg, kv_seg = self._capture_seg_ids(256, [0, 64, 192])
+        expected = np.array([0] * 64 + [1] * 128 + [2] * 64)
+        np.testing.assert_array_equal(q_seg, expected)
+        np.testing.assert_array_equal(kv_seg, expected)
+
+    def test_kernel_alignment_padding_gets_dedicated_segment(self):
+        """The 128-alignment pad rows keep their dedicated trailing segment."""
+        # seq_len 100 -> q_pad 28; one image covering the whole real range.
+        q_seg, kv_seg = self._capture_seg_ids(100, [0, 100])
+        assert q_seg.shape == (128, )
+        np.testing.assert_array_equal(q_seg[:100], np.zeros(100))
+        np.testing.assert_array_equal(q_seg[100:], np.ones(28))
+        np.testing.assert_array_equal(kv_seg, q_seg)
+
+
+class TestVitVmemLimit:
+    """The ViT flash attention must raise the scoped-vmem limit above the
+    32MiB pallas default: large flattened image sequences exceed it
+    (CompileTimeScopedVmemOom at bf16[1,16,25344,80])."""
+
+    def test_vit_vmem_limit_covers_failing_shape(self):
+        # 37.22M was the observed scoped allocation that OOMed at 32M.
+        assert sdpa_ops._VIT_FLASH_ATTENTION_VMEM_LIMIT_BYTES >= int(
+            38 * 1024 * 1024)
+
+    @pytest.mark.parametrize('op,extra_kwargs', [
+        (scaled_dot_product_attention, {}),
+        (vllm_vit_sdpa, {
+            'cu_seqlens': [0, 128]
+        }),
+    ])
+    def test_ops_pass_vmem_limit_to_flash_attention(self, op, extra_kwargs):
+        q = k = v = jnp.ones((1, 2, 128, 64), dtype=jnp.float32)
+        if op is vllm_vit_sdpa:
+            q = k = v = jnp.ones((1, 128, 2, 64), dtype=jnp.float32)
+
+        with mock.patch.object(sdpa_ops,
+                               'sharded_flash_attention') as mock_sfa:
+            mock_sfa.return_value = mock.MagicMock(
+                return_value=jnp.ones((1, 2, 128, 64), dtype=jnp.float32))
+            op(q, k, v, **extra_kwargs)
+
+        assert mock_sfa.call_count == 1
+        assert mock_sfa.call_args.kwargs['vmem_limit_bytes'] == \
+            sdpa_ops._VIT_FLASH_ATTENTION_VMEM_LIMIT_BYTES

@@ -14,14 +14,19 @@
 
 import os
 import re
-
-from tensorflow.tsl.profiler.protobuf import xplane_pb2
+import shutil
 
 
 def find_events_by_pattern(pb_file_path, event_pattern_string):
+    from tensorflow.tsl.profiler.protobuf import xplane_pb2
+
     # 1. Compile the regex pattern (case-insensitive by default for convenience)
     # for example: r"(jit_ragged_paged_attention\()"
     pattern = re.compile(event_pattern_string, re.IGNORECASE)
+
+    if not os.path.exists(pb_file_path):
+        raise FileNotFoundError(
+            f"xprof directory or file does not exist: {pb_file_path}")
 
     if os.path.isdir(pb_file_path):
         # walk the directory to find the .xplane.pb and expect only one file
@@ -76,3 +81,16 @@ def find_events_by_pattern(pb_file_path, event_pattern_string):
         len(matching_events)) if matching_events else 0xFFFFFFFF
 
     return matching_events, average_duration_us
+
+
+def safe_remove_folder(folder_path: str):
+    if os.path.exists(folder_path):
+        shutil.rmtree(folder_path)
+
+
+def safe_remove_files(file_paths: str | list[str]):
+    if isinstance(file_paths, str):
+        file_paths = [file_paths]
+    for file_path in file_paths:
+        if os.path.exists(file_path):
+            os.remove(file_path)

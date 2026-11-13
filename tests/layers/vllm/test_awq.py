@@ -28,7 +28,6 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
                                                MergedColumnParallelLinear,
@@ -41,6 +40,7 @@ from vllm.scalar_type import scalar_types
 
 from tests.layers.common import utils as test_utils
 from tpu_inference.layers.common.moe import MoEBackend
+from tpu_inference.layers.vllm.interface.moe import FusedMoEFactory
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.awq import (VllmAWQConfig,
                                                         VllmAWQLinearMethod,
@@ -300,7 +300,7 @@ def test_row_parallel_linear(model, bias, mesh, enable_sp):
         dtype='bfloat16',
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
+    vllm_config.additional_config["enable_sp"] = enable_sp
 
     vllm_config.model_config.dtype = dtype
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
@@ -339,7 +339,7 @@ def test_column_parallel_linear(model, bias, mesh, enable_sp):
         dtype='bfloat16',
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
+    vllm_config.additional_config["enable_sp"] = enable_sp
 
     # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16
@@ -380,7 +380,7 @@ def test_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
         dtype='bfloat16',
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
+    vllm_config.additional_config["enable_sp"] = enable_sp
 
     # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16
@@ -425,7 +425,7 @@ def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
         dtype='bfloat16',
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
+    vllm_config.additional_config["enable_sp"] = enable_sp
 
     # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16
@@ -492,7 +492,7 @@ def test_fused_moe(num_devices, num_tokens, intermediate_size, hidden_size,
 
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):
-        vllm_fused_moe = FusedMoE(
+        vllm_fused_moe = FusedMoEFactory(
             num_experts=num_experts,
             top_k=topk,
             hidden_size=hidden_size,

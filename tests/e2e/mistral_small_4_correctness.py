@@ -26,6 +26,11 @@ def set_env_vars():
     os.environ['MODEL_IMPL_TYPE'] = 'vllm'
     os.environ[
         'SKIP_JAX_PRECOMPILE'] = '1'  # Set to '1' to skip expensive multi-shape precompilation in unit tests
+    # SKIP_JAX_PRECOMPILE means the first real step compiles during
+    # execute_model, so the CI recompilation guard
+    # (VLLM_XLA_CHECK_RECOMPILATION=1 in run_in_docker.sh) must be off here,
+    # like the other e2e tests that skip precompile.
+    os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '0'
     os.environ['VLLM_TPU_PATCH_MM_EMBEDDINGS'] = '1'
     os.environ['VLLM_DISABLE_SHARED_EXPERTS_STREAM'] = '0'
     os.environ['MOE_REQUANTIZE_BLOCK_SIZE'] = '512'

@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import torch
 import vllm.envs as vllm_envs
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
@@ -32,9 +33,12 @@ from vllm.model_executor.layers.quantization import \
     register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.utils.config_utils import \
+    is_equal_or_regex_match
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, UnquantizedEmbeddingMethod, VocabParallelEmbedding)
 
+from tpu_inference import envs
 from tpu_inference.layers.common.moe import \
     FusedMoEMethodBase as TpuFusedMoEMethodBase
 from tpu_inference.layers.common.process_weights.linear_weights import (
@@ -43,6 +47,8 @@ from tpu_inference.layers.common.process_weights.linear_weights import (
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_unquantized_moe_weights, shard_moe_weights)
 from tpu_inference.layers.common.quant_methods import UNQUANTIZED
+from tpu_inference.layers.common.quantization import fp8 as common_fp8
+from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.quantization import \
     unquantized as common_unquantized
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -57,19 +63,120 @@ from tpu_inference.layers.vllm.quantization.configs import (
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.pathways_dummy_loader import (
     create_dummy_weights_on_tpu, is_pathways_dummy_load)
-from tpu_inference.utils import to_jax_dtype
+from tpu_inference.utils import (_NUMPY_UNSUPPORTED_DTYPES,
+                                 get_mesh_shape_product, to_jax_dtype)
 
 P = PartitionSpec
 
 logger = init_logger(__name__)
 
 
+def _host_numpy_view(tensor: torch.Tensor) -> Optional[np.ndarray]:
+    """Zero-copy numpy view of a CPU torch tensor, or None if there isn't one.
+
+    numpy has no scalar type for bf16 or the fp8 formats, so those travel as
+    uint8 and are reinterpreted with the ml_dtypes type JAX already uses for
+    them -- the same bit cast `tpu_inference.utils.t2j` does, and unlike the
+    torchax `t2j` this module falls back to, which widens them to float32 on
+    the host first. Reinterpreting scales the trailing dimension by the element
+    width on the way out and the numpy view undoes it exactly, but torch can
+    only do it on contiguous data.
+
+    Note that handing torch storage to numpy makes it non-resizable for good,
+    so `untyped_storage().resize_(0)` on the viewed tensor raises from here on.
+    The fp8 MoE callers free through `_free_torch_storage`, which falls back to
+    `set_()` and frees the buffer just the same, but a caller that resizes
+    unguarded cannot be given `stage_on_host`.
+    """
+    t = tensor.detach()
+    if t.device.type != "cpu":
+        return None
+
+    jax_dtype = _NUMPY_UNSUPPORTED_DTYPES.get(t.dtype)
+    if jax_dtype is None:
+        return t.numpy()
+    if not t.dim() or not t.is_contiguous():
+        return None
+    return t.view(torch.uint8).numpy().view(jax_dtype)
+
+
+def _pathways_device_put(tensor: torch.Tensor,
+                         sharding: NamedSharding) -> jax.Array:
+    """Puts a CPU tensor at `sharding` under Pathways, in its own dtype.
+
+    Sends the tensor's native bytes (1 byte/element for fp8, 2 for bf16)
+    instead of widening it to float32 on the host and casting back on device,
+    which costs host CPU time plus 4x (fp8) or 2x (bf16) the host-to-device
+    bytes. Tensors without a zero-copy view (0-dim or non-contiguous) fall back
+    to the float32 path. Values are bit-identical either way.
+
+    The view leaves `tensor`'s storage non-resizable (see `_host_numpy_view`),
+    so free it with fp8's `_free_torch_storage`, not `resize_(0)`.
+    """
+    np_view = _host_numpy_view(tensor)
+    if np_view is None:
+        dtype = to_jax_dtype(tensor.dtype)
+        np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
+        return jax.device_put(np_tensor, sharding).astype(dtype)
+    array = jax.device_put(np_view, sharding)
+    # np_view aliases the torch storage and callers free that storage as soon
+    # as this returns, so the asynchronous copy has to be forced here.
+    jax.block_until_ready(array)
+    return array
+
+
+def _load_weight_on_host(tensor: torch.Tensor,
+                         sharding: NamedSharding) -> Optional[jax.Array]:
+    """Build the sharded array straight from host memory, or None if we can't.
+
+    `t2j` builds the array with `jnp.array(...)`, which lands the whole
+    unsharded tensor on the default device; the caller's own
+    `general_device_put` then slices it back apart, one slice per addressable
+    device. On one host that is merely wasteful. Across hosts it is much worse,
+    because every host stages the entire tensor on its device 0 and keeps only
+    the shards it owns -- on a 32-device mesh 31/32 of that transfer is thrown
+    away, and the discarded fraction grows with the mesh.
+
+    Staging on the host instead lets every shard go straight to the device that
+    owns it. Measured on one host against a 17.2 GB expert weight: 5.08s ->
+    0.99s (3.4 -> 17.3 GB/s), with more to gain multi-host.
+
+    Returns None if the weight cannot be staged this way -- most often a shape
+    the requested sharding does not divide, since block scales are not always
+    divisible along the axes their weight is. Callers reshard afterwards
+    regardless, so falling back to unsharded staging is correct. It is not
+    merely slower, though: the fallback is torchax's `t2j`, which widens bf16
+    and fp8 to float32 before it copies, so a weight that declines staging
+    needs 2-4x its own size in host memory on the way through.
+    """
+    try:
+        np_view = _host_numpy_view(tensor)
+        if np_view is None:
+            return None
+        array = general_device_put(np_view, sharding)
+    except (ValueError, IndexError) as e:
+        logger.warning_once(
+            f"Host staging unavailable for {tuple(tensor.shape)}"
+            f" {tensor.dtype} at {sharding}: {e}")
+        return None
+    # np_view aliases the torch storage and callers free that storage as soon as
+    # this returns, so the asynchronous copy has to be forced here rather than
+    # left to whoever consumes the array.
+    jax.block_until_ready(array)
+    return array
+
+
 def _load_weight_for_layer(
     layer: torch.nn.Module,
     param_name: str,
     sharding: NamedSharding,
+    stage_on_host: bool = False,
 ) -> jax.Array:
     """Load a layer's weight parameter onto the TPU mesh.
+
+    Set `stage_on_host` when the caller's next step is to put the weight at
+    exactly `sharding` anyway -- it produces the same array without the detour
+    through a single device. See `_load_weight_on_host`.
     """
     tensor = getattr(layer, param_name)
 
@@ -101,6 +208,10 @@ def _load_weight_for_layer(
             tensor = new_param
 
     if not vllm_envs.VLLM_TPU_USING_PATHWAYS:
+        if stage_on_host:
+            array = _load_weight_on_host(tensor, sharding)
+            if array is not None:
+                return array
         return t2j(tensor, use_dlpack=False)
 
     if is_pathways_dummy_load():
@@ -116,9 +227,52 @@ def _load_weight_for_layer(
         )
 
     # Pathways real-weight path
-    dtype = to_jax_dtype(tensor.dtype)
-    np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
-    return jax.device_put(np_tensor, sharding).astype(dtype)
+    return _pathways_device_put(tensor, sharding)
+
+
+def _prefix_matches(prefix: str, patterns: Sequence[str]) -> bool:
+    """Match a layer prefix against one of the BF16_LINEAR_REQUANTIZE_PATTERNS.
+
+    Patterns follow the same convention as the `ignore` /
+    `modules_to_not_convert` lists these names are usually copied from: a bare
+    pattern is the whole layer name, and a `re:`-prefixed one is a regex
+    anchored at the start. To select every layer with a given suffix, spell the
+    regex out -- `re:.*\\.o_proj`.
+    """
+    return any(
+        is_equal_or_regex_match(prefix, pattern) for pattern in patterns)
+
+
+def should_quantize_bf16_linear(
+        prefix: str, fused_mapping: Mapping[str, list[str]]) -> bool:
+    """Whether this unquantized linear layer is one we quantize at load time.
+
+    Patterns may name the layers the way the checkpoint does, which for the
+    layers vLLM fuses is not the way the module is named -- `qkv_proj` holds
+    q/k/v and `in_proj_qkvz` holds `in_proj_qkv` and `in_proj_z`. A fused module
+    is quantized only when every shard it covers is selected, since one weight
+    cannot be half fp8.
+    """
+    patterns = envs.BF16_LINEAR_REQUANTIZE_PATTERNS
+    if not patterns:
+        return False
+    if _prefix_matches(prefix, patterns):
+        return True
+
+    proj_name = prefix.split(".")[-1]
+    if proj_name not in fused_mapping:
+        return False
+
+    matched = [
+        _prefix_matches(prefix.replace(proj_name, shard), patterns)
+        for shard in fused_mapping[proj_name]
+    ]
+    if any(matched) and not all(matched):
+        raise ValueError(
+            f"BF16_LINEAR_REQUANTIZE_PATTERNS selects some but not all shards of "
+            f"{prefix} ({fused_mapping[proj_name]}); it is a single fused "
+            f"weight, so it has to be selected as a whole or not at all.")
+    return all(matched)
 
 
 @register_quantization_config(UNQUANTIZED)
@@ -149,6 +303,9 @@ class VllmUnquantizedConfig(QuantizationConfig, VllmQuantConfig):
         match layer:
             case vllm_linear.LinearBase():
                 linear_config = self.get_linear_config(layer)
+                if should_quantize_bf16_linear(prefix,
+                                               self.packed_modules_mapping):
+                    return VllmQuantizedBf16LinearMethod(linear_config)
                 return VllmUnquantizedLinearMethod(linear_config)
             case RoutedExperts():
                 moe_config = self.get_moe_config(layer)
@@ -207,55 +364,33 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
             "VllmUnquantizedLinearMethod")
 
     def __init__(self, linear_config: VllmQuantLinearConfig):
-        super().__init__(linear_config)
+        vllm_linear.UnquantizedLinearMethod.__init__(self)
+        common_unquantized.UnquantizedLinearMethod.__init__(
+            self, linear_config)
 
     def maybe_process_weights(self, layer: torch.nn.Module, param_name: str,
                               args, kwargs):
-        """Check if all weights are loaded for the layer. If so, process and shard the weights.
-
-        Note on Fused Weight Loading (e.g., Qwen3-VL / Qwen3-VL-MoE / Qwen2.5-VL Vision Encoder):
-        Historically, LLMs stored attention Q/K/V weights separately in HuggingFace checkpoints,
-        and vLLM loaded them per shard (passing shard_id in `args`).
-        However, newer multimodal models like Qwen3-VL / Qwen3-VL-MoE store vision attention weights
-        already fused on disk (e.g., `attn.qkv.weight`). In such cases, vLLM's weight loader is invoked
-        without a shard_id (`args` is empty), and vLLM internally slices and copies the fused weight.
-        To support TPU incremental sharding for these fused weights, we detect when `args` is empty
-        and immediately register all underlying shards ('q', 'k', 'v') as loaded to satisfy the sharding trigger.
-        """
-        if isinstance(layer, vllm_linear.QKVParallelLinear):
-            if len(args) == 1:
-                shard_id = args[0]
-                layer._loaded_weights.add((param_name, shard_id))
-            else:
-                # Fused weight loaded in one go (e.g., Qwen3-VL / Qwen3-VL-MoE vision encoder `attn.qkv.weight`).
-                # vLLM's QKVParallelLinear.weight_loader internally slices the weight into q, k, v.
-                # We register all 3 shards to immediately trigger process_weights_after_loading.
-                layer._loaded_weights.add((param_name, 'q'))
-                layer._loaded_weights.add((param_name, 'k'))
-                layer._loaded_weights.add((param_name, 'v'))
-        elif isinstance(layer, vllm_linear.MergedColumnParallelLinear):
-            if len(args) == 1:
-                shard_id = args[0]
-                layer._loaded_weights.add((param_name, shard_id))
-            else:
-                # Fused weight loaded in one go (e.g., MLP gate_up_proj fused on disk).
-                # Register all output partitions to immediately trigger process_weights_after_loading.
-                for i in range(len(layer.output_sizes)):
-                    layer._loaded_weights.add((param_name, i))
-        else:
-            # Keep track of loaded weights for other linear layers, e.g. ('weight', 'bias')
-            layer._loaded_weights.add(param_name)
-
-        if len(layer._loaded_weights) == self.linear_config.num_proj * len(
-                dict(layer.named_parameters(recurse=False))):
-            logger.debug(f"Start sharding weights for layer {type(layer)}")
-            self.process_weights_after_loading(layer)
-            logger.debug(f"Complete sharding weights for layer {type(layer)}")
+        """Check if all weights are loaded for the layer. If so, process and shard the weights."""
+        self.maybe_process_linear_weights(layer, param_name, args, kwargs,
+                                          self.linear_config.num_proj)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if not _tensor_is_in_cpu(layer.weight):
             # Already processed and sharded.
             return
+        weight, bias = self._load_linear_weights(layer)
+        self._store_linear_weights(
+            layer, self._build_linear_weights(layer, weight, bias))
+
+    def _load_linear_weights(
+            self,
+            layer: torch.nn.Module) -> tuple[jax.Array, jax.Array | None]:
+        """Move the layer's weight and bias onto the mesh, freeing the host copy.
+
+        How a weight is loaded does not depend on what is done to it afterwards,
+        so subclasses inherit this unchanged and override
+        `_build_linear_weights` instead.
+        """
         # Under Pathways, shard weights directly onto the TPU mesh to avoid
         # placing a full unsharded copy on a single device (OOM).
         loading_sharding = NamedSharding(
@@ -264,8 +399,12 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
         weight = _load_weight_for_layer(layer, "weight", loading_sharding)
         weight = jnp.transpose(weight)
 
+        # fp8 imports this module, so it can only be imported lazily.
+        from tpu_inference.layers.vllm.quantization.fp8 import \
+            _free_torch_storage
+
         # Free CPU memory immediately
-        layer.weight.untyped_storage().resize_(0)
+        _free_torch_storage(layer.weight)
         delattr(layer, 'weight')
         if layer.bias is not None and not layer.skip_bias_add:
             if layer.return_bias:
@@ -273,10 +412,19 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
             bias_sharding = NamedSharding(self.linear_config.mesh,
                                           self.linear_config.bias_sharding)
             bias = _load_weight_for_layer(layer, "bias", bias_sharding)
-            layer.bias.untyped_storage().resize_(0)
+            _free_torch_storage(layer.bias)
             delattr(layer, 'bias')
         else:
             bias = None
+        return weight, bias
+
+    def _build_linear_weights(self, layer: torch.nn.Module, weight: jax.Array,
+                              bias: jax.Array | None) -> LinearWeights:
+        """Put the loaded weight into the layout its matmul expects.
+
+        The one step that differs between an unquantized layer and one quantized
+        at load time; loading, sharding and assignment are common to both.
+        """
 
         @jax.jit
         def process_unquantized_linear_weights(
@@ -295,7 +443,17 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
                 reorder_size=self.linear_config.n_shards,
             )
 
-        weights = process_unquantized_linear_weights(weight, bias)
+        return process_unquantized_linear_weights(weight, bias)
+
+    def _store_linear_weights(self, layer: torch.nn.Module,
+                              weights: LinearWeights) -> None:
+        """Shard the processed weights and hang them off the layer.
+
+        A scale is stored only when `_build_linear_weights` produced one, which
+        is what lets the quantized and unquantized paths share this step --
+        `shard_linear_weights` and `process_linear_weights` both leave a `None`
+        field alone.
+        """
         weights = torch_view(
             shard_linear_weights(
                 weights,
@@ -305,11 +463,16 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
             ))
         if self.linear_config.fuse_matmuls:
             layer.weight = Parameter(weights.weight, requires_grad=False)
-            if bias is not None:
+            if weights.weight_scale is not None:
+                layer.weight_scale = Parameter(weights.weight_scale,
+                                               requires_grad=False)
+            if weights.bias is not None:
                 layer.bias = Parameter(weights.bias, requires_grad=False)
         else:
             layer.weight = to_parameter_list(weights.weight)
-            if bias is not None:
+            if weights.weight_scale is not None:
+                layer.weight_scale = to_parameter_list(weights.weight_scale)
+            if weights.bias is not None:
                 layer.bias = to_parameter_list(weights.bias)
 
     def apply(self,
@@ -326,25 +489,164 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
             bias_jax = jax_view(
                 bias) if bias is not None and not layer.skip_bias_add else None
             if self.linear_config.fuse_matmuls:
-                weight_jax = jax_view(layer.weight)
-                out_jax = self._apply_fused(x_jax, weight_jax, bias_jax)
-                out: torch.Tensor = torch_view(out_jax)
+                out_jax = self._matmul_fused(layer, x_jax, bias_jax)
             else:
                 assert isinstance(layer.weight, torch.nn.ParameterList)
-                # jax_view cannot handle ParameterList directly, so explicitly
-                # convert to list.
-                weight_jax = [jax_view(w) for w in layer.weight]
                 if bias_jax is not None:
                     assert isinstance(layer.bias, torch.nn.ParameterList)
+                    # jax_view cannot handle ParameterList directly, so
+                    # explicitly convert to a list.
                     bias_jax = [jax_view(b) for b in layer.bias]
-                out_jax = self._apply_split(x_jax, weight_jax, bias_jax)
-                out: torch.Tensor = torch_view(out_jax)
+                out_jax = self._matmul_split(layer, x_jax, bias_jax)
+            out: torch.Tensor = torch_view(out_jax)
 
             if out_sharding := self.linear_config.get_output_sharding(out):
                 out.shard_(NamedSharding(self.linear_config.mesh,
                                          out_sharding))
 
         return out
+
+    def _matmul_fused(self, layer: torch.nn.Module, x_jax: jax.Array,
+                      bias_jax: jax.Array | None) -> jax.Array:
+        """The layer's matmul, over the one fused weight.
+
+        This and `_matmul_split` are the only part of `apply` that depends on
+        how the weight is stored, so they are the pair a subclass overrides --
+        always both, since which `_apply_*` they reach comes from the
+        subclass's MRO.
+        """
+        return self._apply_fused(x_jax, jax_view(layer.weight), bias_jax)
+
+    def _matmul_split(self, layer: torch.nn.Module, x_jax: jax.Array,
+                      bias_jax: Sequence[jax.Array] | None) -> jax.Array:
+        # jax_view cannot handle ParameterList directly, so explicitly convert
+        # to a list.
+        return self._apply_split(x_jax, [jax_view(w) for w in layer.weight],
+                                 bias_jax)
+
+
+class VllmQuantizedBf16LinearMethod(common_fp8.Fp8LinearMethod,
+                                    VllmUnquantizedLinearMethod):
+    """Quantizes a linear weight the checkpoint left unquantized, at load time.
+
+    Selected by BF16_LINEAR_REQUANTIZE_PATTERNS. The weight arrives in the
+    checkpoint dtype and is loaded exactly as the unquantized path loads it, so
+    everything about weight loading, sharding and `apply` is inherited. Only
+    three steps differ: `_build_linear_weights` quantizes the weight on its way
+    to the device, and `_matmul_fused` / `_matmul_split` pass the resulting
+    scale along, which is what reaches the fp8 kernels rather than the
+    unquantized matmul.
+
+    The scale is per output channel by default: a single value per column of the
+    [in, out] weight, which stays valid under both column-parallel sharding (the
+    scale shards with the output axis) and row-parallel sharding (the scale is
+    identical across contracting shards, so the psum is still a sum of
+    like-scaled partial products). BF16_LINEAR_REQUANTIZE_BLOCK_SIZE splits the
+    input axis into blocks instead, giving a [in // block, out] scale; that also
+    survives both shardings, but only the blockwise gmm kernel can consume it
+    directly, so setting it switches the matmul over to that kernel.
+    """
+
+    if "VllmQuantizedBf16LinearMethod" not in vllm_linear.WEIGHT_LOADER_V2_SUPPORTED:
+        vllm_linear.WEIGHT_LOADER_V2_SUPPORTED.append(
+            "VllmQuantizedBf16LinearMethod")
+
+    def __init__(self, linear_config: VllmQuantLinearConfig):
+        VllmUnquantizedLinearMethod.__init__(self, linear_config)
+        self.weight_dtype = to_jax_dtype(
+            envs.BF16_LINEAR_REQUANTIZE_WEIGHT_DTYPE)
+        self.block_size = envs.BF16_LINEAR_REQUANTIZE_BLOCK_SIZE
+        logger.info_once(
+            "BF16_LINEAR_REQUANTIZE_PATTERNS selected the unquantized linear "
+            "layers matching %s; quantizing them to %s (%s).",
+            ", ".join(envs.BF16_LINEAR_REQUANTIZE_PATTERNS),
+            envs.BF16_LINEAR_REQUANTIZE_WEIGHT_DTYPE,
+            f"blocks of {self.block_size} input features"
+            if self.block_size else "per output channel")
+
+    def _check_block_size(self, layer: torch.nn.Module,
+                          in_features: int) -> None:
+        """Reject block sizes this layer cannot use.
+
+        Non-positive, or a size this layer's shape or sharding cannot support.
+        All three would otherwise surface far from their cause -- a modulo by
+        zero, a reshape error inside the jit, or an indivisible-sharding error
+        when the scale is placed -- so name the env var while we still can.
+        """
+        if self.block_size is None:
+            return
+        if self.block_size <= 0:
+            raise ValueError(
+                f"BF16_LINEAR_REQUANTIZE_BLOCK_SIZE={self.block_size} is not a "
+                f"positive number of input features. Unset it to scale per "
+                f"output channel.")
+        name = type(layer).__name__
+        if in_features % self.block_size:
+            raise ValueError(
+                f"BF16_LINEAR_REQUANTIZE_BLOCK_SIZE={self.block_size} does not "
+                f"divide the {in_features} input features of {name}.")
+        n_blocks = in_features // self.block_size
+        in_shards = get_mesh_shape_product(
+            self.linear_config.mesh, self.linear_config.weight_sharding[0])
+        if n_blocks > 1 and n_blocks % in_shards:
+            raise ValueError(
+                f"BF16_LINEAR_REQUANTIZE_BLOCK_SIZE={self.block_size} splits the "
+                f"{in_features} input features of {name} into {n_blocks} "
+                f"blocks, which its input axis cannot shard {in_shards} ways. "
+                f"Use a block size that leaves a multiple of {in_shards} "
+                f"blocks.")
+
+    def _build_linear_weights(self, layer: torch.nn.Module, weight: jax.Array,
+                              bias: jax.Array | None) -> LinearWeights:
+        self._check_block_size(layer, weight.shape[0])
+
+        @jax.jit
+        def quantize_linear_weights(
+            weight: jax.Array,
+            bias: jax.Array | None,
+        ) -> LinearWeights:
+            # axis=0 is the input features: with no block size that leaves one
+            # scale per output feature, and with one it leaves a scale per
+            # [block of input features, output feature].
+            weight, weight_scale = quantize_tensor(self.weight_dtype,
+                                                   weight,
+                                                   axis=0,
+                                                   block_size=self.block_size)
+            return process_linear_weights(
+                LinearWeights(
+                    weight=weight,
+                    weight_scale=weight_scale,
+                    zero_point=None,
+                    bias=bias,
+                ),
+                fused=self.linear_config.fuse_matmuls,
+                output_sizes=self.linear_config.output_sizes,
+                reorder_size=self.linear_config.n_shards,
+                # A blockwise scale is only usable by the gmm kernel, which
+                # wants it shaped [1, n_blocks, 1, out]. VllmFp8LinearMethod
+                # requires that same pairing of its kernel and block-size
+                # flags, so derive it here instead of taking a second flag.
+                enable_kernel=self.block_size is not None,
+            )
+
+        return quantize_linear_weights(weight, bias)
+
+    def _matmul_fused(self, layer: torch.nn.Module, x_jax: jax.Array,
+                      bias_jax: jax.Array | None) -> jax.Array:
+        return self._apply_fused(x_jax, jax_view(layer.weight),
+                                 jax_view(layer.weight_scale), bias_jax)
+
+    def _matmul_split(self, layer: torch.nn.Module, x_jax: jax.Array,
+                      bias_jax: Sequence[jax.Array] | None) -> jax.Array:
+        assert isinstance(layer.weight_scale, torch.nn.ParameterList)
+        # jax_view cannot handle ParameterList directly, so explicitly convert
+        # to a list.
+        weight_and_scale = [(jax_view(w), jax_view(s))
+                            for w, s in zip(layer.weight, layer.weight_scale)]
+        return self._apply_split(x_jax,
+                                 weight_and_scale,
+                                 bias_jax,
+                                 mesh=self.linear_config.mesh)
 
 
 class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
@@ -395,17 +697,21 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         ep_sharding = NamedSharding(self.mesh, P(ShardingAxisName.EXPERT))
         w13_weight = _load_weight_for_layer(layer, "w13_weight", ep_sharding)
         w2_weight = _load_weight_for_layer(layer, "w2_weight", ep_sharding)
+        # fp8 imports this module, so it can only be imported lazily.
+        from tpu_inference.layers.vllm.quantization.fp8 import \
+            _free_torch_storage
+
         # Free CPU memory immediately
-        layer.w13_weight.untyped_storage().resize_(0)
-        layer.w2_weight.untyped_storage().resize_(0)
+        _free_torch_storage(layer.w13_weight)
+        _free_torch_storage(layer.w2_weight)
         delattr(layer, 'w13_weight')
         delattr(layer, 'w2_weight')
 
         if self.moe.has_bias:
             w13_bias = _load_weight_for_layer(layer, "w13_bias", ep_sharding)
             w2_bias = _load_weight_for_layer(layer, "w2_bias", ep_sharding)
-            layer.w13_bias.untyped_storage().resize_(0)
-            layer.w2_bias.untyped_storage().resize_(0)
+            _free_torch_storage(layer.w13_bias)
+            _free_torch_storage(layer.w2_bias)
             delattr(layer, 'w13_bias')
             delattr(layer, 'w2_bias')
         else:

@@ -5,11 +5,10 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import jax
 import jaxlib
-import jaxtyping
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           has_kv_transfer_group)
@@ -178,6 +177,10 @@ def _parse_profile_options(
 
 class TPUWorker(WorkerBase):
 
+    _weight_update_active: bool = False
+    _kv_cache_freed: bool = False
+    _raiden_rl_weight_sync: Any = None
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -292,7 +295,7 @@ class TPUWorker(WorkerBase):
 
         visible_chips = ",".join(str(c) for c in range(start_chip, end_chip))
         # Unique libtpu port per rank so the runtimes can coexist on a host.
-        tpu_port = jax_parallel_state.BASE_JAX_PORT + dp_rank
+        tpu_port = jax_parallel_state.BASE_TPU_PROCESS_PORT + dp_rank
 
         os.environ["TPU_VISIBLE_CHIPS"] = visible_chips
         os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] = f"1,{chips_per_rank},1"
@@ -341,7 +344,7 @@ class TPUWorker(WorkerBase):
             else:
                 # Single host PP logic
                 tpu_ports = [
-                    jax_parallel_state.BASE_JAX_PORT + i
+                    jax_parallel_state.BASE_TPU_PROCESS_PORT + i
                     for i in range(self.pp_config.pp_world_size)
                 ]
                 os.environ["TPU_PROCESS_ADDRESSES"] = ",".join(
@@ -422,7 +425,12 @@ class TPUWorker(WorkerBase):
         self.parallel_config.data_parallel_size = 1
         try:
             with set_current_vllm_config(self.vllm_config):
-                temp_file = tempfile.mkstemp()[1]
+                # Close the file descriptor returned by mkstemp to prevent a resource leak.
+                # In multihost environments, leaving this fd open on Host 0 (which runs both
+                # Ray GCS and the engine core) can conflict with Gloo's file locking and socket
+                # binding, resulting in a startup hang.
+                fd, temp_file = tempfile.mkstemp()
+                os.close(fd)
                 init_distributed_environment(
                     world_size=1,
                     rank=0,
@@ -502,7 +510,7 @@ class TPUWorker(WorkerBase):
                                    self.rank - 1)
 
     def determine_available_memory(self) -> int:
-        gpu_memory_utilization = self.cache_config.gpu_memory_utilization
+        gpu_memory_utilization = self.cache_config.resolved_gpu_memory_utilization
         hbm_usage = utils.hbm_usage_bytes(self.devices)
         total_hbm_limit = total_hbm_used = 0
         for used, limit in hbm_usage:
@@ -690,6 +698,11 @@ class TPUWorker(WorkerBase):
         # and the vLLM side should be updated to handle the translation.
         return self.model_runner.get_kv_cache_spec()
 
+    def get_mamba_num_blocks(self) -> int | None:
+        """Rows in the mamba state pool this worker allocated (None without
+        mamba layers). Read by the engine core over `collective_rpc`."""
+        return self.model_runner.kv_cache_manager.actual_mamba_num_blocks
+
     def get_kv_connector_handshake_metadata(self) -> dict | None:
         """Get KV connector metadata from this worker if available."""
         # NOTE: we are not using it right now.
@@ -719,25 +732,160 @@ class TPUWorker(WorkerBase):
         port = get_kv_transfer_port()
         return (int(self.topology_order_id), ip, int(port))
 
-    def sync_weights(
-        self,
-        updated_weights: jaxtyping.PyTree,
-        mappings: Dict[str, Tuple[str, Tuple[str]]],
-        transpose_keys: Dict[str, Tuple[int]],
-        reshard_fn: Callable[[jaxtyping.PyTree, jaxtyping.PyTree],
-                             jaxtyping.PyTree] = None
-    ) -> None:
-        """Sync the updated weights to the model runner."""
-        return self.model_runner._sync_weights(updated_weights=updated_weights,
-                                               mappings=mappings,
-                                               transpose_keys=transpose_keys,
-                                               reshard_fn=reshard_fn)
+    def init_weight_transfer_engine(self, init_info: Dict[str, Any]) -> None:
+        """Prepare the transport.
+
+        Binds this worker's live weights to Raiden's `WeightSynchronizer`
+        so subsequent `raiden_h2d`/`get_raiden_metadata` calls have
+        something to operate on.
+        """
+        logger.info("init_weight_transfer_engine: %s", sorted(init_info or {}))
+        self.bind_raiden_sync(
+            worker_index=init_info.get("worker_index", 0),
+            parallelism=init_info.get("parallelism", 4),
+            job_name=init_info.get("job_name", "rollout"),
+        )
+
+    def start_weight_update(self, free_kv_cache: bool = True) -> None:
+        """Open a weight update session.
+
+        Freeing the KV cache is on by default: an incoming set of weights
+        roughly doubles peak HBM, and decoding from KV computed under the old
+        weights is incorrect. `finish_weight_update` reallocates it.
+
+        The prefix cache is scheduler-side and cannot be dropped here, so
+        callers must `reset_prefix_cache()` first -- otherwise the scheduler
+        serves hits from blocks this frees.
+        """
+        if self._weight_update_active:
+            raise RuntimeError(
+                "start_weight_update called while an update is already "
+                "active. Call finish_weight_update first.")
+        if free_kv_cache:
+            self.model_runner.delete_kv_cache()
+        self._kv_cache_freed = free_kv_cache
+        self._weight_update_active = True
+
+    def update_weights(self, update_info: Dict[str, Any]) -> None:
+        """No-op. Tunix writes into the exposed vLLM model weights directly, and
+        Raiden's receiver auto-H2Ds on receipt. The phase is kept because
+        vLLM's contract has it.
+        """
+        logger.info(
+            "update_weights is a no-op on TPU; weights are applied "
+            "out-of-band (%s).", sorted(update_info or {}))
+
+    def finish_weight_update(self) -> None:
+        """Close the session and restore serving state."""
+        self._weight_update_active = False
+        if self._kv_cache_freed:
+            self.model_runner.reinitialize_kv_cache()
+            self._kv_cache_freed = False
 
     def delete_kv_cache(self) -> None:
         self.model_runner.delete_kv_cache()
 
     def reinitialize_kv_cache(self) -> None:
         self.model_runner.reinitialize_kv_cache()
+
+    def get_weights_state(self) -> Any:
+        """Builds the weight PyTree (possibly `nnx.State`) from the runner.
+
+        Same-process callers only -- the result can hold live TPU arrays,
+        unserializable over collective_rpc. Used directly by same-process
+        callers, and by `bind_raiden_sync` to bind Raiden in-process.
+        Cross the collective_rpc boundary via `bind_raiden_sync` /
+        `get_raiden_metadata` instead.
+        """
+        from tpu_inference.rl import \
+            raiden_worker_sync  # pylint: disable=g-import-not-at-top
+
+        return raiden_worker_sync.extract_weight_state(
+            getattr(self.model_runner, "state", None),
+            getattr(self.model_runner, "model", None),
+        )
+
+    def _require_raiden_sync(self, op: str) -> Any:
+        sync = self._raiden_rl_weight_sync
+        if sync is None:
+            raise RuntimeError(f"bind_raiden_sync must run before {op}.")
+        return sync
+
+    def bind_raiden_sync(self,
+                         worker_index: int = 0,
+                         parallelism: int = 4,
+                         job_name: str = "rollout",
+                         auto_h2d: Optional[bool] = None) -> dict:
+        """Binds this worker's live weights to Raiden and returns wire-safe
+        registration metadata (never the arrays)."""
+        from tpu_inference.rl import \
+            raiden_worker_sync  # pylint: disable=g-import-not-at-top
+
+        state = self.get_weights_state()
+        worker_idx = worker_index if worker_index != 0 else getattr(
+            self, "rank", 0)
+        if self._raiden_rl_weight_sync is None:
+            self._raiden_rl_weight_sync = raiden_worker_sync.RaidenWorkerSync(
+                job_name=job_name,
+                worker_index=worker_idx,
+                parallelism=parallelism,
+                auto_h2d=auto_h2d,
+            )
+        else:
+            # Re-bind: the transport is reused, but the caller may have moved
+            # this worker to a different Raiden job (per-replica job names), and
+            # metadata_dict() would otherwise re-register under the stale one.
+            self._raiden_rl_weight_sync.job_name = job_name
+            self._raiden_rl_weight_sync.worker_index = worker_idx
+        self._raiden_rl_weight_sync.bind(state, auto_h2d=auto_h2d)
+        return self._raiden_rl_weight_sync.metadata_dict()
+
+    def refresh_model_state_leaves(self) -> None:
+        """Re-points the runner's dispatch view at the freshly synced weights.
+
+        `model_fn` takes `state_leaves` as its first argument; it is derived
+        from `state` at load time and goes stale once the weights behind
+        `state` are replaced.
+        """
+        self.model_runner.refresh_state_leaves()
+
+    def get_raiden_metadata(self) -> dict:
+        """Re-fetches the current binding's wire-safe metadata without rebinding."""
+        return self._require_raiden_sync("get_raiden_metadata").metadata_dict()
+
+    def raiden_h2d(self, uuid: Optional[int] = None) -> dict:
+        """Blocks until the transfer that just landed is visible on-device.
+
+        Returns tensor checksums when `VERIFY_WEIGHTS=true`.
+        """
+        sync = self._require_raiden_sync("raiden_h2d")
+        sync.h2d(uuid=uuid)
+        if envs.VERIFY_WEIGHTS:
+            return sync.checksums()
+        return {}
+
+    def raiden_metrics(self) -> dict:
+        return self._require_raiden_sync("raiden_metrics").metrics()
+
+    def reset_encoder_cache(self) -> None:
+        self.model_runner.reset_encoder_cache()
+
+    def synchronize_device(self) -> None:
+        """Block until in-flight device work completes."""
+        jax.effects_barrier()
+
+    def sleep(self, level: int = 1) -> None:
+        raise NotImplementedError(
+            "Sleep mode is not supported on TPU: there is no analogue of "
+            "CUDA's virtual-memory allocator for offloading weights. Use "
+            "`pause_generation()` to stop scheduling (equivalent to sleep "
+            "level 0), and the weight-update session "
+            "(`start_weight_update`/`finish_weight_update`) to release and "
+            "restore KV cache memory.")
+
+    def wake_up(self, tags: list[str] | None = None) -> None:
+        raise NotImplementedError(
+            "Sleep mode is not supported on TPU; see TPUWorker.sleep.")
 
     def add_lora(self, lora_request: Any) -> bool:
         return self.model_runner.add_lora(lora_request)

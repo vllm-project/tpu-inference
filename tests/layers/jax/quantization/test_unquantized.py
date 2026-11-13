@@ -19,6 +19,7 @@ import pytest
 import torch
 from flax import nnx
 from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from tpu_inference.layers.common.moe import MoEBackend
@@ -27,6 +28,7 @@ from tpu_inference.layers.common.process_weights.moe_weights import \
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.linear import (JaxEinsum, JaxLinear,
                                              JaxMergedColumnParallelLinear)
+from tpu_inference.layers.jax.moe.moe import JaxRoutedExperts
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.unquantized import (
     UnquantizedConfig, UnquantizedMergedLinearMethod)
@@ -204,6 +206,17 @@ class TestJaxMergedColumnParallelLinear:
 
 
 class TestUnquantizedJaxMoe:
+
+    @pytest.mark.parametrize("use_ep", [True, False])
+    def test_routed_expert_weight_shardings(self, mesh, use_ep):
+        edf_spec, efd_spec = JaxRoutedExperts._get_weight_shardings(
+            mesh, use_ep)
+        if use_ep:
+            assert edf_spec == P(ShardingAxisName.EXPERT)
+            assert efd_spec == P(ShardingAxisName.EXPERT)
+        else:
+            assert edf_spec == P(None, None, ShardingAxisName.MLP_TENSOR)
+            assert efd_spec == P(None, ShardingAxisName.MLP_TENSOR, None)
 
     @pytest.fixture
     def mesh(self):

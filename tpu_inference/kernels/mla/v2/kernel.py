@@ -1960,7 +1960,7 @@ def _mla_ragged_paged_attention_kernel(
             acc = acc_ref[...]
             l = broadcast_minor(l_ref[...], acc.shape)  # noqa
             out = (lax.div(acc, l) if q_dtype == jnp.float32 else
-                   (acc * pl.reciprocal(l, approx=True)).astype(q_dtype))
+                   (acc * pltpu.reciprocal(l, approx=True)).astype(q_dtype))
 
             # Wait for previous bo to be fully sent before storing new bo.
             bo_sem_idx = sem_ids_ref[2]

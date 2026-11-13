@@ -13,7 +13,7 @@ from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
 from vllm.model_executor.layers.activation import (SiluAndMul,
                                                    SiluAndMulWithClamp)
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE, GateLinear, fused_moe_make_expert_params_mapping)
+    GateLinear, fused_moe_make_expert_params_mapping)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                RowParallelLinear)
@@ -35,6 +35,9 @@ from vllm.sequence import IntermediateTensors
 
 from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v4.deepseek_v4_attention import \
     VllmDeepseekV4MLAAttention
+from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v4.deepseek_v4_compressor import \
+    VllmDeepseekCompressor
+from tpu_inference.layers.vllm.interface.moe import FusedMoEFactory
 
 
 class DeepseekV4MLP(nn.Module):
@@ -124,7 +127,12 @@ class DeepseekV4MoE(nn.Module):
 
         self.gate.e_score_correction_bias = None
         self.gate.tid2eid = None
-        is_hash_moe = extract_layer_index(prefix) < config.num_hash_layers
+        # transformers' native DeepseekV4Config folds the legacy
+        # `num_hash_layers` kwarg into `mlp_layer_types`; fall back to it.
+        num_hash_layers = getattr(config, "num_hash_layers", None)
+        if num_hash_layers is None:
+            num_hash_layers = config.mlp_layer_types.count("hash_moe")
+        is_hash_moe = extract_layer_index(prefix) < num_hash_layers
         self.hash_indices_dtype = torch.int32
         if is_hash_moe:
             # hash MoE doesn't use e_score_correction_bias
@@ -167,7 +175,7 @@ class DeepseekV4MoE(nn.Module):
         self.experts_start_idx = self.tp_rank * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             gate=self.gate,
             num_experts=config.n_routed_experts,
@@ -186,11 +194,22 @@ class DeepseekV4MoE(nn.Module):
             apply_routed_scale_to_output=True,
         )
 
-        # Upstream vLLM stores the hash routing table on the fused-topk router
-        # (`FusedTopKBiasRouter._hash_indices_table`). The TPU MoE apply path is
-        # only handed the `RoutedExperts` layer, so mirror the table onto it here
-        # so it can be sharded (see cleanup_sharding) and read at forward time.
-        self.experts.routed_experts.hash_indices_table = self.gate.tid2eid
+        # The TPU MoE apply path is only handed the `RoutedExperts` layer and
+        # needs the hash routing table there. Upstream
+        # `FusedMoEFactory(hash_indices_table=...)` already hands the gate's
+        # table to `RoutedExperts.__init__`, which stores it as a plain
+        # attribute (via `object.__setattr__`, so the gate stays the sole owner
+        # of the `tid2eid` Parameter). Do not assign it again here: assigning
+        # an nn.Parameter over an existing plain attribute goes through
+        # `register_parameter` and raises
+        # KeyError: "attribute 'hash_indices_table' already exists".
+        # cleanup_sharding registers the TPU-replicated copy as the
+        # `tpu_hash_indices_table` buffer, which interface/moe.py reads.
+        routed_experts = self.experts.routed_experts
+        assert routed_experts.hash_indices_table is self.gate.tid2eid, (
+            "RoutedExperts.hash_indices_table was not wired to gate.tid2eid by "
+            "FusedMoEFactory; the TPU hash-routing path would read a stale "
+            "table.")
 
     def forward(self,
                 hidden_states: torch.Tensor,
@@ -200,8 +219,11 @@ class DeepseekV4MoE(nn.Module):
                 "DeepSeek V4 hash MoE routing requires input_ids.")
 
         org_shape = hidden_states.shape
-        if self.experts.is_internal_router:
-            # In this case, the gate/router runs inside the FusedMoE class
+        # getattr guard: not every runner FusedMoEFactory can produce
+        # declares is_internal_router (VllmMoERunner lacks it, and the
+        # pinned vLLM LKG does not define it either).
+        if getattr(self.experts, "is_internal_router", False):
+            # In this case, the gate/router runs inside the MoE runner.
             final_hidden_states = self.experts(
                 hidden_states=hidden_states,
                 router_logits=hidden_states,
@@ -415,8 +437,12 @@ class DeepseekV4DecoderLayer(nn.Module):
         residual: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None,
                torch.Tensor | None]:
-        return self._forward_unfused_post_pre(x, positions, input_ids,
-                                              post_mix, res_mix, residual)
+        # The fused seam path: each layer defers its post into the next
+        # layer's pre, so the pair runs as one Pallas kernel
+        # (MHCFusedPostPreOp). ``_forward_unfused_post_pre`` above is the
+        # sequential semantics this must match.
+        return self._forward_fused_post_pre(x, positions, input_ids, post_mix,
+                                            res_mix, residual)
 
 
 class DeepseekV4Model(nn.Module):
@@ -443,6 +469,7 @@ class DeepseekV4Model(nn.Module):
         self.hc_mult = config.hc_mult
         self.hc_dim = self.hc_mult * config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
+        self.mhc_post = MHCPostOp()
 
         aux_stream_list = (None)
 
@@ -563,6 +590,11 @@ class DeepseekV4Model(nn.Module):
                 res_mix,
                 residual,
             )
+
+        if post_mix is not None:
+            # Fused path: complete the deferred final post.
+            hidden_states = self.mhc_post(hidden_states, residual, post_mix,
+                                          res_mix)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
@@ -722,7 +754,6 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
             "embed.": "model.embed.",
             "norm.": "model.norm.",
             "hc_head": "model.hc_head",
-            "mtp.": "model.mtp.",
         },
         orig_to_new_regex=scale_regex,
         orig_to_new_suffix={
@@ -732,6 +763,7 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
         },
         orig_to_new_substr={
             ".shared_experts.w2": ".shared_experts.down_proj",
+            "mtp.": None,
         },
     )
 
@@ -796,9 +828,18 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_substrs=["mtp."])
+        loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(weights,
                                             mapper=self.hf_to_vllm_mapper)
+
+        # Post-load weight surgery goes here.
+        # The TPU compress-and-store kernel wants ``fused_wkv_wgate`` as
+        # [hidden_size, 2 * coff * head_dim]; transpose it once here instead of
+        # on every forward pass.
+        for module in self.modules():
+            if isinstance(module, VllmDeepseekCompressor):
+                module.transpose_wkv_wgate()
+
         return loaded_params
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:

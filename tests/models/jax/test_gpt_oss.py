@@ -19,6 +19,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh
+from vllm.config import AuxOutputConfig
 
 from tpu_inference.models.jax.gpt_oss import GptOss
 
@@ -77,9 +78,9 @@ class MockVllmConfig:
     def __init__(self, hf_config):
         self.model_config = MagicMock()
         self.model_config.dtype = jnp.bfloat16
-        self.model_config.enable_return_routed_experts = False
         self.model_config.hf_config = hf_config
         self.cache_config = MagicMock(cache_dtype="auto")
+        self.aux_output_config = AuxOutputConfig()
         self.additional_config = {}
 
 

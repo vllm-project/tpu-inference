@@ -12,22 +12,54 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import torch
+from jax.sharding import Mesh
 from torchax.interop import jax_view, torch_view
+from vllm.config import VllmConfig
 from vllm.forward_context import is_forward_context_available
+from vllm.model_executor.layers import fused_moe as vllm_fused_moe
 from vllm.model_executor.layers.fused_moe import (FusedMoEMethodBase,
                                                   RoutedExperts)
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import \
     get_layer_from_name
 
+# TODO: Remove this fallback after the vLLM LKG exports FusedMoEFactory.
+if hasattr(vllm_fused_moe, "FusedMoEFactory"):
+    FusedMoEFactory = vllm_fused_moe.FusedMoEFactory
+else:
+    FusedMoEFactory = vllm_fused_moe.FusedMoE
+
 from tpu_inference import envs
+from tpu_inference.layers.common import quant_methods
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.moe_weights import \
     FusedMoEWeights
-from tpu_inference.layers.common.sharding import is_attn_dp
+from tpu_inference.layers.common.sharding import (is_attn_dp,
+                                                  keeps_tokens_sharded,
+                                                  sp_token_axes)
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+def select_moe_backend(use_ep: bool) -> MoEBackend:
+    """The MoE backend the env flags select (no logging).
+
+    With expert parallelism, USE_MOE_EP_KERNEL takes priority over
+    USE_FUSED_EP_MOE_V2, which takes priority over USE_ROUTING_MOE; with none
+    set it is GMM_EP. Without expert parallelism every flag falls back to
+    GMM_TP. Shared by `select_moe_backend_from_fused_moe_config` and
+    `vllm_keeps_tokens_sharded`, so the two can't disagree.
+    """
+    if not use_ep:
+        return MoEBackend.GMM_TP
+    if envs.USE_MOE_EP_KERNEL:
+        return MoEBackend.FUSED_MOE
+    if envs.USE_FUSED_EP_MOE_V2:
+        return MoEBackend.FUSED_EP_MOE_V2
+    if envs.USE_ROUTING_MOE:
+        return MoEBackend.ROUTING_MOE
+    return MoEBackend.GMM_EP
 
 
 def select_moe_backend_from_fused_moe_config(
@@ -44,22 +76,82 @@ def select_moe_backend_from_fused_moe_config(
     Returns:
         The selected MoE backend.
     """
+    backend = select_moe_backend(moe.use_ep)
 
-    if envs.USE_MOE_EP_KERNEL:
-        if moe.use_ep:
-            logger.info_once("[MoE]: Using fused MoE EP kernel")
-            return MoEBackend.FUSED_MOE
-        logger.warning_once(
-            "USE_MOE_EP_KERNEL=1 but expert parallelism is not "
-            "enabled. Falling back to gmm implementation.")
-
-    if moe.use_ep:
+    if backend == MoEBackend.FUSED_MOE:
+        if envs.USE_FUSED_EP_MOE_V2:
+            logger.warning_once(
+                "USE_MOE_EP_KERNEL and USE_FUSED_EP_MOE_V2 are both set; "
+                "USE_MOE_EP_KERNEL takes priority, so fused_ep_moe_v2 is "
+                "not used.")
+        if envs.USE_ROUTING_MOE:
+            logger.warning_once(
+                "USE_MOE_EP_KERNEL and USE_ROUTING_MOE are both set; "
+                "USE_MOE_EP_KERNEL takes priority, so routing_moe is not "
+                "used.")
+        logger.info_once("[MoE]: Using fused MoE EP kernel")
+    elif backend == MoEBackend.FUSED_EP_MOE_V2:
+        if envs.USE_ROUTING_MOE:
+            logger.warning_once(
+                "USE_FUSED_EP_MOE_V2 and USE_ROUTING_MOE are both set; "
+                "USE_FUSED_EP_MOE_V2 takes priority, so routing_moe is "
+                "not used.")
+        logger.info_once("[MoE]: Using fused_ep_moe_v2 (tokamax) kernel")
+    elif backend == MoEBackend.ROUTING_MOE:
+        logger.info_once("[MoE]: Using routing_moe (tokamax) kernel")
+    elif backend == MoEBackend.GMM_EP:
         logger.info_once("[MoE]: Using GMM EP kernel")
-        return MoEBackend.GMM_EP
+    else:
+        if envs.USE_MOE_EP_KERNEL:
+            logger.warning_once(
+                "USE_MOE_EP_KERNEL=1 but expert parallelism is not "
+                "enabled. Falling back to gmm implementation.")
+        if envs.USE_FUSED_EP_MOE_V2:
+            logger.warning_once(
+                "USE_FUSED_EP_MOE_V2=1 but expert parallelism is not "
+                "enabled. Falling back to gmm implementation.")
+        if envs.USE_ROUTING_MOE:
+            # TODO: TP support; only routing_moe's EP path is wired up for now.
+            logger.warning_once(
+                "USE_ROUTING_MOE=1 but expert parallelism is not enabled, "
+                "and only routing_moe's EP path is wired up for now. "
+                "Falling back to gmm implementation.")
+        # Use default implementation.
+        logger.info_once("[MoE]: Using GMM TP kernel")
+    return backend
 
-    # Use default implementation.
-    logger.info_once("[MoE]: Using GMM TP kernel")
-    return MoEBackend.GMM_TP
+
+# Quantization methods (`model_config.quantization`) validated for
+# performance and accuracy with the token-sharded residual stream (FP8
+# checkpoints). Others keep the plain `enable_sp` behavior until they are
+# validated.
+_SP_TOKEN_SHARDING_QUANTIZATIONS = frozenset({quant_methods.FP8})
+
+
+def vllm_keeps_tokens_sharded(vllm_config: VllmConfig | None,
+                              mesh: Mesh | None) -> bool:
+    """`sharding.keeps_tokens_sharded` for a vLLM model.
+
+    The single decision the linear configs and the MoE both use: `enable_sp`
+    set, the MoE backend is GMM_EP or ROUTING_MOE (`select_moe_backend`;
+    both honor `keep_token_sharding`), and the quantization method has been
+    validated with it (`_SP_TOKEN_SHARDING_QUANTIZATIONS`).
+    """
+    if vllm_config is None:
+        return False
+    if (vllm_config.model_config.quantization
+            not in _SP_TOKEN_SHARDING_QUANTIZATIONS):
+        return False
+    # ROUTING_MOE (USE_ROUTING_MOE=1) keeps the tokens sharded too:
+    # routing_moe_func skips the replica split and remote-scatters each output
+    # row to the device that owns its token.
+    moe_keeps_tokens = (select_moe_backend(
+        vllm_config.parallel_config.enable_expert_parallel)
+                        in (MoEBackend.GMM_EP, MoEBackend.ROUTING_MOE))
+    return keeps_tokens_sharded(mesh,
+                                vllm_config.additional_config.get(
+                                    "enable_sp", False),
+                                moe_keeps_tokens=moe_keeps_tokens)
 
 
 def vllm_moe_apply(layer: RoutedExperts,
@@ -93,7 +185,7 @@ def vllm_moe_apply(layer: RoutedExperts,
     except AssertionError:
         vllm_config = None
 
-    enable_return_routed_experts = vllm_config.model_config.enable_return_routed_experts if vllm_config else False
+    enable_return_routed_experts = vllm_config.aux_output_config.enable_return_routed_experts if vllm_config else False
 
     if enable_return_routed_experts:
         if isinstance(router_logits, torch.Tensor):
@@ -111,6 +203,12 @@ def vllm_moe_apply(layer: RoutedExperts,
 
     extra_kwargs = dict(quant_method_instance.extra_backend_kwargs)
     extra_kwargs["scatter_results"] = is_dp
+    # Sequence-parallel residual stream: the linears around the MoE consume
+    # and produce tokens sharded over EXPERT_DATA, so the GMM_EP / ROUTING_MOE
+    # MoE output is not resharded back to ATTN_DATA.
+    keep = vllm_keeps_tokens_sharded(vllm_config, mesh)
+    extra_kwargs["keep_token_sharding"] = (sp_token_axes(
+        mesh, keep, x.shape[0]) is not None)
 
     # Defer the tensor-parallel all-reduce inside the GMM kernel exactly when the
     # runner does NOT expect the fused output to be reduced -- the deferred path
@@ -121,9 +219,16 @@ def vllm_moe_apply(layer: RoutedExperts,
         runner = get_layer_from_name(layer.layer_name)
         extra_kwargs["defer_all_reduce"] = not runner._fused_output_is_reduced
 
-    if getattr(layer, "hash_indices_table", None) is not None:
+    # Upstream RoutedExperts keeps the gate-owned hash routing table as a plain
+    # attribute (`hash_indices_table`). cleanup_sharding registers the
+    # TPU-replicated copy as the `tpu_hash_indices_table` buffer so that it is
+    # passed into the jitted step through functional_call instead of being
+    # baked in as a compile-time constant; prefer it when present.
+    hash_table = getattr(layer, "tpu_hash_indices_table", None)
+    if hash_table is None:
+        hash_table = getattr(layer, "hash_indices_table", None)
+    if hash_table is not None:
         assert input_ids is not None, "input_ids must be provided when hash_indices_table is present in the layer"
-        hash_table = layer.hash_indices_table
         hash_based_topk_indices = jax_view(hash_table)[jax_view(input_ids)]
         extra_kwargs["hash_based_topk_indices"] = hash_based_topk_indices
 

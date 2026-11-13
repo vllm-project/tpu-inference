@@ -40,7 +40,9 @@ cleanup_docker_resource() {
 
   # Iterate and cleanup
   for IMG in "${TARGET_IMAGES[@]}"; do
-    echo "----------------------------------------"
+    # Not "---...": Buildkite reads a leading `---` as a log group header, so a
+    # plain dashed rule silently opens an anonymous group per image.
+    echo "========================================"
     echo "Starting cleanup for ${IMG}"
 
     # Use format to get "Repository ID" and use awk for exact or suffix matching.
@@ -65,8 +67,10 @@ cleanup_docker_resource() {
       fi
       
       echo "Removing old ${IMG} image(s) by ID..."
-      # Using ID directly ensures all tags of that specific image are untagged and removed
-      echo "$OLD_IMAGES" | xargs -r docker rmi -f
+      # Using ID directly ensures all tags of that specific image are untagged and removed.
+      # Output is one "Untagged:"/"Deleted:" line per layer -- dozens of lines of
+      # sha256 noise per run, with nothing actionable in them.
+      echo "$OLD_IMAGES" | xargs -r docker rmi -f >/dev/null
     else
       echo "No images matching ${IMG} found to clean up."
     fi
@@ -119,11 +123,40 @@ verify_image_vllm() {
   echo "[verify-vllm] OK: ${image_ref} contains expected vLLM ${expected_vllm}."
 }
 
+verify_image_tokamax() {
+  local image_ref="$1"
+  local expected_tokamax="${2:-}"
+  if [[ -z "${expected_tokamax}" ]]; then
+    return 0
+  fi
+  local actual_tokamax rc=0 err
+  err=$(mktemp)
+  actual_tokamax=$(docker run --rm --entrypoint python3 "${image_ref}" \
+    -c 'import importlib.metadata as m; print(m.version("tokamax"))' 2>"${err}") || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    echo "[FATAL][verify-tokamax] Could not read the tokamax version from ${image_ref} (exit ${rc}):" >&2
+    cat "${err}" >&2
+    rm -f "${err}"
+    exit 1
+  fi
+  rm -f "${err}"
+  if [[ "${actual_tokamax}" != "${expected_tokamax}" ]]; then
+    echo "[FATAL][verify-tokamax] ${image_ref} contains tokamax ${actual_tokamax}," >&2
+    echo "[FATAL][verify-tokamax] but this build is validating ${expected_tokamax}." >&2
+    exit 1
+  fi
+  echo "[verify-tokamax] ${image_ref} contains tokamax ${actual_tokamax}."
+}
+
 setup_environment() {
   local image_name_param=${1:-"vllm-tpu"}
   local should_push=${2:-"false"}
   local push_to_ci_cache=${3:-"false"}
   IMAGE_NAME="$image_name_param"
+
+  if [[ -n "${BUILDKITE:-}" && "$push_to_ci_cache" != "true" ]]; then
+    export USE_PREBUILT_IMAGE="${USE_PREBUILT_IMAGE:-1}"
+  fi
 
   # ==========================================
   # Skip Build and Cleanup in DEV_MODE if image already exists
@@ -136,7 +169,14 @@ setup_environment() {
   fi
 
   local CI_IMAGE_REPO="us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/${IMAGE_NAME}"
-  local LOCAL_TPU_VERSION="${TPU_VERSION:-tpu6e}" 
+  local LOCAL_TPU_VERSION="${TPU_VERSION:-}"
+  if [ -z "${LOCAL_TPU_VERSION}" ]; then
+    if [[ "${BUILDKITE_AGENT_META_DATA_QUEUE:-}" =~ v7x|tpu7x ]] || [[ "${BUILDKITE_AGENT_NAME:-}" =~ v7x|tpu7x ]] || [[ "${BUILDKITE_STEP_KEY:-}" =~ ^tpu7x ]] || [[ "${BUILDKITE_LABEL:-}" =~ ^tpu7x ]]; then
+      LOCAL_TPU_VERSION="tpu7x"
+    else
+      LOCAL_TPU_VERSION="tpu6e"
+    fi
+  fi 
 
   local DOCKERFILE_NAME="Dockerfile"
 
@@ -175,12 +215,22 @@ setup_environment() {
       VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")
       TPU_INFERENCE_HASH="$BUILDKITE_COMMIT"
   fi
+
+  # Non-empty only in the tokamax integration pipeline, which validates a
+  # candidate nightly that is not yet pinned in requirements.txt. Every other
+  # pipeline leaves this empty and is unaffected by the two blocks below.
+  local TOKAMAX_CANDIDATE_VERSION=""
+  if [ -n "${BUILDKITE:-}" ]; then
+    TOKAMAX_CANDIDATE_VERSION=$(buildkite-agent meta-data get "TOKAMAX_CANDIDATE_VERSION" --default "")
+  fi
  
   # Include the vLLM commit in the cache tag so an image is uniquely identified
   # by BOTH its tpu-inference commit and its vLLM commit. Without this, the CI
   # pipeline (LKG vLLM) and the integration pipeline (HEAD vLLM) produce the same
   # tag for the same tpu-inference commit and can overwrite each other's image in
   # the registry -- a test could then silently run a different vLLM than intended.
+  # Similarly, we bake the tokamax commit in the cache tag below.
+  # The tag has 128 char limit.
   local CACHE_TAG="${TPU_INFERENCE_HASH}-${LOCAL_TPU_VERSION}"
   if [[ -n "${VLLM_COMMIT_HASH}" ]]; then
     CACHE_TAG="${TPU_INFERENCE_HASH}-${VLLM_COMMIT_HASH}-${LOCAL_TPU_VERSION}"
@@ -196,20 +246,34 @@ setup_environment() {
     exit 1
   fi
 
+  if [[ -n "${TOKAMAX_CANDIDATE_VERSION}" ]]; then
+    CACHE_TAG="${CACHE_TAG}-tkmx${TOKAMAX_CANDIDATE_VERSION//[^a-zA-Z0-9]/}"
+  fi
+
   # ==========================================
   # Pull-Only Mode for TPU execution nodes
   # ==========================================
   if [[ "${USE_PREBUILT_IMAGE:-0}" == "1" ]]; then
     echo "Pulling pre-built Docker image: ${CI_IMAGE_REPO}:${CACHE_TAG} ..."
-    docker pull "${CI_IMAGE_REPO}:${CACHE_TAG}"
+    # -q: the layer-by-layer pull progress is several hundred lines per job.
+    docker pull -q "${CI_IMAGE_REPO}:${CACHE_TAG}"
     verify_image_vllm "${CI_IMAGE_REPO}:${CACHE_TAG}" "${VLLM_COMMIT_HASH}"
+    verify_image_tokamax "${CI_IMAGE_REPO}:${CACHE_TAG}" "${TOKAMAX_CANDIDATE_VERSION}"
     docker tag "${CI_IMAGE_REPO}:${CACHE_TAG}" "${IMAGE_NAME}:${TPU_INFERENCE_HASH}"
     docker tag "${CI_IMAGE_REPO}:${CACHE_TAG}" "${IMAGE_NAME}:latest"
+    # Export the computed CI cache image name so calling scripts can use it.
+    export EXPORTED_CI_CACHE_IMAGE="${CI_IMAGE_REPO}:${CACHE_TAG}"
     return 0
   fi
 
+  if [[ -n "${TOKAMAX_CANDIDATE_VERSION}" ]]; then
+    echo "[tokamax] Pinning the build context to tokamax==${TOKAMAX_CANDIDATE_VERSION}"
+    sed -i "s/^tokamax==.*$/tokamax==${TOKAMAX_CANDIDATE_VERSION}/" requirements.txt
+    grep -n '^tokamax==' requirements.txt
+  fi
+
   # Build with specific hash and 'latest' tag for convenience
-  docker build \
+  DOCKER_BUILDKIT=1 docker build \
       --build-arg VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH}" \
       --build-arg IS_TEST="true" \
       --build-arg BM_INFRA="${BM_INFRA:-false}" \
@@ -221,6 +285,7 @@ setup_environment() {
   # Fail fast if the freshly built image does not contain the expected vLLM
   # commit (guards against a mis-set VLLM_COMMIT_HASH build-arg).
   verify_image_vllm "${IMAGE_NAME}:${CACHE_TAG}" "${VLLM_COMMIT_HASH}"
+  verify_image_tokamax "${IMAGE_NAME}:${CACHE_TAG}" "${TOKAMAX_CANDIDATE_VERSION}"
 
   # ==========================================
   # Push to CI Image Registry (Executed by dedicate CPU builder)
@@ -229,6 +294,13 @@ setup_environment() {
     echo "Pushing Docker image to CI Image Registry..."
     docker tag "${IMAGE_NAME}:${CACHE_TAG}" "${CI_IMAGE_REPO}:${CACHE_TAG}"
     docker push "${CI_IMAGE_REPO}:${CACHE_TAG}"
+    export EXPORTED_CI_CACHE_IMAGE="${CI_IMAGE_REPO}:${CACHE_TAG}"
+    # The kube lanes' run.sh names its workload image from this rather than
+    # composing the tag a second time. Keyed by generation because
+    # pipeline_build.yml builds tpu6e and tpu7x in the same build.
+    if [[ -n "${BUILDKITE:-}" ]]; then
+      buildkite-agent meta-data set "ci-image-${LOCAL_TPU_VERSION}" "${EXPORTED_CI_CACHE_IMAGE}"
+    fi
   fi
 
   # Push logic if requested

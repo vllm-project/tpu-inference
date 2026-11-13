@@ -87,13 +87,17 @@ def create_request(request_id: str, num_tokens: int,
 
 
 def make_matched(num_blocks: int, start_chunk: int = 100):
-    """Build a kv_store.lookup() result: list[(hash_bytes, [RaidenId])]."""
-    return [(f"hash_{i}".encode(), [
-        MockRaidenId(job_name="tpu_inference",
-                     job_replica_id="0",
-                     data_name="kv_cache",
-                     data_replica_idx=start_chunk + i)
-    ]) for i in range(num_blocks)]
+    """Build a kv_store.lookup() result: list[(hash_bytes, RaidenBlockID)].
+
+    KVCacheStore maps a single RaidenBlockID per block hash (not a list of
+    replicas), so each entry's second element is one id, not a list.
+    """
+    return [(f"hash_{i}".encode(),
+             MockRaidenId(job_name="tpu_inference",
+                          job_replica_id="0",
+                          data_name="kv_cache",
+                          data_replica_idx=start_chunk + i))
+            for i in range(num_blocks)]
 
 
 def make_scheduler(lookup_result=None, insert_result=None):
@@ -345,8 +349,9 @@ def test_request_finished_releases_pins():
 # --------------------------------------------------------------------------- #
 def test_update_connector_output_inserts_and_stages_evictions():
     evicted = MockRaidenId(data_replica_idx=99)
+    # insert() returns evicted entries as (hash, single RaidenBlockID).
     scheduler, store = make_scheduler(insert_result=(True, [(b"old_hash",
-                                                             [evicted])]))
+                                                             evicted)]))
     scheduler._pending_save_hashes["req_s"] = [b"h0", b"h1"]
 
     stats = KVRaidenConnectorStats()

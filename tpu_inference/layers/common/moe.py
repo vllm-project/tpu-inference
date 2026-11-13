@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe import RoutedExperts
 
 from tpu_inference import envs
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
+from tpu_inference.layers.common import fused_ep_moe_v2, routing_moe
 from tpu_inference.layers.common.fused_moe_gmm import fused_moe_func
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import to_jax_dtype
@@ -57,6 +58,16 @@ class MoEBackend(Enum):
     # Same as GMM_EP but uses `tensor_sharded_gmm_*` for the GMM calls and is production ready
     GMM_TP = "gmm_tp"
 
+    # FUSED_EP_MOE_V2 is tokamax's fused expert-parallel kernel (fused_ep_moe_v2), wrapped in
+    # tpu-inference/tpu_inference/layers/common/fused_ep_moe_v2.py. Selected by USE_FUSED_EP_MOE_V2.
+    # It uses GMM_EP's weight layout (see weights_like); layers it can't run raise an error.
+    FUSED_EP_MOE_V2 = "fused_ep_moe_v2"
+
+    # ROUTING_MOE is tokamax's routing_moe kernel, wrapped in
+    # tpu-inference/tpu_inference/layers/common/routing_moe.py. Selected by USE_ROUTING_MOE.
+    # It uses GMM_EP's weight layout (see weights_like); layers it can't run raise an error.
+    ROUTING_MOE = "routing_moe"
+
     # DENSE_MAT uses a simple dense matmul for the MoE backend,  is intended for testing, and is
     # only used in the JAX path for now
     # NOTE: for DENSE_MAT in the JAX/Flax path, there are no changes for weights for the unfused backends (DENSE_MAT and MEGABLOX_GMM).
@@ -68,7 +79,16 @@ class MoEBackend(Enum):
     @classmethod
     def fused_moe_backends(cls):
         """Returns those backends that use fused weights"""
-        return {cls.FUSED_MOE, cls.GMM_EP, cls.GMM_TP}
+        return {
+            cls.FUSED_MOE, cls.GMM_EP, cls.GMM_TP, cls.FUSED_EP_MOE_V2,
+            cls.ROUTING_MOE
+        }
+
+    def weights_like(self) -> "MoEBackend":
+        """The backend whose weight layout and sharding this one uses."""
+        if self in (MoEBackend.FUSED_EP_MOE_V2, MoEBackend.ROUTING_MOE):
+            return MoEBackend.GMM_EP
+        return self
 
 
 def moe_apply(
@@ -88,6 +108,10 @@ def moe_apply(
     # and return per-shard partial sums, so the reduction can be deferred and
     # fused with a later collective (e.g. a shared-expert all-reduce).
     defer_all_reduce = extra_backend_kwargs.pop("defer_all_reduce", False)
+    # GMM_EP and ROUTING_MOE: keep the output token-sharded over
+    # EXPERT_DATA (sequence-parallel residual stream).
+    keep_token_sharding = extra_backend_kwargs.pop("keep_token_sharding",
+                                                   False)
 
     if defer_all_reduce and moe_backend not in {
             MoEBackend.GMM_EP, MoEBackend.GMM_TP
@@ -166,6 +190,7 @@ def moe_apply(
                     scoring_fn=layer.scoring_func,
                     all_gather_fp8=all_gather_fp8,
                     enable_rs_kernel=envs.ENABLE_RS_KERNEL,
+                    use_gmm_fused_rs_kernel=envs.USE_GMM_FUSED_RS_KERNEL,
                     onehot_moe_permute_threshold=envs.
                     ONEHOT_MOE_PERMUTE_THRESHOLD,
                     scatter_results=scatter_results,
@@ -177,6 +202,79 @@ def moe_apply(
                     moe_chunk_size=moe_chunk_size,
                     num_valid_tokens=extra_backend_kwargs.get(
                         "num_valid_tokens", None),
+                    keep_token_sharding=keep_token_sharding,
+                )
+            case MoEBackend.FUSED_EP_MOE_V2:
+                reason = fused_ep_moe_v2.unsupported_reason(
+                    mesh, weights.w13_weight, weights.w2_weight,
+                    weights.w13_weight_scale, weights.w2_weight_scale,
+                    activation, layer.scoring_func,
+                    extra_backend_kwargs.get("hash_based_topk_indices", None))
+                if reason is not None:
+                    raise ValueError(
+                        f"fused_ep_moe_v2 can't run this MoE layer: {reason}. "
+                        "Unset USE_FUSED_EP_MOE_V2 to use the GMM EP kernel.")
+                # num_valid_tokens is a traced array, so compare it to None
+                # rather than testing its truth value.
+                for name, ignored in (
+                    ("moe_chunk_size", moe_chunk_size > 0),
+                    ("num_valid_tokens",
+                     extra_backend_kwargs.get("num_valid_tokens") is not None),
+                ):
+                    if ignored:
+                        logger.warning_once(
+                            "[MoE]: fused_ep_moe_v2 ignores %s.", name)
+                output = fused_ep_moe_v2.fused_ep_moe_v2_func(
+                    hidden_states=x,
+                    w1=weights.w13_weight,
+                    w2=weights.w2_weight,
+                    w1_scale=weights.w13_weight_scale,
+                    w2_scale=weights.w2_weight_scale,
+                    w1_bias=weights.w13_bias,
+                    w2_bias=weights.w2_bias,
+                    gating_output=gating_output,
+                    topk=layer.top_k,
+                    renormalize=layer.renormalize,
+                    mesh=mesh,
+                    scoring_fn=layer.scoring_func,
+                    score_bias=extra_backend_kwargs.get(
+                        "e_score_correction_bias", None),
+                )
+            case MoEBackend.ROUTING_MOE:
+                reason = routing_moe.unsupported_reason(mesh)
+                if reason is not None:
+                    raise ValueError(
+                        f"routing_moe can't run this MoE layer: {reason}. "
+                        "Unset USE_ROUTING_MOE to use the GMM EP kernel.")
+                # num_valid_tokens is a traced array, so compare it to None
+                # rather than testing its truth value.
+                for name, ignored in (
+                    ("moe_chunk_size", moe_chunk_size > 0),
+                    ("num_valid_tokens",
+                     extra_backend_kwargs.get("num_valid_tokens") is not None),
+                ):
+                    if ignored:
+                        logger.warning_once("[MoE]: routing_moe ignores %s.",
+                                            name)
+                output = routing_moe.routing_moe_func(
+                    hidden_states=x,
+                    w1=weights.w13_weight,
+                    w2=weights.w2_weight,
+                    w1_scale=weights.w13_weight_scale,
+                    w2_scale=weights.w2_weight_scale,
+                    gating_output=gating_output,
+                    topk=layer.top_k,
+                    renormalize=layer.renormalize,
+                    mesh=mesh,
+                    activation=activation,
+                    scoring_fn=layer.scoring_func,
+                    w1_bias=weights.w13_bias,
+                    w2_bias=weights.w2_bias,
+                    hash_based_topk_indices=extra_backend_kwargs.get(
+                        "hash_based_topk_indices", None),
+                    expert_score_correction_bias=extra_backend_kwargs.get(
+                        "e_score_correction_bias", None),
+                    keep_token_sharding=keep_token_sharding,
                 )
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance

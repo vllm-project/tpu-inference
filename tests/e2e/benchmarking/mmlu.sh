@@ -132,9 +132,15 @@ if [ -z "$dataset_path" ]; then
     dataset_path="$root_dir"/mmlu/
     mkdir -p "$dataset_path"
     cd "$dataset_path" || exit
+    fetchDataset() {
+        rm -f data.tar
+        "$@" && tar -xf data.tar
+    }
     if [ ! -d "$dataset_path/data/test" ]; then
-        wget https://people.eecs.berkeley.edu/~hendrycks/data.tar -P .
-        tar -xvf data.tar
+        # The Berkeley host has recurring outages; fall back to the GCS mirror.
+        fetchDataset wget --tries=2 --timeout=60 https://people.eecs.berkeley.edu/~hendrycks/data.tar -P . \
+            || fetchDataset gsutil cp "${MMLU_GCS_URI:-gs://tpu-commons-ci/datasets/mmlu/data.tar}" . \
+            || { echo "ERROR: failed to download the MMLU dataset." >&2; exit 1; }
     fi
     dataset_path=$dataset_path/data/test/
 fi
