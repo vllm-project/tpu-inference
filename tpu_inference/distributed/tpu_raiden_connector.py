@@ -68,7 +68,8 @@ import jax
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole,
+    KVConnectorTransferResults)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics, KVConnectorStats, PromMetric, PromMetricT)
 from vllm.utils.math_utils import round_down
@@ -220,6 +221,13 @@ class TPUConnector(KVConnectorBase_V1):
         So we run saving logic in `start_load_kv -> process_send_load` instead.
         """
         pass
+
+    def get_transfer_results(
+        self,
+        finished_req_ids: set[str],
+    ) -> KVConnectorTransferResults:
+        assert self.connector_worker is not None
+        return self.connector_worker.get_transfer_results()
 
     def get_finished(self,
                      finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
@@ -629,22 +637,43 @@ class TPUConnectorWorker:
             return self.transfer_stats.clone_and_reset()
         return None
 
-    def get_finished(self) -> tuple[set[str], set[str]]:
+    def get_transfer_results(self) -> KVConnectorTransferResults:
         # The kv_manager's control plane reports producer completion (done_sending,
-        # after D acks) and consumer completion (done_recving, after H2H+H2D).
+        # after D acks), consumer completion (done_recving, after H2H+H2D), and
+        # failures/timeouts (failed_recving: expired/failed sends on P, or failed
+        # receives on D).
         # Replaces the reqs_wait_pull/reqs_pulling bookkeeping + ZMQ side channel.
         if self.kv_manager is None:
-            return set(), set()
+            return KVConnectorTransferResults()
         done_sending, done_recving, failed_recving = self.kv_manager.poll_stats(
         )
+        finished_sending_set = set(done_sending)
+        finished_recving_set = set(done_recving)
+        failed_recving_set: set[str] = set()
         if failed_recving:
-            # Do NOT report failed receives as done_recving: vllm would then try
-            # to decode with KV that was never written and hit an AssertionError
-            # that kills the EngineCore (taking down all other requests). Leave
-            # them pending; the request times out at the API layer instead.
             logger.error(
                 f"TPUConnector Worker {self.node_id} --> failed_recving={failed_recving}"
             )
+            if self.is_producer:
+                # On the producer (P), failed_recving entries are send sessions
+                # that failed or timed out without being pulled by D. Report
+                # them in finished_sending so the scheduler decrements their
+                # delay-free refcount and frees the held KV blocks. Record each
+                # one as a failed transfer so expiry-based frees stay visible in
+                # metrics (finished_sending alone cannot distinguish them).
+                finished_sending_set.update(failed_recving)
+                for _ in failed_recving:
+                    self.transfer_stats.record_failed_transfer()
+            else:
+                # On the consumer (D), failed_recving entries are receive
+                # sessions that failed or timed out. Per KVConnectorTransferResults
+                # contract, failed receives must be included in BOTH
+                # finished_recving and failed_recving so the scheduler frees
+                # remote-load blocks and recomputes locally (or fails the request)
+                # instead of decoding with unwritten KV.
+                self._submitted.difference_update(failed_recving)
+                finished_recving_set.update(failed_recving)
+                failed_recving_set.update(failed_recving)
         if done_sending:
             logger.info(
                 f"TPUConnector Worker {self.node_id} -->  done_sending={done_sending}"
@@ -653,7 +682,15 @@ class TPUConnectorWorker:
             logger.info(
                 f"TPUConnector Worker {self.node_id} -->  done_recving={done_recving}"
             )
-        return set(done_sending), set(done_recving)
+        return KVConnectorTransferResults(
+            finished_sending=finished_sending_set,
+            finished_recving=finished_recving_set,
+            failed_recving=failed_recving_set,
+        )
+
+    def get_finished(self) -> tuple[set[str], set[str]]:
+        results = self.get_transfer_results()
+        return results.finished_sending, results.finished_recving
 
 
 def get_uuid() -> int:

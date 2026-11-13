@@ -23,7 +23,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import RequestStatus
 
-from tpu_inference.distributed import tpu_connector, tpu_connector_hma
+from tpu_inference.distributed import (tpu_connector, tpu_connector_hma,
+                                       tpu_raiden_connector)
 from tpu_inference.distributed.tpu_connector_stats import (
     TpuKVConnectorPromMetrics, TpuKVConnectorStats)
 
@@ -1116,6 +1117,96 @@ class TestTPUConnectorStats(unittest.TestCase):
     def test_prometheus_gauge_requests_waiting_pull(self):
         gauge = self.metrics.gauge_tpu_num_requests_waiting_pull[0]
         assert gauge._value.get() == 4.0
+
+
+class TestTPURaidenConnectorWorker(unittest.TestCase):
+
+    def setUp(self):
+        self.vllm_config = MockVllmConfig()
+        patchers = {
+            "get_host_ip":
+            patch(
+                "tpu_inference.distributed.tpu_raiden_connector.dist_utils.get_host_ip",
+                return_value="127.0.0.1",
+            ),
+            "get_kv_transfer_port":
+            patch(
+                "tpu_inference.distributed.tpu_raiden_connector.dist_utils.get_kv_transfer_port",
+                return_value=10000,
+            ),
+        }
+        self.all_mocks = {k: p.start() for k, p in patchers.items()}
+        for p in patchers.values():
+            self.addCleanup(p.stop)
+
+    def test_get_transfer_results_when_kv_manager_is_none(self):
+        worker = tpu_raiden_connector.TPUConnectorWorker(self.vllm_config)
+        results = worker.get_transfer_results()
+        self.assertEqual(results.finished_sending, set())
+        self.assertEqual(results.finished_recving, set())
+        self.assertEqual(results.failed_recving, set())
+        self.assertEqual(worker.get_finished(), (set(), set()))
+
+    def test_get_transfer_results_producer_forwards_failed_as_finished_sending(
+            self):
+        """Producer reports expired/failed sends in finished_sending so P frees KV blocks."""
+        self.vllm_config.kv_transfer_config.is_kv_producer = True
+        worker = tpu_raiden_connector.TPUConnectorWorker(self.vllm_config)
+        worker.kv_manager = MagicMock()
+        worker.kv_manager.poll_stats.return_value = (
+            ["req_acked"],
+            [],
+            ["req_expired"],
+        )
+
+        results = worker.get_transfer_results()
+
+        self.assertEqual(results.finished_sending,
+                         {"req_acked", "req_expired"})
+        self.assertEqual(results.finished_recving, set())
+        self.assertEqual(results.failed_recving, set())
+        stats = worker.get_kv_connector_stats()
+        self.assertIsNotNone(stats)
+        self.assertEqual(stats.data["num_failed_transfers"], [1])
+
+    def test_get_transfer_results_consumer_forwards_failed_recving(self):
+        """Consumer reports failed receives in both finished_recving and failed_recving."""
+        self.vllm_config.kv_transfer_config.is_kv_producer = False
+        worker = tpu_raiden_connector.TPUConnectorWorker(self.vllm_config)
+        worker.kv_manager = MagicMock()
+        worker._submitted = {"req_ok", "req_failed", "req_inflight"}
+        worker.kv_manager.poll_stats.return_value = (
+            [],
+            ["req_ok"],
+            ["req_failed"],
+        )
+
+        results = worker.get_transfer_results()
+
+        self.assertEqual(results.finished_sending, set())
+        self.assertEqual(results.finished_recving, {"req_ok", "req_failed"})
+        self.assertEqual(results.failed_recving, {"req_failed"})
+        self.assertNotIn("req_failed", worker._submitted)
+        self.assertIn("req_inflight", worker._submitted)
+
+    def test_connector_delegates_get_transfer_results(self):
+        connector = tpu_raiden_connector.TPUConnector(
+            self.vllm_config,
+            KVConnectorRole.WORKER,
+            _make_test_kv_cache_config(),
+        )
+        connector.connector_worker.kv_manager = MagicMock()
+        connector.connector_worker.kv_manager.poll_stats.return_value = (
+            ["req1"],
+            [],
+            ["req2"],
+        )
+
+        results = connector.get_transfer_results(set())
+
+        self.assertEqual(results.finished_sending, {"req1", "req2"})
+        self.assertEqual(results.finished_recving, set())
+        self.assertEqual(results.failed_recving, set())
 
 
 if __name__ == "__main__":
