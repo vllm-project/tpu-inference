@@ -177,6 +177,12 @@ class VllmQKVParallelLinear(QKVParallelLinear):
         else:
             out, bias = super().forward(x), None
         out_jax = jax_view(out)
+        # The shard_map below is written for 2-D (num_tokens, features)
+        # activations, which vLLM's native models pass. vLLM's Transformers
+        # backend passes (batch, seq, features); flatten the leading dims so
+        # the sharding specs line up, and restore them at the end.
+        lead_shape = out_jax.shape[:-1]
+        out_jax = out_jax.reshape(-1, out_jax.shape[-1])
 
         out_jax = reorder_concatenated_tensor_for_sharding(
             out_jax,
@@ -243,6 +249,7 @@ class VllmQKVParallelLinear(QKVParallelLinear):
             v_jax = _mark_kv_head_replicated(v_jax)
 
         out_jax = jnp.concatenate([q_jax, k_jax, v_jax], axis=-1)
+        out_jax = out_jax.reshape(*lead_shape, out_jax.shape[-1])
         if not self.return_bias:
             return torch_view(out_jax)
         return torch_view(out_jax), bias
