@@ -59,7 +59,10 @@ class TPUSupportedSamplingMetadata:
         req_indices_dp: dict,
         sharding: Optional[jax.sharding.Sharding] = None,
     ) -> "TPUSupportedSamplingMetadata":
-        needs_logprobs = input_batch.max_num_logprobs > 0 if input_batch.max_num_logprobs else False
+        # max_num_logprobs is None when no request asked for logprobs. A value
+        # of 0 (e.g. logprobs=0 or chat logprobs=true without top_logprobs)
+        # still needs the sampled token's logprob, matching vLLM's sampler.
+        needs_logprobs = input_batch.max_num_logprobs is not None
 
         # Use a dummy tensor with a unique shape for each logprobs config.
         # This avoids persistent cache collisions.
