@@ -61,6 +61,8 @@ fi
 TENSOR_PARALLEL_SIZE=$(( NUM_HOSTS_PER_INSTANCE * CORES_PER_CHIP ))
 
 PREFILL_RAY_PORT=8100
+# Per-process Ray agent/metrics ports start here (see start_instance).
+RAY_AGENT_PORT_BASE=30000
 DECODE_RAY_PORT=9100
 PREFILL_VLLM_PORT=8400
 DECODE_VLLM_PORT=9400
@@ -181,6 +183,19 @@ start_instance() {
     # directory, raylet socket and plasma socket under --temp-dir, so raylets
     # sharing one collide and workers attach to the wrong raylet.
     local cmd="ray start --block --temp-dir=${tmpdir}-${i}"
+    # Fixed, distinct agent ports per process. Every Ray node, workers
+    # included, starts a dashboard agent on 52365 by default and picks its
+    # other agent/metrics ports by test-binding a free one, so the processes
+    # of both clusters in this one pod race for the same ports: the loser's
+    # node dies or rejoins under a new session ("address already in use",
+    # then ActorHandleNotFoundError / a missing node in get_kv_ips). The
+    # chip index is unique across both clusters; 30000+ is clear of the
+    # worker port ranges (prefill 10002-19999, decode 20000-29999).
+    local agent_base=$(( RAY_AGENT_PORT_BASE + (chip_base + i) * 10 ))
+    cmd="$cmd --dashboard-agent-listen-port=${agent_base}"
+    cmd="$cmd --dashboard-agent-grpc-port=$(( agent_base + 1 ))"
+    cmd="$cmd --runtime-env-agent-port=$(( agent_base + 2 ))"
+    cmd="$cmd --metrics-export-port=$(( agent_base + 3 ))"
     if [ "$i" -eq 0 ]; then
       # No dashboard: nothing here uses it, and both heads would default to
       # port 8265. `ray start` test-binds that port and the dashboard process
