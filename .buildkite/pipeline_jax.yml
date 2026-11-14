@@ -210,7 +210,7 @@ steps:
         commands:
           - |
             .buildkite/scripts/run_in_docker.sh bash -c \
-              'MOE_HIERARCHICAL_DISPATCH_REQUIRE_DUAL_CORE=1 python3 -m pytest -s -v -rs /workspace/tpu_inference/tests/layers/common/test_moe_hierarchical_dispatch.py'
+              'MOE_HIERARCHICAL_DISPATCH_REQUIRE_DUAL_CORE=1 python3 -m pytest -s -v -rs /workspace/tpu_inference/tests/layers/common/test_moe_hierarchical_dispatch.py /workspace/tpu_inference/tests/layers/common/test_moe_quantize_lhs.py'
 
       - label: "${TPU_VERSION:-tpu6e} lora e2e tests for JAX + vLLM models single chip - test_lora"
         key: ${TPU_VERSION:-tpu6e}_test_10_1

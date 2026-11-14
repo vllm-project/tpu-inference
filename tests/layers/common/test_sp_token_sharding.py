@@ -473,9 +473,10 @@ def _ref_gmm(lhs,
              group_sizes,
              group_offset,
              fuse_act=None,
-             preferred_element_type=None):
+             preferred_element_type=None,
+             quantize_lhs=True):
     """Pure-jnp stand-in for gmm_wrapper so fused_moe_func runs on CPU."""
-    del rhs_scale, rhs_bias
+    del rhs_scale, rhs_bias, quantize_lhs
     start_group = group_offset[0]
     num_local = rhs.shape[0]
     local_sizes = jax.lax.dynamic_slice_in_dim(group_sizes,
