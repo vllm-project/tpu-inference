@@ -185,10 +185,16 @@ def _decode_core_impl(
     layer_names_per_group: tuple[tuple[str, ...], ...] | None = None,
 ):
     has_logprobs = False if sampling_metadata is None else sampling_metadata.logprobs
-    from tpu_inference.layers.jax.sample.sampling import \
-        distributed_sampling_allowed
+    from tpu_inference.layers.jax.sample.sampling import (
+        distributed_sampling_allowed, with_distributed_sampling_support)
     allow_distributed_sampling = distributed_sampling_allowed(
         has_logprobs, logprobs_mode)
+    if sampling_metadata is not None:
+        # The sampling params do not change inside the loop. Check once here
+        # whether every row fits the distributed candidate sampler; inside
+        # sample() that check is a cross-DP all-reduce on every decode step.
+        sampling_metadata = with_distributed_sampling_support(
+            sampling_metadata)
 
     # Discover the per-step expert-indices shape at JIT trace time without
     # executing a step. Gated by collect_expert_indices so the abstract trace is

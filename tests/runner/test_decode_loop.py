@@ -20,6 +20,7 @@ import pytest
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, GroupedAttentionMetadata, MambaMetadata)
 from tpu_inference.layers.common.sharding import MESH_AXIS_NAMES
+from tpu_inference.layers.jax.sample import sampling
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.runner.decode_loop import (TpuSamplingState,
@@ -503,6 +504,94 @@ def test_continue_decode_no_exit_on_eos_drops_eos_reduction():
     """
     assert "reduce_or" in _lower_decode_core(1)
     assert "reduce_or" not in _lower_decode_core(-1)
+
+
+def _primitive_names(jaxpr):
+    """Primitive names in a jaxpr, including nested sub-jaxprs."""
+    names = set()
+    for eqn in jaxpr.eqns:
+        names.add(eqn.primitive.name)
+        for param in eqn.params.values():
+            for sub in param if isinstance(param, (list, tuple)) else [param]:
+                sub = getattr(sub, "jaxpr", sub)
+                if hasattr(sub, "eqns"):
+                    names |= _primitive_names(sub)
+    return names
+
+
+def test_continue_decode_checks_sampling_support_once():
+    """sample() checks that every row fits the distributed candidate sampler.
+    The check reduces over the batch, which is a cross-DP all-reduce in the
+    multi-device program. The sampling params are fixed for the whole loop, so
+    the check must run once before the while_loop, not on every step.
+    """
+    batch_size = 2
+
+    def mock_model_fn(state, kv_caches, current_tokens, attn_metadata, *args,
+                      **kwargs):
+        hidden_states = attn_metadata.input_positions.astype(jnp.float32)[:,
+                                                                          None,
+                                                                          None]
+        return kv_caches, hidden_states, None, None
+
+    def mock_compute_logits_fn(state, hidden_states, _):
+        logits = jnp.zeros((batch_size, 100))
+        return logits.at[:, 0].set(hidden_states[:, 0, 0])
+
+    def mock_sample_fn(rng, mesh, logits, sampling_metadata, **kwargs):
+        supported = sampling._can_sample_distributed(sampling_metadata)
+        tokens = jnp.where(supported, jnp.argmax(logits, axis=-1), 0)
+        return tokens.astype(jnp.int32), None
+
+    def run(sampling_metadata):
+        step_rngs, _ = _split_rngs(jax.random.PRNGKey(0), 5, 5)
+        return _decode_core_impl(
+            state={},
+            kv_caches=[jnp.zeros((2, 10))],
+            step_rngs=step_rngs,
+            sampling_metadata=sampling_metadata,
+            inputs_embeds=None,
+            lora_metadata=None,
+            intermediate_tensors=None,
+            block_tables=jnp.zeros((2, 16), dtype=jnp.int32),
+            query_start_loc=jnp.array([0, 1, 2], dtype=jnp.int32),
+            request_distribution=jnp.array([0, 0], dtype=jnp.int32),
+            mamba_state_indices=None,
+            current_tokens=jnp.array([10, 20], dtype=jnp.int32),
+            active_mask=jnp.array([True, True], dtype=jnp.bool_),
+            input_positions=jnp.array([0, 0], dtype=jnp.int32),
+            seq_lens=jnp.array([1, 1], dtype=jnp.int32),
+            model_fn=mock_model_fn,
+            compute_logits_fn=mock_compute_logits_fn,
+            sample_fn=mock_sample_fn,
+            mesh=None,
+            max_decode_steps=5,
+            static_max_decode_steps=5,
+            eos_token_id=(99, ),
+            padding_token_id=-1,
+            dp_size=1,
+            pad_len=0,
+            collect_expert_indices=False,
+            layer_name_to_kvcache_index=(),
+            is_first_rank=True,
+            is_last_rank=True,
+            max_logprobs=0,
+            logprobs_mode="raw",
+            continue_decode_eos_check_interval=-1,
+        )
+
+    metadata = TPUSupportedSamplingMetadata(
+        temperature=jnp.full((batch_size, ), 0.7, dtype=jnp.float32),
+        top_k=jnp.full((batch_size, ), 20, dtype=jnp.int32),
+        top_p=jnp.full((batch_size, ), 0.9, dtype=jnp.float32),
+        do_sampling=True,
+    )
+    jaxpr = jax.make_jaxpr(run)(metadata).jaxpr
+    loops = [eqn for eqn in jaxpr.eqns if eqn.primitive.name == "while"]
+    assert len(loops) == 1
+    assert "reduce_and" in _primitive_names(jaxpr)
+    assert "reduce_and" not in _primitive_names(
+        loops[0].params["body_jaxpr"].jaxpr)
 
 
 def test_continue_decode_exit_on_eos_interval():
