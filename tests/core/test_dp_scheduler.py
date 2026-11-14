@@ -1063,9 +1063,15 @@ class TestDPScheduler:
             block_hashes={},
             finished_requests=("old1", ))
 
+        # One rank preempted a request; the other left the field at its
+        # SchedulerOutput default of None.
+        output_0.preempted_req_ids = {"req_p"}
+        output_1.preempted_req_ids = None
+
         combined = scheduler._combine_scheduler_outputs([output_0, output_1])
 
         assert combined.total_num_scheduled_tokens == 30
+        assert combined.preempted_req_ids == {"req_p"}
 
         # Verify new per-rank fields and structured output propagation
         assert combined.req_ids_per_rank == {0: ["req1"], 1: ["req2"]}

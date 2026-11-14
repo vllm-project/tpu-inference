@@ -1067,10 +1067,10 @@ class DPScheduler(SchedulerInterface):
 
         # Combine preempted request IDs: the worker drops a preempted
         # request's state (and mamba slot) when it sees it here.
+        # SchedulerOutput.preempted_req_ids defaults to None, hence `or ()`.
         combined_preempted_req_ids: set[str] = set()
         for output in rank_outputs:
-            combined_preempted_req_ids.update(
-                getattr(output, "preempted_req_ids", None) or ())
+            combined_preempted_req_ids.update(output.preempted_req_ids or ())
 
         # Create DP rank assignment mapping for scheduled requests
         assigned_dp_rank = {}
