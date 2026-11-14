@@ -129,6 +129,21 @@ class VllmQKVParallelLinear(QKVParallelLinear):
         self.num_kv_head_replicas = replicas
         self.mesh_tp_size = tp
 
+    @property
+    def tpu_split_sizes(self) -> list[int]:
+        """Global (q, k, v) widths of what `forward` returns.
+
+        `output_sizes` stays inflated by the KV-head replicas (weight loading
+        and the sharding helpers need that), but `forward` merges the replicas
+        back into one copy, so a caller that splits the fused output must use
+        these widths instead. Read by the vLLM Transformers-backend split that
+        `transformers_backend.global_view` installs.
+        """
+        q = self.total_num_heads * self.head_size
+        k = self.total_num_kv_heads * self.head_size
+        v = self.total_num_kv_heads * self.v_head_size
+        return [q, k, v]
+
     def weight_loader(self,
                       param: Parameter,
                       loaded_weight: torch.Tensor,

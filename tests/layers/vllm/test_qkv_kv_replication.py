@@ -140,3 +140,21 @@ def test_tile_kv_along_output_dim_1():
         dtype=torch.float32,
     )
     assert torch.equal(out, expected)
+
+
+def test_tpu_split_sizes_are_de_replicated():
+    # codegemma-2b at TP=2: 8 heads, 1 KV head (replicated 2x), head 256.
+    # output_sizes stay inflated, but forward returns one copy of K/V, so a
+    # caller splitting the fused output needs the de-replicated widths.
+    layer, _ = _build_qkv(mesh_shape={"model": 2}, total_num_kv_heads=1)
+    layer.total_num_heads, layer.head_size, layer.v_head_size = 8, 256, 256
+    layer.output_sizes = [2048, 512, 512]
+    assert layer.num_kv_head_replicas == 2
+    assert layer.tpu_split_sizes == [2048, 256, 256]
+
+
+def test_tpu_split_sizes_without_replication_match_output_sizes():
+    layer, _ = _build_qkv(mesh_shape={"model": 2}, total_num_kv_heads=2)
+    layer.total_num_heads, layer.head_size, layer.v_head_size = 8, 128, 128
+    assert layer.num_kv_head_replicas == 1
+    assert layer.tpu_split_sizes == [1024, 256, 256]
