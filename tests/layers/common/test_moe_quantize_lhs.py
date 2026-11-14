@@ -13,8 +13,8 @@
 # limitations under the License.
 """Tests for fused_moe_func's quantize_lhs option.
 
-The gmm_wrapper test runs anywhere. The fused_moe_func test needs 8 TPU
-devices (gmm_v2 is a TPU kernel).
+The gmm_wrapper tests run anywhere. The numerical fused_moe_func test needs 8
+TPU devices (gmm_v2 is a TPU kernel); CI runs it in the v7x multi-chip MoE step.
 """
 
 from unittest import mock
@@ -73,8 +73,7 @@ def _quantize_per_channel(w: jax.Array, qtype) -> tuple[jax.Array, jax.Array]:
     return q, scale[:, :, None, :]
 
 
-def _run(mesh, quantize_lhs: bool, w1, w2, w1_scale, w2_scale, hidden,
-         gating):
+def _run(mesh, quantize_lhs: bool, w1, w2, w1_scale, w2_scale, hidden, gating):
     jax.clear_caches()
     try:
         with jax.set_mesh(mesh):
@@ -137,21 +136,21 @@ def test_quantize_lhs_false_matches_dequantized_weights(qtype):
 
 def test_quantize_lhs_false_rejects_fused_rs_kernel():
     mesh = _make_mesh()
+    kwargs = dict(hidden_states=jnp.zeros((8, 256), jnp.bfloat16),
+                  w1=jnp.zeros((2, 256, 1024), jnp.bfloat16),
+                  w2=jnp.zeros((2, 512, 256), jnp.bfloat16),
+                  w1_scale=None,
+                  w2_scale=None,
+                  w1_bias=None,
+                  w2_bias=None,
+                  gating_output=jnp.zeros((8, 2), jnp.bfloat16),
+                  topk=1,
+                  renormalize=True,
+                  mesh=mesh,
+                  use_ep=True,
+                  activation="silu",
+                  scoring_fn="softmax",
+                  use_gmm_fused_rs_kernel=True,
+                  quantize_lhs=False)
     with pytest.raises(ValueError, match="quantize_lhs=False"):
-        fused_moe_gmm.fused_moe_func.__wrapped__(
-            hidden_states=jnp.zeros((8, 256), jnp.bfloat16),
-            w1=jnp.zeros((2, 256, 1024), jnp.bfloat16),
-            w2=jnp.zeros((2, 512, 256), jnp.bfloat16),
-            w1_scale=None,
-            w2_scale=None,
-            w1_bias=None,
-            w2_bias=None,
-            gating_output=jnp.zeros((8, 2), jnp.bfloat16),
-            topk=1,
-            renormalize=True,
-            mesh=mesh,
-            use_ep=True,
-            activation="silu",
-            scoring_fn="softmax",
-            use_gmm_fused_rs_kernel=True,
-            quantize_lhs=False)
+        fused_moe_gmm.fused_moe_func.__wrapped__(**kwargs)

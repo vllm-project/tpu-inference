@@ -541,14 +541,23 @@ def _tc_banded_combine(rows: jax.Array,
                              lambda m, a: a + window_sum(m), acc)
 
 
-def _tc_local_moe(tokens: jax.Array, topk_argsort_indices: jax.Array,
-                  w1: jax.Array, w1_scale: jax.Array | None,
-                  w1_bias: jax.Array | None, w2: jax.Array,
-                  w2_scale: jax.Array | None, w2_bias: jax.Array | None,
-                  group_sizes: jax.Array, group_offset: jax.Array,
+def _tc_local_moe(tokens: jax.Array,
+                  topk_argsort_indices: jax.Array,
+                  w1: jax.Array,
+                  w1_scale: jax.Array | None,
+                  w1_bias: jax.Array | None,
+                  w2: jax.Array,
+                  w2_scale: jax.Array | None,
+                  w2_bias: jax.Array | None,
+                  group_sizes: jax.Array,
+                  group_offset: jax.Array,
                   topk_argsort_revert_indices: jax.Array,
-                  topk_weights: jax.Array, *, activation: str, topk: int,
-                  capacity: int, quantize_lhs: bool = True) -> jax.Array:
+                  topk_weights: jax.Array,
+                  *,
+                  activation: str,
+                  topk: int,
+                  capacity: int,
+                  quantize_lhs: bool = True) -> jax.Array:
     """Runs this shard's experts, gathering and combining on the TensorCore.
 
     1. Gather: copy the shard's rows (its slice of the expert-sorted order)
@@ -665,32 +674,31 @@ def _tc_local_moe(tokens: jax.Array, topk_argsort_indices: jax.Array,
     return out.astype(tokens.dtype)
 
 
-def moe_gmm_local(
-        x: jax.Array,
-        w1: jax.Array,
-        w1_scale: jax.Array | None,
-        w1_bias: jax.Array | None,
-        w2: jax.Array,
-        w2_scale: jax.Array | None,
-        w2_bias: jax.Array | None,
-        group_sizes: jax.Array,
-        group_offset: jax.Array,
-        topk_argsort_revert_indices: jax.Array,
-        topk_weights: jax.Array,
-        topk_argsort_indices: jax.Array | None = None,
-        *,
-        activation: str,
-        topk: int,
-        parallelism: Literal["tp", "ep"],
-        enable_rs_kernel: bool = False,
-        onehot_moe_permute_threshold: int = 0,
-        out_token_axes=None,
-        moe_chunk_size: int = 0,
-        defer_all_reduce: bool = False,
-        hierarchical_collect: tuple | None = None,
-        tc_capacity: int = 0,
-        ragged_gather_reduce_version: str | None = None,
-        quantize_lhs: bool = True) -> jax.Array:
+def moe_gmm_local(x: jax.Array,
+                  w1: jax.Array,
+                  w1_scale: jax.Array | None,
+                  w1_bias: jax.Array | None,
+                  w2: jax.Array,
+                  w2_scale: jax.Array | None,
+                  w2_bias: jax.Array | None,
+                  group_sizes: jax.Array,
+                  group_offset: jax.Array,
+                  topk_argsort_revert_indices: jax.Array,
+                  topk_weights: jax.Array,
+                  topk_argsort_indices: jax.Array | None = None,
+                  *,
+                  activation: str,
+                  topk: int,
+                  parallelism: Literal["tp", "ep"],
+                  enable_rs_kernel: bool = False,
+                  onehot_moe_permute_threshold: int = 0,
+                  out_token_axes=None,
+                  moe_chunk_size: int = 0,
+                  defer_all_reduce: bool = False,
+                  hierarchical_collect: tuple | None = None,
+                  tc_capacity: int = 0,
+                  ragged_gather_reduce_version: str | None = None,
+                  quantize_lhs: bool = True) -> jax.Array:
     """Main MoE logic on a local shard can run in TP or EP mode.
 
     Set parallelism for "tp" or "ep"
@@ -1510,7 +1518,8 @@ def fused_moe_func(
 
     if use_ep and use_gmm_fused_rs_kernel and not quantize_lhs:
         raise ValueError(
-            "quantize_lhs=False is not supported with use_gmm_fused_rs_kernel.")
+            "quantize_lhs=False is not supported with use_gmm_fused_rs_kernel."
+        )
 
     if use_ep and use_gmm_fused_rs_kernel:
         from tpu_inference.kernels.experimental.fused_moe.fused_moe_rs import \
