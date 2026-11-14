@@ -497,9 +497,7 @@ class TestDPScheduler:
         mock_output_0.finished_req_ids = set()
         mock_output_0.scheduled_cached_reqs = CachedRequestData(
             req_ids=[],
-            resumed_req_ids=[],
             new_token_ids=[],
-            all_token_ids={},
             new_block_ids=[],
             num_computed_tokens=[],
             num_output_tokens=[],
@@ -515,9 +513,7 @@ class TestDPScheduler:
         mock_output_1.finished_req_ids = set()
         mock_output_1.scheduled_cached_reqs = CachedRequestData(
             req_ids=[],
-            resumed_req_ids=[],
             new_token_ids=[],
-            all_token_ids={},
             new_block_ids=[],
             num_computed_tokens=[],
             num_output_tokens=[],
@@ -567,9 +563,7 @@ class TestDPScheduler:
         mock_output_0.finished_req_ids = set()
         mock_output_0.scheduled_cached_reqs = CachedRequestData(
             req_ids=[],
-            resumed_req_ids=[],
             new_token_ids=[],
-            all_token_ids={},
             new_block_ids=[],
             num_computed_tokens=[],
             num_output_tokens=[],
@@ -585,9 +579,7 @@ class TestDPScheduler:
         mock_output_1.finished_req_ids = set()
         mock_output_1.scheduled_cached_reqs = CachedRequestData(
             req_ids=[],
-            resumed_req_ids=[],
             new_token_ids=[],
-            all_token_ids={},
             new_block_ids=[],
             num_computed_tokens=[],
             num_output_tokens=[],
@@ -624,9 +616,7 @@ class TestDPScheduler:
         output_0 = MagicMock(spec=SchedulerOutput)
         output_0.scheduled_cached_reqs = CachedRequestData(
             req_ids=["req1"],
-            resumed_req_ids=["req1"],
             new_token_ids=[[1, 2, 3]],
-            all_token_ids={"req1": [1, 2, 3, 4, 5]},
             new_block_ids=[[10, 11]],
             num_computed_tokens=[5],
             num_output_tokens=[3],
@@ -635,9 +625,7 @@ class TestDPScheduler:
         output_1 = MagicMock(spec=SchedulerOutput)
         output_1.scheduled_cached_reqs = CachedRequestData(
             req_ids=["req2"],
-            resumed_req_ids=[],
             new_token_ids=[[6, 7]],
-            all_token_ids={"req2": [6, 7, 8, 9]},
             new_block_ids=[[20, 21]],
             num_computed_tokens=[4],
             num_output_tokens=[2],
@@ -647,12 +635,7 @@ class TestDPScheduler:
 
         # Verify combined data
         assert combined.req_ids == ["req1", "req2"]
-        assert combined.resumed_req_ids == ["req1"]
         assert combined.new_token_ids == [[1, 2, 3], [6, 7]]
-        assert combined.all_token_ids == {
-            "req1": [1, 2, 3, 4, 5],
-            "req2": [6, 7, 8, 9]
-        }
         assert combined.num_computed_tokens == [5, 4]
         assert combined.num_output_tokens == [3, 2]
 
@@ -1042,9 +1025,7 @@ class TestDPScheduler:
         output_0.finished_req_ids = set()
         output_0.scheduled_cached_reqs = MagicMock(spec=CachedRequestData)
         output_0.scheduled_cached_reqs.req_ids = ["req1"]
-        output_0.scheduled_cached_reqs.resumed_req_ids = set()
         output_0.scheduled_cached_reqs.new_token_ids = [[1, 2]]
-        output_0.scheduled_cached_reqs.all_token_ids = {}
         output_0.scheduled_cached_reqs.new_block_ids = [None]
         output_0.scheduled_cached_reqs.num_computed_tokens = [10]
         output_0.scheduled_cached_reqs.num_output_tokens = [1]
@@ -1058,9 +1039,7 @@ class TestDPScheduler:
         output_1.finished_req_ids = set()
         output_1.scheduled_cached_reqs = MagicMock(spec=CachedRequestData)
         output_1.scheduled_cached_reqs.req_ids = ["req2"]
-        output_1.scheduled_cached_reqs.resumed_req_ids = set()
         output_1.scheduled_cached_reqs.new_token_ids = [[3, 4]]
-        output_1.scheduled_cached_reqs.all_token_ids = {}
         output_1.scheduled_cached_reqs.new_block_ids = [None]
         output_1.scheduled_cached_reqs.num_computed_tokens = [20]
         output_1.scheduled_cached_reqs.num_output_tokens = [2]
@@ -1112,9 +1091,7 @@ class TestDPScheduler:
             scheduled_new_reqs=[],
             scheduled_cached_reqs=CachedRequestData(
                 req_ids=[],
-                resumed_req_ids=[],
                 new_token_ids=[],
-                all_token_ids={},
                 new_block_ids=[],
                 num_computed_tokens=[],
                 num_output_tokens=[],
@@ -1143,11 +1120,6 @@ class TestDPScheduler:
 
         model_runner_output = ModelRunnerOutput(
             req_ids=["req1", "req2", "req3"],
-            req_id_to_index={
-                "req1": 0,
-                "req2": 1,
-                "req3": 2
-            },
             sampled_token_ids=[[42], [99], [77]],
             logprobs=None,
             prompt_logprobs_dict={"req2": MagicMock()},
@@ -1167,7 +1139,6 @@ class TestDPScheduler:
 
         # Rank 0 should have req1, req3
         assert outputs[0].req_ids == ["req1", "req3"]
-        assert outputs[0].req_id_to_index == {"req1": 0, "req3": 1}
         assert outputs[0].sampled_token_ids == [[42], [77]]
         # req3 emitted no routed experts this step.
         assert outputs[0].aux_output_connector_output == {
@@ -1176,7 +1147,6 @@ class TestDPScheduler:
 
         # Rank 1 should have req2
         assert outputs[1].req_ids == ["req2"]
-        assert outputs[1].req_id_to_index == {"req2": 0}
         assert outputs[1].sampled_token_ids == [[99]]
         assert "req2" in outputs[1].prompt_logprobs_dict
         assert outputs[1].aux_output_connector_output == {
@@ -1197,9 +1167,7 @@ class TestDPScheduler:
             scheduled_new_reqs=[],
             scheduled_cached_reqs=CachedRequestData(
                 req_ids=[],
-                resumed_req_ids=[],
                 new_token_ids=[],
-                all_token_ids={},
                 new_block_ids=[],
                 num_computed_tokens=[],
                 num_output_tokens=[],
@@ -1234,10 +1202,6 @@ class TestDPScheduler:
 
         model_runner_output = ModelRunnerOutput(
             req_ids=["req1", "req2"],
-            req_id_to_index={
-                "req1": 0,
-                "req2": 1
-            },
             sampled_token_ids=[[42], [99]],
             logprobs=logprobs,
             prompt_logprobs_dict={},
@@ -1355,7 +1319,6 @@ class TestDPScheduler:
 
         model_runner_output = ModelRunnerOutput(
             req_ids=["req1"],
-            req_id_to_index={"req1": 0},
             sampled_token_ids=[[42]],
             logprobs=None,
             prompt_logprobs_dict={},

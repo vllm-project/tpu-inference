@@ -22,7 +22,7 @@ import jax.numpy as jnp
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorRole, SupportsHMA)
-from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 import tpu_inference.distributed.utils as dist_utils
+from tpu_inference.core.hybrid_coordinator import is_mamba_group
 from tpu_inference.distributed.host_kv_pool_hma import HostKVPoolHMA
 from tpu_inference.distributed.kv_transfer import copy_to_host
 
@@ -207,8 +208,7 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
         self.num_groups = len(runner.kv_cache_config.kv_cache_groups)
         # Mapping of kv cache group id to whether it is mamba or full attn
         self.group_is_mamba: list[bool] = [
-            isinstance(g.kv_cache_spec, MambaSpec)
-            for g in runner.kv_cache_config.kv_cache_groups
+            is_mamba_group(g) for g in runner.kv_cache_config.kv_cache_groups
         ]
 
         # Build layer id to kv cache group id mapping
@@ -530,7 +530,7 @@ def _select_from_kv_caches_per_group(
 ) -> list[jax.Array]:
     """Read blocks specified by `block_ids_per_group`.
 
-    Returns a flat list of arrays to be transfered. Mamaba 
+    Returns a flat list of arrays to be transfered. Mamaba
     layer kv cache is a tuple of arrays and will be flattened.
     """
     indices_per_group = [

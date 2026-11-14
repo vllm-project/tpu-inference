@@ -32,8 +32,7 @@ from flywheel_tpu.pallas.kv_cache_write import write_kv_cache_pages
 from jax import lax
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheGroupSpec,
-                                        UniformTypeKVCacheSpecs)
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheGroup
 
 from tpu_inference import envs
 from tpu_inference.layers.common.attention_backend import (AttentionBackend,
@@ -709,18 +708,15 @@ def check_supported(
 
 
 def attention_group_page_sizes(
-        kv_cache_groups: Sequence[KVCacheGroupSpec]) -> dict[int, int]:
+        kv_cache_groups: Sequence[KVCacheGroup]) -> dict[int, int]:
     """KV cache group id -> tokens per page, for the attention groups only
     (a mamba group has no pages to write)."""
     page_sizes: dict[int, int] = {}
     for gid, kv_cache_group in enumerate(kv_cache_groups):
-        spec = kv_cache_group.kv_cache_spec
-        if isinstance(spec, UniformTypeKVCacheSpecs):
-            layer_spec = next(iter(spec.kv_cache_specs.values()))
-        else:
-            layer_spec = spec
-        if isinstance(layer_spec, AttentionSpec):
-            page_sizes[gid] = spec.block_size
+        if any(
+                isinstance(s, AttentionSpec)
+                for s in kv_cache_group.distinct_specs):
+            page_sizes[gid] = kv_cache_group.block_size
     return page_sizes
 
 
@@ -974,7 +970,7 @@ class FlywheelAttentionBackend(AttentionBackend):
             kv_write_num_slices=metadata[f"kv_write_num_slices_gid_{gid}"],
             kernel_index=metadata[_KERNEL_INDEX_KEY])
 
-    def warmup_arrays(self, kv_cache_groups: Sequence[KVCacheGroupSpec], *,
+    def warmup_arrays(self, kv_cache_groups: Sequence[KVCacheGroup], *,
                       num_tokens: int, max_num_reqs: int, dp_size: int,
                       mesh: Mesh,
                       sharding: NamedSharding) -> Mapping[str, jax.Array]:

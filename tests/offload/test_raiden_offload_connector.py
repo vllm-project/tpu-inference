@@ -77,6 +77,7 @@ def create_request(request_id: str, num_tokens: int,
     req.req_id = request_id
     req.prompt_token_ids = list(range(num_tokens))
     req.all_token_ids = list(range(num_tokens))
+    req.prefill_token_ids = req.all_token_ids
     req.num_computed_tokens = 0
     req.block_size = block_size
     num_blocks = num_tokens // block_size
@@ -155,8 +156,7 @@ def test_scheduler_build_meta():
     sched_output.finished_req_ids = set()
     sched_output.scheduled_new_reqs = [req]
     sched_output.scheduled_cached_reqs = MagicMock(req_ids=[],
-                                                   new_block_ids=[],
-                                                   resumed_req_ids=set())
+                                                   new_block_ids=[])
     sched_output.num_scheduled_tokens = {"req_1": 32}
 
     meta: RaidenConnectorMetadata = scheduler.build_connector_meta(
