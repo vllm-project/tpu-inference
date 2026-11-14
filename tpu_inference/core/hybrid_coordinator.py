@@ -217,6 +217,8 @@ class TPUDualBlockPool(BlockPool):
         self.cached_block_hash_to_block = attention_pool.cached_block_hash_to_block
         self.cached_block_hashes_by_block = attention_pool.cached_block_hashes_by_block
         self.kv_event_queue = attention_pool.kv_event_queue
+        # Read by vLLM's KV cache coordinator (replay_boundaries).
+        self.num_hash_lookahead_tokens = attention_pool.num_hash_lookahead_tokens
 
     def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
         attn_blocks: list[KVCacheBlock] = []

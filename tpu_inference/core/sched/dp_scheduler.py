@@ -1065,6 +1065,13 @@ class DPScheduler(SchedulerInterface):
         for output in rank_outputs:
             combined_finished_req_ids.update(output.finished_req_ids)
 
+        # Combine preempted request IDs: the worker drops a preempted
+        # request's state (and mamba slot) when it sees it here.
+        # SchedulerOutput.preempted_req_ids defaults to None, hence `or ()`.
+        combined_preempted_req_ids: set[str] = set()
+        for output in rank_outputs:
+            combined_preempted_req_ids.update(output.preempted_req_ids or ())
+
         # Create DP rank assignment mapping for scheduled requests
         assigned_dp_rank = {}
         for req_id in combined_num_scheduled_tokens.keys():
@@ -1139,6 +1146,7 @@ class DPScheduler(SchedulerInterface):
             scheduled_spec_decode_tokens=combined_spec_decode_tokens,
             scheduled_encoder_inputs=combined_encoder_inputs,
             finished_req_ids=combined_finished_req_ids,
+            preempted_req_ids=combined_preempted_req_ids,
             free_encoder_mm_hashes=set(),
             assigned_dp_rank=assigned_dp_rank,
             max_num_scheduled_tokens_per_dp_rank=max_scheduled_tokens_per_rank,
@@ -1181,9 +1189,7 @@ class DPScheduler(SchedulerInterface):
             self, rank_outputs: List[SchedulerOutput]) -> CachedRequestData:
         """Combine cached request data from all DP rank schedulers."""
         combined_req_ids = []
-        combined_resumed_req_ids = []
         combined_new_token_ids = []
-        combined_all_token_ids = {}
         combined_new_block_ids = []
         combined_num_computed_tokens = []
         combined_num_output_tokens = []
@@ -1192,9 +1198,7 @@ class DPScheduler(SchedulerInterface):
             cached_data = output.scheduled_cached_reqs
 
             combined_req_ids.extend(cached_data.req_ids)
-            combined_resumed_req_ids.extend(cached_data.resumed_req_ids)
             combined_new_token_ids.extend(cached_data.new_token_ids)
-            combined_all_token_ids.update(cached_data.all_token_ids)
             combined_new_block_ids.extend(cached_data.new_block_ids)
             combined_num_computed_tokens.extend(
                 cached_data.num_computed_tokens)
@@ -1202,9 +1206,7 @@ class DPScheduler(SchedulerInterface):
 
         return CachedRequestData(
             req_ids=combined_req_ids,
-            resumed_req_ids=combined_resumed_req_ids,
             new_token_ids=combined_new_token_ids,
-            all_token_ids=combined_all_token_ids,
             new_block_ids=combined_new_block_ids,
             num_computed_tokens=combined_num_computed_tokens,
             num_output_tokens=combined_num_output_tokens,
@@ -1493,17 +1495,17 @@ class DPScheduler(SchedulerInterface):
         aux_output = g.aux_output_connector_output
 
         outputs = []
+        # ModelRunnerOutput fields are indexed by position in req_ids.
+        global_req_id_to_index = {rid: i for i, rid in enumerate(g.req_ids)}
 
         for rank in range(self.dp_size):
             req_ids = scheduler_output.req_ids_per_rank.get(rank, [])
 
             # Map each rank-local index to the corresponding global index.
-            global_indices = [g.req_id_to_index[rid] for rid in req_ids]
-            rank_req_id_to_index = {rid: i for i, rid in enumerate(req_ids)}
+            global_indices = [global_req_id_to_index[rid] for rid in req_ids]
 
             rank_model_runner_output = ModelRunnerOutput(
                 req_ids=req_ids,
-                req_id_to_index=rank_req_id_to_index,
                 sampled_token_ids=(
                     [g.sampled_token_ids[i]
                      for i in global_indices] if g.sampled_token_ids else []),

@@ -61,6 +61,7 @@ from tpu_inference.models.common.compiler_options import \
 from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
+from tpu_inference.models.vllm import transformers_backend
 from tpu_inference.models.vllm.experimental.model_patcher import (
     apply_model_specific_patches, patch_mm_model)
 from tpu_inference.models.vllm.experimental.vision_tower_jit import (
@@ -238,8 +239,11 @@ class VllmModelWrapper:
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.
 
+        # global_view(): vLLM's Transformers modeling backend otherwise sizes
+        # its attention and fused-QKV splits per TP shard, which does not match
+        # the global arrays tpu-inference runs on (see transformers_backend).
         with load_context, jax_context, set_current_vllm_config(
-                self.vllm_config):
+                self.vllm_config), transformers_backend.global_view():
             model_config_for_load = vllm_config_for_load.speculative_config.draft_model_config if self.is_draft_model else vllm_config_for_load.model_config
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load,
                                         model_config=model_config_for_load)
