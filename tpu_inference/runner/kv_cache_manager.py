@@ -1093,9 +1093,11 @@ class KVCacheManager:
                     jax_dtype = t2j_dtype(dtype)
                     cache_shape = (num_blocks, *shape)
                     if state_index == 0:
-                        # conv_state: [num_blocks, conv_kernel_size, intermediate_size]
-                        spec = PartitionSpec(ShardingAxisName.ATTN_DATA, None,
-                                             ShardingAxisName.ATTN_HEAD)
+                        # conv_state: [num_blocks, conv_kernel_size, (1,) intermediate_size]
+                        spec = PartitionSpec(
+                            ShardingAxisName.ATTN_DATA,
+                            *([None] * (len(cache_shape) - 2)),
+                            ShardingAxisName.ATTN_HEAD)
                     elif state_index == 1:
                         # ssm_state: [num_blocks, num_heads, head_dim, state_size]
                         spec = PartitionSpec(ShardingAxisName.ATTN_DATA,

@@ -22,9 +22,13 @@ from torchax.interop import jax_view, torch_view
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import \
     QwenGatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.mamba_utils import \
+    is_conv_state_dim_first
 
+import tpu_inference.envs as envs
 from tpu_inference.layers.common.attention_backend import (
-    attention_backend_name, create_linear_attention_backend)
+    GDNLinearAttentionBackend, attention_backend_name,
+    create_linear_attention_backend)
 from tpu_inference.layers.common.gdn_attention import run_jax_gdn_attention
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import (
@@ -109,7 +113,7 @@ def gdn_attention_core_tpu(
     conv_state, recurrent_state = vllm_context.kv_caches[layer_idx]
     state_len = conv_state.shape[1]
     if state_len > kernel_size - 1:
-        conv_state_in = conv_state[:, :kernel_size - 1, :]
+        conv_state_in = conv_state[:, :kernel_size - 1]
     else:
         conv_state_in = conv_state
 
@@ -215,7 +219,7 @@ def gdn_attention_core_tpu(
          **extra_gdn_kwargs,
      )
     if state_len > kernel_size - 1:
-        remaining_old_state = conv_state[:, kernel_size - 1:, :]
+        remaining_old_state = conv_state[:, kernel_size - 1:]
         new_conv_state = jnp.concatenate(
             [new_conv_state_extracted, remaining_old_state], axis=1)
     else:
@@ -231,11 +235,31 @@ def gdn_attention_core_tpu(
 class VllmGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
 
     def __init__(self, config, vllm_config, *args, **kwargs) -> None:
-        super().__init__(config, vllm_config, *args, **kwargs)
         # The linear attention backend --attention-backend selects, whose
-        # kernel gdn_attention_core_tpu runs.
+        # kernel gdn_attention_core_tpu runs. Initialize before super().__init__
+        # so get_state_shape() / get_state_dtype() observe it if queried early.
         self.linear_attention_backend = create_linear_attention_backend(
             attention_backend_name(vllm_config))
+        super().__init__(config, vllm_config, *args, **kwargs)
+
+    def _use_fp32_4d_conv_state(self) -> bool:
+        backend = getattr(self, "linear_attention_backend", None)
+        return (bool(envs.GDN_FP32_4D_CONV_STATE)
+                and isinstance(backend, GDNLinearAttentionBackend)
+                and not is_conv_state_dim_first())
+
+    def get_state_shape(self):
+        conv_shape, ssm_shape = super().get_state_shape()
+        if self._use_fp32_4d_conv_state():
+            # (kernel_size - 1, dim) -> (kernel_size - 1, 1, dim)
+            conv_shape = (conv_shape[0], 1, conv_shape[1])
+        return conv_shape, ssm_shape
+
+    def get_state_dtype(self):
+        conv_dtype, ssm_dtype = super().get_state_dtype()
+        if self._use_fp32_4d_conv_state():
+            return (torch.float32, ssm_dtype)
+        return (conv_dtype, ssm_dtype)
 
     def forward(
         self,

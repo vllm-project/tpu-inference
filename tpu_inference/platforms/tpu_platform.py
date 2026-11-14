@@ -216,6 +216,7 @@ class TpuPlatform(Platform):
         "FUSED_EP_MOE_V2_SHARDED_PLAN",
         "USE_ROUTING_MOE",
         "ROUTING_MOE_REMOTE_SCATTER",
+        "GDN_FP32_4D_CONV_STATE",
         "TPU_CHIPS_PER_HOST_BOUNDS",
         "TPU_HOST_BOUNDS",
         "TPU_MULTIHOST_BACKEND",
