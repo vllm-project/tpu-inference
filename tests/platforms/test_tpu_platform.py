@@ -951,3 +951,16 @@ class TestEnvOverrideSamplingParamsCircularImport:
         # Should not raise AttributeError when SamplingParams is not yet
         # defined on vllm.sampling_params.
         importlib.reload(env_override)
+
+    def test_env_override_does_not_eagerly_import_vllm(self, monkeypatch):
+        """Regression test for #3962: env_override must not eagerly import
+        vllm or vllm.sampling_params, preventing circular import loops and
+        opaque type re-registration errors during platform resolution."""
+        import importlib
+        import sys
+
+        from tpu_inference import env_override
+
+        monkeypatch.delitem(sys.modules, "vllm.sampling_params", raising=False)
+        importlib.reload(env_override)
+        assert "vllm.sampling_params" not in sys.modules
