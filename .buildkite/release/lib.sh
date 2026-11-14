@@ -13,12 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Shared by the tpu-inference-release steps and the wheel build and publish
+# Shared by the release pipeline's steps and the wheel build and publish
 # scripts in .buildkite/scripts. Sourced, not run.
 
+# PyPI projects of a release: this repo's core wheel, the combined wheel
+# (vLLM renamed and pinned to it), and their transitional empty meta-wheels.
+# shellcheck disable=SC2034 # Read by the scripts that source this file.
+CORE_PROJECT="vllm-jax-core"
+# shellcheck disable=SC2034
+LEGACY_CORE_PROJECT="tpu-inference"
+COMBINED_PROJECT="vllm-jax"
+# shellcheck disable=SC2034
+LEGACY_COMBINED_PROJECT="vllm-tpu"
+
 # Newest manylinux tag (i.e. glibc) the release wheels may need: the release
-# queue runs on Ubuntu 24.04 (glibc 2.39), the vllm-tpu build fails on a wheel
-# tagged above this, and check_wheels.sh resolves for this platform.
+# queue runs on Ubuntu 24.04 (glibc 2.39), the combined wheel's build fails on
+# a wheel tagged above this, and check_wheels.sh resolves for this platform.
 WHEEL_MAX_MANYLINUX="2_39"
 
 # Release branches and versions: public PEP 440 versions in normalized form
@@ -126,19 +136,24 @@ check_manylinux_tag() {
   fi
 }
 
-# Resolve vllm-tpu==<version> for the platform the wheels support (CPython
-# 3.12 on x86_64 Linux with the glibc of WHEEL_MAX_MANYLINUX) into <out_file>,
-# passing any extra uv flags (e.g. --find-links <dir>).
-resolve_vllm_tpu() {
-  local uv_bin="$1" version="$2" out_file="$3"
+# Resolve <requirement> (e.g. vllm-jax==<version>) for the platform the wheels
+# support (CPython 3.12 on x86_64 Linux with the glibc of WHEEL_MAX_MANYLINUX)
+# into <out_file>, passing any extra uv flags (e.g. --find-links <dir>).
+resolve_requirement() {
+  local uv_bin="$1" requirement="$2" out_file="$3"
   shift 3
-  local req_file
-  req_file="$(dirname "${out_file}")/req.in"
-  echo "vllm-tpu==${version}" > "${req_file}"
+  local req_file="${out_file}.in"
+  echo "${requirement}" > "${req_file}"
   "${uv_bin}" pip compile "${req_file}" --no-config --quiet \
     --python-version 3.12 --python-platform "x86_64-manylinux_${WHEEL_MAX_MANYLINUX}" \
     --index-url https://pypi.org/simple \
     "$@" -o "${out_file}"
+}
+
+resolve_combined() {
+  local uv_bin="$1" version="$2" out_file="$3"
+  shift 3
+  resolve_requirement "${uv_bin}" "${COMBINED_PROJECT}==${version}" "${out_file}" "$@"
 }
 
 # --- Docker image -------------------------------------------------------------
@@ -148,10 +163,14 @@ resolve_vllm_tpu() {
 # never collide with. GAR is internal; Docker Hub is what users pull.
 RELEASE_GAR="${RELEASE_GAR:-us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci}"
 # shellcheck disable=SC2034 # Read by build_images.sh.
-RELEASE_IMAGE="${RELEASE_GAR}/vllm-tpu"
+RELEASE_IMAGE="${RELEASE_GAR}/vllm-jax"
 # shellcheck disable=SC2034 # Read by build_images.sh.
 RELEASE_TAG_PREFIX="release-"
-RELEASE_DOCKERHUB_REPO="${RELEASE_DOCKERHUB_REPO:-vllm/vllm-tpu}"
+RELEASE_DOCKERHUB_REPO="${RELEASE_DOCKERHUB_REPO:-vllm/vllm-jax}"
+# Transitional legacy Docker Hub repo dual-published alongside vllm/vllm-jax;
+# set empty once legacy pulls are retired.
+# shellcheck disable=SC2034 # Read by preflight.sh, publish_images.sh, verify_published.sh.
+RELEASE_LEGACY_DOCKERHUB_REPO="${RELEASE_LEGACY_DOCKERHUB_REPO:-vllm/vllm-tpu}"
 RELEASE_DOCKERHUB_USERNAME="${RELEASE_DOCKERHUB_USERNAME:-tpuinference}"
 
 # The digest part of <repo>@sha256:<hex>.
@@ -159,23 +178,23 @@ digest_of() {
   echo "${1##*@}"
 }
 
-# The digest Docker Hub serves for RELEASE_DOCKERHUB_REPO:<tag> to an anonymous
-# user, or nothing if the tag doesn't exist. A HEAD request, which Docker Hub
-# doesn't count against the pull rate limit.
+# The digest Docker Hub serves for <repo>:<tag> (default: RELEASE_DOCKERHUB_REPO)
+# to an anonymous user, or nothing if the tag doesn't exist. A HEAD request,
+# which Docker Hub doesn't count against the pull rate limit.
 dockerhub_digest() {
-  local tag="$1" token headers status
+  local tag="$1" repo="${2:-${RELEASE_DOCKERHUB_REPO}}" token headers status
   token="$(curl -fsS --max-time 30 \
-    "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${RELEASE_DOCKERHUB_REPO}:pull" \
+    "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull" \
     | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])')" \
-    || die "no anonymous Docker Hub token for ${RELEASE_DOCKERHUB_REPO}."
+    || die "no anonymous Docker Hub token for ${repo}."
   headers="$(curl -sS --max-time 30 -I -H "Authorization: Bearer ${token}" \
     -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json" \
-    "https://registry-1.docker.io/v2/${RELEASE_DOCKERHUB_REPO}/manifests/${tag}" | tr -d '\r')"
+    "https://registry-1.docker.io/v2/${repo}/manifests/${tag}" | tr -d '\r')"
   status="$(head -n 1 <<< "${headers}" | awk '{print $2}')"
   case "${status}" in
     200) sed -n 's/^[Dd]ocker-[Cc]ontent-[Dd]igest: //p' <<< "${headers}" ;;
     404) ;;
-    *) die "Docker Hub answered '${status}' for ${RELEASE_DOCKERHUB_REPO}:${tag}." ;;
+    *) die "Docker Hub answered '${status}' for ${repo}:${tag}." ;;
   esac
 }
 

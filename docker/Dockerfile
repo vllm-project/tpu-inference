@@ -56,7 +56,7 @@ RUN if [ "$BM_INFRA" = "true" ]; then \
 # the pod is handed one at run time.
 #
 # Staged to /tmp and moved, because COPY cannot be conditional and this file
-# builds the published vllm/vllm-tpu image as well as the test one. Only the
+# builds the published vllm/vllm-jax image as well as the test one. Only the
 # test image keeps the binary.
 COPY --from=buildkite/agent:3 /usr/local/bin/buildkite-agent /tmp/buildkite-agent
 RUN if [ "$IS_TEST" = "true" ]; then \
@@ -112,7 +112,10 @@ RUN  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then
         pip install -r requirements_test.txt --retries 3; \
     fi
 COPY . .
-RUN --mount=type=cache,target=/root/.cache/pip pip install -e .
+# vLLM's requirements/tpu.txt still pulls a pinned tpu-inference wheel from PyPI
+# until upstream switches to vllm-jax-core; uninstall it so site-packages never
+# shadows this editable checkout or duplicates vllm.general_plugins.
+RUN --mount=type=cache,target=/root/.cache/pip pip uninstall -y tpu-inference && pip install -e .
 
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

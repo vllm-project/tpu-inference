@@ -38,6 +38,14 @@ from tpu_inference.logger import init_logger  # noqa: E402
 
 logger = init_logger(__name__)
 
+# Register the vllm_jax <-> tpu_inference singleton alias before Pathways
+# platform resolution so both import orders resolve to identical module objects.
+import sys as _sys  # noqa: E402
+
+import vllm_jax  # noqa: F401,E402
+
+_sys.modules["vllm_jax"] = _sys.modules[__name__]
+
 if "proxy" in envs.JAX_PLATFORMS:
     logger.info("Running vLLM on TPU via Pathways proxy.")
     # Must run pathwaysutils.initialize() before any JAX operations
