@@ -589,7 +589,7 @@ class TestTPUWorker:
         "worker_method_name, runner_method_name, method_args", [
             ("load_model", "load_model", []),
             ("get_model", "get_model", []),
-            ("get_kv_cache_spec", "get_kv_cache_spec", []),
+            ("get_kv_cache_layer_configs", "get_kv_cache_layer_configs", []),
         ])
     def test_runner_passthrough_methods(self, worker_method_name,
                                         runner_method_name, method_args,

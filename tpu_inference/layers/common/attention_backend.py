@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     import jax.numpy as jnp
     from jax.sharding import Mesh, NamedSharding
     from vllm.config import VllmConfig
-    from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+    from vllm.v1.kv_cache_interface import KVCacheGroup
 
     from tpu_inference.layers.common.attention_metadata import (
         AttentionMetadata, SharedAttentionMetadata)
@@ -56,7 +56,7 @@ class HostStepInputs:
     is [num_decode, num_decode, num_reqs]. block_tables maps a KV cache group
     id to its (max_num_seqs, max_num_blocks_per_req) view.
     """
-    kv_cache_groups: "Sequence[KVCacheGroupSpec]"
+    kv_cache_groups: "Sequence[KVCacheGroup]"
     block_tables: Mapping[int, np.ndarray]
     query_start_loc: np.ndarray
     seq_lens: np.ndarray
@@ -130,14 +130,14 @@ class AttentionBackend(abc.ABC):
               (e.g. "seq_lens") or by prepare_step (e.g. a backend's own
               "kv_write_slices_gid_0"), to its array. In the warmup it holds
               the dummy arrays of warmup_arrays instead.
-            gid: the KV cache group id, the index of a KVCacheGroupSpec in the
+            gid: the KV cache group id, the index of a KVCacheGroup in the
               KV cache config. A group is a set of layers that share one KV
-              cache spec and one block table.
+              cache policy and one block table.
           Output:
             a pytree of the backend's own type, or None."""
         return None
 
-    def warmup_arrays(self, kv_cache_groups: "Sequence[KVCacheGroupSpec]", *,
+    def warmup_arrays(self, kv_cache_groups: "Sequence[KVCacheGroup]", *,
                       num_tokens: int, max_num_reqs: int, dp_size: int,
                       mesh: "Mesh",
                       sharding: "NamedSharding") -> Mapping[str, "jax.Array"]:

@@ -31,6 +31,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import LogprobsLists, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
+from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 from tpu_inference.core.sched import dp_scheduler as dp_scheduler_module
 from tpu_inference.core.sched.dp_scheduler import (
@@ -1204,6 +1205,50 @@ class TestDPScheduler:
         assert combined_stats.num_running_reqs == 7
         assert combined_stats.num_waiting_reqs == 3
         assert combined_stats.kv_cache_usage == 0.6
+
+    def test_combine_scheduler_stats_spec_decoding_verified_tokens(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
+        """Test _combine_scheduler_stats sums verified and accepted tokens."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager,
+                                           log_stats=True)
+
+        spec_0 = SpecDecodingStats.new(3)
+        spec_0.num_drafts = 2
+        spec_0.num_draft_tokens = 6
+        spec_0.num_verified_tokens = 5
+        spec_0.num_accepted_tokens = 4
+        spec_0.num_verified_tokens_per_pos = [2, 2, 1]
+        spec_0.num_accepted_tokens_per_pos = [2, 1, 1]
+
+        spec_1 = SpecDecodingStats.new(3)
+        spec_1.num_drafts = 3
+        spec_1.num_draft_tokens = 9
+        spec_1.num_verified_tokens = 8
+        spec_1.num_accepted_tokens = 6
+        spec_1.num_verified_tokens_per_pos = [3, 3, 2]
+        spec_1.num_accepted_tokens_per_pos = [3, 2, 1]
+
+        stats_0 = SchedulerStats(num_running_reqs=1,
+                                 num_waiting_reqs=0,
+                                 kv_cache_usage=0.2,
+                                 spec_decoding_stats=spec_0)
+        stats_1 = SchedulerStats(num_running_reqs=1,
+                                 num_waiting_reqs=0,
+                                 kv_cache_usage=0.4,
+                                 spec_decoding_stats=spec_1)
+
+        combined_stats = scheduler._combine_scheduler_stats([stats_0, stats_1])
+        combined_spec = combined_stats.spec_decoding_stats
+        assert combined_spec is not None
+        assert combined_spec.num_drafts == 5
+        assert combined_spec.num_draft_tokens == 15
+        assert combined_spec.num_verified_tokens == 13
+        assert combined_spec.num_accepted_tokens == 10
+        assert combined_spec.num_verified_tokens_per_pos == [5, 5, 3]
+        assert combined_spec.num_accepted_tokens_per_pos == [5, 3, 2]
 
     def test_make_stats_returns_none_when_disabled(
             self, mock_vllm_config, mock_kv_cache_config,
