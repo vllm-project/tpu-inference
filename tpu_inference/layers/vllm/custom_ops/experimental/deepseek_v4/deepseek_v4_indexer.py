@@ -27,6 +27,7 @@ from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4 import attention as dsv4_attention
 from vllm.models.deepseek_v4.attention import (DeepseekV4Indexer,
                                                DeepseekV4IndexerCache)
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 # =====================================================================
@@ -86,12 +87,12 @@ class VllmDeepseekV4IndexerCache(DeepseekV4IndexerCache):
   avoid registering a spec for this layer.
   """
 
-    def get_kv_cache_spec(self, vllm_config):
+    def get_kv_cache_config(self, vllm_config):
         # In DSV4 FP8 indexer cache format
         # 128 fp8, 1 e8m0 scale packed as uint8
         # TODO: consider put the scale as a separate Array / Tensor
         # to reduce large space waste due to padding.
-        return MLAAttentionSpec(
+        spec = MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
             head_size=align_to(128 + 1, 128),
@@ -101,6 +102,7 @@ class VllmDeepseekV4IndexerCache(DeepseekV4IndexerCache):
             # the indexer's compressor state cache. V3.2 keeps the legacy layout.
             alignment=None,
         )
+        return FullAttentionManager.layer_config(spec)
 
 
 class VllmDeepseekV4Indexer(DeepseekV4Indexer):

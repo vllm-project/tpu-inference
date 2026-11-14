@@ -489,10 +489,11 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
                     f"max_batch_size={self.max_batch_size}; the batch was "
                     f"packed into a token budget whose capture inputs do not "
                     f"fit this key.")
-            # General case: zeroed buffer + the model's per-key padding logic.
+            # General case: zeroed buffer + the model's per-key padding logic
+            # (with upstream's repeat-last default for cumulative offset keys).
             buf = torch.zeros_like(tmpl)
-            padding_logic = self.config.padding_logics.get(
-                key, EncoderCudaGraphManager._copy_padded_buffer)
+            padding_logic = EncoderCudaGraphManager._get_padding_logic(
+                self.config, key)
             padding_logic(buf, src.to(dtype=tmpl.dtype, device=tmpl.device))
             padded[key] = buf
         return padded

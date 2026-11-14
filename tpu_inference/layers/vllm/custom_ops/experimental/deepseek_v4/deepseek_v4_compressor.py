@@ -23,7 +23,8 @@ from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4 import compressor as dsv4_compressor
 from vllm.models.deepseek_v4.compressor import (CompressorStateCache,
                                                 DeepseekCompressor)
-from vllm.v1.kv_cache_interface import SlidingWindowMLASpec
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from tpu_inference.kernels.experimental.deepseek_v4.compress_and_store import \
     config as compressor_config
@@ -80,15 +81,16 @@ class VllmCompressorStateCache(CompressorStateCache):
         assert self.block_size > 0
 
     # pylint: disable=unused-argument
-    def get_kv_cache_spec(self, vllm_config):
-        return SlidingWindowMLASpec(
+    def get_kv_cache_config(self, vllm_config):
+        spec = MLAAttentionSpec(
             block_size=self.block_size,
             num_kv_heads=1,
             head_size=self.state_dim,
             dtype=self.dtype,
-            sliding_window=self.sliding_window,
             alignment=None,
         )
+        return SlidingWindowManager.layer_config(
+            spec, sliding_window=self.sliding_window)
 
 
 class VllmDeepseekCompressor(DeepseekCompressor):

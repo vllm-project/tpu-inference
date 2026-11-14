@@ -17,7 +17,7 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
 from vllm.tasks import SupportedTask
 from vllm.v1 import utils as vllm_utils
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheLayerConfig
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
@@ -538,12 +538,12 @@ class TPUWorker(WorkerBase):
                 staging_buffer_pages = envs.TPU_OFFLOAD_NUM_STAGING_BLOCKS
 
                 # TODO(jcgu): verify page_size_bytes
-                kv_cache_specs = self.get_kv_cache_spec()
-                num_layers = len(kv_cache_specs)
-                assert len(kv_cache_specs) >= 1
+                layer_configs = self.get_kv_cache_layer_configs()
+                num_layers = len(layer_configs)
+                assert len(layer_configs) >= 1
                 # TODO(jcgu): hybrid-kv is not supported yet.
-                _layer_name, _layer_spec = next(iter(kv_cache_specs.items()))
-                vllm_page_size_bytes = _layer_spec.page_size_bytes
+                _layer_name, _layer_cfg = next(iter(layer_configs.items()))
+                vllm_page_size_bytes = _layer_cfg.spec.page_size_bytes
                 # rpa_page_size_bytes = get_rpa_page_size_bytes(self.model_runner.mesh,
                 #                                             kv_cache_specs)
                 stage_buffer_size_bytes = staging_buffer_pages * num_layers * vllm_page_size_bytes
@@ -683,20 +683,14 @@ class TPUWorker(WorkerBase):
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()
 
-    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+    def get_kv_cache_layer_configs(self) -> dict[str, KVCacheLayerConfig]:
         # NOTE: This method intentionally returns a concrete vLLM type, which
         # violates the pure abstract contract of the base class. This is a
         # deliberate, temporary compromise.
         #
         # The vLLM executor that calls this method expects the concrete
-        # `vllm.KVCacheSpec` object to perform its own internal logic. If we
-        # returned an abstract adapter, the vLLM code would break.
-        #
-        # The ideal long-term solution is for the vLLM DI container to be
-        # responsible for this translation. When vLLM can be modified, this
-        # method should be changed to return `dict[str, AbstractKVCacheSpec]`,
-        # and the vLLM side should be updated to handle the translation.
-        return self.model_runner.get_kv_cache_spec()
+        # `vllm.KVCacheLayerConfig` object to perform its own internal logic.
+        return self.model_runner.get_kv_cache_layer_configs()
 
     def get_mamba_num_blocks(self) -> int | None:
         """Rows in the mamba state pool this worker allocated (None without

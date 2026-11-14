@@ -27,13 +27,14 @@ import numpy as np
 from vllm.config import VllmConfig
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata, AuxRequestOutput)
-from vllm.v1.kv_cache_interface import KVCacheConfig, is_full_attention_spec
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
 
 def get_routed_experts_attn_gid(kv_cache_config: KVCacheConfig) -> int:
     """Return the full-attention KV cache group used for routed experts."""
     for gid, group in enumerate(kv_cache_config.kv_cache_groups):
-        if is_full_attention_spec(group.kv_cache_spec):
+        if issubclass(group.manager_cls, FullAttentionManager):
             return gid
     raise ValueError(
         "Routed-experts capture requires a full-attention KV cache group.")

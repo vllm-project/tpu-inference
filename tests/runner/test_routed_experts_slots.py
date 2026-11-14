@@ -34,11 +34,18 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata, AuxOutputSchedulerConnector)
+from vllm.v1.core.single_type_kv_cache_manager import (FullAttentionManager,
+                                                       MambaManager,
+                                                       SlidingWindowManager)
+from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
+                                        KVCacheGroup, MambaSpec)
 
 from tpu_inference.runner.routed_experts import (RoutedExpertsStepEntry,
                                                  TPUAuxOutputWorker,
+                                                 get_routed_experts_attn_gid,
                                                  reconstruct_slots)
 from tpu_inference.runner.tpu_runner import (
     _routed_experts_step_entries, _snapshot_block_ids_for_routed_experts)
@@ -535,3 +542,64 @@ class TestTPUAuxOutputWorker:
 
         worker.begin_step(AuxOutputConnectorMetadata(1, {"r1": 0}, {}, ()))
         assert set(worker._requests) == {"r1"}
+
+
+class TestGetRoutedExpertsAttnGid:
+    """``get_routed_experts_attn_gid`` finds the full-attention group via
+    ``group.manager_cls``."""
+
+    def test_hybrid_mamba_then_full_attention(self):
+        mamba_spec = MambaSpec(shapes=((4, 16), ),
+                               dtypes=(torch.bfloat16, ),
+                               block_size=16)
+        attn_spec = AttentionSpec(block_size=16,
+                                  num_kv_heads=4,
+                                  head_size=64,
+                                  dtype=torch.bfloat16)
+        groups = [
+            KVCacheGroup.from_layers(
+                {f"m.{i}": MambaManager.layer_config(mamba_spec)})
+            for i in range(3)
+        ] + [
+            KVCacheGroup.from_layers(
+                {"attn.0": FullAttentionManager.layer_config(attn_spec)})
+        ]
+        cfg = KVCacheConfig(num_blocks=8,
+                            kv_cache_tensors=[],
+                            kv_cache_groups=groups)
+        assert get_routed_experts_attn_gid(cfg) == 3
+
+    def test_sliding_window_then_full_attention(self):
+        attn_spec = AttentionSpec(block_size=16,
+                                  num_kv_heads=4,
+                                  head_size=64,
+                                  dtype=torch.bfloat16)
+        groups = [
+            KVCacheGroup.from_layers({
+                "swa.0":
+                SlidingWindowManager.layer_config(attn_spec, sliding_window=64)
+            }),
+            KVCacheGroup.from_layers(
+                {"attn.0": FullAttentionManager.layer_config(attn_spec)}),
+        ]
+        cfg = KVCacheConfig(num_blocks=8,
+                            kv_cache_tensors=[],
+                            kv_cache_groups=groups)
+        assert get_routed_experts_attn_gid(cfg) == 1
+
+    def test_missing_full_attention_raises(self):
+        attn_spec = AttentionSpec(block_size=16,
+                                  num_kv_heads=4,
+                                  head_size=64,
+                                  dtype=torch.bfloat16)
+        groups = [
+            KVCacheGroup.from_layers({
+                "swa.0":
+                SlidingWindowManager.layer_config(attn_spec, sliding_window=64)
+            }),
+        ]
+        cfg = KVCacheConfig(num_blocks=8,
+                            kv_cache_tensors=[],
+                            kv_cache_groups=groups)
+        with pytest.raises(ValueError, match="full-attention KV cache group"):
+            get_routed_experts_attn_gid(cfg)

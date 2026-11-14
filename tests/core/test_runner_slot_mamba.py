@@ -21,16 +21,16 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.kv_cache_coordinator import KVCacheCoordinatorNoPrefixCache
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
-from vllm.v1.core.single_type_kv_cache_manager import MambaManager
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheGroupSpec, MambaSpec)
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+from vllm.v1.core.single_type_kv_cache_manager import (FullAttentionManager,
+                                                       MambaManager)
+from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
+                                        KVCacheGroup, KVCacheLayerConfig,
+                                        MambaSpec)
 from vllm.v1.request import Request
 
 from tpu_inference.core import runner_slot_mamba
-from tpu_inference.core.runner_slot_mamba import (RunnerSlotMambaManager,
-                                                  RunnerSlotMambaSpec,
-                                                  maybe_runner_slot_mamba_spec)
+from tpu_inference.core.runner_slot_mamba import (
+    RunnerSlotMambaManager, maybe_runner_slot_mamba_layer_config)
 from tpu_inference.platforms.tpu_platform import TpuPlatform
 
 # Qwen3.5-style layout: one attention group plus three GDN groups. With prefix
@@ -43,22 +43,25 @@ NUM_GDN_GROUPS = 3
 ATTN_PAGE_BYTES = 2 * BLOCK * 8 * 128 * 2  # K and V, 8 heads x 128, bf16
 
 
-def _attn_spec() -> FullAttentionSpec:
-    return FullAttentionSpec(block_size=BLOCK,
-                             num_kv_heads=8,
-                             head_size=128,
-                             dtype=torch.bfloat16)
+def _attn_layer_config() -> KVCacheLayerConfig:
+    return FullAttentionManager.layer_config(
+        AttentionSpec(block_size=BLOCK,
+                      num_kv_heads=8,
+                      head_size=128,
+                      dtype=torch.bfloat16))
 
 
-def _gdn_spec(spec_cls=MambaSpec,
-              mamba_cache_mode: str = "none",
-              mamba_type=MambaAttentionBackendEnum.GDN_ATTN) -> MambaSpec:
-    return spec_cls(shapes=((3, 64), (8, 64, 16)),
+def _gdn_layer_config(
+        manager_cls=MambaManager,
+        spec_cls=MambaSpec,
+        mamba_cache_mode: str = "none",
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN) -> KVCacheLayerConfig:
+    spec = spec_cls(shapes=((3, 64), (8, 64, 16)),
                     dtypes=(torch.bfloat16, torch.float32),
                     block_size=MAX_MODEL_LEN,
                     page_size_padded=ATTN_PAGE_BYTES,
-                    mamba_type=mamba_type,
-                    mamba_cache_mode=mamba_cache_mode)
+                    mamba_type=mamba_type)
+    return manager_cls.layer_config(spec, mamba_cache_mode=mamba_cache_mode)
 
 
 def _vllm_config(mamba_cache_mode: str = "none",
@@ -81,31 +84,19 @@ def flag_off(monkeypatch):
     monkeypatch.delenv("SKIP_MAMBA_SCHEDULER_BLOCKS", raising=False)
 
 
-@pytest.fixture
-def runner_slot_registered():
-    """Registers RunnerSlotMambaSpec whatever the current platform is.
-
-    vLLM's built-in specs are loaded first: a registration into the empty
-    registry would keep them from ever loading. Registering twice is a no-op.
-    """
-    KVCacheSpecRegistry.get_manager_class(_attn_spec())
-    runner_slot_mamba.register_runner_slot_mamba_spec()
-
-
 class TestGate:
 
-    def test_flag_off_keeps_spec(self, flag_off):
-        spec = _gdn_spec()
-        assert maybe_runner_slot_mamba_spec(spec, _vllm_config()) is spec
+    def test_flag_off_keeps_layer_config(self, flag_off):
+        cfg = _gdn_layer_config()
+        assert maybe_runner_slot_mamba_layer_config(cfg, _vllm_config()) is cfg
 
-    def test_flag_on_swaps_gdn_spec(self, flag_on):
-        spec = _gdn_spec()
-        out = maybe_runner_slot_mamba_spec(spec, _vllm_config())
-        assert type(out) is RunnerSlotMambaSpec
-        assert isinstance(out, MambaSpec)
-        for f in dataclasses.fields(spec):
-            assert getattr(out, f.name) == getattr(spec, f.name), f.name
-        assert out.page_size_bytes == spec.page_size_bytes
+    def test_flag_on_swaps_gdn_manager(self, flag_on):
+        cfg = _gdn_layer_config()
+        out = maybe_runner_slot_mamba_layer_config(cfg, _vllm_config())
+        assert out.manager_cls is RunnerSlotMambaManager
+        assert out.manager_config.params == cfg.manager_config.params
+        assert out.spec == cfg.spec
+        assert out.spec.page_size_bytes == cfg.spec.page_size_bytes
 
     @pytest.mark.parametrize(
         "config_kwargs, reason",
@@ -116,95 +107,82 @@ class TestGate:
         ],
         ids=["mtp", "prefix_caching", "kv_connector"],
     )
-    def test_flag_ignored_keeps_stock_spec(self, flag_on, config_kwargs,
-                                           reason):
-        spec = _gdn_spec(
+    def test_flag_ignored_keeps_stock_manager(self, flag_on, config_kwargs,
+                                              reason):
+        cfg = _gdn_layer_config(
             mamba_cache_mode=config_kwargs.get("mamba_cache_mode", "none"))
         with patch.object(runner_slot_mamba.logger, "warning_once") as warn:
-            out = maybe_runner_slot_mamba_spec(spec,
-                                               _vllm_config(**config_kwargs))
-        assert out is spec
+            out = maybe_runner_slot_mamba_layer_config(
+                cfg, _vllm_config(**config_kwargs))
+        assert out is cfg
         warn.assert_called_once()
         assert reason in warn.call_args.args[1]
 
-    def test_non_gdn_mamba_keeps_stock_spec(self, flag_on):
-        spec = _gdn_spec(mamba_type=MambaAttentionBackendEnum.MAMBA2)
+    def test_non_gdn_mamba_keeps_stock_manager(self, flag_on):
+        cfg = _gdn_layer_config(mamba_type=MambaAttentionBackendEnum.MAMBA2)
         with patch.object(runner_slot_mamba.logger, "warning_once") as warn:
-            out = maybe_runner_slot_mamba_spec(spec, _vllm_config())
-        assert out is spec
+            out = maybe_runner_slot_mamba_layer_config(cfg, _vllm_config())
+        assert out is cfg
         assert "GDN layers only" in warn.call_args.args[1]
 
-    def test_mamba_subclass_keeps_its_spec(self, flag_on):
+    def test_mamba_subclass_keeps_its_config(self, flag_on):
 
         @dataclasses.dataclass(frozen=True)
         class OtherMambaSpec(MambaSpec):
             extra: int = 0
 
-        spec = _gdn_spec(OtherMambaSpec)
+        cfg = _gdn_layer_config(spec_cls=OtherMambaSpec)
         with patch.object(runner_slot_mamba.logger, "warning_once") as warn:
-            out = maybe_runner_slot_mamba_spec(spec, _vllm_config())
-        assert out is spec
+            out = maybe_runner_slot_mamba_layer_config(cfg, _vllm_config())
+        assert out is cfg
         assert "OtherMambaSpec" in warn.call_args.args[1]
 
-    def test_attention_spec_untouched(self, flag_on):
-        spec = _attn_spec()
+    def test_attention_config_untouched(self, flag_on):
+        cfg = _attn_layer_config()
         with patch.object(runner_slot_mamba.logger, "warning_once") as warn:
-            assert maybe_runner_slot_mamba_spec(spec, _vllm_config()) is spec
+            assert maybe_runner_slot_mamba_layer_config(cfg,
+                                                        _vllm_config()) is cfg
         warn.assert_not_called()
 
 
-class TestRegistration:
-
-    def test_platform_hook_maps_spec_to_manager(self):
-        # Looking up a built-in spec loads vLLM's registrations, which end by
-        # calling the platform hook.
-        assert KVCacheSpecRegistry.get_manager_class(
-            _gdn_spec()) is MambaManager
-        # The hook may run again (another process, another config).
-        TpuPlatform.register_custom_kv_cache_specs(MagicMock())
-        TpuPlatform.register_custom_kv_cache_specs(MagicMock())
-
-        spec = _gdn_spec(RunnerSlotMambaSpec)
-        assert KVCacheSpecRegistry.get_manager_class(
-            spec) is RunnerSlotMambaManager
-        assert KVCacheSpecRegistry.get_uniform_type_base_spec(
-            spec) is MambaSpec
-        assert KVCacheSpecRegistry.get_manager_class(
-            _gdn_spec()) is MambaManager
+class TestGrouping:
 
     def test_flag_reaches_ray_workers(self):
         # The flag is read by the runner on every host; Ray copies only VLLM_*
         # and the platform's additional_env_vars to remote workers.
         assert "SKIP_MAMBA_SCHEDULER_BLOCKS" in TpuPlatform.additional_env_vars
 
-    def test_grouping_keeps_spec_class(self):
-        # A spec that lost its subclass while vLLM groups the layers would
+    def test_grouping_keeps_manager_class(self):
+        # A config that lost its manager_cls while vLLM groups the layers would
         # silently map back to the stock MambaManager.
         vllm_config = MagicMock()
         vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
-        specs = {"attn_0": _attn_spec()}
-        specs.update({
-            f"gdn_{i}": _gdn_spec(RunnerSlotMambaSpec)
+        vllm_config.cache_config.block_size = BLOCK
+        layer_configs = {"attn_0": _attn_layer_config()}
+        layer_configs.update({
+            f"gdn_{i}":
+            _gdn_layer_config(manager_cls=RunnerSlotMambaManager)
             for i in range(NUM_GDN_GROUPS)
         })
-        groups = get_kv_cache_groups(vllm_config, specs)
+        groups = get_kv_cache_groups(vllm_config, layer_configs)
         gdn_groups = [
-            g for g in groups if isinstance(g.kv_cache_spec, MambaSpec)
+            g for g in groups if issubclass(g.manager_cls, MambaManager)
         ]
         assert gdn_groups
-        assert all(
-            type(g.kv_cache_spec) is RunnerSlotMambaSpec for g in gdn_groups)
+        assert all(g.manager_cls is RunnerSlotMambaManager for g in gdn_groups)
 
 
-@pytest.mark.usefixtures("runner_slot_registered")
 class TestSchedulerAccounting:
     """vLLM's own KVCacheManager with prefix caching off, as the scheduler
-    builds it, with stock GDN specs and with RunnerSlotMambaSpec."""
+    builds it, with stock MambaManager and with RunnerSlotMambaManager."""
 
-    def _manager(self, gdn_spec_cls, num_blocks: int = 131) -> KVCacheManager:
-        groups = [KVCacheGroupSpec(["attn_0"], _attn_spec())]
+    def _manager(self,
+                 gdn_manager_cls,
+                 num_blocks: int = 131) -> KVCacheManager:
+        groups = [KVCacheGroup.from_layers({"attn_0": _attn_layer_config()})]
         groups += [
-            KVCacheGroupSpec([f"gdn_{i}"], _gdn_spec(gdn_spec_cls))
+            KVCacheGroup.from_layers(
+                {f"gdn_{i}": _gdn_layer_config(manager_cls=gdn_manager_cls)})
             for i in range(NUM_GDN_GROUPS)
         ]
         config = KVCacheConfig(num_blocks=num_blocks,
@@ -236,16 +214,16 @@ class TestSchedulerAccounting:
             admitted.append(req)
         return admitted
 
-    def test_stock_spec_charges_gdn_blocks(self):
+    def test_stock_manager_charges_gdn_blocks(self):
         # 130 usable blocks; each request takes 10 attention + 3 GDN.
-        manager = self._manager(MambaSpec)
+        manager = self._manager(MambaManager)
         assert not any(
             isinstance(m, RunnerSlotMambaManager)
             for m in manager.coordinator.single_type_managers)
         assert len(self._fill(manager, 13)) == 10
 
-    def test_runner_slot_spec_charges_attention_only(self):
-        manager = self._manager(RunnerSlotMambaSpec)
+    def test_runner_slot_manager_charges_attention_only(self):
+        manager = self._manager(RunnerSlotMambaManager)
         assert type(manager.coordinator) is KVCacheCoordinatorNoPrefixCache
         managers = manager.coordinator.single_type_managers
         assert all(type(m) is RunnerSlotMambaManager for m in managers[1:])
@@ -259,12 +237,12 @@ class TestSchedulerAccounting:
             assert gdn_ids == [[]] * NUM_GDN_GROUPS
 
     def test_usage_is_attention_usage(self):
-        manager = self._manager(RunnerSlotMambaSpec)
+        manager = self._manager(RunnerSlotMambaManager)
         assert len(self._fill(manager, 1)) == 1
         assert manager.usage == pytest.approx(10 / 130)
 
     def test_decode_steps_free_and_refill(self):
-        manager = self._manager(RunnerSlotMambaSpec)
+        manager = self._manager(RunnerSlotMambaManager)
         req = self._fill(manager, 1)[0]
         req.num_computed_tokens = TOKENS
         # Decode to 192 tokens: the attention row grows to 12 blocks, and

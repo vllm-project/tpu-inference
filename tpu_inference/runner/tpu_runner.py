@@ -1369,8 +1369,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             return (self.model_config.convert_type, )
         assert False, f"unsupported runner type: {runner_type}"
 
-    def get_kv_cache_spec(self):
-        return self.kv_cache_manager.get_kv_cache_spec()
+    def get_kv_cache_layer_configs(self):
+        return self.kv_cache_manager.get_kv_cache_layer_configs()
 
     def get_kv_cache_layout(self):
         return self.kv_cache_manager.get_kv_cache_layout()

@@ -1320,8 +1320,13 @@ class DPScheduler(SchedulerInterface):
                 combined_spec_decoding_stats.num_drafts += rank_spec.num_drafts
                 combined_spec_decoding_stats.num_draft_tokens += (
                     rank_spec.num_draft_tokens)
+                combined_spec_decoding_stats.num_verified_tokens += (
+                    rank_spec.num_verified_tokens)
                 combined_spec_decoding_stats.num_accepted_tokens += (
                     rank_spec.num_accepted_tokens)
+                for i, v in enumerate(rank_spec.num_verified_tokens_per_pos):
+                    combined_spec_decoding_stats.num_verified_tokens_per_pos[
+                        i] += v
                 for i, v in enumerate(rank_spec.num_accepted_tokens_per_pos):
                     combined_spec_decoding_stats.num_accepted_tokens_per_pos[
                         i] += v
