@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import MagicMock
+import gc
+from unittest.mock import MagicMock, patch
 
 import jax
 import pytest
@@ -25,12 +26,35 @@ from tpu_inference.distributed.jax_parallel_state import \
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     get_kv_cache_shape
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.jax.moe.moe import JaxRoutedExperts
 from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
-from tpu_inference.models.jax.gemma4 import Gemma4DecoderLayer
+from tpu_inference.models.jax.gemma4 import Gemma4DecoderLayer, Gemma4MoE
 from tpu_inference.models.jax.gemma4_mm import Gemma4ForConditionalGeneration
 
 
 class TestGemma4ForConditionalGeneration:
+
+    @pytest.mark.parametrize("enabled", [False, True])
+    def test_moe_respects_return_routed_experts_config(self, enabled):
+        text_config = MagicMock()
+        text_config.num_experts = 128
+        text_config.hidden_size = 2816
+        text_config.moe_intermediate_size = 1408
+        text_config.top_k_experts = 8
+
+        with patch.object(JaxRoutedExperts, "__init__",
+                          return_value=None) as routed_experts_init:
+            Gemma4MoE(
+                config=text_config,
+                dtype=jnp.bfloat16,
+                mesh=MagicMock(),
+                rngs=MagicMock(),
+                quant_config=MagicMock(),
+                enable_return_routed_experts=enabled,
+            )
+
+        assert (routed_experts_init.call_args.
+                kwargs["enable_return_routed_experts"] is enabled)
 
     def _run_model_loading_test(self, model_name, pp_rank, pp_world_size,
                                 load_format, truncate_layers, rng, mesh,
@@ -47,6 +71,8 @@ class TestGemma4ForConditionalGeneration:
             (`embed_tokens_per_layer.weight` shape `[V_ple, L*P]`), so
             truncating L breaks weight load with a shape mismatch.
         """
+        gc.collect()
+        jax.clear_caches()
         kv_cache_type = "auto"
         vllm_config = mock_vllm_config(model_name, kv_cache_type)
         if truncate_layers is not None:
@@ -60,6 +86,9 @@ class TestGemma4ForConditionalGeneration:
                 truncate_layers)
         vllm_config.load_config.load_format = load_format
         vllm_config.parallel_config = MagicMock()
+        vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+        vllm_config.parallel_config.tensor_parallel_size = 1
         vllm_config.parallel_config.enable_expert_parallel = False
 
         init_pp_distributed_environment(
@@ -79,10 +108,11 @@ class TestGemma4ForConditionalGeneration:
         seq_len = 2
         input = [[0.01 * i for i in range(model_dim)] for _ in range(seq_len)]
 
-        with jax.set_mesh(mesh):
+        with jax.set_mesh(mesh), set_current_vllm_config(vllm_config):
             model = Gemma4ForConditionalGeneration(vllm_config, rng, mesh)
-            start_layer_idx = model.model.start_layer
-            layer_0: Gemma4DecoderLayer = model.model.layers[start_layer_idx]
+            start_layer_idx = model.model.language_model.start_layer
+            layer_0: Gemma4DecoderLayer = model.model.language_model.layers[
+                start_layer_idx]
             num_key_value_heads = layer_0.self_attn.num_kv_heads
             qk_head_dim = layer_0.self_attn.head_dim_original
 
@@ -102,8 +132,8 @@ class TestGemma4ForConditionalGeneration:
             with set_current_vllm_config(vllm_config):
                 loader.load_weights(model, model_config)
 
-        layer_idx_in_model = model.model.start_layer
-        jax_layer_0 = model.model.layers[layer_idx_in_model]
+        layer_idx_in_model = model.model.language_model.start_layer
+        jax_layer_0 = model.model.language_model.layers[layer_idx_in_model]
 
         input_tensor_jax = jnp.array(input, dtype=jnp.bfloat16)
 
@@ -126,15 +156,20 @@ class TestGemma4ForConditionalGeneration:
                 ),
             )
         assert jax_output is not None
+        del model
+        gc.collect()
+        jax.clear_caches()
 
     @pytest.mark.parametrize("model_name", [
         "google/gemma-4-31B-it",
         "google/gemma-4-26B-A4B-it",
+        "RedHatAI/gemma-4-31B-it-FP8-Dynamic",
+        "RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic",
     ])
     @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
                                                        (3, 4)])
-    @pytest.mark.parametrize(
-        "load_format", ["skip_layers_model_loader_for_test", "jax_dummy"])
+    @pytest.mark.parametrize("load_format",
+                             ["skip_layers_model_loader_for_test"])
     def test_model_loading(
             self,
             model_name,

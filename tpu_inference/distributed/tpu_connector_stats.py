@@ -49,6 +49,14 @@ class TpuKVConnectorStats(KVConnectorStats):
         """Record a failed TPU KV transfer operation."""
         self.data["num_failed_transfers"].append(1)
 
+    def record_queue_lengths(self, num_requests_being_pulled: int,
+                             num_requests_waiting_pull: int):
+        """Record current queue lengths."""
+        self.data["num_requests_being_pulled"].append(
+            num_requests_being_pulled)
+        self.data["num_requests_waiting_pull"].append(
+            num_requests_waiting_pull)
+
     def reset(self):
         # Must be serializable
         self.data: dict[str, list[float | int]] = {
@@ -58,6 +66,8 @@ class TpuKVConnectorStats(KVConnectorStats):
             "transfer_time": [],
             "mb_transferred": [],
             "num_failed_transfers": [],
+            "num_requests_being_pulled": [],
+            "num_requests_waiting_pull": [],
         }
 
     def clone_and_reset(self) -> "TpuKVConnectorStats":
@@ -79,6 +89,10 @@ class TpuKVConnectorStats(KVConnectorStats):
         prepare_time = np.asarray(self.data["prepare_time"])
         transfer_time = np.asarray(self.data["transfer_time"])
         mb_transferred = np.asarray(self.data["mb_transferred"])
+        num_requests_being_pulled = np.asarray(
+            self.data["num_requests_being_pulled"])
+        num_requests_waiting_pull = np.asarray(
+            self.data["num_requests_waiting_pull"])
 
         total_mb = mb_transferred.sum()
         avg_mb = total_mb / self.num_successful_transfers if self.num_successful_transfers > 0 else 0
@@ -117,13 +131,21 @@ class TpuKVConnectorStats(KVConnectorStats):
             round(avg_mb, 3),
             "Throughput (MB/s)":
             round(throughput_mb_s, 3),
+            "Avg requests being pulled":
+            round(num_requests_being_pulled.mean(), 3)
+            if num_requests_being_pulled.size > 0 else 0.0,
+            "Avg requests waiting to be pulled":
+            round(num_requests_waiting_pull.mean(), 3)
+            if num_requests_waiting_pull.size > 0 else 0.0,
         }
 
     def is_empty(self) -> bool:
         return (len(self.data["d2h_slice_time"]) == 0
                 and len(self.data["d2h_transfer_time"]) == 0
                 and self.num_successful_transfers == 0
-                and len(self.data["num_failed_transfers"]) == 0)
+                and len(self.data["num_failed_transfers"]) == 0
+                and len(self.data["num_requests_being_pulled"]) == 0
+                and len(self.data["num_requests_waiting_pull"]) == 0)
 
     @property
     def num_successful_transfers(self) -> int:
@@ -222,6 +244,20 @@ class TpuKVConnectorPromMetrics(KVConnectorPromMetrics):
         )
         self.counter_tpu_num_failed_transfers = create_metric_per_engine(
             counter_tpu_num_failed_transfers, self.per_engine_labelvalues)
+        gauge_tpu_num_requests_being_pulled = self._gauge_cls(
+            name="vllm:tpu_num_requests_being_pulled",
+            documentation="Number of requests being pulled.",
+            labelnames=labelnames,
+        )
+        self.gauge_tpu_num_requests_being_pulled = create_metric_per_engine(
+            gauge_tpu_num_requests_being_pulled, self.per_engine_labelvalues)
+        gauge_tpu_num_requests_waiting_pull = self._gauge_cls(
+            name="vllm:tpu_num_requests_waiting_pull",
+            documentation="Number of requests waiting to be pulled.",
+            labelnames=labelnames,
+        )
+        self.gauge_tpu_num_requests_waiting_pull = create_metric_per_engine(
+            gauge_tpu_num_requests_waiting_pull, self.per_engine_labelvalues)
 
     def observe(self,
                 transfer_stats_data: dict[str, Any],
@@ -253,3 +289,17 @@ class TpuKVConnectorPromMetrics(KVConnectorPromMetrics):
         ):
             for list_item in transfer_stats_data[counter_item_key]:
                 counter_obj[engine_idx].inc(list_item)
+
+        for gauge_obj, gauge_item_key in zip(
+            [
+                self.gauge_tpu_num_requests_being_pulled,
+                self.gauge_tpu_num_requests_waiting_pull,
+            ],
+            [
+                "num_requests_being_pulled",
+                "num_requests_waiting_pull",
+            ],
+        ):
+            if gauge_item_key in transfer_stats_data:
+                for list_item in transfer_stats_data[gauge_item_key]:
+                    gauge_obj[engine_idx].set(list_item)

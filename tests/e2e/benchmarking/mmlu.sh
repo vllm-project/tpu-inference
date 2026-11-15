@@ -132,9 +132,15 @@ if [ -z "$dataset_path" ]; then
     dataset_path="$root_dir"/mmlu/
     mkdir -p "$dataset_path"
     cd "$dataset_path" || exit
+    fetchDataset() {
+        rm -f data.tar
+        "$@" && tar -xf data.tar
+    }
     if [ ! -d "$dataset_path/data/test" ]; then
-        wget https://people.eecs.berkeley.edu/~hendrycks/data.tar -P .
-        tar -xvf data.tar
+        # The Berkeley host has recurring outages; fall back to the GCS mirror.
+        fetchDataset wget --tries=2 --timeout=60 https://people.eecs.berkeley.edu/~hendrycks/data.tar -P . \
+            || fetchDataset gsutil cp "${MMLU_GCS_URI:-gs://tpu-commons-ci/datasets/mmlu/data.tar}" . \
+            || { echo "ERROR: failed to download the MMLU dataset." >&2; exit 1; }
     fi
     dataset_path=$dataset_path/data/test/
 fi
@@ -287,8 +293,16 @@ for model_name in $model_list; do
             export TIMEOUT_SECONDS=3600 # DeepSeek needs a longer timeout
             max_batched_tokens=512
             max_model_len=9216
-            served_name=deepseek-ai/DeepSeek-R1
-            TARGET_ACCURACY="0.84"
+            if [[ "${model_name,,}" == *"v4-flash"* ]]; then
+                served_name=deepseek-ai/DeepSeek-V4-Flash
+                TARGET_ACCURACY="0.86"
+                # Overrides the default --gpu-memory-utilization=0.95 above
+                # (last flag wins in vLLM's argparse).
+                current_serve_args+=(--gpu-memory-utilization 0.4)
+            else
+                served_name=deepseek-ai/DeepSeek-R1
+                TARGET_ACCURACY="0.84"
+            fi
             current_serve_args+=(--served-model-name "${served_name}" --load-format=runai_streamer --trust-remote-code)
             current_serve_args+=(--kv-cache-dtype=fp8)
             if [ "$MODEL_IMPL_TYPE" == "vllm" ]; then

@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,22 +21,6 @@ import string
 import pytest
 from vllm import LLM, SamplingParams
 from vllm.v1.metrics.reader import Counter
-
-
-def _disable_shardy_for_qwen35_4b(mp: pytest.MonkeyPatch) -> None:
-    """Disables Shardy to avoid a libtpu 0.0.41 segfault in `embed_multimodal`.
-
-    TODO: Remove once libtpu >= 0.0.42.dev20260527.
-    """
-    import jax
-
-    mp.setenv("JAX_USE_SHARDY_PARTITIONER", "false")
-    libtpu_init_args = os.environ.get("LIBTPU_INIT_ARGS", "")
-    mp.setenv(
-        "LIBTPU_INIT_ARGS",
-        "--xla_use_shardy=false --xla_tpu_scoped_vmem_limit_kib=131072 " +
-        libtpu_init_args)
-    jax.config.update("jax_use_shardy_partitioner", False)
 
 
 # TODO (Qiliang Cui): remove this when XLA fixes the recursive jit call issue.
@@ -78,7 +62,8 @@ def get_eagle3_test_prompts():
 def get_test_prompts(speculative_config: dict):
     if speculative_config['method'] == 'ngram':
         return get_ngram_test_prompts()
-    elif speculative_config['method'] in ('eagle3', 'qwen3_next_mtp', 'mtp'):
+    elif speculative_config['method'] in ('eagle3', 'qwen3_next_mtp', 'mtp',
+                                          'dflash'):
         return get_eagle3_test_prompts()
     else:
         raise NotImplementedError(
@@ -512,6 +497,109 @@ def test_eagle3_performance(
 
 
 @pytest.fixture(scope="module")
+def dflash_baseline():
+    """Compute the DFlash reference prompts and baseline outputs once."""
+    model_name = 'meta-llama/Llama-3.1-8B-Instruct'
+    sampling_config = SamplingParams(temperature=0,
+                                     max_tokens=32,
+                                     ignore_eos=True,
+                                     repetition_penalty=1,
+                                     frequency_penalty=0,
+                                     presence_penalty=0,
+                                     min_p=0,
+                                     logprobs=None)
+    test_prompts = get_eagle3_test_prompts()
+    with pytest.MonkeyPatch.context() as mp:
+        ref_outputs = _get_baseline_results(
+            mp,
+            sampling_config,
+            model_name,
+            test_prompts,
+            max_num_seqs=10,
+            extra_kwargs={"gpu_memory_utilization": 0.85})
+    return test_prompts, ref_outputs
+
+
+@pytest.mark.parametrize(
+    "async_scheduling, enable_dp_attention",
+    [
+        pytest.param(False, False, marks=pytest.mark.bvt),
+        (False, True),
+        (True, False),
+        pytest.param(True, True, marks=pytest.mark.bvt),
+    ],
+)
+def test_dflash_correctness(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    async_scheduling: bool,
+    enable_dp_attention: bool,
+    dflash_baseline: tuple,
+):
+    """Compare the outputs of a original LLM and a speculative LLM.
+
+    Should be the same when using DFlash speculative decoding.
+    """
+    model_name = 'meta-llama/Llama-3.1-8B-Instruct'
+
+    model_impl = os.environ.get("MODEL_IMPL_TYPE", "flax_nnx")
+    monkeypatch.setenv("MODEL_IMPL_TYPE", model_impl)
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
+
+    speculative_config = {
+        'model': "z-lab/LLaMA3.1-8B-Instruct-DFlash-UltraChat",
+        "num_speculative_tokens": 9,
+        "method": "dflash",
+        "draft_tensor_parallel_size": 1
+    }
+    test_prompts, ref_outputs = dflash_baseline
+
+    _test_correctness_helper(monkeypatch,
+                             sampling_config,
+                             model_name,
+                             speculative_config,
+                             test_prompts,
+                             ref_outputs=ref_outputs,
+                             max_num_seqs=10,
+                             async_scheduling=async_scheduling,
+                             enable_dp_attention=enable_dp_attention,
+                             extra_kwargs={"gpu_memory_utilization": 0.85})
+
+
+@pytest.mark.parametrize(
+    "max_num_seqs,async_scheduling, enable_dp_attention",
+    [(1, False, False), (20, True, False),
+     pytest.param(20, True, True, marks=pytest.mark.bvt)],
+)
+def test_dflash_performance(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    max_num_seqs: int,
+    async_scheduling: bool,
+    enable_dp_attention: bool,
+):
+    """Test that DFlash speculative decoding achieves the expected acceptance rate."""
+    model_impl = os.environ.get("MODEL_IMPL_TYPE", "flax_nnx")
+    monkeypatch.setenv("MODEL_IMPL_TYPE", model_impl)
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
+
+    _test_performance_helper(
+        monkeypatch,
+        sampling_config, {
+            "method": "dflash",
+            "model": "z-lab/LLaMA3.1-8B-Instruct-DFlash-UltraChat",
+            "num_speculative_tokens": 9,
+            "draft_tensor_parallel_size": 1
+        },
+        min_acceptance_rate=0.40,
+        max_num_seqs=max_num_seqs,
+        async_scheduling=async_scheduling,
+        enable_dp_attention=enable_dp_attention,
+        model_name='meta-llama/Llama-3.1-8B-Instruct',
+        extra_kwargs={"gpu_memory_utilization": 0.85})
+
+
+@pytest.fixture(scope="module")
 def mtp_baseline():
     '''
     Compute the mtp reference prompts, baseline outputs and the LLM extra_kwargs
@@ -542,7 +630,6 @@ def mtp_baseline():
     }
     test_prompts = get_eagle3_test_prompts()
     with pytest.MonkeyPatch.context() as mp:
-        _disable_shardy_for_qwen35_4b(mp)
         ref_outputs = _get_baseline_results(
             mp,
             sampling_config,
@@ -576,7 +663,6 @@ def test_mtp_correctness(
     model_name = "Qwen/Qwen3.5-4B"
     monkeypatch.setenv("MODEL_IMPL_TYPE", "vllm")
     monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", "vllm")
-    _disable_shardy_for_qwen35_4b(monkeypatch)
 
     speculative_config = {
         "method": "mtp",
@@ -616,7 +702,6 @@ def test_mtp_performance(
     model_name = "Qwen/Qwen3.5-4B"
     monkeypatch.setenv("MODEL_IMPL_TYPE", "vllm")
     monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", "vllm")
-    _disable_shardy_for_qwen35_4b(monkeypatch)
 
     extra_kwargs = {
         "seed": 42,

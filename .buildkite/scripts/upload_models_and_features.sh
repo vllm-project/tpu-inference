@@ -49,6 +49,21 @@ failure_handler() {
 
 # Catch ERR signals
 trap 'failure_handler $LINENO' ERR
+
+# upload_with_priority: the priority line and the author's TPU concurrency cap,
+# as bootstrap.sh's own uploads get. JOB_PRIORITY and PR_TPU_CONCURRENCY_GROUP
+# reach this job through the env of its step in nightly_verify.yml.
+# shellcheck source=/dev/null
+source "$(dirname "${BASH_SOURCE[0]}")/configs/pipeline_config.sh"
+
+# A kube build sends up the kube versions of the same suites.
+if [[ "${CI_FLEET:-bare}" == "kube" ]]; then
+  # shellcheck source=/dev/null
+  source "$(dirname "${BASH_SOURCE[0]}")/kube_suites.sh"
+  export JOB_PRIORITY="${JOB_PRIORITY:-1}"
+  upload_kube_nightly_suites
+  exit 0
+fi
 declare -a TARGET_FOLDERS=()
 
 # Append the kernel_microbenchmarks subdirectories
@@ -64,18 +79,15 @@ add_kernel_microbenchmarks() {
   fi
 }
 
-case "${MODEL_IMPL_TYPE}" in
-  "auto")
-    TARGET_FOLDERS=("parallelism" "models" "features" "rl")
+# shellcheck source=/dev/null
+source "$(dirname "${BASH_SOURCE[0]}")/nightly_suites.sh"
+for suite in $(nightly_suites); do
+  if [[ "${suite}" == "kernel_microbenchmarks" ]]; then
     add_kernel_microbenchmarks
-    ;;
-  "flax_nnx")
-    TARGET_FOLDERS=("quantization" "parallelism" "features")
-    ;;
-  "vllm")
-    TARGET_FOLDERS=("quantization" "parallelism" "models" "features")
-    ;;
-esac
+  else
+    TARGET_FOLDERS+=("${suite}")
+  fi
+done
 
 # Arrays to store YAML content fragments (without 'steps:' header)
 pipeline_v6e_fragments=()
@@ -149,6 +161,9 @@ fi
 
 # --- Upload Dynamic Pipeline ---
 # Final Uploads (Two separate calls to handle variables) ---
+# A regular file, not a pipe: upload_with_priority prepends the priority line
+# and may read the file twice (cap fallback).
+GROUP_YAML=$(mktemp)
 if [[ "${#pipeline_v6e_fragments[@]}" -gt 0 ]]; then
   echo "--- Uploading TPU v6e Pipeline Group"
   # Export v6e specific variables
@@ -159,16 +174,17 @@ if [[ "${#pipeline_v6e_fragments[@]}" -gt 0 ]]; then
   export TENSOR_PARALLEL_SIZE_MULTI=8
   buildkite-agent meta-data set "run_v6_matrix" "true"
   {
-    echo "priority: ${JOB_PRIORITY:-1}"
     echo "steps:"
     echo "  - group: \"TPU v6e nightly Tests (${MODEL_IMPL_TYPE:-auto})\""
     echo "    key: \"v6e-group\""
     echo "    depends_on: \"build_docker\""
     echo "    steps:"
     printf "%s\n" "${pipeline_v6e_fragments[@]}" | sed 's/^/      /'
-  } | buildkite-agent pipeline upload
+  } > "${GROUP_YAML}"
+  upload_with_priority "${GROUP_YAML}" "${JOB_PRIORITY:-1}"
 else
   echo "--- No .yml files found, nothing to upload."
+  rm -f "${GROUP_YAML}"
   exit 0
 fi
 
@@ -182,15 +198,15 @@ if [[ "${#pipeline_v7x_fragments[@]}" -gt 0 ]]; then
   export TENSOR_PARALLEL_SIZE_MULTI=8
   buildkite-agent meta-data set "run_v7_matrix" "true"
   {
-    echo "priority: ${JOB_PRIORITY:-1}"
     echo "steps:"
     echo "  - group: \"TPU v7x nightly Tests (${MODEL_IMPL_TYPE:-auto})\""
     echo "    key: \"v7x-group\""
     echo "    depends_on: \"build_docker\""
     echo "    steps:"
     printf "%s\n" "${pipeline_v7x_fragments[@]}" | sed 's/^/      /'
-  } | buildkite-agent pipeline upload
+  } > "${GROUP_YAML}"
+  upload_with_priority "${GROUP_YAML}" "${JOB_PRIORITY:-1}"
 else
   echo "--- No .yml files found, nothing to upload."
-  exit 0
 fi
+rm -f "${GROUP_YAML}"

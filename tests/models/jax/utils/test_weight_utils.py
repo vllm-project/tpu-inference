@@ -17,6 +17,7 @@ import tempfile
 from unittest.mock import MagicMock
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import torch
 from flax import nnx
@@ -28,7 +29,8 @@ from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxLinear
-from tpu_inference.models.jax.utils.weight_utils import LoadableWithIterator
+from tpu_inference.models.jax.utils.weight_utils import (
+    LoadableWithIterator, convert_torch_to_jax_with_view)
 
 
 class TorchMLP(nn.Module):
@@ -113,6 +115,21 @@ class TestJaxAutoWeightsLoader:
                                    jax_output,
                                    rtol=1e-3,
                                    atol=1e-2)
+
+    def test_skip_lists_survive_init(self):
+        """skip_prefixes/skip_substrs must survive construction regardless of
+        whether the vLLM AutoWeightsLoader base class still owns (and resets)
+        those attributes in its own __init__."""
+        from tpu_inference.models.jax.utils.weight_utils import \
+            JaxAutoWeightsLoader
+
+        jax_model = JaxMLP(rngs=nnx.Rngs(0))
+        loader = JaxAutoWeightsLoader(jax_model,
+                                      skip_prefixes=["lm_head"],
+                                      skip_substrs=["vision", "audio"])
+        assert "lm_head" in loader.skip_prefixes
+        assert "vision" in loader.skip_substrs
+        assert "audio" in loader.skip_substrs
 
     def test_weight_prefix_mapping(self):
         """Test that 'model.' is prepended correctly based on module structure."""
@@ -293,3 +310,24 @@ class TestJaxAutoWeightsLoader:
 
             received_keys = [name for name, _ in modified_weights]
             assert received_keys == expected_keys
+
+
+def test_convert_torch_to_jax_with_view():
+    tensor = torch.randn(4, 4, dtype=torch.bfloat16)
+    cast_type = jnp.bfloat16
+
+    # Test conversion under normal conditions
+    jax_arr = convert_torch_to_jax_with_view(tensor, cast_type)
+    assert jax_arr.dtype == jnp.bfloat16
+    assert jax_arr.shape == (4, 4)
+    assert jax_arr.device.platform == "cpu"
+
+    # Test conversion under an active JAX Mesh context
+    # This directly verifies that our set_mesh(None) suspension workaround works as expected
+    devices = jax.devices()
+    mesh = Mesh(devices, ('data', ))
+    with jax.set_mesh(mesh):
+        jax_arr_mesh = convert_torch_to_jax_with_view(tensor, cast_type)
+        assert jax_arr_mesh.dtype == jnp.bfloat16
+        assert jax_arr_mesh.shape == (4, 4)
+        assert jax_arr_mesh.device.platform == "cpu"

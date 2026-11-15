@@ -256,6 +256,7 @@ def get_expert_parallelism(expert_axis_name: str, mesh: Mesh) -> int:
             return math.prod(mesh.shape[axis] for axis in expert_axis_name)
 
 
+# TODO(#3041): Unify with torchax `select_moe_backend_from_fused_moe_config()`
 def select_moe_backend(use_ep: bool) -> MoEBackend:
     """
     Selects the MoE backend for the JAX path.

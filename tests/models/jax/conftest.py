@@ -24,7 +24,7 @@ import pytest
 from flax.typing import PRNGKey
 from jax import numpy as jnp
 from jax.sharding import Mesh
-from vllm.config import ModelConfig
+from vllm.config import AuxOutputConfig, ModelConfig
 from vllm.model_executor.model_loader import LoadConfig, register_model_loader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 
@@ -68,6 +68,7 @@ def mock_vllm_config():
 
         def __init__(self, model: str, kv_cache_dtype: str):
             self.model_config = ModelConfig(model)
+            self.aux_output_config = AuxOutputConfig()
             self.model_config.dtype = jnp.bfloat16
             self.load_config = LoadConfig(load_format="auto")
             self.load_config.download_dir = None

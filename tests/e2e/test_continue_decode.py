@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Union
 
+import numpy as np
 import pytest
 from vllm import LLM, SamplingParams
 
@@ -30,16 +31,23 @@ class InferenceConfig:
     max_num_seqs: int = 8
     gpu_memory_utilization: float = 0.85
     additional_config: dict = field(default_factory=dict)
+    async_scheduling: bool = False
+    enable_prefix_caching: bool = False
+    prefix_cache_retention_interval: int | None = None
+    limit_mm_per_prompt: dict | None = None
 
 
 def _run_inference_and_return_outputs(
         config: InferenceConfig,
         prompts: list[str],
         sampling_params: Union[SamplingParams, list[SamplingParams]],
-        enable_export: bool = True):
+        enable_export: bool = True,
+        follow_up_suffix: str | None = None,
+        follow_up_prompts: list[str] | None = None):
     os.environ['MODEL_IMPL_TYPE'] = config.impl_type
 
-    llm = LLM(
+    enable_routed_experts = enable_export and "MoE" in config.model_name
+    llm_kwargs = dict(
         model=config.model_name,
         max_model_len=config.max_model_len,
         tensor_parallel_size=config.tensor_parallel_size,
@@ -50,15 +58,33 @@ def _run_inference_and_return_outputs(
         max_num_seqs=config.max_num_seqs,
         enable_expert_parallel=config.enable_expert_parallel,
         additional_config=config.additional_config,
-        async_scheduling=False,
+        async_scheduling=config.async_scheduling,
+        enable_prefix_caching=(config.enable_prefix_caching
+                               or enable_routed_experts),
+        enable_return_routed_experts=enable_routed_experts,
     )
+    if config.prefix_cache_retention_interval is not None:
+        llm_kwargs["prefix_cache_retention_interval"] = (
+            config.prefix_cache_retention_interval)
+    if config.limit_mm_per_prompt is not None:
+        llm_kwargs["limit_mm_per_prompt"] = config.limit_mm_per_prompt
 
-    if enable_export:
-        llm.llm_engine.vllm_config.model_config.enable_return_routed_experts = True
+    llm = LLM(**llm_kwargs)
 
     try:
         start_time = time.time()
         outputs = llm.generate(prompts, sampling_params)
+        if follow_up_suffix is not None and follow_up_prompts is None:
+            follow_up_prompts = [
+                p + out.outputs[0].text + follow_up_suffix
+                for p, out in zip(prompts, outputs)
+            ]
+        if follow_up_prompts is not None:
+            llm.enqueue(follow_up_prompts[:1], sampling_params)
+            time.sleep(0.04 if config.async_scheduling else 0.07)
+            llm.enqueue(follow_up_prompts[1:], sampling_params)
+            turn2_outputs = llm.wait_for_completion()
+            outputs = list(outputs) + list(turn2_outputs)
         latency = time.time() - start_time
         return outputs, latency
     finally:
@@ -192,13 +218,14 @@ def generate_test_prompts(num_prompts: int = 4) -> list[str]:
     ]
 
 
-@pytest.fixture
-def sampling_params():
+@pytest.fixture(params=[0.0, 1.0])
+def sampling_params(request):
     return SamplingParams(
-        temperature=0.0,
+        temperature=request.param,
         max_tokens=16,
         ignore_eos=True,
         logprobs=1,
+        seed=42,
     )
 
 
@@ -232,6 +259,7 @@ def sampling_params():
             "dp": 1,
             "max_model_len": 1024,
             "max_num_batched_tokens": 8192,
+            "async_scheduling": False,
         },
         {
             "id": "correctness_DP_torchax",
@@ -241,6 +269,57 @@ def sampling_params():
             "dp": 8,
             "max_model_len": 1024,
             "max_num_batched_tokens": 8192,
+            "async_scheduling": False,
+        },
+        {
+            "id": "correctness_non_DP_torchax_async",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
+            "impl": "vllm",
+            "tp": 8,
+            "dp": 1,
+            "max_model_len": 1024,
+            "max_num_batched_tokens": 8192,
+            "async_scheduling": True,
+        },
+        {
+            "id": "correctness_DP_torchax_async",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
+            "impl": "vllm",
+            "tp": 1,
+            "dp": 8,
+            "max_model_len": 1024,
+            "max_num_batched_tokens": 8192,
+            "async_scheduling": True,
+        },
+        {
+            "id": "correctness_MoE_torchax",
+            "model": "Qwen/Qwen1.5-MoE-A2.7B",
+            "impl": "vllm",
+            "tp": 1,
+            "dp": 1,
+            "max_model_len": 1024,
+            "max_num_batched_tokens": 2048,
+            "async_scheduling": False,
+        },
+        {
+            "id": "correctness_MoE_torchax_async",
+            "model": "Qwen/Qwen1.5-MoE-A2.7B",
+            "impl": "vllm",
+            "tp": 1,
+            "dp": 1,
+            "max_model_len": 1024,
+            "max_num_batched_tokens": 2048,
+            "async_scheduling": True,
+        },
+        {
+            "id": "correctness_DP_MoE_torchax_async",
+            "model": "Qwen/Qwen1.5-MoE-A2.7B",
+            "impl": "vllm",
+            "tp": 1,
+            "dp": 2,
+            "max_model_len": 1024,
+            "max_num_batched_tokens": 2048,
+            "async_scheduling": True,
         },
     ],
     ids=lambda x: x["id"],
@@ -257,6 +336,7 @@ def test_continue_decode_correctness_matrix(matrix_case, sampling_params):
         data_parallel_size=matrix_case["dp"],
         max_model_len=matrix_case["max_model_len"],
         max_num_batched_tokens=matrix_case["max_num_batched_tokens"],
+        async_scheduling=matrix_case.get("async_scheduling", False),
         additional_config={},
     )
 
@@ -280,7 +360,7 @@ def test_continue_decode_correctness_matrix(matrix_case, sampling_params):
 
     # 5. Verify expert routing metadata for MoE architectures
     if "MoE" in config.model_name:
-        for cd_out in continue_decode_outputs:
+        for base_out, cd_out in zip(baseline_outputs, continue_decode_outputs):
             cd_req = cd_out.outputs[0]
             assert cd_req.routed_experts is not None, "routed_experts tensor must be populated for MoE models when enabled."
             assert len(
@@ -297,6 +377,47 @@ def test_continue_decode_correctness_matrix(matrix_case, sampling_params):
                 f"Exported expert IDs token dimension mismatch. Expected {expected_tokens_dim} "
                 f"(prompt len {num_prompt_tokens} + gen len {num_gen_tokens} - 1), got {actual_tokens_dim}"
             )
+
+            # Value-level check on the PROMPT slice: continue_decode must return
+            # the same routed expert IDs as the single-step baseline for the
+            # prompt tokens (deterministic prefill, temp=0). A shape-only check
+            # cannot catch a slot-mapping regression (e.g. a wrong start_pos that
+            # zero-fills the prompt experts). We compare only the prompt slice
+            # [:num_prompt_tokens] -- it is identical across both runs regardless
+            # of any later generation divergence (which _check_correctness only
+            # bounds fuzzily), so this avoids false-fails on diverging tails.
+            base_req = base_out.outputs[0]
+            assert base_req.routed_experts is not None, (
+                "baseline routed_experts must be populated for MoE models")
+            cd_re = np.asarray(cd_req.routed_experts)
+            base_re = np.asarray(base_req.routed_experts)
+            p = num_prompt_tokens
+            assert cd_re.shape[1:] == base_re.shape[1:], (
+                f"routed_experts per-token shape mismatch: continue_decode "
+                f"{cd_re.shape} vs baseline {base_re.shape}")
+            np.testing.assert_array_equal(
+                cd_re[:p],
+                base_re[:p],
+                err_msg=
+                ("continue_decode prompt routed experts differ from the "
+                 "single-step baseline; a slot-mapping regression can zero-fill "
+                 "or shift prompt expert IDs while keeping the shape correct"))
+            assert np.all(cd_re[p:] >= 0), (
+                "continue_decode decode routed experts contain unpopulated (<0) slots"
+            )
+            common_decode_len = 0
+            for b_tok, c_tok in zip(base_req.token_ids[:-1],
+                                    cd_req.token_ids[:-1]):
+                if b_tok != c_tok:
+                    break
+                common_decode_len += 1
+            if sampling_params.temperature == 0.0 and common_decode_len > 0:
+                decode_match_rate = float(
+                    np.mean(cd_re[p:p + common_decode_len] ==
+                            base_re[p:p + common_decode_len]))
+                assert decode_match_rate >= 0.9, (
+                    f"continue_decode decode routed_experts match rate "
+                    f"{decode_match_rate:.2%} < 90%")
 
 
 # Scenarios 5-6: Performance evaluation on MMLU workloads with Qwen/Qwen1.5-MoE-A2.7B
@@ -377,4 +498,84 @@ def test_continue_decode_performance_overhead(perf_case):
         latency_continue_decode,
         len(prompts),
         min_speedup=1.05,
+    )
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True],
+                         ids=["sync", "async"])
+@pytest.mark.parametrize("enable_prefix_caching", [False, True],
+                         ids=["mamba_none", "mamba_align"])
+def test_continue_decode_gdn_hybrid(enable_prefix_caching, async_scheduling):
+    """Verify continue_decode correctness on hybrid GDN (full attention + linear attention) models."""
+    os.environ['SKIP_JAX_PRECOMPILE'] = '1'
+    os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '0'
+
+    config = InferenceConfig(
+        model_name="Qwen/Qwen3.5-4B",
+        impl_type="vllm",
+        tensor_parallel_size=1,
+        data_parallel_size=1,
+        max_model_len=1024,
+        max_num_batched_tokens=1024,
+        max_num_seqs=8,
+        async_scheduling=async_scheduling,
+        enable_prefix_caching=enable_prefix_caching,
+        prefix_cache_retention_interval=(64
+                                         if enable_prefix_caching else None),
+        limit_mm_per_prompt={
+            "image": 0,
+            "video": 0,
+        },
+        additional_config={},
+    )
+
+    # With mamba_block_size=64 and ~82-token prompts, max_tokens=120 (~82 -> ~202)
+    # crosses two Mamba block boundaries (128 and 192) during Turn 1 decode so
+    # block 2 [128..191] is 100% decode-generated, and Turn 2 hits it in cache.
+    prompts = generate_test_prompts(4)
+    params = SamplingParams(
+        temperature=0.0,
+        max_tokens=120,
+        ignore_eos=True,
+        logprobs=1,
+        seed=42,
+    )
+    follow_up = ("\nSummarize the key takeaway in one sentence:"
+                 if enable_prefix_caching else None)
+
+    config.additional_config = {"enable_continue_decode": True}
+    continue_decode_outputs, _ = _run_inference_and_return_outputs(
+        config,
+        prompts,
+        params,
+        enable_export=False,
+        follow_up_suffix=follow_up)
+
+    if enable_prefix_caching:
+        turn2_outputs = continue_decode_outputs[len(prompts):]
+        for out in turn2_outputs:
+            assert (out.num_cached_tokens or 0) >= 192, (
+                f"Expected Turn 2 to hit decode-generated Mamba cache block "
+                f"(>=192 cached tokens), got {out.num_cached_tokens}")
+        turn2_prompts = [
+            p + out.outputs[0].text + follow_up
+            for p, out in zip(prompts, continue_decode_outputs[:len(prompts)])
+        ]
+    else:
+        turn2_prompts = None
+
+    config.async_scheduling = False
+    config.enable_prefix_caching = False
+    config.additional_config = {"enable_continue_decode": False}
+    baseline_outputs, _ = _run_inference_and_return_outputs(
+        config,
+        prompts,
+        params,
+        enable_export=False,
+        follow_up_prompts=turn2_prompts)
+
+    _check_correctness(
+        f"Continue decode GDN (prefix_caching={enable_prefix_caching}, async={async_scheduling})",
+        baseline_outputs,
+        continue_decode_outputs,
     )

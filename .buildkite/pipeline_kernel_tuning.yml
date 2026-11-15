@@ -19,24 +19,62 @@
 # HOW TO TRIGGER THIS PIPELINE
 # ─────────────────────────────
 # Option A — Buildkite UI:
-#   Go to https://buildkite.com/tpu-commons/tpu-inference-kernel-tuning
+#   Go to https://buildkite.com/vllm/tpu-inference-kernel-tuning
 #   Click "New Build", set branch to your branch, click "Create Build".
 #
 # Option B — Buildkite API (requires BUILDKITE_API_TOKEN in your env):
 #   curl -s -X POST \
 #     -H "Authorization: Bearer $BUILDKITE_API_TOKEN" \
 #     -H "Content-Type: application/json" \
-#     "https://api.buildkite.com/v2/organizations/tpu-commons/pipelines/tpu-inference-kernel-tuning/builds" \
+#     "https://api.buildkite.com/v2/organizations/vllm/pipelines/tpu-inference-kernel-tuning/builds" \
 #     -d "{\"commit\": \"$(git rev-parse HEAD)\", \"branch\": \"$(git rev-parse --abbrev-ref HEAD)\", \"message\": \"my test\"}"
 #
-
 steps:
+  # -----------------------------------------------------------------
+  # -----------------------------------------------------------------
+  - label: "Bootstrap All Kernel Tuning Pipeline"
+    key: bootstrap_all_kernel_tuning_pipeline
+    if: '"${BOOTSTRAP_ALL_KERNEL_TUNING:-}" == "1"'
+    depends_on: build_docker
+    agents:
+      queue: tpu_v6e_queue
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: tpu6e
+    commands:
+      - |
+        # remove the existing generated pipeline YAML in the temp dir on the host. 
+        rm -f "/tmp/kernel_tuning/generated_pipeline.yml"
+      - |
+        .buildkite/scripts/run_in_docker.sh bash -c '
+          generator_script="./tools/kernel/tuner/v1/autotune/bootstrap_kernel_tuners.py"
+          pip install -r tools/kernel/tuner/v1/storage_management/requirements.txt
+          if [[ ! -f "$$generator_script" ]]; then
+            echo "🚨 Bootstrap script not found at $$generator_script"
+            exit 1
+          fi
+          if ! py_output=$(python3 "$$generator_script" --autotune_id "$KERNEL_TUNING_AUTOTUNE_ID" 2>&1); then
+            echo "🚨 Failed to bootstrap all kernel tuning for autotune ${KERNEL_TUNING_AUTOTUNE_ID}"
+            exit 1
+          fi
+        '
+      - |
+        # Upload the generated pipeline YAML from the temp dir on the host.
+        buildkite-agent artifact upload "/tmp/kernel_tuning/generated_pipeline.yml"
+        echo "Upload generated pipeline YAML to Buildkite artifacts with priority ${PRIORITY_KERNEL_TUNING}"
+        { 
+          echo "priority: ${PRIORITY_KERNEL_TUNING}"; 
+          cat /tmp/kernel_tuning/generated_pipeline.yml; 
+        } | buildkite-agent pipeline upload
+        rm -f "/tmp/kernel_tuning/generated_pipeline.yml"
 
 
   # -----------------------------------------------------------------
+  # This step will generate the bucketinize job in YML and upload to BuildKite
   # -----------------------------------------------------------------
   - label: ":docker: Tuning Cases Generation and Pipeline Upload (${TPU_VERSION:-tpu6e})"
     key: generate_tuning_cases_and_yml
+    if: '"${BOOTSTRAP_ALL_KERNEL_TUNING:-}" == ""'
     depends_on: build_docker
     env:
       USE_PREBUILT_IMAGE: "1"
@@ -48,25 +86,31 @@ steps:
         # remove the existing generated pipeline YAML in the temp dir on the host. 
         rm -f "/tmp/kernel_tuning/generated_pipeline.yml"
       - |
-        .buildkite/scripts/run_in_docker.sh bash -c "
-          if [ -z \"\${KERNEL_TUNING_RUN_ID}\" ] || [ -z \"\${KERNEL_TUNING_CASE_SET_ID}\" ]; then
-            echo \"Error: KERNEL_TUNING_RUN_ID or KERNEL_TUNING_CASE_SET_ID not set\"
-            exit 1
-          fi && \
-          pip install --upgrade google-cloud-spanner && \
-          pip install --upgrade google-api-core && \
-          pip install --upgrade google-auth && \
-          pip install --upgrade absl-py && \
-          python -m tools.kernel.tuner.v1.kernel_tuner_runner \
-          --kernel_tuner_name=\${KERNEL_TUNING_KERNEL_NAME} \
-          --case_set_desc=\${KERNEL_TUNING_CASE_SET_DESC} \
-          --generate_buildkite_pipeline=True \
-          --case_set_id=\${KERNEL_TUNING_CASE_SET_ID} \
-          --run_id=\${KERNEL_TUNING_RUN_ID} \
-          --tpu_cores=\${KERNEL_TUNING_TPU_CORES} \
-          --job_priority=\${KERNEL_TUNING_JOB_PRIORITY:--10} \
-          --max_execution_minutes=\${KERNEL_TUNING_MAX_EXECUTION_MINUTES:-20} \
-          --tpu_version=\${TPU_VERSION} "
+        .buildkite/scripts/run_in_docker.sh bash -c '
+          set -e
+          
+          pip install -r tools/kernel/tuner/v1/storage_management/requirements.txt tensorflow==2.21.0
+          
+          # Start with the arguments that do not follow the KERNEL_TUNING_ pattern
+          PYTHON_ARGS=( 
+            "--generate_buildkite_pipeline=True"
+          )
+          
+          # Dynamically gather all KERNEL_TUNING_ variables
+          for key in "$${!KERNEL_TUNING_@}"; do
+            # $${!key} gets the value of the variable name stored in $key (indirect expansion)
+            value="$${!key}"
+            
+            # Remove "KERNEL_TUNING_" prefix and convert to lowercase
+            arg_name=$(echo "$${key#KERNEL_TUNING_}" | tr "[:upper:]" "[:lower:]")
+            
+            # Add to our arguments array
+            PYTHON_ARGS+=("--$${arg_name}=$${value}")
+          done
+          
+          # Run the python script with the dynamically built array
+          python -m tools.kernel.tuner.v1.kernel_tuner_runner "$${PYTHON_ARGS[@]}"
+        '
       - |
         # Upload the generated pipeline YAML from the temp dir on the host.
         buildkite-agent artifact upload "/tmp/kernel_tuning/generated_pipeline.yml"
@@ -75,3 +119,4 @@ steps:
           echo "priority: ${PRIORITY_KERNEL_TUNING}"; 
           cat /tmp/kernel_tuning/generated_pipeline.yml; 
         } | buildkite-agent pipeline upload
+        rm -f "/tmp/kernel_tuning/generated_pipeline.yml"

@@ -41,12 +41,12 @@ class MockVllmConfig:
     def __init__(self, model: str, kv_cache_dtype: str):
         self.model_config = ModelConfig(model=model)
         self.model_config.dtype = jnp.bfloat16
-        self.load_config = MagicMock()
-        self.load_config.download_dir = None
+        self.load_config = LoadConfig()
         self.cache_config = MagicMock(cache_dtype=kv_cache_dtype)
         self.quant_config = None
         self.additional_config = {}
         self.parallel_config = None
+        self.speculative_config = None
 
 
 @pytest.fixture(scope="module")

@@ -18,9 +18,20 @@ from vllm import LLM, SamplingParams
 
 LLM.__repr__ = lambda self: "LLM"
 
+# TODO(#3636): unskip once the vLLM LKG carries a platform-aware
+# _verify_aux_output_compatibility. At LKG 0b7f11a1ee the gate requires Model
+# Runner V2 on every platform and MRV2 requires Triton, so constructing an
+# engine with enable_return_routed_experts=True raises ValueError inside
+# VllmConfig.__post_init__ before any tpu-inference code runs. Only the
+# enabled engines are affected; llm_disabled still builds and runs.
+ROUTED_EXPERTS_GATED_ON_TPU = (
+    "TODO(#3636): AuxOutput gate rejects enable_return_routed_experts on TPU "
+    "until the Model-Runner-V2 requirement is CUDA-only upstream.")
+
 
 @pytest.fixture(scope="function")
 def llm_enabled():
+    pytest.skip(ROUTED_EXPERTS_GATED_ON_TPU)
     engine = LLM(
         model="Qwen/Qwen1.5-MoE-A2.7B",
         load_format="dummy",
@@ -31,7 +42,8 @@ def llm_enabled():
         gpu_memory_utilization=0.95,
         tensor_parallel_size=1,
         pipeline_parallel_size=1,
-        enable_prefix_caching=False,
+        # Routed-experts output requires prefix caching (vLLM #45635).
+        enable_prefix_caching=True,
         kv_cache_dtype="auto",
         enable_expert_parallel=False,
         enable_return_routed_experts=True,
@@ -58,6 +70,41 @@ def llm_disabled():
         kv_cache_dtype="auto",
         enable_expert_parallel=False,
         enable_return_routed_experts=False,
+    )
+    yield engine
+    engine.llm_engine.engine_core.shutdown()
+    import gc
+    gc.collect()
+
+
+@pytest.fixture(scope="function")
+def llm_enabled_sync():
+    pytest.skip(ROUTED_EXPERTS_GATED_ON_TPU)
+    # async_scheduling=False routes generation through the sync sampler path
+    # (_sample_from_logits), which reconstructs routed experts differently than
+    # the async get_output path. continue_decode requires async_scheduling=False,
+    # so this also covers that use case. The default llm_enabled fixture runs on
+    # the async path, so this fixture is the only coverage of the sync path.
+    engine = LLM(
+        model="Qwen/Qwen1.5-MoE-A2.7B",
+        load_format="dummy",
+        trust_remote_code=True,
+        max_model_len=128,
+        max_num_batched_tokens=128,
+        max_num_seqs=16,
+        gpu_memory_utilization=0.95,
+        tensor_parallel_size=1,
+        pipeline_parallel_size=1,
+        # Routed-experts output requires prefix caching (vLLM #45635).
+        enable_prefix_caching=True,
+        kv_cache_dtype="auto",
+        enable_expert_parallel=False,
+        enable_return_routed_experts=True,
+        async_scheduling=False,
+        additional_config={
+            "enable_continue_decode": True,
+            "max_decode_steps": 4
+        },
     )
     yield engine
     engine.llm_engine.engine_core.shutdown()
@@ -140,3 +187,26 @@ class TestMoEExpertIds:
                                       routed_experts_a)
         np.testing.assert_array_equal(routed_experts_batched_b,
                                       routed_experts_b)
+
+    def test_moe_expert_ids_sync_path_prompt_populated(self,
+                                                       llm_enabled_sync: LLM):
+        """Covers the sync sampler path (async_scheduling=False, used by
+        continue_decode). The slot start for routed experts must be the
+        request's pre-step computed-token count; deriving it as
+        num_computed_tokens - num_tokens underflowed to a negative value on this
+        path and crashed the engine on the first prefill. The prompt's routed
+        experts must be populated (not zero-filled)."""
+        prompt = "The capital of France is"
+        sampling_params = SamplingParams(temperature=0, max_tokens=8)
+        output = llm_enabled_sync.generate([prompt], sampling_params)[0]
+
+        routed_experts = output.outputs[0].routed_experts
+        assert routed_experts is not None, (
+            "routed_experts must be populated on the sync path")
+        re_arr = np.asarray(routed_experts)
+        num_prompt_tokens = len(output.prompt_token_ids)
+        # The prompt slice must not be all-zero (the slot bug zero-filled it).
+        prompt_slice = re_arr[:num_prompt_tokens]
+        assert not (prompt_slice == 0).all(), (
+            "prompt routed experts are all zero on the sync path -- slot "
+            "start_pos is misaligned with the scheduler-side read")

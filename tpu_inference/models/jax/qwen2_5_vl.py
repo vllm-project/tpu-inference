@@ -31,12 +31,14 @@ from vllm.transformers_utils.config import set_default_rope_theta
 
 from tpu_inference import utils as utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
-from tpu_inference.layers.common.attention_interface import \
-    sharded_flash_attention
+from tpu_inference.layers.common.attention_interface import (
+    segment_ids_from_cu_seqlens, sharded_flash_attention)
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.layers.jax.linear import JaxLmHead
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer
+from tpu_inference.layers.jax.rope_interface import (get_rope_scaling,
+                                                     get_rope_theta)
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
@@ -196,8 +198,9 @@ def generate_window_segment_ids(cu_seqlens: jax.Array, seq_len: int,
     Returns:
         A SegmentIds object for flash_attention.
     """
-    indices = jnp.arange(seq_len, dtype=jnp.int32)
-    segment_ids = jnp.searchsorted(cu_seqlens[1:], indices, side='right') + 1
+    # Shared 0-based ids (positions >= cu_seqlens[-1] get num_segs), shifted to
+    # 1-based here so this kernel can keep 0 for the trailing padding below.
+    segment_ids = segment_ids_from_cu_seqlens(cu_seqlens, seq_len) + 1
     padding_segment_ids = jnp.zeros(padded_seq_len - seq_len, dtype=jnp.int32)
     segment_ids = jnp.concatenate([segment_ids, padding_segment_ids])
     segment_ids = segment_ids.reshape(1, -1)
@@ -214,8 +217,8 @@ class Qwen2_5_VisionAttention(nnx.Module):
         self.num_heads = vision_config.num_heads
         self.num_kv_heads = self.num_heads
         set_default_rope_theta(config, default_theta=1000000)
-        self.rope_theta = config.rope_parameters["rope_theta"]
-        self.rope_scaling = getattr(config, "rope_scaling", None)
+        self.rope_theta = get_rope_theta(config, default=1000000.0)
+        self.rope_scaling = get_rope_scaling(config)
         self.head_dim_original = self.hidden_size // self.num_heads
 
         sharding_size = mesh.shape["model"]

@@ -623,3 +623,134 @@ def test_dp_mamba_global_to_local_conversion():
     assert (7 * local_slots + 1) % local_slots == 1
     # Boundary: rank 1 last slot = 595 → local 297
     assert 595 % local_slots == 297
+
+
+# --------------- Speculative-decoding slot-group tests ---------------
+
+NUM_SPEC_TOKENS = 4
+SLOT_STRIDE = NUM_SPEC_TOKENS + 1
+
+
+@pytest.fixture
+def spec_input_batch():
+    """InputBatch with speculative decoding enabled (slot groups of 5)."""
+    return InputBatch(
+        max_num_reqs=MAX_NUM_REQS,
+        max_model_len=MAX_MODEL_LEN,
+        max_num_batched_tokens=MAX_NUM_BATCHED_TOKENS,
+        pin_memory=False,
+        vocab_size=VOCAB_SIZE,
+        block_sizes=BLOCK_SIZES,
+        is_spec_decode=True,
+        num_speculative_tokens=NUM_SPEC_TOKENS,
+    )
+
+
+@pytest.fixture
+def dp_spec_input_batch():
+    """InputBatch with dp_size=4 and speculative decoding enabled."""
+    return InputBatch(
+        max_num_reqs=DP_MAX_NUM_REQS,
+        max_model_len=MAX_MODEL_LEN,
+        max_num_batched_tokens=MAX_NUM_BATCHED_TOKENS,
+        pin_memory=False,
+        vocab_size=VOCAB_SIZE,
+        block_sizes=BLOCK_SIZES,
+        is_spec_decode=True,
+        num_speculative_tokens=NUM_SPEC_TOKENS,
+        dp_size=DP_SIZE,
+    )
+
+
+def test_mamba_slot_stride_one_matches_legacy(input_batch: InputBatch):
+    """Without spec decode the stride is 1 and the pool is the legacy
+    layout: every slot in (0, local_slots) is a valid base."""
+    assert input_batch.mamba_slot_stride == 1
+    local_slots = input_batch._mamba_local_slots
+    assert local_slots == MAX_NUM_REQS + 1
+    pool = input_batch._free_mamba_slots_per_rank[0]
+    assert sorted(pool) == list(range(1, MAX_NUM_REQS + 1))
+
+
+def test_mamba_slot_groups_stride_allocation(spec_input_batch: InputBatch):
+    """Group bases are handed out with stride num_spec + 1, leaving room
+    for one state checkpoint per speculative window position."""
+    assert spec_input_batch.mamba_slot_stride == SLOT_STRIDE
+    # One group per request plus the null slot.
+    assert (spec_input_batch._mamba_local_slots == MAX_NUM_REQS * SLOT_STRIDE +
+            1)
+    bases = []
+    for i in range(MAX_NUM_REQS):
+        req = create_dummy_request(f"req_{i}")
+        spec_input_batch.add_request(req)
+        base = int(spec_input_batch.mamba_state_indices_cpu[
+            spec_input_batch.req_id_to_index[f"req_{i}"]])
+        assert spec_input_batch.is_valid_mamba_slot_base(base)
+        bases.append(base)
+    assert bases == [1 + i * SLOT_STRIDE for i in range(MAX_NUM_REQS)]
+    # Groups cover disjoint slot ranges within the shard.
+    covered = set()
+    for base in bases:
+        group = set(range(base, base + SLOT_STRIDE))
+        assert not (group & covered)
+        assert max(group) < spec_input_batch._mamba_local_slots
+        covered |= group
+
+
+def test_mamba_slot_groups_release_and_reuse(spec_input_batch: InputBatch):
+    """A removed request's group base returns to the pool and is reused."""
+    for i in range(MAX_NUM_REQS):
+        spec_input_batch.add_request(create_dummy_request(f"req_{i}"))
+    assert not spec_input_batch._free_mamba_slots_per_rank[0]
+
+    victim_base = int(spec_input_batch.mamba_state_indices_cpu[
+        spec_input_batch.req_id_to_index["req_3"]])
+    removed_idx = spec_input_batch.remove_request("req_3")
+    spec_input_batch.condense([removed_idx])
+    assert victim_base in spec_input_batch._free_mamba_slots_per_rank[0]
+
+    spec_input_batch.add_request(create_dummy_request("req_new"))
+    new_base = int(spec_input_batch.mamba_state_indices_cpu[
+        spec_input_batch.req_id_to_index["req_new"]])
+    assert new_base == victim_base
+    spec_input_batch.assert_mamba_state_invariants()
+
+
+def test_mamba_slot_release_rejects_unaligned(spec_input_batch: InputBatch):
+    """Releasing a slot id that is not a group base must fail loudly:
+    a misaligned id in the free pool would corrupt a later request."""
+    spec_input_batch.add_request(create_dummy_request("req_0"))
+    base = int(spec_input_batch.mamba_state_indices_cpu[0])
+    with pytest.raises(AssertionError):
+        spec_input_batch.release_mamba_slot(base + 2)
+    # Null slot ids are silently ignored, as before.
+    spec_input_batch.release_mamba_slot(0)
+
+
+def test_mamba_slot_groups_init_pools_resize(spec_input_batch: InputBatch):
+    """init_mamba_pools re-derives group bases from the actual device
+    block count."""
+    # 3 groups of 5 + null = 16 slots.
+    spec_input_batch.init_mamba_pools(16)
+    assert spec_input_batch._mamba_local_slots == 16
+    pool = spec_input_batch._free_mamba_slots_per_rank[0]
+    assert sorted(pool) == [1, 6, 11]
+
+
+def test_dp_mamba_slot_groups_partitioned_by_rank(
+        dp_spec_input_batch: InputBatch):
+    """Group bases stay within their rank's shard and keep the stride,
+    so a group never straddles a DP-rank boundary."""
+    local_slots = dp_spec_input_batch._mamba_local_slots
+    reqs_per_rank = DP_MAX_NUM_REQS // DP_SIZE
+    assert local_slots == reqs_per_rank * SLOT_STRIDE + 1
+    for rank in range(DP_SIZE):
+        rank_base = rank * local_slots
+        pool = dp_spec_input_batch._free_mamba_slots_per_rank[rank]
+        assert sorted(pool) == [
+            rank_base + 1 + g * SLOT_STRIDE for g in range(reqs_per_rank)
+        ]
+        for slot in pool:
+            assert dp_spec_input_batch.is_valid_mamba_slot_base(slot)
+            # The whole group fits inside this rank's shard.
+            assert slot + SLOT_STRIDE - 1 < rank_base + local_slots

@@ -12,30 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from absl import flags
 from google.api_core import retry
 from google.cloud import spanner
 
+from tools.kernel.tuner.v1.common.tuner_datatypes import (BucketStatus,
+                                                          ProcessedCaseStatus)
 from tools.kernel.tuner.v1.storage_management.storage_manager import \
     StorageManager
+from tools.kernel.tuner.v1.utils import get_worker_id
 
 BATCH_SIZE = 1000
-
-FLAGS = flags.FLAGS
 
 
 class SpannerStorageManager(StorageManager):
     # (TODO)For historical reason, the database_id is still tune-gmm, but it
     # actually contains tuning cases for different kernels, not just gmm. We
     # can consider to rename it in the future for better clarity.
-    def __init__(self, worker_id=None, dry_run=False):
-        gcp_project_id = FLAGS.gcp_project_id
-        spanner_instance_id = FLAGS.spanner_instance_id
-        spanner_database_id = FLAGS.spanner_database_id
+    def __init__(self,
+                 gcp_project_id,
+                 spanner_instance_id,
+                 spanner_database_id,
+                 worker_id=None,
+                 dry_run=False,
+                 results_batch_size=10):
+        super().__init__(results_batch_size=results_batch_size)
         self.current_case_id = 0
         self.invalid_count = 0
         self.buffer = []
-        self.worker_id = worker_id
+        self.worker_id = get_worker_id(worker_id)
         self.dry_run = dry_run
         if not self.dry_run:
             self.client = spanner.Client(project=gcp_project_id,
@@ -43,7 +47,18 @@ class SpannerStorageManager(StorageManager):
             self.instance = self.client.instance(spanner_instance_id)
             self.database = self.instance.database(spanner_database_id)
         else:
+            self.client = None
             self.database = None
+
+    def close(self):
+        """Safely closes the Spanner client connection after flushing pending data."""
+        if getattr(self, '_closed', False):
+            return
+        self.flush()
+        self._closed = True
+        if not self.dry_run and self.client:
+            self.client.close()
+            self.client = None
 
     def init_case_set(self, case_set_id, scan_space, desc):
         """Initializes the CaseSet row."""
@@ -139,6 +154,7 @@ class SpannerStorageManager(StorageManager):
 
     @retry.Retry(predicate=retry.if_transient_error)
     def flush(self):
+        self.flush_results()
         if not self.buffer or self.dry_run:
             return
         with self.database.batch() as b:
@@ -197,34 +213,22 @@ class SpannerStorageManager(StorageManager):
                     ]))
 
     # tuner agents working on the a bucket will mark the bucket as IN_PROGRESS/COMPLETED
-    def mark_bucket_in_progress(self, cs_id, r_id, b_id):
+    def update_bucket_status(self, cs_id, r_id, b_id, status: BucketStatus):
         self.database.run_in_transaction(lambda tx: tx.execute_update(
-            "UPDATE WorkBuckets SET Status = 'IN_PROGRESS', WorkerID = @wid, UpdatedAt = PENDING_COMMIT_TIMESTAMP() WHERE ID = @id AND RunId = @rid AND BucketId = @bid",
+            "UPDATE WorkBuckets SET Status = @s, WorkerID = @wid, UpdatedAt = PENDING_COMMIT_TIMESTAMP() WHERE ID = @id AND RunId = @rid AND BucketId = @bid",
             params={
                 'id': cs_id,
                 'rid': r_id,
                 'bid': b_id,
-                'wid': self.worker_id
+                'wid': self.worker_id,
+                's': status.value
             },
             param_types={
                 'id': spanner.param_types.STRING,
                 'rid': spanner.param_types.STRING,
                 'bid': spanner.param_types.INT64,
-                'wid': spanner.param_types.STRING
-            }))
-
-    def mark_bucket_completed(self, cs_id, r_id, b_id):
-        self.database.run_in_transaction(lambda tx: tx.execute_update(
-            "UPDATE WorkBuckets SET Status = 'COMPLETED', UpdatedAt = PENDING_COMMIT_TIMESTAMP() WHERE ID = @id AND RunId = @rid AND BucketId = @bid",
-            params={
-                'id': cs_id,
-                'rid': r_id,
-                'bid': b_id
-            },
-            param_types={
-                'id': spanner.param_types.STRING,
-                'rid': spanner.param_types.STRING,
-                'bid': spanner.param_types.INT64
+                'wid': spanner.param_types.STRING,
+                's': spanner.param_types.STRING
             }))
 
     def add_bucket_processed_time_us(self, cs_id, r_id, b_id,
@@ -245,30 +249,46 @@ class SpannerStorageManager(StorageManager):
             }))
 
     def get_already_processed_ids(self, cs_id, r_id, start, end):
-        query = "SELECT CaseId FROM CaseResults WHERE ID = @id AND RunId = @rid AND CaseId BETWEEN @s AND @e"
+        query = "SELECT CaseId, ProcessedStatus FROM CaseResults WHERE ID = @id AND RunId = @rid AND CaseId BETWEEN @s AND @e"
         with self.database.snapshot() as snp:
-            return {
-                row[0]
-                for row in snp.execute_sql(query,
-                                           params={
-                                               'id': cs_id,
-                                               'rid': r_id,
-                                               's': start,
-                                               'e': end
-                                           })
-            }
+            return [
+                ProcessedCaseStatus(case_id=row[0], status=row[1])
+                for row in snp.execute_sql(
+                    query,
+                    params={
+                        'id': cs_id,
+                        'rid': r_id,
+                        's': start,
+                        'e': end,
+                    },
+                )
+            ]
 
-    # tuner agents will save the result after completing a tuning batch
-    def save_results_batch(self, results):
-        if not results:
+    def save_results_batch(self):
+        if not self.results_buffer:
             return
+        values = []
+        for r in self.results_buffer:
+            values.append((
+                r.case_set_id,
+                r.run_id,
+                r.case_id,
+                r.processed_status,
+                r.worker_id,
+                r.latency,
+                r.warmup_time,
+                r.total_time,
+                r.processed_at,
+                r.tpu,
+            ))
         with self.database.batch() as b:
             b.insert_or_update(table='CaseResults',
                                columns=('ID', 'RunId', 'CaseId',
                                         'ProcessedStatus', 'WorkerID',
                                         'Latency', 'WarmupTime', 'TotalTime',
                                         'ProcessedAt', 'TPU'),
-                               values=results)
+                               values=values)
+        self.results_buffer.clear()
 
     # tuner agents will query from the KernelTuningCases table and run the cases
     def get_bucket_configs(self, cs_id, start, end):
@@ -283,6 +303,19 @@ class SpannerStorageManager(StorageManager):
                                                'e': end
                                            })
             }
+
+    def get_all_cases(self, case_set_id):
+        """Returns all cases in the given case set.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+
+        Returns:
+            A list of all cases in the case set.
+        """
+        query = "SELECT CaseId, CaseKeyValue FROM KernelTuningCases WHERE ID = @id ORDER BY CaseId ASC"
+        with self.database.snapshot() as snp:
+            return list(snp.execute_sql(query, params={'id': case_set_id}))
 
     def get_total_cases_in_case_set(self, case_set_id):
         """Returns the total number of cases in the given case set.
@@ -307,3 +340,51 @@ class SpannerStorageManager(StorageManager):
             Current timestamp in seconds.
         """
         return spanner.COMMIT_TIMESTAMP
+
+    def add_autotune_case(self, case_set_id: str, case_str: str,
+                          kernel_tuner_name: str, tpu: str):
+        """Adds a tuning case to the AutoTuneCase table for logging purposes.
+
+        Called by the autotuning pipeline to log the tuning key and tuned params
+        for each case.
+
+        This table will be used to build all tuning cases for an auto tune job.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+            case_str: String encoding of the tuning case (e.g. in 'key:value' format).
+            kernel_tuner_name: Name of the kernel tuner that generated this case.
+            tpu: TPU identifier where this case was generated or will be executed.
+        """
+        assert isinstance(
+            case_set_id, str
+        ), f'param case_set_id should be a string but got {type(case_set_id)}'
+        assert isinstance(
+            case_str,
+            str), f'param case_str should be a string but got {type(case_str)}'
+        with self.database.batch() as b:
+            b.insert(table='KernelAutoTuneCases',
+                     columns=('CaseSetId', 'CaseKeyValue', 'KernelTunerName',
+                              'TPU'),
+                     values=[(case_set_id, case_str, kernel_tuner_name, tpu)])
+
+    def read_autotune_cases(self,
+                            case_set_id,
+                            kernel_tuner_name=None,
+                            tpu=None):
+        """ Reads tuning cases from the KernelAutoTuneCases table for a given case set.
+        """
+        query = "SELECT DISTINCT CaseKeyValue, KernelTunerName, TPU FROM KernelAutoTuneCases WHERE CaseSetId = @id"
+        params = {'id': case_set_id}
+        if kernel_tuner_name:
+            query += " AND KernelTunerName = @ktn"
+            params['ktn'] = kernel_tuner_name
+        if tpu:
+            query += " AND TPU = @tpu"
+            params['tpu'] = tpu
+        with self.database.snapshot() as snp:
+            return [{
+                "CaseKeyValue": row[0],
+                "KernelTunerName": row[1],
+                "TPU": row[2]
+            } for row in snp.execute_sql(query, params=params)]

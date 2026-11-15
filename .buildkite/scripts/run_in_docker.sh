@@ -59,17 +59,11 @@ ENV_VARS=(
   -e BENCH_DATASET="${BENCH_DATASET:-}"
   -e USE_BATCHED_RPA_KERNEL="${USE_BATCHED_RPA_KERNEL:-}"
   -e GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-}"
-  # For kernel tuning pipeline env vars
-  -e KERNEL_TUNING_CASE_SET_ID="${KERNEL_TUNING_CASE_SET_ID:-}"
-  -e KERNEL_TUNING_RUN_ID="${KERNEL_TUNING_RUN_ID:-}"
-  -e KERNEL_TUNING_KERNEL_NAME="${KERNEL_TUNING_KERNEL_NAME:-}"
-  -e KERNEL_TUNING_CASE_SET_DESC="${KERNEL_TUNING_CASE_SET_DESC:-}"
-  -e KERNEL_TUNING_TPU_VERSION="${KERNEL_TUNING_TPU_VERSION:-}"
-  -e KERNEL_TUNING_TPU_CORES="${KERNEL_TUNING_TPU_CORES:-}"
-  -e KERNEL_TUNING_JOB_PRIORITY="${PRIORITY_KERNEL_TUNING:--10}"
-  -e KERNEL_TUNING_MAX_EXECUTION_MINUTES="${KERNEL_TUNING_MAX_EXECUTION_MINUTES:-20}"
+  -e BUILDKITE_STEP_KEY="${BUILDKITE_STEP_KEY:-}"
+  -e COMPILATION_CONFIG="${COMPILATION_CONFIG:-}"
   -e HOST_NAME="${HOST_NAME:-}"
   -e GCS_BUCKET="${GCS_BUCKET:-}"
+  -e GITHUB_CI_BOT_TOKEN="${GITHUB_CI_BOT_TOKEN:-}"
 )
 
 if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
@@ -89,6 +83,13 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/setup_docker_env.sh"
 setup_environment $IMAGE_NAME
+
+# Kernel Tuning Environment Variables, tuning should be invoked through below pipelines
+# shellcheck disable=SC1091
+if [[ "${BUILDKITE_PIPELINE_NAME:-}" =~ (kernel-tuning|kernel-autotune) ]]; then
+  source "$SCRIPT_DIR/kernel_tuning_envs.sh"
+  ENV_VARS+=("${KERNEL_TUNING_ENV_VARS[@]}")
+fi
 
 TEST_SUITE_VARS=(
   -e BUILDKITE_ANALYTICS_TOKEN="${BUILDKITE_ANALYTICS_TOKEN:-}"
@@ -138,29 +139,46 @@ if ! mkdir -p "$LOCAL_JAX_CACHE_DIR"; then
   exit 1
 fi
 echo "[INFO] Pulling JAX Cache from GCS to local directory..."
-# Parallel CI builds‘ pushes are safe because JAX's compilation cache 
+# Parallel CI builds‘ pushes are safe because JAX's compilation cache
 # entries are content-addressed. Concurrent pushes are thus idempotent;
-gsutil -m rsync -d -r "$FINAL_CACHE_PATH" "$LOCAL_JAX_CACHE_DIR" || echo "[WARN] Failed to pull JAX Cache from GCS. Proceeding with cold start."
+gcloud storage rsync \
+  --recursive \
+  --no-clobber \
+  --delete-unmatched-destination-objects \
+  --exclude=".*_.gstmp$" \
+  --no-user-output-enabled \
+  "$FINAL_CACHE_PATH" "$LOCAL_JAX_CACHE_DIR" || \
+  echo "[WARN] Failed to pull JAX Cache from GCS. Proceeding with cold start."
 
 # ==========================================
 # 2. Run Docker Container
 # ==========================================
 set +e # Temporarily disable exit on error to capture exit code
 
+# Container output is teed here so the failure summary at the bottom can quote
+# it without making the reader expand the collapsed run group.
+RUN_LOG="$(mktemp)"
+
 # Ensure the docker container is killed if the wrapper script exits, fails, or is cancelled.
-trap 'docker kill "$IMAGE_NAME" 2>/dev/null || true' EXIT INT TERM
+trap 'docker kill "$IMAGE_NAME" 2>/dev/null || true; rm -f "$RUN_LOG"' EXIT INT TERM
 
 # Some test scripts set tp=2 on TPU_VERSION=tpu7x to mitigate test failures.
 # TODO (Qiliang Cui) Investigate why tensor-parallel-size=1 breaks in tpu7x.
 
 # -----------------------------------------------------------------------------
 # JAX Cache Env Variables Explanation:
-# - VLLM_XLA_CACHE_PATH: Prevents vLLM's CompilationManager from overriding our 
+# - VLLM_XLA_CACHE_PATH: Prevents vLLM's CompilationManager from overriding our
 #   path with its default.
-# - JAX_COMPILATION_CACHE_DIR: Serves as a global catch-all for unit tests that 
+# - JAX_COMPILATION_CACHE_DIR: Serves as a global catch-all for unit tests that
 #   initiate models and bypass vLLM's CompilationManager logic entirely.
 # -----------------------------------------------------------------------------
 
+# The command runs under `umask 000`. The container is root, and the HF cache
+# it writes is the host's /mnt/disks/persist/models, which other jobs on the
+# same agents write from the host as the agent user. With the default umask, a
+# download here leaves hub/ and each models--* directory 0755 root-owned, and
+# those jobs then fail with "Permission denied" on every model this agent has
+# not cached yet.
 docker run \
   --name "$IMAGE_NAME" \
   --privileged \
@@ -192,8 +210,8 @@ docker run \
   -e NUM_PRECOMPILE_WORKERS="${NUM_PRECOMPILE_WORKERS:-1}" \
    "${BENCHMARK_DOCKER_ARGS[@]}" \
   "$FULL_IMAGE_TAG" \
-  "$@" # Pass all script arguments as the command to run in the container
-DOCKER_EXIT_CODE=$?
+  bash -c 'umask 000; exec "$@"' -- "$@" 2>&1 | tee "$RUN_LOG" # Pass all script arguments as the command to run in the container
+DOCKER_EXIT_CODE=${PIPESTATUS[0]}
 
 set -e
 
@@ -202,7 +220,37 @@ set -e
 # ==========================================
 echo "[INFO] Docker finished with exit code ${DOCKER_EXIT_CODE}."
 
-echo "[INFO] Syncing local JAX Cache back to GCS..."
-gsutil -m rsync -r "$LOCAL_JAX_CACHE_DIR" "$FINAL_CACHE_PATH" || echo "[WARN] Failed to sync JAX Cache back to GCS."
+if [ "$DOCKER_EXIT_CODE" -eq 0 ]; then
+  echo "[INFO] Syncing local JAX Cache back to GCS..."
+  gcloud storage rsync \
+    --recursive \
+    --no-clobber \
+    --exclude=".*_.gstmp$" \
+    --no-user-output-enabled \
+    "$LOCAL_JAX_CACHE_DIR" "$FINAL_CACHE_PATH" || \
+    echo "[WARN] Failed to sync JAX Cache back to GCS."
+else
+  echo "[WARN] Docker exited with non-zero code ${DOCKER_EXIT_CODE}. Skipping syncing local JAX Cache back to GCS to avoid potential cache corruption."
+fi
 
-exit $DOCKER_EXIT_CODE
+# `~~~` rather than `---`: this group is housekeeping, and Buildkite expands the
+# last `---` group whenever a log has no `+++` group at all -- which is how a
+# red job used to open on docker cleanup output instead of on the error.
+echo "~~~ Cleaning up Docker resources after run"
+cleanup_docker_resource "${IMAGE_NAME}"
+
+# Must be the last thing printed: `+++` is expanded by default, and its mere
+# presence stops Buildkite from expanding the trailing cleanup group instead.
+if [ "$DOCKER_EXIT_CODE" -ne 0 ]; then
+  echo "+++ :boom: ${BUILDKITE_LABEL:-Command} failed (exit ${DOCKER_EXIT_CODE})"
+  FATAL_LINES="$(grep -m5 -E '\b[A-Za-z_]*(Error|Exception): |\[Errno [0-9]+\]|_FAIL:|^FAILED ' "$RUN_LOG" || true)"
+  if [ -n "$FATAL_LINES" ]; then
+    echo "First errors in the container output:"
+    echo "$FATAL_LINES"
+    echo
+  fi
+  echo "Last 40 lines of container output:"
+  tail -n 40 "$RUN_LOG"
+fi
+
+exit "$DOCKER_EXIT_CODE"

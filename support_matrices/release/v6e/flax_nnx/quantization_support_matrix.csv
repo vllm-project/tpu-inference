@@ -4,3 +4,4 @@ Quantization dtype,Quantization methods,Recommended TPU Generations,CorrectnessT
 "FP8 W8A16",compressed-tensor,v7,❓ Untested,❓ Untested
 "INT4 W4A16",awq,"v5, v6",❓ Untested,❓ Untested
 "INT8 W8A8",compressed-tensor,"v5, v6",❓ Untested,❓ Untested
+"NVFP4 W4A16",modelopt_fp4,v7,❓ Untested,❓ Untested

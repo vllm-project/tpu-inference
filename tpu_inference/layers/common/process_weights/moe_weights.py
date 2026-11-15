@@ -359,7 +359,7 @@ def process_moe_weights(
         w2_bias = w2_bias.astype(jnp.float32)
         w2_bias = jnp.expand_dims(w2_bias, 1)
 
-    match moe_backend:
+    match moe_backend.weights_like():
         case MoEBackend.FUSED_MOE:
             # Kernel expects:
             # w13: (num_experts, 2, hidden_size, intermediate_size)
@@ -560,7 +560,7 @@ def _get_moe_weight_shardings(
     Used by both shard_moe_weights (for device_put) and
     process_quantized_moe_weights (for sharding constraints inside JIT).
     """
-    match moe_backend:
+    match moe_backend.weights_like():
         case MoEBackend.FUSED_MOE | MoEBackend.GMM_EP:
             ep_sharding = NamedSharding(mesh, P(ShardingAxisName.EXPERT))
             return FusedMoEWeights(
@@ -615,7 +615,7 @@ def shard_moe_weights(
 
     weight_shardings = _get_moe_weight_shardings(weights, moe_backend, mesh)
 
-    match moe_backend:
+    match moe_backend.weights_like():
         case MoEBackend.FUSED_MOE:
             weight_layouts = FusedMoEWeights(
                 w13_weight=Layout((0, 1, 2, 3)),
@@ -738,6 +738,8 @@ def process_quantized_moe_weights(
         if requant_block_size_from_env := envs.MOE_REQUANTIZE_BLOCK_SIZE:
             requant_block_size = int(requant_block_size_from_env)
 
+    clip_percentile = envs.MOE_REQUANTIZE_CLIP_PERCENTILE
+
     return _process_quantized_moe_weights_impl(
         weights=weights,
         moe_backend=moe_backend,
@@ -747,6 +749,7 @@ def process_quantized_moe_weights(
         desired_quant_dtype=desired_quant_dtype,
         requant_block_size=requant_block_size,
         disable_weight_requantization=disable_weight_requantization,
+        clip_percentile=clip_percentile,
     )
 
 
@@ -840,6 +843,7 @@ def _requant_expert_batch_fn(
     desired_quant_dtype: jnp.dtype,
     w13_block_size: int,
     w2_block_size: int,
+    clip_percentile: float | None,
 ):
     """Requantize a batch of experts.
 
@@ -858,6 +862,8 @@ def _requant_expert_batch_fn(
         desired_quant_dtype: Desired data type for requantization.
         w13_block_size: Block size for w13 requantization.
         w2_block_size: Block size for w2 requantization.
+        clip_percentile: If set, clip outlier weights per matrix at this
+            percentile before requantization.
 
     Returns:
         Tuple of (carry, (w13_q_b, w13_s_new_b, w2_q_b, w2_s_new_b)).
@@ -913,18 +919,12 @@ def _requant_expert_batch_fn(
     w2_pad_widths = ((0, 0), (0, hidden_pad), (0, inter_pad))
     w2_fp32 = jnp.pad(w2_fp32, w2_pad_widths)
 
-    if envs.MOE_REQUANTIZE_CLIP_PERCENTILE is not None:
-        percentile_val = envs.MOE_REQUANTIZE_CLIP_PERCENTILE
+    if clip_percentile is not None:
+        w13_clip = jnp.percentile(jnp.abs(w13_fp32), clip_percentile)
+        w13_fp32 = jnp.clip(w13_fp32, -w13_clip, w13_clip)
 
-        for arr_name in ('w13', 'w2'):
-            arr = w13_fp32 if arr_name == 'w13' else w2_fp32
-
-            clip_val = jnp.percentile(jnp.abs(arr), percentile_val)
-
-            if arr_name == 'w13':
-                w13_fp32 = jnp.clip(w13_fp32, -clip_val, clip_val)
-            else:
-                w2_fp32 = jnp.clip(w2_fp32, -clip_val, clip_val)
+        w2_clip = jnp.percentile(jnp.abs(w2_fp32), clip_percentile)
+        w2_fp32 = jnp.clip(w2_fp32, -w2_clip, w2_clip)
 
     w13_q_b, w13_s_new_b = quantize_tensor(desired_quant_dtype, w13_fp32, 2,
                                            w13_block_size)
@@ -954,6 +954,7 @@ def _requant_and_process_local_fn(
     desired_quant_dtype: jnp.dtype,
     w13_block_size: int,
     w2_block_size: int,
+    clip_percentile: float | None,
     moe_backend: MoEBackend,
     w13_reorder_size: int,
 ):
@@ -971,6 +972,8 @@ def _requant_and_process_local_fn(
         inter_pad, hidden_pad: Padding amounts.
         desired_quant_dtype: Desired data type for requantization.
         w13_block_size, w2_block_size: Block sizes for requantization.
+        clip_percentile: If set, clip outlier weights per matrix at this
+            percentile before requantization.
         moe_backend: The MoE backend.
         w13_reorder_size: Size for reordering w13 weights.
 
@@ -992,6 +995,7 @@ def _requant_and_process_local_fn(
         desired_quant_dtype=desired_quant_dtype,
         w13_block_size=w13_block_size,
         w2_block_size=w2_block_size,
+        clip_percentile=clip_percentile,
     )
 
     xs_list = []
@@ -1060,6 +1064,7 @@ def _requant_and_process_local_fn(
     "desired_quant_dtype",
     "requant_block_size",
     "disable_weight_requantization",
+    "clip_percentile",
 ))
 def _process_quantized_moe_weights_impl(
     weights: FusedMoEWeights,
@@ -1070,6 +1075,7 @@ def _process_quantized_moe_weights_impl(
     desired_quant_dtype: jnp.dtype | None = None,
     requant_block_size: int | None = None,
     disable_weight_requantization: bool = False,
+    clip_percentile: float | None = None,
 ) -> FusedMoEWeights:
     w13_weight = weights.w13_weight
     w13_weight_scale = weights.w13_weight_scale
@@ -1155,6 +1161,7 @@ def _process_quantized_moe_weights_impl(
         desired_quant_dtype=desired_quant_dtype,
         w13_block_size=w13_block_size,
         w2_block_size=w2_block_size,
+        clip_percentile=clip_percentile,
         moe_backend=moe_backend,
         w13_reorder_size=w13_reorder_size,
     )

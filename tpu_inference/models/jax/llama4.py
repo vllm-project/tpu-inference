@@ -43,7 +43,8 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (
     BaseWeightLoader, _is_pp_missing_layer, convert_torch_to_jax_with_view,
-    get_param, print_param_info, reshape_params, transpose_params)
+    cpu_mesh_context, get_param, print_param_info, reshape_params,
+    transpose_params)
 
 logger = init_logger(__name__)
 
@@ -268,7 +269,7 @@ class Llama4WeightLoader(BaseWeightLoader):
                 layer_name = ".".join([str(s) for s in path])
                 self.pp_missing_layers.append(layer_name)
 
-        with jax.default_device(jax.devices("cpu")[0]):
+        with cpu_mesh_context():
             for loaded_name, loaded_weight in self.get_weights_iterator():
                 is_moe_layer = False
                 layer_num = self._get_layer_num(loaded_name)
@@ -355,7 +356,7 @@ class Llama4WeightLoader(BaseWeightLoader):
                                                mesh=model_for_loading.mesh)
                 if self.is_verbose:
                     print_param_info(model_weight, loaded_name)
-            with jax.default_device(jax.devices("cpu")[0]):
+            with cpu_mesh_context():
                 for buffer_key, expert_map in self.expert_weights_buffer.items(
                 ):
                     sorted_exp_nums = sorted(expert_map.keys())
@@ -431,7 +432,7 @@ class Llama4ForCausalLM(nnx.Module):
         self.mesh = mesh
         self.is_verbose = getattr(self.vllm_config.additional_config,
                                   "is_verbose", False)
-        self.enable_return_routed_experts = self.vllm_config.model_config.enable_return_routed_experts
+        self.enable_return_routed_experts = self.vllm_config.aux_output_config.enable_return_routed_experts
 
         # Currently the runner will always set a mesh, so the custom default sharding (when
         #  no sharding is set in vllm config) doesn't take effect.
@@ -475,7 +476,12 @@ class Llama4ForCausalLM(nnx.Module):
 
         self.rope_scaling = getattr(text_config, "rope_scaling", None)
         if self.rope_scaling:
-            self.rope_scaling["scale_factor"] = self.rope_scaling.pop("factor")
+            if "factor" in self.rope_scaling:
+                self.rope_scaling = dict(self.rope_scaling)
+                self.rope_scaling["scale_factor"] = self.rope_scaling.pop(
+                    "factor")
+            else:
+                self.rope_scaling = None
 
         self.use_qk_norm = getattr(text_config, "use_qk_norm", True)
 

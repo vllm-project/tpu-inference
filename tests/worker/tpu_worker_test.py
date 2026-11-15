@@ -32,6 +32,7 @@ def mock_vllm_config():
     # Create mocks for the nested config objects first
     mock_cache_conf = MagicMock()
     mock_cache_conf.gpu_memory_utilization = 0.9
+    mock_cache_conf.resolved_gpu_memory_utilization = 0.9
     mock_cache_conf.num_gpu_blocks = 0
     mock_cache_conf.num_cpu_blocks = 0
 
@@ -186,6 +187,79 @@ class TestTPUWorker:
                            distributed_init_method="test_method")
         assert worker.profile_dir is None
 
+    def test_init_with_gcs_profiler_on_rank_zero(self, mock_vllm_config):
+        """Tests that a GCS profile dir is set directly without os.makedirs."""
+        mock_vllm_config.profiler_config.profiler = "torch"
+        mock_vllm_config.profiler_config.torch_profiler_dir = (
+            "gs://my-bucket/profiles")
+        with patch(
+                "tpu_inference.worker.tpu_worker.os.makedirs") as mock_mkdirs:
+            worker = TPUWorker(
+                vllm_config=mock_vllm_config,
+                local_rank=0,
+                rank=0,
+                distributed_init_method="test_method",
+            )
+            assert worker.profile_dir == "gs://my-bucket/profiles"
+            mock_mkdirs.assert_not_called()
+
+    @patch("tpu_inference.worker.tpu_worker.os.makedirs")
+    @patch("tpu_inference.tpu_info.get_num_cores_per_chip", return_value=2)
+    def test_init_pp_with_gcs_path_skips_makedirs(self, mock_get_cores,
+                                                  mock_mkdirs,
+                                                  mock_vllm_config):
+        """Tests that os.makedirs is NOT called for GCS paths in PP mode."""
+        mock_vllm_config.profiler_config.profiler = "torch"
+        mock_vllm_config.profiler_config.torch_profiler_dir = (
+            "gs://my-bucket/profiles")
+        mock_vllm_config.parallel_config.pipeline_parallel_size = 2
+        worker = TPUWorker(
+            vllm_config=mock_vllm_config,
+            local_rank=0,
+            rank=0,
+            distributed_init_method="test_method",
+        )
+        assert worker.profile_dir == (
+            "gs://my-bucket/profiles/pprank_0_ppworldsize_2")
+        mock_mkdirs.assert_not_called()
+
+    @patch("tpu_inference.worker.tpu_worker.os.makedirs")
+    @patch("tpu_inference.tpu_info.get_num_cores_per_chip", return_value=2)
+    def test_init_pp_with_local_path_calls_makedirs(self, mock_get_cores,
+                                                    mock_mkdirs,
+                                                    mock_vllm_config):
+        """Tests that os.makedirs IS called for local paths in PP mode."""
+        mock_vllm_config.profiler_config.profiler = "torch"
+        mock_vllm_config.profiler_config.torch_profiler_dir = "/tmp/profiles"
+        mock_vllm_config.parallel_config.pipeline_parallel_size = 2
+        worker = TPUWorker(
+            vllm_config=mock_vllm_config,
+            local_rank=0,
+            rank=0,
+            distributed_init_method="test_method",
+        )
+        assert worker.profile_dir == "/tmp/profiles/pprank_0_ppworldsize_2"
+        mock_mkdirs.assert_called_once_with(
+            "/tmp/profiles/pprank_0_ppworldsize_2", exist_ok=True)
+
+    @patch("tpu_inference.worker.tpu_worker.jax")
+    @patch.dict("os.environ", {"PYTHON_TRACER_LEVEL": "1"}, clear=True)
+    def test_profile_start_with_gcs_path(self, mock_jax, mock_vllm_config):
+        """Tests that a GCS path is passed directly to jax.profiler.start_trace."""
+        worker = TPUWorker(
+            vllm_config=mock_vllm_config,
+            local_rank=0,
+            rank=0,
+            distributed_init_method="test",
+        )
+        worker.profile_dir = "gs://my-bucket/profiles"
+
+        worker.profile(is_start=True)
+
+        mock_jax.profiler.start_trace.assert_called_once()
+        args, _ = mock_jax.profiler.start_trace.call_args
+        assert args[0] == "gs://my-bucket/profiles"
+
     #
     # --- Device and Cache Initialization Tests ---
     #
@@ -281,6 +355,30 @@ class TestTPUWorker:
         expected_mem = 1500 * 1024**3
         assert available_mem == expected_mem
 
+    @patch('tpu_inference.worker.tpu_worker.utils')
+    def test_determine_available_memory_none_utilization(
+            self, mock_utils, mock_vllm_config):
+        """Tests available HBM memory calculation when gpu_memory_utilization is None (vLLM >= 0.33.0)."""
+        mock_utils.hbm_usage_bytes.return_value = [
+            (100 * 1024**3, 1000 * 1024**3), (200 * 1024**3, 1000 * 1024**3)
+        ]
+        mock_devices = ['tpu:0', 'tpu:1']
+        mock_vllm_config.cache_config.gpu_memory_utilization = None
+        mock_vllm_config.cache_config.resolved_gpu_memory_utilization = 0.92
+        worker = TPUWorker(vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test_method",
+                           devices=mock_devices)
+
+        available_mem = worker.determine_available_memory()
+        # Total limit: 2000 GiB
+        # Total cap: 2000 * 0.92 = 1840 GiB
+        # Total used: 300 GiB
+        # Total free = 1840 - 300 = 1540 GiB
+        expected_mem = int(2000 * 1024**3 * 0.92 - 300 * 1024**3)
+        assert available_mem == expected_mem
+
     #
     # --- Core Logic Tests ---
     #
@@ -347,16 +445,21 @@ class TestTPUWorker:
     # --- Profiling and Health Check Tests ---
     #
 
-    @patch('tpu_inference.worker.tpu_worker.jax')
-    @patch.dict('os.environ', {"PYTHON_TRACER_LEVEL": "1"}, clear=True)
-    def test_profile_start(self, mock_jax, mock_vllm_config):
-        """Tests starting the JAX profiler."""
+    def _create_worker(self,
+                       mock_vllm_config,
+                       profile_dir="/tmp/profile_dir") -> TPUWorker:
         worker = TPUWorker(vllm_config=mock_vllm_config,
                            local_rank=0,
                            rank=0,
                            distributed_init_method="test")
-        worker.profile_dir = "/tmp/profile_dir"
+        worker.profile_dir = profile_dir
+        return worker
 
+    @patch('tpu_inference.worker.tpu_worker.jax')
+    @patch.dict('os.environ', {"PYTHON_TRACER_LEVEL": "1"}, clear=True)
+    def test_profile_start(self, mock_jax, mock_vllm_config):
+        """Tests starting the JAX profiler."""
+        worker = self._create_worker(mock_vllm_config)
         worker.profile(is_start=True)
 
         mock_jax.profiler.ProfileOptions.assert_called_once()
@@ -367,21 +470,110 @@ class TestTPUWorker:
         assert kwargs['profiler_options'].python_tracer_level == 1
 
     @patch('tpu_inference.worker.tpu_worker.jax')
+    def test_profile_with_prefix_options(self, mock_jax, mock_vllm_config):
+        """Tests that profile_prefix options are correctly parsed and applied."""
+        worker = self._create_worker(mock_vllm_config)
+
+        mock_options = MagicMock()
+        mock_options.advanced_configuration = {}
+        mock_jax.profiler.ProfileOptions.return_value = mock_options
+
+        prefix = ("host_tracer_level:3;tpu_power_trace_level:2;"
+                  "tpu_perf_counters:true;enable_hlo_proto:false")
+        worker.profile(is_start=True, profile_prefix=prefix)
+
+        assert mock_options.host_tracer_level == 3
+        assert mock_options.advanced_configuration == {
+            "check_experimental_options": True,
+            "tpu_power_trace_level": 2,
+            "tpu_perf_counters": True,
+            "enable_hlo_proto": False,
+        }
+
+    @patch('tpu_inference.worker.tpu_worker.jax')
+    def test_profile_with_prefix_complex_options(self, mock_jax,
+                                                 mock_vllm_config):
+        """Tests that advanced options with commas (sub-lists) and colons are correctly parsed."""
+        worker = self._create_worker(mock_vllm_config)
+
+        mock_options = MagicMock()
+        mock_options.advanced_configuration = {}
+        mock_jax.profiler.ProfileOptions.return_value = mock_options
+
+        prefix = ("host_tracer_level:2;"
+                  "tpu_cpu_perf_counter_profile_events:event1,event2;"
+                  "tpu_cpu_perf_counter_configs:101:3:cpu_event")
+        worker.profile(is_start=True, profile_prefix=prefix)
+
+        assert mock_options.host_tracer_level == 2
+        assert mock_options.advanced_configuration == {
+            "check_experimental_options": True,
+            "tpu_cpu_perf_counter_profile_events": "event1,event2",
+            "tpu_cpu_perf_counter_configs": "101:3:cpu_event",
+        }
+
+    @patch('tpu_inference.worker.tpu_worker.jax')
+    def test_profile_with_prefix_options_invalid(self, mock_jax,
+                                                 mock_vllm_config):
+        """Tests that invalid options (e.g. containing special characters) throw ValueError."""
+        worker = self._create_worker(mock_vllm_config)
+
+        prefix = "invalid_opt:\"bad_val\""
+        with pytest.raises(ValueError,
+                           match="Invalid characters in option value"):
+            worker.profile(is_start=True, profile_prefix=prefix)
+
+    @patch('tpu_inference.worker.tpu_worker.jax')
+    def test_profile_with_prefix_options_malformed(self, mock_jax,
+                                                   mock_vllm_config):
+        """Tests that malformed options (without colons) throw ValueError."""
+        worker = self._create_worker(mock_vllm_config)
+
+        prefix = "host_tracer_level=5;another_option"
+        with pytest.raises(ValueError, match="Expected 'key:value' format"):
+            worker.profile(is_start=True, profile_prefix=prefix)
+
+    @patch('tpu_inference.worker.tpu_worker.jax')
+    def test_profile_with_prefix_options_non_ascii(self, mock_jax,
+                                                   mock_vllm_config):
+        """Tests that profile_prefix containing non-ascii characters throws ValueError."""
+        worker = self._create_worker(mock_vllm_config)
+
+        prefix = "host_tracer_level:3;test_option:🌟"
+        with pytest.raises(
+                ValueError,
+                match="profile_prefix contains non-ASCII characters"):
+            worker.profile(is_start=True, profile_prefix=prefix)
+
+    @patch('tpu_inference.worker.tpu_worker.jax')
+    def test_profile_with_prefix_options_empty_parts(self, mock_jax,
+                                                     mock_vllm_config):
+        """Tests that empty parts and extra semicolons are ignored gracefully."""
+        worker = self._create_worker(mock_vllm_config)
+
+        mock_options = MagicMock()
+        mock_options.advanced_configuration = {}
+        mock_jax.profiler.ProfileOptions.return_value = mock_options
+
+        prefix = "host_tracer_level:3;;tpu_power_trace_level:2;"
+        worker.profile(is_start=True, profile_prefix=prefix)
+
+        assert mock_options.host_tracer_level == 3
+        assert mock_options.advanced_configuration == {
+            "check_experimental_options": True,
+            "tpu_power_trace_level": 2,
+        }
+
+    @patch('tpu_inference.worker.tpu_worker.jax')
     def test_profile_stop(self, mock_jax, mock_vllm_config):
         """Tests stopping the JAX profiler."""
-        worker = TPUWorker(vllm_config=mock_vllm_config,
-                           local_rank=0,
-                           rank=0,
-                           distributed_init_method="test")
+        worker = self._create_worker(mock_vllm_config)
         worker.profile(is_start=False)
         mock_jax.profiler.stop_trace.assert_called_once()
 
     def test_check_health(self, mock_vllm_config):
         """Tests that check_health runs without error."""
-        worker = TPUWorker(vllm_config=mock_vllm_config,
-                           local_rank=0,
-                           rank=0,
-                           distributed_init_method="test")
+        worker = self._create_worker(mock_vllm_config)
         try:
             worker.check_health()
         except Exception as e:
@@ -403,10 +595,7 @@ class TestTPUWorker:
                                         runner_method_name, method_args,
                                         mock_vllm_config):
         """Tests methods that are simple pass-throughs to the TPUModelRunner."""
-        worker = TPUWorker(vllm_config=mock_vllm_config,
-                           local_rank=0,
-                           rank=0,
-                           distributed_init_method="test")
+        worker = self._create_worker(mock_vllm_config)
         worker.model_runner = MagicMock()
 
         # Call the worker method and assert the underlying runner method was called
@@ -503,3 +692,147 @@ class TestTPUWorker:
             assert os.environ["TPU_PROCESS_ADDRESSES"] == "localhost:9999"
             assert os.environ["TPU_PROCESS_PORT"] == "9999"
             assert os.environ["CLOUD_TPU_TASK_ID"] == "0"
+
+    #
+    # --- Weight Update Tests ---
+    #
+
+    def _weight_update_worker(self, mock_vllm_config):
+        """A worker with a stub model runner."""
+        worker = TPUWorker(vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test_method",
+                           devices=['tpu:0'])
+        worker.model_runner = MagicMock()
+        return worker
+
+    def test_full_update_cycle(self, mock_vllm_config):
+        """Tests that a weight update cycles the KV cache and closes cleanly."""
+        worker = self._weight_update_worker(mock_vllm_config)
+        runner = worker.model_runner
+
+        worker.start_weight_update()
+        worker.update_weights({})
+        worker.finish_weight_update()
+
+        runner.delete_kv_cache.assert_called_once()
+        runner.reinitialize_kv_cache.assert_called_once()
+        assert worker._weight_update_active is False
+
+    def test_kv_cache_untouched_when_not_freed(self, mock_vllm_config):
+        """Tests that free_kv_cache=False leaves the KV cache alone."""
+        worker = self._weight_update_worker(mock_vllm_config)
+        runner = worker.model_runner
+
+        # Also exercised after a session that did free it.
+        worker.start_weight_update()
+        worker.finish_weight_update()
+        runner.reset_mock()
+
+        worker.start_weight_update(free_kv_cache=False)
+        worker.finish_weight_update()
+
+        runner.delete_kv_cache.assert_not_called()
+        runner.reinitialize_kv_cache.assert_not_called()
+
+    def test_bind_raiden_sync_and_deferred_h2d(self, mock_vllm_config):
+        """Tests RaidenWorkerSync auto_h2d=False binding, metadata, and deferred h2d."""
+        from types import SimpleNamespace
+
+        from tpu_inference.rl import raiden_worker_sync
+
+        worker = self._weight_update_worker(mock_vllm_config)
+        fake_mesh = SimpleNamespace(
+            axis_names=("data", ),
+            shape={"data": 1},
+            local_mesh=SimpleNamespace(devices=SimpleNamespace(shape=(1, ))),
+        )
+
+        class FakeDevice:
+            platform = "tpu"
+
+        fake_device = FakeDevice()
+        fake_sharding = SimpleNamespace(
+            mesh=fake_mesh,
+            spec=("data", ),
+            shard_shape=lambda shape: shape,
+            devices_indices_map=lambda shape:
+            {fake_device: (slice(0, 2), slice(0, 2))},
+        )
+        fake_arr = SimpleNamespace(
+            shape=(2, 2),
+            ndim=2,
+            size=4,
+            nbytes=16,
+            dtype=raiden_worker_sync.jnp.dtype(raiden_worker_sync.jnp.float32),
+            devices=lambda: [fake_device],
+            sharding=fake_sharding,
+            addressable_shards=[
+                SimpleNamespace(
+                    device=fake_device,
+                    data=SimpleNamespace(nbytes=16),
+                )
+            ],
+        )
+        worker.model_runner.state = {"w": fake_arr}
+        worker.model_runner.model = SimpleNamespace()
+
+        calls = []
+
+        class FakeNativeSync:
+
+            def __init__(self, arrays, **kwargs):
+                self.arrays = arrays
+                self.kwargs = kwargs
+                self.local_port = 5555
+                self.listener_port = 6666
+                self.num_shards = 1
+
+            def wait_for_transfer_completion(self, uuid):
+                calls.append(("wait", uuid))
+
+            def h2d(self):
+                calls.append(("h2d", None))
+
+        with patch.object(
+                raiden_worker_sync,
+                "_ws_lib",
+                SimpleNamespace(WeightSynchronizer=FakeNativeSync),
+        ), patch.object(
+                raiden_worker_sync.jax, "block_until_ready"), patch.object(
+                    raiden_worker_sync.envs, "RAIDEN_H2D_SETTLE",
+                    False), patch(
+                        "tpu_inference.worker.tpu_worker.envs.VERIFY_WEIGHTS",
+                        False):
+            md = worker.bind_raiden_sync(
+                worker_index=2,
+                parallelism=4,
+                job_name="rollout_w2",
+                auto_h2d=False,
+            )
+            assert md["auto_h2d"] is False
+            assert worker._raiden_rl_weight_sync._sync.kwargs[
+                "auto_h2d"] is False
+
+            # Valid uuid triggers wait_for_transfer_completion(uuid) followed by h2d()
+            worker.raiden_h2d(uuid=9)
+            assert calls == [("wait", 9), ("h2d", None)]
+
+            # Missing or non-positive uuid raises ValueError when auto_h2d=False
+            for invalid_uuid in (None, 0, -1):
+                with pytest.raises(ValueError):
+                    worker.raiden_h2d(uuid=invalid_uuid)
+
+    def test_bind_raiden_sync_falls_back_to_rank(self, mock_vllm_config):
+        """Tests that bind_raiden_sync falls back to worker rank when worker_index is 0."""
+        worker = self._weight_update_worker(mock_vllm_config)
+        worker.rank = 3
+        with patch("tpu_inference.rl.raiden_worker_sync.RaidenWorkerSync"
+                   ) as mock_sync_cls:
+            mock_sync = MagicMock()
+            mock_sync_cls.return_value = mock_sync
+            worker.get_weights_state = MagicMock(return_value={})
+            worker.bind_raiden_sync(worker_index=0)
+            mock_sync_cls.assert_called_once()
+            assert mock_sync_cls.call_args.kwargs["worker_index"] == 3

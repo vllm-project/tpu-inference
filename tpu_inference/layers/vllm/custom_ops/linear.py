@@ -34,6 +34,13 @@ from tpu_inference.utils import get_mesh_shape_product
 @RowParallelLinear.register_oot
 class VllmRowParallelLinear(RowParallelLinear):
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        linear_config = getattr(self.quant_method, "linear_config", None)
+        if linear_config is not None:
+            linear_config.defer_all_reduce = not self.reduce_results
+
     def forward(
         self,
         input_,
@@ -80,6 +87,14 @@ class VllmQKVParallelLinear(QKVParallelLinear):
     value so vLLM's `_load_fused_module_from_checkpoint` (Phi-3-style fused
     QKV on disk) computes correct on-disk offsets. Other shape attributes
     (`num_kv_heads`, `output_sizes`, allocated buffers) stay inflated.
+
+    The mesh TP degree is kept in `self.mesh_tp_size`, *not* `self.tp_size`.
+    Under single-controller JAX SPMD every tensor in the torch model has its
+    global shape, and vLLM derives per-rank widths from `self.tp_size`
+    (e.g. the Transformers backend's QKV fuser splits the fused output as
+    `[s // qkv.tp_size for s in qkv.output_sizes]`). Overriding `tp_size`
+    with the mesh degree would make that split carve `q`, `k`, `v` out of
+    the first `1/tp` of the global output.
     """
 
     def __init__(self,
@@ -112,7 +127,7 @@ class VllmQKVParallelLinear(QKVParallelLinear):
 
         self.total_num_kv_heads = total_num_kv_heads
         self.num_kv_head_replicas = replicas
-        self.tp_size = tp
+        self.mesh_tp_size = tp
 
     def weight_loader(self,
                       param: Parameter,
@@ -161,13 +176,13 @@ class VllmQKVParallelLinear(QKVParallelLinear):
         out_jax = reorder_concatenated_tensor_for_sharding(
             out_jax,
             self.output_sizes,
-            self.tp_size,
+            self.mesh_tp_size,
             dim=-1,
         )
         q_jax, k_jax, v_jax = slice_sharded_tensor_for_concatenation(
             out_jax,
             self.output_sizes,
-            self.tp_size,
+            self.mesh_tp_size,
         )
 
         mesh = jax.sharding.get_abstract_mesh()

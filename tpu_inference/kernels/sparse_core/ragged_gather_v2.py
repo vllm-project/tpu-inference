@@ -215,10 +215,28 @@ def main_kernel_v2(
     )(indices_hbm_ref)
 
 
-@jax.jit
-def ragged_gather_v2(x: jax.Array, indices: jax.Array, start: jax.Array,
-                     end: jax.Array) -> jax.Array:
-    """Perform gather on indices within dynamic array start and end using BlockSpec."""
+@functools.partial(jax.jit, static_argnames=("max_row_subchunks", "trim_rows"))
+def ragged_gather_v2(x: jax.Array,
+                     indices: jax.Array,
+                     start: jax.Array,
+                     end: jax.Array,
+                     *,
+                     max_row_subchunks: int = 4,
+                     trim_rows: bool = True) -> jax.Array:
+    """Perform gather on indices within dynamic array start and end using BlockSpec.
+
+    Rows outside [start, end) are not meaningful. The kernel writes whole
+    blocks of num_lanes * num_cores * num_row_subchunks rows, so the output is
+    padded up to a multiple of the block size.
+
+    max_row_subchunks caps num_row_subchunks. Smaller blocks move fewer rows
+    when [start, end) is a small part of `indices`.
+
+    trim_rows=True copies the output down to indices.size rows;
+    trim_rows=False skips that copy and returns the padded output. It is safe to
+    be False since nothing downstream (gmm_v2, collect, etc.) reads the padded rows,
+    but it is still protected by a flag for now.
+    """
 
     assert x.ndim == 2, "Ragged gather only supports 2d inputs."
     assert indices.ndim == 1, "Ragged gather only supports 1d indices."
@@ -229,9 +247,12 @@ def ragged_gather_v2(x: jax.Array, indices: jax.Array, start: jax.Array,
         end = end[None]
 
     dtype = x.dtype
-    if dtype not in (jnp.bfloat16, jnp.float32, jnp.int8, jnp.int4):
+    # any data type with a size of {4,8,16,32} should be fine
+    dtype_bits = jax.dtypes.itemsize_bits(dtype)
+    if dtype_bits not in (4, 8, 16, 32):
         raise ValueError(
-            f"dtype must be f32, bf16, int8, or int4, but got {dtype}")
+            f"dtype bit width must be one of 4, 8, 16, or 32, but got {dtype_bits} ({dtype})"
+        )
 
     sc_info = pltpu.get_tpu_info().sparse_core
     if sc_info is None:
@@ -240,7 +261,6 @@ def ragged_gather_v2(x: jax.Array, indices: jax.Array, start: jax.Array,
     hidden_size = x.shape[-1]
     out_size = indices.size
 
-    dtype_bits = jax.dtypes.itemsize_bits(dtype)
     packing = 32 // dtype_bits
     col_size = calculate_col_size(hidden_size, packing)
 
@@ -252,7 +272,9 @@ def ragged_gather_v2(x: jax.Array, indices: jax.Array, start: jax.Array,
 
     # Calculate ideal num_row_subchunks to avoid too much padding overhead.
     num_row_subchunks = max(
-        1, min(4, (out_size + base_block_size - 1) // base_block_size))
+        1,
+        min(max_row_subchunks,
+            (out_size + base_block_size - 1) // base_block_size))
 
     row_subchunk_size = num_simd_lanes
     row_chunk_size = row_subchunk_size * num_row_subchunks
@@ -268,7 +290,7 @@ def ragged_gather_v2(x: jax.Array, indices: jax.Array, start: jax.Array,
         core_axis_name="core",
         subcore_axis_name="subcore",
     )
-    return core_map_helper.kernel(
+    out = core_map_helper.kernel(
         functools.partial(
             main_kernel_v2,
             core_axis_name=vector_mesh.core_axis_name,
@@ -289,4 +311,5 @@ def ragged_gather_v2(x: jax.Array, indices: jax.Array, start: jax.Array,
         ],
         mesh=vector_mesh,
         name="sc_ragged_gather_v2",
-    )(start, end, x, indices)[:out_size, :hidden_size]
+    )(start, end, x, indices)
+    return out[:out_size, :hidden_size] if trim_rows else out[:, :hidden_size]

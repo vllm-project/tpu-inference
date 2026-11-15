@@ -474,10 +474,9 @@ def ragged_paged_attention_kernel(
             def masked_store(ref, val, start, end, group=1):
                 iota = lax.broadcasted_iota(jnp.int32, ref.shape, 0) // group
                 mask = jnp.logical_and(iota >= start, iota < end)
-                pl.store(ref,
-                         idx=tuple(slice(None) for _ in ref.shape),
-                         val=val,
-                         mask=mask)
+                # jax 0.10.2 removed pl.store; masked store becomes a
+                # read-modify-write with jnp.where over the full ref.
+                ref[...] = jnp.where(mask, val, ref[...])
 
             def load_with_init(ref, init_val):
                 return jnp.where(kv_blk_idx == 0, jnp.full_like(ref, init_val),
@@ -804,7 +803,7 @@ def ragged_paged_attention(
     )
     in_specs = [
         q_block_spec,
-        pl.BlockSpec(memory_space=pltpu.ANY),
+        pl.BlockSpec(memory_space=pl.MemorySpace.ANY),
     ]
     out_specs = q_block_spec
     lm_scratch = pltpu.VMEM(

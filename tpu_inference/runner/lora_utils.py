@@ -16,9 +16,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import jax
 import numpy as np
-from flax import nnx
 from torchax.interop import jax_view
 from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
 from vllm.lora.request import LoRARequest
@@ -65,11 +63,7 @@ class LoraUtils:
         # `state_leaves` as their first arg, which for vllm-impl aliases
         # `state`. The LoRA load above reassigned `state` to a new dict, so
         # the prior `state_leaves` reference is stale.
-        if isinstance(self.runner.state, nnx.State):
-            self.runner.state_leaves = tuple(
-                jax.tree_util.tree_leaves(self.runner.state))
-        else:
-            self.runner.state_leaves = self.runner.state
+        self.runner.refresh_state_leaves()
 
     def extract_lora_metadata(self):
         if self.runner.lora_config is None:

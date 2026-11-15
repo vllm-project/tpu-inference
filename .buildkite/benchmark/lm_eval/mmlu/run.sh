@@ -46,7 +46,9 @@ if [[ "$DEVICE" == tpu7x-8 ]]; then
 fi
 
 CMD=(
-    lm_eval
+    python3
+    -m
+    scripts.vllm.integration.lm_eval_accuracy
     --model vllm
     --model_args "$MODEL_ARGS"
     --tasks mmlu_llama

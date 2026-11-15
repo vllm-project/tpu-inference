@@ -26,6 +26,8 @@ from jax.sharding import PartitionSpec as P
 from tpu_inference import utils
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention
+from tpu_inference.layers.common.attention_interface import \
+    rpa_block_size_kwargs
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -241,12 +243,21 @@ class Attention(nnx.Module):
         out_specs = (self.attn_o_tnh, kv_cache_spec)
 
         def _ragged_paged_attention(*args):
+            # Optional operator block-size overrides, read at the call site
+            # (outside the kernel, so the kernel stays self-contained) and
+            # forwarded only when set. Each env var is a comma-separated 4-tuple
+            # (bq_sz, bkv_sz, bq_csz, bkv_csz); an empty list (the default) is
+            # omitted entirely, so the stock call is unchanged and no v3-only
+            # kwarg is passed to a kernel that doesn't accept it.
+            block_size_kwargs = rpa_block_size_kwargs()
             return ragged_paged_attention(
                 *args,
                 sm_scale=q_TNH.shape[-1]**-0.5,
                 q_scale=q_scale,
                 k_scale=k_scale,
                 v_scale=v_scale,
+                use_causal_mask=attention_metadata.use_causal_mask,
+                **block_size_kwargs,
             )
 
         output_TNH, kv_cache = jax.jit(

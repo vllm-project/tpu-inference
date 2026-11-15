@@ -38,13 +38,15 @@ from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
-from tpu_inference.layers.common.moe import MoEBackend
+from tpu_inference import envs
+from tpu_inference.layers.common.moe import \
+    FusedMoEMethodBase as TpuFusedMoEMethodBase
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_moe_weights, quantize_moe_weights,
     shard_moe_weights)
 from tpu_inference.layers.common.quant_methods import MXFP4
-from tpu_inference.layers.common.quantization import \
-    dequantize_tensor_from_mxfp4_packed
+from tpu_inference.layers.common.quantization import (
+    MXFP4_REQUANTIZED_BLOCK_SIZE, dequantize_tensor_from_mxfp4_packed)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.interface.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
@@ -52,9 +54,7 @@ from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedLinearMethod
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_mesh_shape_product, t2j
-
-REQUANTIZED_BLOCK_SIZE = 512
+from tpu_inference.utils import get_mesh_shape_product, t2j, to_jax_dtype
 
 P = PartitionSpec
 
@@ -92,7 +92,7 @@ class VllmMxfp4Config(Mxfp4Config, VllmQuantConfig):
         return None
 
 
-class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
+class VllmMxfp4MoEMethod(Mxfp4MoEMethod, FusedMoEMethodBase):
 
     def __init__(
         self,
@@ -106,14 +106,16 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         # specific post processing to the weights.
         self.mxfp4_backend = Mxfp4MoeBackend.TRITON
 
+        # vLLM's Mxfp4MoEMethod.__init__ (intentionally skipped above) sets
+        # is_k3_situ_aiter for the ROCm AITER Kimi-K3 path, and inherited
+        # methods such as create_weights read it. That path never applies on
+        # TPU, so pin it to False.
+        self.is_k3_situ_aiter = False
+
         self.mesh = mesh
         self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
 
-        self.extra_backend_kwargs = {}
-        if self.moe_backend == MoEBackend.FUSED_MOE:
-            # When fused moe kernle is used, we pass extra arguments like
-            # tuned block sizes to the kernel.
-            self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
+        TpuFusedMoEMethodBase.__init__(self, self.moe_backend, ep_axis_name)
 
     def get_fused_moe_quant_config(
             self, layer: torch.nn.Module) -> FusedMoEQuantConfig | None:
@@ -158,6 +160,18 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
             w13_reorder_size = get_mesh_shape_product(
                 self.mesh, ShardingAxisName.MLP_TENSOR)
 
+            # Allow overriding target requantization dtype and block size.
+            # For DeepSeek-V4 on TPU v6e (Trillium), the default block size 512 results in intermediate dimension
+            # 3072 / 512 = 6, which cannot be divided by attn_dp_expert = 4 (standard on v6e slices),
+            # raising an IndivisibleError in JAX NamedSharding. Setting MOE_REQUANTIZE_BLOCK_SIZE = 32
+            # produces 3072 / 32 = 96 (divisible by 4), enabling clean sharding across the v6e device mesh.
+            desired_quant_dtype = to_jax_dtype(
+                envs.MOE_REQUANTIZE_WEIGHT_DTYPE
+            ) if envs.MOE_REQUANTIZE_WEIGHT_DTYPE else jnp.float4_e2m1fn
+            requant_block_size = int(
+                envs.MOE_REQUANTIZE_BLOCK_SIZE
+            ) if envs.MOE_REQUANTIZE_BLOCK_SIZE else MXFP4_REQUANTIZED_BLOCK_SIZE
+
             weights = quantize_moe_weights(
                 FusedMoEWeights(
                     w13_weight=w13_weight,
@@ -167,8 +181,8 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
                     w2_weight_scale=None,
                     w2_bias=w2_bias,
                 ),
-                jnp.float4_e2m1fn,
-                REQUANTIZED_BLOCK_SIZE,
+                desired_quant_dtype,
+                requant_block_size,
                 w13_interleave=w13_interleave,
             )
             return process_moe_weights(

@@ -24,10 +24,11 @@ from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
-from vllm.model_executor.layers.fused_moe import FusedMoE, RoutedExperts
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 
 # yapf: disable
 from tests.layers.common import utils as test_utils
+from tpu_inference.layers.vllm.interface.moe import FusedMoEFactory
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors_moe import \
     VllmCompressedTensorsW8A8Fp8MoEMethod
@@ -130,23 +131,23 @@ def test_fused_moe_method(mesh, num_tokens, intermediate_size, hidden_size,
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sp = False
+    vllm_config.additional_config["enable_sp"] = False
 
     # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
-
-    with set_current_vllm_config(vllm_config):
-        layer = FusedMoE(num_experts=num_experts,
-                         top_k=topk,
-                         hidden_size=hidden_size,
-                         intermediate_size=intermediate_size)
-        layer.moe_config.moe_parallel_config.use_ep = use_ep
     weight_quant = quant_config.target_scheme_map['Linear']['weights']
     input_quant = quant_config.target_scheme_map['Linear']['input_activations']
-    moe = quant_config.get_moe_config(layer.routed_experts)
-    method = VllmCompressedTensorsW8A8Fp8MoEMethod(weight_quant, input_quant,
-                                                   moe, mesh)
+
+    with set_current_vllm_config(vllm_config):
+        layer = FusedMoEFactory(num_experts=num_experts,
+                                top_k=topk,
+                                hidden_size=hidden_size,
+                                intermediate_size=intermediate_size)
+        layer.moe_config.moe_parallel_config.use_ep = use_ep
+        moe = quant_config.get_moe_config(layer.routed_experts)
+        method = VllmCompressedTensorsW8A8Fp8MoEMethod(weight_quant,
+                                                       input_quant, moe, mesh)
     method.create_weights(layer.routed_experts,
                           num_experts,
                           hidden_size,

@@ -12,17 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-site_name: vLLM TPU
+site_name: vLLM JAX
 site_url: !ENV READTHEDOCS_CANONICAL_URL
 repo_url: https://github.com/vllm-project/tpu-inference
 edit_uri: edit/main/docs/
 docs_dir: docs
+# Theme override templates live under docs/ but are not site content.
+exclude_docs: |
+  overrides/
 strict: true
 
 theme:
   name: material
-  logo: https://docs.vllm.ai/en/latest/assets/logos/vllm-logo-only-light.ico
-  favicon: https://docs.vllm.ai/en/latest/assets/logos/vllm-logo-only-light.ico
+  custom_dir: docs/overrides
+  # The header logo is a composite (vLLM + JAX) rendered by
+  # docs/overrides/partials/logo.html, so theme.logo is not set here.
+  favicon: assets/logos/vllm-logo-only-light.png
   palette:
     # Palette toggle for automatic mode
     - media: "(prefers-color-scheme)"
@@ -55,20 +60,28 @@ theme:
     - toc.follow
 
 nav:
-  - Home: README.md
-  - Getting Started:
-    - TPU Setup: getting_started/tpu_setup.md
-    - Installation: getting_started/installation.md
-    - Quickstart: getting_started/quickstart.md
+  - 'Home': README.md
+  - 'Getting Started':
+    - 'TPU Setup': getting_started/tpu_setup.md
+    - 'Installation': getting_started/installation.md
+    - 'Quickstart': getting_started/quickstart.md
+  - 'Features & Usage':
+    - 'Recommended Models': recommended_models.md
+    - 'Feature Matrix': features.md
+    - 'Deployment Recipes':
+      - 'v7x Recipes (Ironwood)': deployment_guides/ironwood.md
+      - 'v6e Recipes (Trillium)': deployment_guides/trillium.md
+    - 'Code Examples':
+      - 'Multi Modal Inference': api_and_code_examples/multi_modal_inference.md
+      - 'Offline LoRA': api_and_code_examples/offline_lora_inference.md
     - 'Out-of-Tree Usage': getting_started/out-of-tree.md
-  - 'Recommended Models and Features': recommended_models_features.md
-  - Developer Guides:
-    - 'JAX Model Development': developer_guides/jax_model_development.md
-    - 'Torch Model Development': developer_guides/torchax_model_development.md
-  - 'Recipes (External)':
-    - 'v7x (Ironwood)': https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/ironwood/vLLM
-    - 'v6e (Trillium)': https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM
-  - 'Profiling' : profiling.md
+  - 'Developers Guides':
+    - 'Contributing to vLLM JAX': developers_guide/contributing.md
+    - 'Adding a New Model to CI': developers_guide/buildkite.md
+    - 'JAX Model Development': developers_guide/jax_model_development.md
+    - 'Torchax Model Development': developers_guide/torchax_model_development.md
+    - 'Profiling' : developers_guide/profiling.md
+
 plugins:
   - search
   - same-dir
@@ -81,6 +94,8 @@ markdown_extensions:
   - attr_list
   - md_in_html
   - admonition
+  # GitHub-style `> [!NOTE]` callouts (shared with the GitHub README)
+  - github-callouts
   - pymdownx.details
   # For content tabs
   - pymdownx.superfences
@@ -95,7 +110,8 @@ markdown_extensions:
       line_spans: __span
       pygments_lang_class: true
   - pymdownx.inlinehilite
-  - pymdownx.snippets
+  - pymdownx.snippets:
+      check_paths: true
   # For emoji and icons
   - pymdownx.emoji:
       emoji_index: !!python/name:material.extensions.emoji.twemoji
@@ -107,8 +123,13 @@ markdown_extensions:
   - mdx_math:
       enable_dollar_delimiter: true
 
+extra_css:
+  - mkdocs/stylesheets/extra.css
+  - mkdocs/stylesheets/interactive.css
+
 extra_javascript:
   - https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS_HTML
+  - mkdocs/javascripts/interactive.js
 
 use_directory_urls: true
 

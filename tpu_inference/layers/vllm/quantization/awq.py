@@ -38,6 +38,8 @@ from vllm.model_executor.layers.quantization.base_config import \
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
+from tpu_inference.layers.common.moe import \
+    FusedMoEMethodBase as TpuFusedMoEMethodBase
 from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
@@ -49,7 +51,7 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
 from tpu_inference.layers.vllm.interface.moe import (
-    MoEBackend, select_moe_backend_from_fused_moe_config, vllm_moe_apply)
+    select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
 from tpu_inference.layers.vllm.quantization.unquantized import \
@@ -250,9 +252,7 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
         self.quant_config = quant_config
         self.mesh = mesh
         self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
-        self.extra_backend_kwargs = {}
-        if self.moe_backend == MoEBackend.FUSED_MOE:
-            self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name)
+        TpuFusedMoEMethodBase.__init__(self, self.moe_backend, ep_axis_name)
 
     @property
     def is_monolithic(self) -> bool:

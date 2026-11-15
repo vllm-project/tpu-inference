@@ -25,7 +25,8 @@ class QuantLinearConfig:
                  *,
                  enable_sp: bool,
                  output_sizes: list[int],
-                 weight_sharding: P | None = None):
+                 weight_sharding: P | None = None,
+                 defer_all_reduce: bool = False):
         # Output size across all TP ranks.
         self.output_sizes = output_sizes
         self.weight_sharding = weight_sharding if weight_sharding is not None else P(
@@ -36,6 +37,13 @@ class QuantLinearConfig:
         self.output_sharding = None
         self.mesh = None
 
+        # If True, defer the all-reduce (psum) over the contracting (in) axis of
+        # the matmul: it is not performed here even when that axis is sharded.
+        # The matmul then returns per-shard partial sums and the caller is
+        # responsible for reducing them later (e.g. fusing the reduction with a
+        # downstream collective).
+        self.defer_all_reduce = defer_all_reduce
+
         self.bias_sharding = P(self.weight_sharding[1])
         # n_shards is always the TP degree for the weight's output axis, derived
         # from the active mesh.  get_mesh_shape_product returns 1 when the axis
@@ -45,3 +53,18 @@ class QuantLinearConfig:
         self.enable_quantized_matmul_kernel = envs.ENABLE_QUANTIZED_MATMUL_KERNEL
         self.requant_block_size = envs.REQUANTIZE_BLOCK_SIZE
         self.requant_weight_dtype = to_jax_dtype(envs.REQUANTIZE_WEIGHT_DTYPE)
+
+    def get_sp_token_axes(self, x: jax.Array):
+        """Mesh axes the tokens of `x` stay sharded over outside attention.
+
+        None (default) keeps the usual ATTN_DATA token sharding in
+        sharded_matmul / sharded_quantized_matmul. VllmQuantLinearConfig
+        returns EXPERT_DATA when the sequence-parallel residual stream is on.
+
+        The default is needed: the common linear methods (quantization/fp8.py,
+        quantization/unquantized.py) call this unconditionally, and they are
+        also used with the JAX-path QuantLinearConfig
+        (layers/jax/quantization/configs.py), which doesn't override it.
+        """
+        del x
+        return None

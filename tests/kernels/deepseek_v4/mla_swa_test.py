@@ -19,21 +19,8 @@ import numpy as np
 from absl.testing import absltest, parameterized
 
 # Import the kernels
-from tpu_inference.kernels.experimental.deepseek_v4 import mla_swa
-
-
-def cdiv(a, b):
-    assert b != 0
-    return (a + b - 1) // b
-
-
-def align_to(x, a):
-    return cdiv(x, a) * a
-
-
-def get_dtype_packing(dtype):
-    bits = jax.dtypes.itemsize_bits(dtype)
-    return 32 // bits
+from tpu_inference.kernels.experimental.deepseek_v4.core_attention import \
+    mla_swa
 
 
 def get_kv_cache_shape(
@@ -49,6 +36,23 @@ def get_kv_cache_shape(
         kv_packing,
         align_to(kv_dim, 128),
     )
+
+
+DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
+
+
+def cdiv(a, b):
+    assert b != 0
+    return (a + b - 1) // b
+
+
+def align_to(x, a):
+    return cdiv(x, a) * a
+
+
+def get_dtype_packing(dtype):
+    bits = jax.dtypes.itemsize_bits(dtype)
+    return 32 // bits
 
 
 @jax.jit(donate_argnames="cache_kv")
@@ -100,64 +104,22 @@ def update_kv_cache(
     return cache_kv
 
 
-DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
-
-
-def quantize_and_dequantize_ref_cache(kv_c_cache):
-    total_num_pages, page_size_per_kv_packing, kv_packing, lkv_dim = (
-        kv_c_cache.shape)
-    page_size = page_size_per_kv_packing * kv_packing
-    kv_c_cache = kv_c_cache.reshape(total_num_pages, page_size, lkv_dim)
-
-    fp8_part = kv_c_cache[..., :448]
-    bf16_part = kv_c_cache[..., 448:512]
-
-    fp8_blocked = fp8_part.reshape(total_num_pages, page_size, 7, 64)
-    fp8_max = float(jnp.finfo(jnp.float8_e4m3fn).max)
-    x_amax = jnp.max(jnp.abs(fp8_blocked), axis=-1, keepdims=True)
-    x_amax = jnp.clip(x_amax, 1e-4, None)
-    sf = jnp.power(2.0, jnp.ceil(jnp.log2(x_amax / fp8_max)))
-
-    fp8_quant = (fp8_blocked * (1.0 / sf)).astype(jnp.float8_e4m3fn)
-    scales_quant = sf.reshape(total_num_pages, page_size,
-                              7).astype(jnp.float8_e8m0fnu)
-
-    fp8_dequant = (fp8_quant.astype(jnp.bfloat16) *
-                   scales_quant[..., None].astype(jnp.bfloat16)).reshape(
-                       total_num_pages, page_size, 448)
-    kv_c_cache = jnp.concatenate([fp8_dequant, bf16_part], axis=-1)
-
-    return kv_c_cache.reshape(total_num_pages, page_size_per_kv_packing,
-                              kv_packing, lkv_dim)
-
-
-def dequantize_swa_cache(swc_cache):
-    total_num_pages = swc_cache.shape[0]
-    # quantized has shape [total_num_pages, page_size_per_kv_packing, 4, 640]
-    page_size_per_kv_packing = swc_cache.shape[1]
-    quantized_flat = swc_cache.reshape(
-        total_num_pages * page_size_per_kv_packing * 4, 640)
-
-    fp8_uint8 = quantized_flat[..., :448]
-    bf16_uint8 = quantized_flat[..., 448:576]
-    scales_uint8 = quantized_flat[..., 576:583]
-
-    fp8_val = jax.lax.bitcast_convert_type(
-        fp8_uint8, jnp.float8_e4m3fn).astype(jnp.bfloat16)
-    bf16_uint8_reshaped = bf16_uint8.reshape(quantized_flat.shape[:-1] +
-                                             (64, 2))
-    rope_val = jax.lax.bitcast_convert_type(bf16_uint8_reshaped, jnp.bfloat16)
-    sf_val = jax.lax.bitcast_convert_type(
-        scales_uint8, jnp.float8_e8m0fnu).astype(jnp.bfloat16)
-
-    fp8_val_blocked = fp8_val.reshape(
-        total_num_pages * page_size_per_kv_packing * 4, 7, 64)
-    sf_val_expanded = sf_val[..., None]
-    dequant_nope = (fp8_val_blocked * sf_val_expanded).reshape(
-        total_num_pages * page_size_per_kv_packing * 4, 448)
-    dequantized_flat = jnp.concatenate([dequant_nope, rope_val], axis=-1)
-    return dequantized_flat.reshape(total_num_pages,
-                                    page_size_per_kv_packing * 4, 512)
+def reformat_swc_cache(swc_cache):
+    # Raw bf16 layout: uint8 [total_num_pages, slots, kv_packing, lkv_dim], where
+    # each token owns `slots_per_token` consecutive slots. Reinterpret the bytes
+    # as bf16
+    total_num_pages, slots, *_ = swc_cache.shape
+    slots_per_token = 2
+    tokens = slots // slots_per_token
+    row = swc_cache.reshape(total_num_pages, tokens, -1)
+    nb = row.shape[-1] // 256  # number of 128-lane (lo, hi) block pairs
+    row = row.reshape(total_num_pages, tokens, nb, 2, 128)
+    swc_cache_lo = row[..., 0, :]
+    swc_cache_hi = row[..., 1, :]
+    swc_cache = (swc_cache_hi.astype(jnp.uint16) << 8) | swc_cache_lo.astype(
+        jnp.uint16)
+    swc_cache = swc_cache.reshape(total_num_pages, tokens, nb * 128)
+    return jax.lax.bitcast_convert_type(swc_cache, jnp.bfloat16)
 
 
 def ref_implementation(
@@ -210,8 +172,7 @@ def ref_implementation(
     kv_c_cache = updated_cache_kv[..., :lkv_dim]
 
     # Quantize and dequantize kv_c_cache to simulate the loss of quantization
-    kv_c_cache = quantize_and_dequantize_ref_cache(kv_c_cache).reshape(
-        total_num_pages, page_size, lkv_dim)
+    kv_c_cache = kv_c_cache.reshape(total_num_pages, page_size, lkv_dim)
 
     outputs = []
     ls = []
@@ -261,15 +222,15 @@ def ref_implementation(
             mask = jnp.logical_or(mask, q_span - sliding_window >= kv_span)
         attn = jnp.where(mask, mask_value, attn)
         m = jnp.max(attn, axis=-1, keepdims=True)
-        L = jnp.sum(jnp.exp(attn - m), axis=-1, keepdims=True)
+        l_sum = jnp.sum(jnp.exp(attn - m), axis=-1, keepdims=True)
         l_sinks = jnp.exp(attention_sinks[..., None, None] - m)
-        l_final = L + l_sinks
+        l_final = l_sum + l_sinks
         attn = jnp.exp(attn - m) / l_final
 
         # out_i: [q_len, actual_num_q_heads, lkv_dim]
         out_i = jnp.einsum("nqk,kl->qnl", attn, v_i).astype(q_i.dtype)
         outputs.append(out_i)
-        ls.append(jnp.transpose(L[..., 0]))
+        ls.append(jnp.transpose(l_sum[..., 0]))
         ms.append(jnp.transpose(m[..., 0]))
 
     return (
@@ -296,11 +257,10 @@ class CorrectnessTest(parameterized.TestCase):
         self.num_heads = 128
         self.head_dim = 512
         self.lkv_dim = 640
-        self.sliding_window = 32
-        self.page_size = 12
+        self.sliding_window = 16
+        self.page_size = 16
         self.attention_sinks = jnp.array(
-            self.rng.random(size=(self.num_heads, ), dtype=np.float32) *
-            300.0 + 200.0)
+            self.rng.random(size=(self.num_heads, ), dtype=np.float32))
 
         self.ref_pages_per_seq = cdiv(self.sliding_window * 10, self.page_size)
         self.ref_page_indices = jnp.arange(self.batch_size *
@@ -317,14 +277,16 @@ class CorrectnessTest(parameterized.TestCase):
             dtype=self.kv_dtype,
         )
 
-        # SW cache is in DDS V4 FP8 format.
+        # DSv4's SWA cache overlay onto the CSA's compressed kv cache.
+        # shape: [total_num_pages, page_size_csa_compressed_cache, 4, 128]
+        # Physical page holds a few extra tokens beyond the logical page_size.
         self.sw_physical_page_size = self.page_size + 4
         self.swc_cache = jnp.zeros(
             (
                 self.batch_size * self.ref_pages_per_seq,
-                self.sw_physical_page_size // self.kv_packing,
-                get_dtype_packing(jnp.uint8),
-                640,
+                self.sw_physical_page_size * 2,  # each token takes 2 slots
+                4,
+                128,
             ),
             dtype=jnp.uint8,
         )
@@ -351,21 +313,16 @@ class CorrectnessTest(parameterized.TestCase):
         valid_mask = valid_mask.reshape(batch_size * pages_per_seq,
                                         page_size // kv_packing, kv_packing, 1)
 
-        ref_cache_masked = np.where(
-            valid_mask, quantize_and_dequantize_ref_cache(self.ref_cache), 0)
+        ref_cache_masked = np.where(valid_mask, self.ref_cache, 0)
+        swa_cache = reformat_swc_cache(self.swc_cache[:, :page_size * 2, :, :])
+        swa_cache = swa_cache.reshape(batch_size * pages_per_seq,
+                                      page_size // kv_packing, kv_packing, 512)
+        swa_cache_masked = np.where(valid_mask, swa_cache, 0)
 
-        kv_packing_uint8 = get_dtype_packing(jnp.uint8)
-        swc_dequant = dequantize_swa_cache(
-            self.swc_cache[:, :page_size // kv_packing_uint8, :, :])
-        swc_dequant = swc_dequant.reshape(batch_size * pages_per_seq,
-                                          page_size // kv_packing, kv_packing,
-                                          512)
-        swc_cache_masked = np.where(valid_mask, swc_dequant, 0)
-
-        diff_cache = np.abs(ref_cache_masked - swc_cache_masked)
+        diff_cache = np.abs(ref_cache_masked - swa_cache_masked)
         print(f"Max Diff Cache: {np.max(diff_cache)}")
         np.testing.assert_allclose(ref_cache_masked,
-                                   swc_cache_masked,
+                                   swa_cache_masked,
                                    rtol=0.1,
                                    atol=0.1)
 
@@ -385,7 +342,7 @@ class CorrectnessTest(parameterized.TestCase):
             sliding_window=self.sliding_window,
         )
 
-        out, self.swc_cache, L, m = (
+        out, self.swc_cache, l_sum, m = (
             mla_swa.mla_sliding_window_ragged_paged_attention(
                 q,
                 new_kv,
@@ -399,6 +356,7 @@ class CorrectnessTest(parameterized.TestCase):
                 sliding_window=self.sliding_window,
                 num_queries_per_block=8,
                 num_kv_pages_per_block=2,
+                q_compute_block_size=2,
                 logical_page_size=self.page_size,
             ))
 
@@ -412,13 +370,13 @@ class CorrectnessTest(parameterized.TestCase):
         print(f"cu_q_lens: {cu_q_lens}")
         np.testing.assert_allclose(out_base, out, rtol=0.1, atol=0.1)
 
-        L.block_until_ready()
+        l_sum.block_until_ready()
         m.block_until_ready()
         l_base.block_until_ready()
         m_base.block_until_ready()
-        assert L.shape == (total_tokens, self.num_heads)
+        assert l_sum.shape == (total_tokens, self.num_heads)
         assert m.shape == (total_tokens, self.num_heads)
-        np.testing.assert_allclose(l_base, L, rtol=0.1, atol=0.1)
+        np.testing.assert_allclose(l_base, l_sum, rtol=0.1, atol=0.1)
         np.testing.assert_allclose(m_base, m, rtol=0.1, atol=0.1)
 
         # Cache comparison

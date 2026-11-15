@@ -22,7 +22,8 @@ from flax import nnx
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from tpu_inference.layers.common.moe import MoEBackend, moe_apply
+from tpu_inference.layers.common.moe import (FusedMoEMethodBase, MoEBackend,
+                                             moe_apply)
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, UnfusedMoEWeights, process_unquantized_moe_weights,
     shard_moe_weights)
@@ -33,7 +34,7 @@ from tpu_inference.layers.common.utils import (
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import (JaxEinsum,
                                              JaxMergedColumnParallelLinear)
-from tpu_inference.layers.jax.moe.moe import JaxMoE
+from tpu_inference.layers.jax.moe.moe import JaxMoE, JaxRoutedExperts
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.logger import init_logger
@@ -166,18 +167,17 @@ class UnquantizedMergedLinearMethod(UnquantizedLinearMethod):
         assign_and_shard_param(param, fused, param_name=param_name)
 
 
-class UnquantizedFusedMoEMethod(QuantizeMethodBase):
+class UnquantizedFusedMoEMethod(QuantizeMethodBase, FusedMoEMethodBase):
     """
-    Unquantized method for JAXMoE layer.
-
-    TODO (jacobplatin): support weight loading -- currently, model-dependent.
+    Unquantized method for JaxRoutedExperts layers.
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.extra_backend_kwargs = {}
+    def __init__(self,
+                 layer: JaxRoutedExperts | JaxMoE,
+                 ep_axis_name: str = "model"):
+        FusedMoEMethodBase.__init__(self, layer.moe_backend, ep_axis_name)
 
-    def process_weights_after_loading(self, layer: JaxMoE, *args,
+    def process_weights_after_loading(self, layer: JaxRoutedExperts, *args,
                                       **kwargs) -> bool:
         """
         Process weights after loading.
@@ -189,9 +189,13 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
             layer: The layer to process.
         """
         if layer.moe_backend == MoEBackend.FUSED_MOE:
-            if layer.edf_sharding:
-                e2df_sharding = (layer.edf_sharding[0], None,
-                                 layer.edf_sharding[1], layer.edf_sharding[2])
+            # TODO(#3041): Remove once we remove JaxMoe from code base.
+            edf_sharding = getattr(layer, 'edf_sharding', ())
+            if edf_sharding:
+                e2df_sharding = (edf_sharding[0], None, edf_sharding[1],
+                                 edf_sharding[2])
+            else:
+                e2df_sharding = (None, None, None, None)
             # fuse the weights into w13: [Gate, Up]
             w_gate = layer.kernel_gating_EDF.value
             w_up = layer.kernel_up_proj_EDF.value
@@ -205,7 +209,10 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
             del layer.kernel_gating_EDF
             del layer.kernel_up_proj_EDF
 
-            ep_axis_name = layer.efd_sharding[0]
+            # TODO(#3041): Remove once we remove JaxMoe from code base.
+            # VllmUnquantizedFusedMoEMethod passes ep_axis_name through __init__
+            efd_sharding = getattr(layer, 'efd_sharding', ())
+            ep_axis_name = efd_sharding[0] if efd_sharding else None
 
             self.extra_backend_kwargs = {
                 "ep_axis_name": ep_axis_name,
@@ -280,7 +287,7 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
 
         return True
 
-    def apply_jax(self, layer: JaxMoE, x: jax.Array, *,
+    def apply_jax(self, layer: JaxRoutedExperts, x: jax.Array, *,
                   router_logits: jax.Array) -> jax.Array:
         """Forward pass for MoE layer.
         Args:
@@ -350,7 +357,7 @@ class UnquantizedConfig(QuantizationConfig):
         if isinstance(layer, JaxMergedColumnParallelLinear):
             # Read the weight's partition spec so n_shards = get_mesh_shape_product
             # picks up the TP degree from the active mesh automatically.
-            sharding = layer.weight.get_metadata().get("sharding", None)
+            sharding = layer.weight.get_metadata().get("out_sharding", None)
             weight_sharding = P(*sharding) if sharding is not None else None
             linear_config = QuantLinearConfig(enable_sp=False,
                                               output_sizes=list(
@@ -367,6 +374,6 @@ class UnquantizedConfig(QuantizationConfig):
             linear_config = QuantLinearConfig(enable_sp=False,
                                               output_sizes=[out_size])
             return UnquantizedLinearMethod(linear_config)
-        if isinstance(layer, JaxMoE):
-            return UnquantizedFusedMoEMethod()
+        if isinstance(layer, (JaxRoutedExperts, JaxMoE)):
+            return UnquantizedFusedMoEMethod(layer)
         return None

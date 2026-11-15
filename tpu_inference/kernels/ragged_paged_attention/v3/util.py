@@ -56,9 +56,11 @@ def get_tpu_version() -> int:
         return -1
     if kind.endswith(' lite'):
         kind = kind[:-len(' lite')]
-    if kind.endswith('p') or kind.endswith('e'):
+    if kind.endswith('p') or kind.endswith('e') or kind.endswith('i'):
         kind = kind[:-1]
-    if kind == 'TPU7x':
+    if kind.startswith('TPU7'):
         return 7
+    if kind.startswith('TPU8'):
+        return 8
     assert kind[:-1] == 'TPU v', kind
     return int(kind[-1])

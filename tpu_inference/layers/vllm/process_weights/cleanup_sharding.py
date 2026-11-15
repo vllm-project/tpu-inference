@@ -105,10 +105,11 @@ def _convert_to_torchax_and_shard(tensor: torch.Tensor,
                     weight_dtype=to_jax_dtype(tensor.dtype),
                 ))
         else:
-            dtype = to_jax_dtype(tensor.dtype)
-            np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
-            return torch_view(
-                jax.device_put(np_tensor, sharding).astype(dtype))
+            # unquantized imports this module, so it can only be imported
+            # lazily.
+            from tpu_inference.layers.vllm.quantization.unquantized import \
+                _pathways_device_put
+            return torch_view(_pathways_device_put(tensor, sharding))
     if isinstance(tensor, torchax.tensor.Tensor):
         tensor = jax_view(tensor)
     else:
@@ -185,8 +186,20 @@ def _replicate_fused_moe_hash_indices_tables_and_e_score_correction_bias(
         table = getattr(module, "hash_indices_table", None)
         if table is not None:
             sharded = _shard_tensor_to_tpu_replicated(table, mesh)
-            module.hash_indices_table = torch.nn.Parameter(sharded,
-                                                           requires_grad=False)
+            # Upstream RoutedExperts stores `hash_indices_table` as a plain
+            # attribute (the gate owns the nn.Parameter), so it is neither in
+            # named_parameters() nor overwritable with a Parameter: assigning
+            # one would go through register_parameter and raise
+            # KeyError("attribute 'hash_indices_table' already exists").
+            # Register the replicated copy under a non-colliding buffer name
+            # so it is returned by _extract_all_params_buffers and fed into
+            # the jitted step via functional_call (see interface/moe.py).
+            if "tpu_hash_indices_table" in module._buffers:
+                module.tpu_hash_indices_table = sharded
+            else:
+                module.register_buffer("tpu_hash_indices_table",
+                                       sharded,
+                                       persistent=False)
         e_score_correction_bias = getattr(module, "e_score_correction_bias",
                                           None)
         if e_score_correction_bias is not None:

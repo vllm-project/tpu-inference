@@ -63,6 +63,20 @@ class UtilsTest(jtu.JaxTestCase):
         self.assertEqual(result['b'][0].sharding, self.sharding)
         self.assertAllClose(result['a'], t1)
 
+    def test_general_device_put_multihost_passes_dtype(self):
+        # A host that owns no shard never calls the callback, so the dtype
+        # must be passed explicitly.
+        tensor = jnp.ones((8, 8), dtype=jnp.bfloat16)
+
+        with mock.patch.object(envs, 'TPU_MULTIHOST_BACKEND', 'ray'):
+            with mock.patch('jax.make_array_from_callback') as mock_make_array:
+                mock_make_array.return_value = tensor
+
+                general_device_put(tensor, self.sharding)
+
+                _, kwargs = mock_make_array.call_args
+                self.assertEqual(kwargs['dtype'], jnp.bfloat16)
+
     def test_general_device_put_multihost_single_tensor(self):
         tensor = jnp.ones((8, 8))
 
