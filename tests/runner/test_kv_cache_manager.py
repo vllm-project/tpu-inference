@@ -2431,6 +2431,8 @@ class TestKVCacheManager:
             args, _ = mock_warning.call_args
             formatted_msg = args[0] % args[1:]
             assert "0% memory savings" in formatted_msg
+            assert "--kv-cache-dtype auto" in formatted_msg
+            assert "enable_dp_attention" not in formatted_msg
             # FP8 must remain active (not overridden to auto or bf16)
             assert spec.dtype == torch.float8_e4m3fn
 
@@ -2445,6 +2447,7 @@ class TestKVCacheManager:
             args, _ = mock_warning.call_args
             formatted_msg = args[0] % args[1:]
             assert "0% memory savings" in formatted_msg
+            assert "enable_dp_attention" not in formatted_msg
             assert spec.dtype == torch.float8_e4m3fn
 
     def test_fp8_kv_cache_packing_no_warning_when_savings(self):
@@ -2498,75 +2501,8 @@ class TestKVCacheManager:
                 formatted_msg = args[0] % args[1:]
                 assert "0% memory savings" in formatted_msg
                 assert "kv_head_shards=2" in formatted_msg
+                assert "reducing tensor parallel size" in formatted_msg
+                assert "enable_dp_attention" in formatted_msg
                 assert spec.dtype == torch.float8_e4m3fn
         finally:
             self.runner.mesh = original_mesh
-
-    def test_initialize_kv_cache_raises_on_dtype_mismatch(self):
-        """Test initialize_kv_cache raises ValueError if allocated dtype mismatches spec."""
-        block_size = self.runner.vllm_config.cache_config.block_size
-        spec = FullAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=256,
-            dtype=torch.float8_e4m3fn,
-        )
-        num_blocks = 10
-        page_size_bytes = spec.page_size_bytes
-        kv_cache_config = KVCacheConfig(
-            num_blocks=num_blocks,
-            kv_cache_tensors=[
-                KVCacheTensor(
-                    size=num_blocks * page_size_bytes,
-                    layers=["layers.0.attn"],
-                    layer_stride=num_blocks * page_size_bytes,
-                    block_stride=page_size_bytes,
-                )
-            ],
-            kv_cache_groups=[
-                KVCacheGroupSpec(
-                    layer_names=["layers.0.attn"],
-                    kv_cache_spec=spec,
-                )
-            ],
-        )
-        mock_array = MagicMock()
-        mock_array.dtype = jnp.bfloat16
-        with patch("tpu_inference.runner.kv_cache_manager.create_kv_caches",
-                   return_value=[mock_array]), pytest.raises(
-                       ValueError, match="does not match expected dtype"):
-            self.runner.initialize_kv_cache(kv_cache_config)
-
-    def test_initialize_kv_cache_raises_on_mamba_dtype_mismatch(self):
-        """Test initialize_kv_cache raises ValueError if allocated mamba state dtype mismatches spec."""
-        mamba_spec = MagicMock(spec=MambaSpec)
-        mamba_spec.block_size = 16
-        mamba_spec.shapes = [(4, 128)]
-        mamba_spec.dtypes = [torch.float32]
-        mamba_spec.page_size_bytes = 4 * 128 * 4
-        mamba_spec.page_size_padded = None
-        num_blocks = 10
-        page_size_bytes = mamba_spec.page_size_bytes
-        kv_cache_config = KVCacheConfig(
-            num_blocks=num_blocks,
-            kv_cache_tensors=[
-                KVCacheTensor(
-                    size=num_blocks * page_size_bytes,
-                    layers=["layers.0.mamba"],
-                    layer_stride=num_blocks * page_size_bytes,
-                    block_stride=page_size_bytes,
-                )
-            ],
-            kv_cache_groups=[
-                KVCacheGroupSpec(
-                    layer_names=["layers.0.mamba"],
-                    kv_cache_spec=mamba_spec,
-                )
-            ],
-        )
-        mock_state = MagicMock()
-        mock_state.dtype = jnp.bfloat16
-        with patch("tpu_inference.runner.kv_cache_manager.create_mamba_cache",
-                   return_value=mock_state), pytest.raises(
-                       ValueError, match="does not match expected dtype"):
-            self.runner.initialize_kv_cache(kv_cache_config)

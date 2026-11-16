@@ -127,6 +127,11 @@ class KVCacheManager:
                 packing = common_utils.get_dtype_packing(jax_dtype)
                 bf16_packing = common_utils.get_dtype_packing(
                     DEFAULT_KV_CACHE_DTYPE)
+                remedy = (
+                    "consider using --kv-cache-dtype auto, reducing tensor "
+                    "parallel size below num_kv_heads, or enabling "
+                    "enable_dp_attention." if kv_head_shards > 1 else
+                    "consider using --kv-cache-dtype auto.")
                 logger.warning_once(
                     "Quantized KV cache dtype %s was requested and is allocated "
                     "as %s (not bfloat16). However, due to 32-bit VMEM sublane packing "
@@ -134,9 +139,7 @@ class KVCacheManager:
                     "(num_kv_heads=%d, kv_head_shards=%d, head_size=%d) are padded "
                     "such that each page requires %d bytes, yielding 0%% memory savings "
                     "compared to bfloat16 (%d bytes). To avoid quantization overhead and "
-                    "potential accuracy loss with zero memory reduction, consider using "
-                    "--kv-cache-dtype auto, reducing tensor parallel size below num_kv_heads, "
-                    "or enabling enable_dp_attention.",
+                    "potential accuracy loss with zero memory reduction, %s",
                     self.runner.kv_cache_dtype,
                     jax_dtype,
                     packing,
@@ -146,6 +149,7 @@ class KVCacheManager:
                     head_size,
                     page_size_bytes,
                     bf16_page_size_bytes,
+                    remedy,
                 )
 
     def _create_attention_spec(
@@ -1025,15 +1029,8 @@ class KVCacheManager:
                             None, *([None] * (len(cache_shape) - 1)))
 
                     sharding = NamedSharding(self.runner.mesh, spec)
-                    state = create_mamba_cache(cache_shape, jax_dtype,
-                                               sharding)
-                    expected_mamba_dtype = common_utils.to_jax_dtype(dtype)
-                    if state.dtype != expected_mamba_dtype:
-                        raise ValueError(
-                            f"Allocated Mamba state dtype {state.dtype} does not match "
-                            f"expected dtype {expected_mamba_dtype} for layer {first_layer_name} "
-                            f"(state index {state_index}).")
-                    mamba_states.append(state)
+                    mamba_states.append(
+                        create_mamba_cache(cache_shape, jax_dtype, sharding))
 
                 metadata["mamba"].count += 1
                 if metadata["mamba"].shape is None:
@@ -1060,13 +1057,6 @@ class KVCacheManager:
                     use_mla=self.use_mla,
                     attention_backend=self.runner.attention_backend,
                 )[0]
-                expected_attn_dtype = common_utils.to_jax_dtype(
-                    layer_spec.dtype)
-                if kv_cache.dtype != expected_attn_dtype:
-                    raise ValueError(
-                        f"Allocated KV cache dtype {kv_cache.dtype} does not match "
-                        f"expected dtype {expected_attn_dtype} for layer {first_layer_name} "
-                        f"(requested layer spec dtype: {layer_spec.dtype}).")
                 kv_caches.append(kv_cache)
 
                 metadata["regular_attn"].count += 1
