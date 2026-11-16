@@ -457,7 +457,8 @@ class VllmModelWrapper:
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=kv_caches,
                     mesh=self.mesh,
-                    layer_name_to_kvcache_index=layer_name_to_kvcache_index
+                    layer_name_to_kvcache_index=layer_name_to_kvcache_index,
+                    vllm_config=self.vllm_config,
             ), set_forward_context(attn_metadata=attn_metadata,
                                    vllm_config=self.vllm_config,
                                    num_tokens=num_tokens):
