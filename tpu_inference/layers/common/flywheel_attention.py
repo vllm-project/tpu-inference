@@ -849,7 +849,8 @@ class FlywheelAttentionBackend(AttentionBackend):
     ) -> tuple[jax.Array, jax.Array]:
         # Note: the kernels pad head_dim themselves (align_head_dim), so q
         # arrives at the model's head_dim and head_dim_original is unused;
-        # decode_query_size is 1 for every vLLM model.
+        # decode_query_size is unused (always 1 here since check_config
+        # rejects speculative decoding and USE_BATCHED_RPA_KERNEL).
         check_supported(
             q,
             sinks=sinks,

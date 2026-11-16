@@ -285,9 +285,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
                 # `query_start_loc`.
                 spec_config = getattr(vllm_model_wrapper_context.vllm_config,
                                       "speculative_config", None)
-                raw_spec = getattr(spec_config, "num_speculative_tokens", 0)
-                num_spec_tokens = (int(raw_spec) if isinstance(raw_spec, int)
-                                   and not isinstance(raw_spec, bool) else 0)
+                num_spec_tokens = (spec_config.num_speculative_tokens
+                                   if spec_config else 0)
                 decode_query_size = (num_spec_tokens +
                                      1 if envs.USE_BATCHED_RPA_KERNEL
                                      and num_spec_tokens > 0 else 1)
