@@ -34,6 +34,12 @@ ROUTING_MOE_REMOTE_SCATTER=0 selects tokamax's local mode instead of the remote
 scatter above: each device sums its experts' rows into a partial result for
 every token, and a reduce-scatter combines the partial results.
 
+ROUTING_MOE_FP8_COMBINE=1 has routing_gmm write its expert-output rows in fp8
+with per-lane f32 scales (tokamax's lane-strided format) instead of bf16, and
+output_reduce dequantizes them while summing each token's top-k rows. With
+remote scatter this halves the bytes sent to the token owners; in local mode
+the rows stay on the device, so it saves only local memory traffic.
+
 With the sequence-parallel residual stream (`enable_sp`, see
 sharding.keeps_tokens_sharded) the tokens arrive already sharded over
 EXPERT_DATA, one share per device, so the replica split and the all-gather
@@ -190,6 +196,11 @@ def routing_moe_func(hidden_states: jax.Array,
     replica split and gather are skipped and the output is returned sharded
     over EXPERT_DATA too.
     """
+    from jax.experimental.pallas import tpu as pltpu
+    from tokamax._src.ops.experimental.routing_moe.common import \
+        layout_util as tk_layout_util
+    from tokamax._src.ops.experimental.routing_moe.common import \
+        out_format as tk_out_format
     from tokamax._src.ops.experimental.routing_moe.layer import \
         modular as tk_modular
     from tokamax._src.ops.experimental.routing_moe.layer import plan as tk_plan
@@ -208,18 +219,36 @@ def routing_moe_func(hidden_states: jax.Array,
                                 ((0, 0), (0, padded_hidden - hidden_size)))
     weight_dtype = "fp8" if w1.dtype == jnp.float8_e4m3fn else "bf16"
     scatter = "remote" if envs.ROUTING_MOE_REMOTE_SCATTER else "local"
+    # ROUTING_MOE_FP8_COMBINE: routing_gmm sends its output rows to
+    # output_reduce in fp8 with per-lane scales instead of bf16.
+    scatter_format = None
+    if envs.ROUTING_MOE_FP8_COMBINE:
+        # routing_gmm writes fp8 output rows in whole chunks of (fp8 values per
+        # 32-bit word) x lanes; tokamax's routing_moe/gmm/config.py rejects
+        # other output widths, so compute the chunk the same way it does.
+        fp8_chunk_cols = (tk_layout_util.get_packing(jnp.float8_e4m3fn) *
+                          pltpu.get_tpu_info().num_lanes)
+        if padded_hidden % fp8_chunk_cols == 0:
+            scatter_format = tk_out_format.ActivationFormat(
+                dtype=jnp.float8_e4m3fn, quant=tk_out_format.LaneStrided())
+        else:
+            logger.warning_once(
+                "[MoE]: ROUTING_MOE_FP8_COMBINE ignored: hidden size %d is "
+                "not a multiple of %d; combine rows stay bf16.", padded_hidden,
+                fp8_chunk_cols)
+    combine_dtype = "fp8" if scatter_format is not None else "bf16"
     if keep_token_sharding:
         logger.info_once(
             "[MoE]: routing_moe over %d devices, %d experts each, token rows "
-            "sharded over EXPERT_DATA; %s weights, %s scatter.",
-            mesh.devices.size, num_experts // mesh.devices.size, weight_dtype,
-            scatter)
+            "sharded over EXPERT_DATA; %s weights, %s scatter, %s combine "
+            "rows.", mesh.devices.size, num_experts // mesh.devices.size,
+            weight_dtype, scatter, combine_dtype)
     else:
         logger.info_once(
             "[MoE]: routing_moe over %d devices, %d experts each, token rows "
-            "split over replica axes %s; %s weights, %s scatter.",
-            mesh.devices.size, num_experts // mesh.devices.size, replica,
-            weight_dtype, scatter)
+            "split over replica axes %s; %s weights, %s scatter, %s combine "
+            "rows.", mesh.devices.size, num_experts // mesh.devices.size,
+            replica, weight_dtype, scatter, combine_dtype)
 
     def to_ep_rows(t: jax.Array) -> jax.Array:
         if keep_token_sharding:
@@ -258,7 +287,8 @@ def routing_moe_func(hidden_states: jax.Array,
         ep_axis=ep_axes,
         use_sp=True,
         moe_plan=tk_plan.RoutingMoEPlan(
-            remote_scatter=envs.ROUTING_MOE_REMOTE_SCATTER),
+            remote_scatter=envs.ROUTING_MOE_REMOTE_SCATTER,
+            scatter_format=scatter_format),
     )
     if keep_token_sharding:
         out = _reshard_rows(out, mesh, ShardingAxisName.EXPERT,
