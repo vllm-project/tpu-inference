@@ -421,3 +421,50 @@ class TestPersistentBatchManager(unittest.TestCase):
 
             manager.update_states(scheduler_output_changed, None)
             mock_assert.assert_called_once()
+
+    def test_update_states_restores_spec_decode_tokens_for_readded_request(
+            self):
+        req = _create_cached_request("req-0")
+        req.output_token_ids = [10]
+        req.num_computed_tokens = 3
+        requests = {req.req_id: req}
+        input_batch = InputBatch(
+            max_num_reqs=4,
+            max_model_len=16,
+            max_num_batched_tokens=16,
+            pin_memory=False,
+            vocab_size=128,
+            block_sizes=[16],
+            is_spec_decode=True,
+            num_speculative_tokens=3,
+        )
+        input_batch.add_request(req)
+
+        manager = PersistentBatchManager(requests,
+                                         input_batch,
+                                         encoder_cache={},
+                                         uses_mrope=False,
+                                         model_config=MagicMock(),
+                                         is_last_rank=True)
+
+        # Unschedule req-0 on step t
+        manager.update_states(_make_scheduler_output(), None)
+        self.assertEqual(input_batch.num_reqs, 0)
+
+        # Re-schedule req-0 on step t+1 with 3 draft tokens
+        sched_out = _make_scheduler_output(scheduled_req_ids=[req.req_id])
+        sched_out.scheduled_cached_reqs.num_computed_tokens = [3]
+        sched_out.scheduled_cached_reqs.num_output_tokens = [1]
+        sched_out.scheduled_spec_decode_tokens = {req.req_id: [20, 21, 22]}
+        sched_out.num_scheduled_tokens = {req.req_id: 4}
+        sched_out.total_num_scheduled_tokens = 4
+
+        manager.update_states(sched_out, None)
+
+        self.assertEqual(input_batch.num_reqs, 1)
+        self.assertEqual(input_batch.num_tokens_no_spec[0], 4)
+        self.assertEqual(input_batch.num_tokens[0], 7)
+        np.testing.assert_array_equal(
+            input_batch.token_ids_cpu[0, :7],
+            np.array([1, 2, 3, 10, 20, 21, 22], dtype=np.int32),
+        )
