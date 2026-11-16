@@ -196,9 +196,6 @@ def routing_moe_func(hidden_states: jax.Array,
     replica split and gather are skipped and the output is returned sharded
     over EXPERT_DATA too.
     """
-    from jax.experimental.pallas import tpu as pltpu
-    from tokamax._src.ops.experimental.routing_moe.common import \
-        layout_util as tk_layout_util
     from tokamax._src.ops.experimental.routing_moe.common import \
         out_format as tk_out_format
     from tokamax._src.ops.experimental.routing_moe.layer import \
@@ -220,22 +217,12 @@ def routing_moe_func(hidden_states: jax.Array,
     weight_dtype = "fp8" if w1.dtype == jnp.float8_e4m3fn else "bf16"
     scatter = "remote" if envs.ROUTING_MOE_REMOTE_SCATTER else "local"
     # ROUTING_MOE_FP8_COMBINE: routing_gmm sends its output rows to
-    # output_reduce in fp8 with per-lane scales instead of bf16.
+    # output_reduce in fp8 with per-lane scales instead of bf16. tokamax
+    # rejects hidden sizes that don't fill whole fp8 chunks.
     scatter_format = None
     if envs.ROUTING_MOE_FP8_COMBINE:
-        # routing_gmm writes fp8 output rows in whole chunks of (fp8 values per
-        # 32-bit word) x lanes; tokamax's routing_moe/gmm/config.py rejects
-        # other output widths, so compute the chunk the same way it does.
-        fp8_chunk_cols = (tk_layout_util.get_packing(jnp.float8_e4m3fn) *
-                          pltpu.get_tpu_info().num_lanes)
-        if padded_hidden % fp8_chunk_cols == 0:
-            scatter_format = tk_out_format.ActivationFormat(
-                dtype=jnp.float8_e4m3fn, quant=tk_out_format.LaneStrided())
-        else:
-            logger.warning_once(
-                "[MoE]: ROUTING_MOE_FP8_COMBINE ignored: hidden size %d is "
-                "not a multiple of %d; combine rows stay bf16.", padded_hidden,
-                fp8_chunk_cols)
+        scatter_format = tk_out_format.ActivationFormat(
+            dtype=jnp.float8_e4m3fn, quant=tk_out_format.LaneStrided())
     combine_dtype = "fp8" if scatter_format is not None else "bf16"
     if keep_token_sharding:
         logger.info_once(

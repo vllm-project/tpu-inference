@@ -18,7 +18,6 @@ it to a dense f32 reference instead of matching the GMM path bit for bit.
 moe_apply raises for layers the kernel can't run.
 """
 
-from types import SimpleNamespace
 from unittest import mock
 
 import jax
@@ -187,20 +186,15 @@ def test_fp8_combine_matches_dense_reference(remote_scatter):
 
 
 @pytest.mark.usefixtures("tokamax_kernel")
-@pytest.mark.parametrize("fp8_combine, hidden", [(False, 512), (True, 512),
-                                                 (True, 256)])
-def test_fp8_combine_sets_scatter_format(fp8_combine, hidden):
+@pytest.mark.parametrize("fp8_combine", [False, True])
+def test_fp8_combine_sets_scatter_format(fp8_combine):
     """The flag passes tokamax an fp8 lane-strided scatter_format, and no
-    scatter_format (bf16 rows) when it's off or the hidden size isn't a
-    multiple of 512."""
+    scatter_format (bf16 rows) when it's off."""
     from tokamax._src.ops.experimental.routing_moe.common import out_format
     from tokamax._src.ops.experimental.routing_moe.layer import modular
     mesh = _make_mesh()
-    # The kernel is mocked, so this also runs off TPU; give the fp8 chunk
-    # check TPU lane info.
-    with (mock.patch.object(fused_v2_test, "HIDDEN", hidden),
-          mock.patch("jax.experimental.pallas.tpu.get_tpu_info",
-                     return_value=SimpleNamespace(num_lanes=128)),
+    # The kernel is mocked, so this also runs off TPU.
+    with (mock.patch.object(fused_v2_test, "HIDDEN", 512),
           mock.patch("tpu_inference.envs.ROUTING_MOE_FP8_COMBINE",
                      fp8_combine),
           mock.patch.object(modular,
@@ -210,7 +204,7 @@ def test_fp8_combine_sets_scatter_format(fp8_combine, hidden):
         w = _weights(mesh, True)
         _run_kernel(mesh, x, gating, *w)
     fmt = kernel.call_args.kwargs["moe_plan"].scatter_format
-    if fp8_combine and hidden % 512 == 0:
+    if fp8_combine:
         assert fmt.dtype == jnp.float8_e4m3fn
         assert isinstance(fmt.quant, out_format.LaneStrided)
     else:
