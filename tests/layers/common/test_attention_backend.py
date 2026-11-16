@@ -310,6 +310,74 @@ def test_pallas_backend_passes_decode_query_size(mesh, monkeypatch,
     np.testing.assert_array_equal(out_np, expected_decode_query_size)
 
 
+def test_draft_step_fun_populates_vllm_config_in_wrapper_context(
+        mesh, monkeypatch):
+    from contextlib import nullcontext
+
+    import torch
+
+    from tpu_inference.models.vllm import vllm_model_wrapper
+    from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
+    from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+        get_vllm_model_wrapper_context
+
+    monkeypatch.setattr(vllm_model_wrapper, "get_tpu_quantization_config",
+                        lambda vllm_config, mesh: None)
+    monkeypatch.setattr(vllm_model_wrapper, "set_forward_context",
+                        lambda **kwargs: nullcontext())
+
+    vllm_config = SimpleNamespace(
+        quant_config=None,
+        speculative_config=SimpleNamespace(method="mtp",
+                                           num_speculative_tokens=3),
+    )
+    wrapper = VllmModelWrapper(
+        vllm_config=vllm_config,
+        rng=jax.random.key(0),
+        mesh=mesh,
+        is_draft_model=True,
+    )
+    wrapper.model = SimpleNamespace()
+
+    captured = {}
+
+    def fake_functional_call(model, params, kwargs, tie_weights=False):
+        ctx = get_vllm_model_wrapper_context()
+        captured["vllm_config"] = ctx.vllm_config
+        captured["shared_attn_metadata"] = ctx.shared_attn_metadata
+        captured["layer_name_to_kvcache_index"] = (
+            ctx.layer_name_to_kvcache_index)
+        captured["spec_step_idx"] = kwargs.get("spec_step_idx")
+        return kwargs["hidden_states"]
+
+    monkeypatch.setattr(torch.func, "functional_call", fake_functional_call)
+
+    draft_step_fn = wrapper.jit_step_func()
+    kv_cache = jnp.zeros((2, 16, 2, HEAD_DIM), jnp.bfloat16)
+    input_ids = jnp.zeros((NUM_TOKENS, ), dtype=jnp.int32)
+    hidden = jnp.ones((NUM_TOKENS, HEAD_DIM), dtype=jnp.bfloat16)
+    positions = jnp.arange(NUM_TOKENS)
+
+    with jax.disable_jit():
+        new_kv_caches, out_hidden, aux_hidden, _ = draft_step_fn(
+            {},
+            [kv_cache],
+            input_ids,
+            hidden,
+            AttentionMetadata(input_positions=positions),
+            (("0", 0), ),
+            spec_step_idx=1,
+        )
+
+    assert captured["vllm_config"] is vllm_config
+    assert captured["shared_attn_metadata"] is None
+    assert captured["layer_name_to_kvcache_index"] == {"0": 0}
+    assert captured["spec_step_idx"] == 1
+    assert len(new_kv_caches) == 1
+    assert out_hidden.shape == (NUM_TOKENS, HEAD_DIM)
+    assert len(aux_hidden) == 1
+
+
 def test_default_backend_skips_the_process_check(monkeypatch):
     monkeypatch.setenv("TPU_MULTIHOST_BACKEND", "ray")
 

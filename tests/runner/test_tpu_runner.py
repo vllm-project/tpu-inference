@@ -1055,6 +1055,160 @@ class TestTPUJaxRunner:
         assert observed_in_propose["tokens"] == [10, 20, 30, 40, 50, 60, 70]
         assert observed_in_propose["mamba_read_offset"] == 2
 
+    @pytest.mark.parametrize(
+        ("logprobs_mode", "do_sampling", "expect_processed"),
+        [
+            ("processed_logprobs", True, True),
+            ("processed_logprobs", False, False),
+            ("raw_logprobs", True, False),
+        ],
+    )
+    @patch("tpu_inference.runner.tpu_runner._jax_logprobs_materialize")
+    @patch("tpu_inference.runner.tpu_runner._jax_logprobs_copy_to_host_async",
+           side_effect=lambda x: x)
+    @patch("tpu_inference.runner.tpu_runner.compute_and_gather_logprobs")
+    @patch("tpu_inference.runner.tpu_runner.extend_logits_simple")
+    @patch("tpu_inference.runner.tpu_runner.process_and_extend_logits")
+    @patch("tpu_inference.runner.tpu_runner.extract_last_sampled_tokens")
+    @patch(
+        "tpu_inference.runner.tpu_runner.runner_utils.host_extract_sampled_tokens"
+    )
+    def test_sample_from_logits_spec_decode_logprobs_target_logits_dtype(
+        self,
+        mock_host_extract,
+        mock_extract_last,
+        mock_process_and_extend,
+        mock_extend_simple,
+        mock_compute_logprobs,
+        mock_logprobs_d2h,
+        mock_logprobs_materialize,
+        logprobs_mode,
+        do_sampling,
+        expect_processed,
+    ):
+        """`process_and_extend_logits` receives float32 `target_logits` (cast before `maybe_forbid_compile`), while `extend_logits_simple` keeps bfloat16."""
+        self.runner.scheduler_config.async_scheduling = False
+        self.runner.speculative_config = SimpleNamespace(
+            num_speculative_tokens=3)
+        self.runner.kv_cache_config = SimpleNamespace(has_mamba_layers=False)
+        self.runner.aux_output_worker = None
+        self.runner.model_config.logprobs_mode = logprobs_mode
+        self.runner.model_config.max_logprobs = 5
+        self.runner.rng_params_for_sampling = jax.random.key(0)
+        self.runner.mesh = jax.sharding.Mesh(
+            np.array([jax.devices("cpu")[0]]),
+            axis_names=("data", ),
+        )
+
+        class _TrackingForbidCompile:
+
+            def __init__(self):
+                self.depth = 0
+
+            def __enter__(self):
+                self.depth += 1
+
+            def __exit__(self, *exc):
+                self.depth -= 1
+
+        tracker = _TrackingForbidCompile()
+        self.runner.maybe_forbid_compile = tracker
+
+        req_state = SimpleNamespace(
+            req_id="req1",
+            num_computed_tokens=4,
+            num_tokens=4,
+            output_token_ids=[],
+            mamba_read_offset=0,
+        )
+        self.runner.requests = {"req1": req_state}
+        self.runner.input_batch = MagicMock()
+        self.runner.input_batch.num_reqs = 1
+        self.runner.input_batch.req_ids = ["req1"]
+        self.runner.input_batch.req_id_to_index = {"req1": 0}
+        self.runner.input_batch.vocab_size = 16
+        self.runner.input_batch.token_ids_cpu = np.zeros((16, 64),
+                                                         dtype=np.int32)
+        self.runner.input_batch.num_tokens_no_spec = np.zeros(16,
+                                                              dtype=np.int32)
+        self.runner.input_batch.num_tokens = np.zeros(16, dtype=np.int32)
+        self.runner.input_batch.num_prompt_logprobs = {}
+
+        mock_host_extract.return_value = [[50]]
+        mock_extract_last.return_value = (
+            jnp.array([50], dtype=jnp.int32),
+            jnp.array([0], dtype=jnp.int32),
+        )
+        self.runner.speculative_decoding_manager.propose_draft_token_ids = (
+            MagicMock())
+        self.runner._select_from_array_fn = MagicMock(
+            side_effect=lambda arr, idx, *_: jnp.zeros(
+                (idx.shape[0], 16), dtype=jnp.bfloat16))
+        self.runner._extract_draft_token_ids = MagicMock(
+            return_value=jnp.zeros((3, ), dtype=jnp.int32))
+        self.runner.rejection_sampler = MagicMock(
+            return_value=jnp.array([[50, -1, -1, -1]], dtype=jnp.int32))
+        mock_process_and_extend.side_effect = (lambda *args, **kwargs: (
+            assert_in_forbid(),
+            jnp.zeros((4, 16), dtype=jnp.float32),
+        )[1])
+        mock_extend_simple.side_effect = (lambda *args, **kwargs: (
+            assert_in_forbid(),
+            jnp.zeros((4, 16), dtype=jnp.float32),
+        )[1])
+        mock_compute_logprobs.return_value = MagicMock()
+        mock_logprobs_materialize.return_value = MagicMock()
+
+        def assert_in_forbid():
+            assert tracker.depth > 0
+
+        tpu_sampling_metadata = SimpleNamespace(do_sampling=do_sampling,
+                                                logprobs=True)
+        spec_decode_metadata = SimpleNamespace(
+            bonus_logits_indices=jnp.array([0], dtype=jnp.int32),
+            target_logits_indices=jnp.array([0, 1, 2], dtype=jnp.int32),
+            final_logits_indices=jnp.array([0, 1, 2, 3], dtype=jnp.int32),
+            draft_lengths=jnp.array([3], dtype=jnp.int32),
+        )
+        scheduler_output = SimpleNamespace(
+            num_scheduled_tokens={"req1": 4},
+            scheduled_spec_decode_tokens={"req1": [50, 60, 70]},
+            total_num_scheduled_tokens=4,
+        )
+
+        with patch(
+                "tpu_inference.runner.tpu_runner.sample",
+                return_value=(
+                    jnp.array([70], dtype=jnp.int32),
+                    jnp.zeros((1, 16), dtype=jnp.float32),
+                ),
+        ):
+            self.runner._sample_from_logits(
+                scheduler_output=scheduler_output,
+                attn_metadata=MagicMock(),
+                tpu_sampling_metadata=tpu_sampling_metadata,
+                input_ids=jnp.zeros((4, ), dtype=jnp.int32),
+                hidden_states=jnp.zeros((4, 8), dtype=jnp.float32),
+                logits=jnp.zeros((4, 16), dtype=jnp.bfloat16),
+                aux_hidden_states=None,
+                spec_decode_metadata=spec_decode_metadata,
+                kv_connector_output=None,
+                padded_num_reqs=1,
+            )
+
+        if expect_processed:
+            mock_process_and_extend.assert_called_once()
+            mock_extend_simple.assert_not_called()
+            passed_target_logits = mock_process_and_extend.call_args[0][1]
+            assert passed_target_logits.dtype == jnp.float32
+        else:
+            mock_extend_simple.assert_called_once()
+            mock_process_and_extend.assert_not_called()
+            passed_target_logits = mock_extend_simple.call_args[0][0]
+            passed_bonus_logits = mock_extend_simple.call_args[0][1]
+            assert passed_target_logits.dtype == jnp.bfloat16
+            assert passed_bonus_logits.dtype == jnp.bfloat16
+
     def test_jax_logprobs_materialize_spec_decode_zero_draft_tokens(self):
         from vllm.v1.outputs import LogprobsTensors
 
