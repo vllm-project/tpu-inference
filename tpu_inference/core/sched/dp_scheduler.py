@@ -970,14 +970,9 @@ class DPScheduler(SchedulerInterface):
         self._get_result(rank, SchedulerCommand.ADD_REQUEST)
 
     def _send_unsent_requests(self) -> None:
-        """Send the routed round-robin requests, one message per rank.
+        """Send held round-robin requests as one ADD_REQUESTS message per rank.
 
-        All sends go out before the acks are read, so the ranks add their
-        requests in parallel, each in arrival order. In a 128-rank RL rollout
-        (2,048 requests per step) this saved about 1.3 s per step over one
-        blocking ADD_REQUEST round trip per request. With log_stats on, the
-        rank stamps each request's QUEUED event when it adds it here, so the
-        reported queue time leaves out the time the request was held.
+        Sends to all ranks before reading acks so workers unpickle in parallel.
         """
         unsent = self._unsent_requests
         self._unsent_requests = defaultdict(list)
