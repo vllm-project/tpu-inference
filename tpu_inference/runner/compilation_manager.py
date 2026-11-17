@@ -199,9 +199,14 @@ class CompilationManager:
                 # AOT lower not supported here (e.g. a jit whose body contains a
                 # nested jit with compiler_options). Fall back to warmup-only — the
                 # warmup pass will trigger inline compile.
+                # exc_info keeps the traceback: without it a lowering failure
+                # that also breaks warmup only shows up as a bare message
+                # (e.g. through RayDistributedExecutor workers).
                 logger.info(
                     "AOT lower skipped for %s (%r); will compile in warmup.",
-                    name, e)
+                    name,
+                    e,
+                    exc_info=True)
                 return
 
         # Compilation is thread-safe

@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING
 import jax
 import jax.numpy as jnp
 import numpy as np
-from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
@@ -100,13 +99,16 @@ class MultiModalManager:
                     dst_start = mrope_pos_ptr
                     dst_end = mrope_pos_ptr + completion_part_len
 
-                    MRotaryEmbedding.get_next_input_positions_tensor(
-                        out=self.runner.mrope_positions_cpu,
-                        out_offset=dst_start,
-                        mrope_position_delta=req.mrope_position_delta,
-                        context_len=num_computed_tokens + prompt_part_len,
-                        num_new_tokens=completion_part_len,
-                    )
+                    # Completion tokens share one position across all three
+                    # M-RoPE sections, offset by the request's position delta.
+                    # (Inlined from MRotaryEmbedding.get_next_input_positions_
+                    # tensor, which vllm-project/vllm#63373 removed.)
+                    start_pos = (req.mrope_position_delta +
+                                 num_computed_tokens + prompt_part_len)
+                    self.runner.mrope_positions_cpu[:, dst_start:dst_end] = (
+                        np.arange(start_pos,
+                                  start_pos + completion_part_len,
+                                  dtype=self.runner.mrope_positions_cpu.dtype))
 
                     mrope_pos_ptr += completion_part_len
 

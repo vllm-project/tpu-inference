@@ -115,6 +115,7 @@ class TestStructuredDecodingManager:
             req1 = CachedRequestState(
                 req_id="req-1",
                 prompt_token_ids=[1],
+                prefill_token_ids=[1],
                 output_token_ids=[],
                 sampling_params=mock_sampling_params,
                 block_ids=([1], ),
@@ -127,6 +128,7 @@ class TestStructuredDecodingManager:
             req2 = CachedRequestState(
                 req_id="req-2",
                 prompt_token_ids=[2],
+                prefill_token_ids=[2],
                 output_token_ids=[],
                 sampling_params=mock_sampling_params,
                 block_ids=([2], ),
@@ -139,6 +141,7 @@ class TestStructuredDecodingManager:
             req3 = CachedRequestState(
                 req_id="req-3",
                 prompt_token_ids=[3],
+                prefill_token_ids=[3],
                 output_token_ids=[],
                 sampling_params=mock_sampling_params,
                 block_ids=([3], ),

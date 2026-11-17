@@ -129,6 +129,21 @@ class VllmQKVParallelLinear(QKVParallelLinear):
         self.num_kv_head_replicas = replicas
         self.mesh_tp_size = tp
 
+    @property
+    def tpu_split_sizes(self) -> list[int]:
+        """Global (q, k, v) widths of what `forward` returns.
+
+        `output_sizes` stays inflated by the KV-head replicas (weight loading
+        and the sharding helpers need that), but `forward` merges the replicas
+        back into one copy, so a caller that splits the fused output must use
+        these widths instead. Read by the vLLM Transformers-backend split that
+        `transformers_backend.global_view` installs.
+        """
+        q = self.total_num_heads * self.head_size
+        k = self.total_num_kv_heads * self.head_size
+        v = self.total_num_kv_heads * self.v_head_size
+        return [q, k, v]
+
     def weight_loader(self,
                       param: Parameter,
                       loaded_weight: torch.Tensor,
@@ -170,8 +185,19 @@ class VllmQKVParallelLinear(QKVParallelLinear):
         if self.num_kv_head_replicas == 1:
             return super().forward(x)
 
-        out, bias = super().forward(x)
+        # With return_bias=False (as vLLM's Transformers backend builds its
+        # linear layers) the parent returns only the output tensor.
+        if self.return_bias:
+            out, bias = super().forward(x)
+        else:
+            out, bias = super().forward(x), None
         out_jax = jax_view(out)
+        # The shard_map below is written for 2-D (num_tokens, features)
+        # activations, which vLLM's native models pass. vLLM's Transformers
+        # backend passes (batch, seq, features); flatten the leading dims so
+        # the sharding specs line up, and restore them at the end.
+        lead_shape = out_jax.shape[:-1]
+        out_jax = out_jax.reshape(-1, out_jax.shape[-1])
 
         out_jax = reorder_concatenated_tensor_for_sharding(
             out_jax,
@@ -238,4 +264,7 @@ class VllmQKVParallelLinear(QKVParallelLinear):
             v_jax = _mark_kv_head_replicated(v_jax)
 
         out_jax = jnp.concatenate([q_jax, k_jax, v_jax], axis=-1)
+        out_jax = out_jax.reshape(*lead_shape, out_jax.shape[-1])
+        if not self.return_bias:
+            return torch_view(out_jax)
         return torch_view(out_jax), bias

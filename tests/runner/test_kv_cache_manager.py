@@ -175,6 +175,7 @@ class TestKVCacheManager:
         prefill_request_state = CachedRequestState(
             req_id="test_req_1",
             prompt_token_ids=list(range(prompt_len)),
+            prefill_token_ids=list(range(prompt_len)),
             output_token_ids=[],
             sampling_params=mock_sampling_params,
             block_ids=tuple([prefill_block_ids]),

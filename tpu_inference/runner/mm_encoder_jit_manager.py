@@ -17,11 +17,14 @@ device-bound methods, inheriting everything algorithmic:
   Inherited unchanged
     * ``__init__`` budget derivation + validation (reads the upstream
       ``compilation_config.encoder_cudagraph_*`` knobs).
-    * ``_generate_budgets`` / ``_find_smallest_fitting_budget_given_tokens``.
+    * ``_find_smallest_fitting_budget_given_tokens``.
     * ``_execute_local`` — the greedy smallest-first bin-packing loop.
     * ``supports_modality`` / ``get_cumulative_stats`` / ``capture``.
 
   Overridden for XLA
+    * ``_generate_budgets`` — keeps power-of-two budgets. Each budget is a
+      separate XLA compile at warmup, so upstream's finer CUDA-graph grid
+      (vllm-project/vllm#65227) would multiply compile time on TPU.
     * ``_capture_budget_graph`` — prime the ``jax.jit`` cache for a budget
       (the XLA analog of CUDA-graph capture) instead of recording a graph.
     * ``_run_budget_graph`` — host-pad the replay buffers to the budget's
@@ -159,7 +162,15 @@ class _TorchaxEncoderModelAdapter:
         # ops (e.g. ``vllm_ir.rms_norm`` in the ViT block norms) reach torchax
         # as opaque OpOverloads it has no lowering for, and dispatch dies with
         # "torchax Tensors can only do math within the torchax environment".
-        with torchax.default_env(), enable_torch_wrap(False):
+        # ``inference_mode(False)`` + ``no_grad``: vLLM's _execute_local calls
+        # this under ``torch.inference_mode()`` (vllm-project/vllm#65227).
+        # Inference mode skips the autograd dispatch keys where composite ops
+        # (chunk, split, view, layer_norm, ...) decompose, so on the weights
+        # (torchax tensors created outside inference mode) they reach torchax
+        # undecomposed and fail with "aten::chunk has no lowering". torchax
+        # does not use torch autograd, so plain no_grad keeps the same intent.
+        with torch.inference_mode(False), torch.no_grad(), \
+                torchax.default_env(), enable_torch_wrap(False):
             torchax_kwargs = {
                 k: jax.tree.map(self._torchax_view_if_torch, v)
                 for k, v in mm_kwargs.items()
@@ -345,6 +356,32 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
             "max_frames_per_batch=%d template_count=%d", self.token_budgets,
             self._capture_axes, self.max_batch_size, self.max_frames_per_batch,
             len(self.budget_templates))
+
+    @staticmethod
+    def _generate_budgets(
+        min_budget: int,
+        max_budget: int,
+        cap: int | None = None,
+    ) -> list[int]:
+        """Power-of-two token budgets from min_budget up to max_budget.
+
+        Upstream (vllm-project/vllm#65227) switched to a finer grid, which is
+        cheap for CUDA graphs (shared capture buffers) but costs one XLA compile
+        per budget here, so keep the power-of-two grid. `cap` (from
+        `encoder_cudagraph_max_token_budget`) limits the largest budget, as
+        upstream does.
+        """
+        if cap is not None:
+            max_budget = min(max_budget, max(cap, min_budget))
+        budgets: list[int] = []
+        b = min_budget
+        while b <= max_budget:
+            budgets.append(b)
+            b *= 2
+        # Always include max_budget if it is not a power-of-two step.
+        if not budgets or budgets[-1] < max_budget:
+            budgets.append(max_budget)
+        return budgets
 
     def _call_prepare_capture_inputs(self, budget: int, max_batch_size: int,
                                      max_frames_per_batch: int,

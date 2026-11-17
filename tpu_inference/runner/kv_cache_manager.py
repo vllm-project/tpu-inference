@@ -1828,6 +1828,7 @@ class KVCacheManager:
             sampling_params=request.sampling_params,
             block_ids=tuple(block_ids),
             num_computed_tokens=request.num_computed_tokens,
+            prefill_token_ids=request.prefill_token_ids,
             lora_request=request.lora_request,
             mm_features=getattr(request, "mm_features", []),
             pooling_params=getattr(request, "pooling_params", None),
