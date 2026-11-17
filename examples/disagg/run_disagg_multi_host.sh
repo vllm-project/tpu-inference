@@ -248,6 +248,60 @@ if [ "$TPU_VERSION" = "tpu7x" ]; then
     PREFILL_TPU_PORTS=(8476 8477)
     DECODE_TPU_PORTS=(9476 9477)
 fi
+
+# Order TPU_VISIBLE_CHIPS indices by (NUMA node, PCI BDF) so that on 8-chip VMs
+# spanning two 4-chip trays (e.g. ct6e-standard-8t 2x4), prefill and decode each
+# receive a contiguous 2x2 tray even when /dev/vfio/* group IDs are interleaved.
+TOTAL_CHIPS_NEEDED=$(( NUM_HOSTS_PER_INSTANCE * 2 ))
+mapfile -t ORDERED_CHIPS < <(python3 - <<'PY' 2>/dev/null || true
+import glob
+import os
+import re
+
+bdf_re = re.compile(r"^(?:([0-9a-fA-F]+):)?([0-9a-fA-F]+):([0-9a-fA-F]+)\.([0-9a-fA-F]+)$")
+accel = glob.glob("/dev/accel*")
+if accel:
+    for idx in range(len(accel)):
+        print(idx)
+else:
+    entries = []
+    scanner_id = 0
+    for path in sorted(glob.glob("/dev/vfio/[0-9]*")):
+        group = os.path.basename(path)
+        if not group.isdigit() or not os.access(path, os.R_OK):
+            continue
+        dev_dir = f"/sys/kernel/iommu_groups/{group}/devices"
+        devs = sorted(os.listdir(dev_dir))
+        if not devs:
+            raise RuntimeError("empty iommu devices")
+        bdf = devs[0]
+        vendor_path = f"/sys/bus/pci/devices/{bdf}/vendor"
+        if os.path.exists(vendor_path):
+            with open(vendor_path, encoding="utf-8") as vf:
+                if int(vf.read().strip(), 16) != 0x1AE0:
+                    continue
+        numa = 0
+        numa_path = f"/sys/bus/pci/devices/{bdf}/numa_node"
+        if os.path.exists(numa_path):
+            with open(numa_path, encoding="utf-8") as nf:
+                numa = max(0, int(nf.read().strip()))
+        m = bdf_re.match(bdf)
+        bdf_key = tuple(int(g or "0", 16) for g in m.groups()) if m else (0, 0, 0, 0)
+        entries.append((numa, bdf_key, scanner_id))
+        scanner_id += 1
+    entries.sort()
+    for _, _, sid in entries:
+        print(sid)
+PY
+)
+if [ "${#ORDERED_CHIPS[@]}" -lt "$TOTAL_CHIPS_NEEDED" ]; then
+    ORDERED_CHIPS=()
+    for ((c=0; c<TOTAL_CHIPS_NEEDED; c++)); do
+        ORDERED_CHIPS+=("$c")
+    done
+fi
+echo "Resolved TPU chip order: ${ORDERED_CHIPS[*]}"
+
 ######## Prefill hosts setup ########
 
 # Start ray cluster on 4 hosts.
@@ -261,6 +315,7 @@ PREFILL_RAY_PORT=8100
 
 for ((i=0; i<NUM_HOSTS_PER_INSTANCE; i++)); do
     tpu_port=${PREFILL_TPU_PORTS[$i]}
+    visible_chip=${ORDERED_CHIPS[$i]}
 
     if [[ i -eq 0 ]]; then
         DOCKER_CMD="ray start --block --head --port=${PREFILL_RAY_PORT}"
@@ -287,7 +342,7 @@ for ((i=0; i<NUM_HOSTS_PER_INSTANCE; i++)); do
         \
         -e TPU_CHIPS_PER_PROCESS_BOUNDS="1,1,1" \
         -e TPU_PROCESS_BOUNDS="${TPU_PROCESS_BOUNDS}" \
-        -e TPU_VISIBLE_CHIPS="${i}" \
+        -e TPU_VISIBLE_CHIPS="${visible_chip}" \
         -e CLOUD_TPU_TASK_ID="${i}" \
         -e TPU_PROCESS_ADDRESSES="${PREFILL_TPU_ADDRS}" \
         -e TPU_PROCESS_PORT="${tpu_port}" \
@@ -334,6 +389,7 @@ DECODE_RAY_PORT=9100
 for ((i=0; i<NUM_HOSTS_PER_INSTANCE; i++)); do
     tpu_port=${DECODE_TPU_PORTS[$i]}
     tpu_index=$((i + NUM_HOSTS_PER_INSTANCE))
+    visible_chip=${ORDERED_CHIPS[$tpu_index]}
 
     if [[ i -eq 0 ]]; then
         DOCKER_CMD="ray start --block --head --port=${DECODE_RAY_PORT} --min-worker-port=20000 --max-worker-port=29999"
@@ -360,7 +416,7 @@ for ((i=0; i<NUM_HOSTS_PER_INSTANCE; i++)); do
         \
         -e TPU_CHIPS_PER_PROCESS_BOUNDS="1,1,1" \
         -e TPU_PROCESS_BOUNDS="${TPU_PROCESS_BOUNDS}" \
-        -e TPU_VISIBLE_CHIPS="${tpu_index}" \
+        -e TPU_VISIBLE_CHIPS="${visible_chip}" \
         -e CLOUD_TPU_TASK_ID="${i}" \
         -e TPU_PROCESS_ADDRESSES="${DECODE_TPU_ADDRS}" \
         -e TPU_PROCESS_PORT="${tpu_port}" \

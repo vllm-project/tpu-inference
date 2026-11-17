@@ -83,8 +83,10 @@ class TestPPConfig:
         assert pp_config.default_tpu_chips_per_process_bounds == "1,1,1"
         assert pp_config.default_tpu_visible_chips == "0"
 
+    @patch('tpu_inference.tpu_info.get_ordered_chip_ids', return_value=[])
     @patch('tpu_inference.tpu_info.get_num_cores_per_chip')
-    def test_pp_config_with_pp(self, mock_get_cores, mock_vllm_config):
+    def test_pp_config_with_pp(self, mock_get_cores, mock_ordered_chips,
+                               mock_vllm_config):
         """Tests PPConfig initialization when pipeline parallelism is enabled."""
         mock_get_cores.return_value = 2
         mock_vllm_config.sharding_config.total_devices = 4
@@ -109,8 +111,10 @@ class TestPPConfig:
         assert pp_config_rank1.default_tpu_chips_per_process_bounds == "1,2,1"
         assert pp_config_rank1.default_tpu_visible_chips == "2,3"
 
+    @patch('tpu_inference.tpu_info.get_ordered_chip_ids', return_value=[])
     @patch('tpu_inference.tpu_info.get_num_cores_per_chip')
     def test_pp_config_single_core_per_chip(self, mock_get_cores,
+                                            mock_ordered_chips,
                                             mock_vllm_config):
         """Tests PPConfig with 1 core per chip (e.g., v5litepod, v6e)."""
         mock_get_cores.return_value = 1
@@ -127,9 +131,35 @@ class TestPPConfig:
         assert pp_config.default_tpu_chips_per_process_bounds == "1,1,1"
         assert pp_config.default_tpu_visible_chips == "2"
 
+    @patch('tpu_inference.tpu_info.get_ordered_chip_ids',
+           return_value=[1, 2, 6, 3, 4, 0, 7, 5])
+    @patch('tpu_inference.tpu_info.get_num_cores_per_chip', return_value=1)
+    def test_pp_config_four_chips_per_stage_tray_ordered(
+            self, mock_get_cores, mock_ordered_chips, mock_vllm_config):
+        """Tests PPConfig selects tray-ordered chips and 2,2,1 bounds for 4 chips."""
+        mock_vllm_config.sharding_config.total_devices = 4
+
+        stage0 = PPConfig(vllm_config=mock_vllm_config,
+                          rank=0,
+                          ip="127.0.0.1",
+                          prev_worker_ip="127.0.0.1",
+                          pp_world_size=2)
+        stage1 = PPConfig(vllm_config=mock_vllm_config,
+                          rank=1,
+                          ip="127.0.0.1",
+                          prev_worker_ip="127.0.0.1",
+                          pp_world_size=2)
+
+        assert stage0.default_tpu_chips_per_process_bounds == "2,2,1"
+        assert stage0.default_tpu_visible_chips == "1,2,6,3"
+        assert stage1.default_tpu_chips_per_process_bounds == "2,2,1"
+        assert stage1.default_tpu_visible_chips == "4,0,7,5"
+
+    @patch('tpu_inference.tpu_info.get_ordered_chip_ids', return_value=[])
     @patch('tpu_inference.tpu_info.get_num_cores_per_chip')
     @patch.dict('os.environ', {"TPU_MULTIHOST_BACKEND": "ray"})
-    def test_pp_config_with_ray(self, mock_get_cores, mock_vllm_config):
+    def test_pp_config_with_ray(self, mock_get_cores, mock_ordered_chips,
+                                mock_vllm_config):
         """Tests PPConfig when using Ray multi-host backend."""
         mock_get_cores.return_value = 2
         mock_vllm_config.sharding_config.total_devices = 4
@@ -147,6 +177,29 @@ class TestPPConfig:
 
 class TestTPUWorker:
     """Test suite for the TPUWorker class."""
+
+    @patch('tpu_inference.tpu_info.get_ordered_chip_ids',
+           return_value=[1, 2, 6, 3, 4, 0, 7, 5])
+    @patch('tpu_inference.tpu_info.get_num_chips', return_value=8)
+    @patch('tpu_inference.tpu_info.get_num_cores_per_chip', return_value=1)
+    def test_setup_dp_chip_isolation_tray_ordered(self, mock_get_cores,
+                                                  mock_get_chips,
+                                                  mock_ordered_chips,
+                                                  mock_vllm_config):
+        """Tests multi-process DP chip isolation uses tray-ordered chips."""
+        mock_vllm_config.sharding_config.total_devices = 4
+        mock_vllm_config.parallel_config.data_parallel_index = 1
+        worker = TPUWorker(vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test_method",
+                           devices=['tpu:0'])
+
+        with patch.dict('os.environ', {}, clear=False):
+            import os
+            worker._setup_dp_chip_isolation()
+            assert os.environ["TPU_VISIBLE_CHIPS"] == "4,0,7,5"
+            assert os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] == "2,2,1"
 
     #
     # --- Initialization Tests ---

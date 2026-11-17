@@ -36,6 +36,14 @@ from tpu_inference.runner.tpu_runner import TPUModelRunner
 logger = init_logger(__name__)
 
 
+def _chips_per_process_bounds(num_chips: int) -> str:
+    if num_chips == 4:
+        return "2,2,1"
+    if num_chips == 8:
+        return "2,4,1"
+    return f"1,{num_chips},1"
+
+
 @dataclass
 class PPConfig:
     vllm_config: VllmConfig
@@ -80,13 +88,19 @@ class PPConfig:
                 multihost_backend = envs.TPU_MULTIHOST_BACKEND
                 # For multi-host PP, each host is an independent JAX cluster,
                 # so chips always start from index 0 on each host.
-                start_chip = 0 if multihost_backend == "ray" else self.rank * chips_per_stage
+                start_chip = (0 if multihost_backend == "ray" else self.rank *
+                              chips_per_stage)
+                end_chip = start_chip + chips_per_stage
+                ordered_chips = tpu_info.get_ordered_chip_ids()
+                stage_chips = (ordered_chips[start_chip:end_chip]
+                               if len(ordered_chips) >= end_chip else range(
+                                   start_chip, end_chip))
                 self.default_tpu_visible_chips = ",".join(
-                    str(i)
-                    for i in range(start_chip, start_chip + chips_per_stage))
+                    str(i) for i in stage_chips)
 
-                # Set bounds to match the visible chips exactly.
-                self.default_tpu_chips_per_process_bounds = f"1,{chips_per_stage},1"
+                # Set bounds to match the visible chips topology.
+                self.default_tpu_chips_per_process_bounds = (
+                    _chips_per_process_bounds(chips_per_stage))
 
 
 _STANDARD_KEYS = frozenset({
@@ -293,20 +307,24 @@ class TPUWorker(WorkerBase):
                 f"{total_chips} chips. Reduce --data-parallel-size or "
                 f"--tensor-parallel-size.")
 
-        visible_chips = ",".join(str(c) for c in range(start_chip, end_chip))
+        ordered_chips = tpu_info.get_ordered_chip_ids()
+        rank_chips = (ordered_chips[start_chip:end_chip] if len(ordered_chips)
+                      >= end_chip else range(start_chip, end_chip))
+        visible_chips = ",".join(str(c) for c in rank_chips)
+        chips_bounds = _chips_per_process_bounds(chips_per_rank)
         # Unique libtpu port per rank so the runtimes can coexist on a host.
         tpu_port = jax_parallel_state.BASE_TPU_PROCESS_PORT + dp_rank
 
         os.environ["TPU_VISIBLE_CHIPS"] = visible_chips
-        os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] = f"1,{chips_per_rank},1"
+        os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] = chips_bounds
         os.environ["TPU_PROCESS_BOUNDS"] = "1,1,1"
         os.environ["TPU_PROCESS_PORT"] = str(tpu_port)
         os.environ["TPU_PROCESS_ADDRESSES"] = f"localhost:{tpu_port}"
         os.environ["CLOUD_TPU_TASK_ID"] = "0"
         logger.info(
             "Multi-process DP | rank=%d | TPU_VISIBLE_CHIPS=%s | "
-            "TPU_CHIPS_PER_PROCESS_BOUNDS=1,%d,1 | TPU_PROCESS_PORT=%d",
-            dp_rank, visible_chips, chips_per_rank, tpu_port)
+            "TPU_CHIPS_PER_PROCESS_BOUNDS=%s | TPU_PROCESS_PORT=%d", dp_rank,
+            visible_chips, chips_bounds, tpu_port)
 
     def init_device(self,
                     tpu_process_bounds="",

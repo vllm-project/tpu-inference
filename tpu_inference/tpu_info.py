@@ -14,6 +14,7 @@
 
 import glob
 import os
+import re
 
 import requests
 
@@ -21,6 +22,10 @@ from tpu_inference import envs
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
+
+GOOGLE_PCI_VENDOR_ID = 0x1AE0
+_PCI_BDF_PATTERN = re.compile(
+    r"^(?:([0-9a-fA-F]+):)?([0-9a-fA-F]+):([0-9a-fA-F]+)\.([0-9a-fA-F]+)$")
 
 GCE_TPU_ACCELERATOR_ENDPOINT = (
     "http://metadata.google.internal/computeMetadata/v1/instance/attributes/")
@@ -75,6 +80,78 @@ def get_num_cores_per_chip() -> int:
     if tpu_type.startswith(("v5litepod", "v6e")):
         return 1
     return 2
+
+
+def _parse_pci_bdf(pci_bdf: str) -> tuple[int, int, int, int]:
+    match = _PCI_BDF_PATTERN.match(pci_bdf)
+    if not match:
+        return (0, 0, 0, 0)
+    domain, bus, slot, func = match.groups()
+    return (
+        int(domain, 16) if domain else 0,
+        int(bus, 16),
+        int(slot, 16),
+        int(func, 16),
+    )
+
+
+def get_ordered_chip_ids() -> list[int]:
+    """Returns TPU_VISIBLE_CHIPS indices ordered by physical tray (NUMA, PCI BDF).
+
+    On multi-tray TPU VMs such as ct6e-standard-8t (2x4), libtpu enumerates
+    devices in /dev/vfio/[0-9]* order, whereas Linux guest PCI bus probing can
+    interleave IOMMU group IDs across the two PCI root complexes / NUMA nodes.
+    Sorting the libtpu scanner indices by (numa_node, pci_bdf) groups each 4-chip
+    2x2 tray contiguously ([0:4] and [4:8]).
+    """
+    accel_files = glob.glob("/dev/accel*")
+    if accel_files:
+        return list(range(len(accel_files)))
+
+    vfio_paths = sorted(glob.glob("/dev/vfio/[0-9]*"))
+    if not vfio_paths:
+        return []
+
+    chip_entries: list[tuple[int, tuple[int, int, int, int], int]] = []
+    scanner_id = 0
+    for vfio_path in vfio_paths:
+        group = os.path.basename(vfio_path)
+        if not group.isdigit() or not os.access(vfio_path, os.R_OK):
+            continue
+
+        iommu_devices_dir = f"/sys/kernel/iommu_groups/{group}/devices"
+        try:
+            pci_devices = sorted(os.listdir(iommu_devices_dir))
+        except OSError:
+            return list(range(get_num_chips()))
+        if not pci_devices:
+            return list(range(get_num_chips()))
+
+        pci_bdf = pci_devices[0]
+        vendor_path = f"/sys/bus/pci/devices/{pci_bdf}/vendor"
+        try:
+            with open(vendor_path, encoding="utf-8") as vf:
+                vendor_id = int(vf.read().strip(), 16)
+            if vendor_id != GOOGLE_PCI_VENDOR_ID:
+                continue
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError):
+            return list(range(get_num_chips()))
+
+        numa_node = 0
+        numa_path = f"/sys/bus/pci/devices/{pci_bdf}/numa_node"
+        try:
+            with open(numa_path, encoding="utf-8") as nf:
+                numa_node = max(0, int(nf.read().strip()))
+        except (OSError, ValueError):
+            numa_node = 0
+
+        chip_entries.append((numa_node, _parse_pci_bdf(pci_bdf), scanner_id))
+        scanner_id += 1
+
+    chip_entries.sort()
+    return [entry_scanner_id for _, _, entry_scanner_id in chip_entries]
 
 
 def get_num_chips() -> int:
