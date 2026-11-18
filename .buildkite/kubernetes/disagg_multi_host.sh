@@ -17,8 +17,8 @@
 # no docker daemon and runs under PodSecurity `baseline`, which rejects the
 # --privileged that run_disagg_multi_host.sh's `docker run` asks for.
 #
-#   prefill  4 processes, chips 0-3, Ray cluster on 8100, vLLM on 8400
-#   decode   4 processes, chips 4-7, Ray cluster on 9100, vLLM on 9400
+#   prefill  first tray-ordered slice (4 chips on v6e, 2 on v7x), Ray 8100, vLLM 8400
+#   decode   second tray-ordered slice (4 chips on v6e, 2 on v7x), Ray 9100, vLLM 9400
 #   proxy    1 process, port 8000, no chips
 #
 # TPU_VISIBLE_CHIPS, CLOUD_TPU_TASK_ID and TPU_PROCESS_PORT differ per process,
@@ -167,6 +167,23 @@ rm -f "$LOG_DIR"/{ray-prefill,ray-decode,prefill,decode,proxy,benchmark,correctn
 rm -rf /tmp/ray-prefill* /tmp/ray-decode* /tmp/libtpu_lockfile
 ray stop --force >/dev/null 2>&1 || true
 
+# Order TPU_VISIBLE_CHIPS indices by (NUMA node, PCI BDF) so that on 8-chip VMs
+# spanning two 4-chip trays (e.g. ct6e-standard-8t 2x4), prefill and decode each
+# receive a contiguous 2x2 tray even when /dev/vfio/* group IDs are interleaved.
+TOTAL_CHIPS_NEEDED=$(( NUM_HOSTS_PER_INSTANCE * 2 ))
+mapfile -t ORDERED_CHIPS < <(python3 -c '
+from tpu_inference.tpu_info import get_ordered_chip_ids
+for chip_id in get_ordered_chip_ids():
+    print(chip_id)
+' 2>/dev/null || true)
+if [ "${#ORDERED_CHIPS[@]}" -lt "$TOTAL_CHIPS_NEEDED" ]; then
+  ORDERED_CHIPS=()
+  for ((c=0; c<TOTAL_CHIPS_NEEDED; c++)); do
+    ORDERED_CHIPS+=("$c")
+  done
+fi
+echo "Resolved TPU chip order: ${ORDERED_CHIPS[*]}"
+
 # One Ray cluster per instance, then the vLLM server that drives it.
 # `ray start --block` stays in the foreground, hence the backgrounding.
 start_instance() {
@@ -177,8 +194,10 @@ start_instance() {
   for p in "${ports[@]}"; do addrs+=("127.0.0.1:$p"); done
   local joined
   joined=$(IFS=, ; echo "${addrs[*]}")
+  local instance_chips=("${ORDERED_CHIPS[@]:$chip_base:$NUM_HOSTS_PER_INSTANCE}")
 
   for ((i=0; i<NUM_HOSTS_PER_INSTANCE; i++)); do
+    local visible_chip="${ORDERED_CHIPS[$(( chip_base + i ))]}"
     # One temp dir per process, not per cluster: a Ray node keeps its session
     # directory, raylet socket and plasma socket under --temp-dir, so raylets
     # sharing one collide and workers attach to the wrong raylet.
@@ -220,7 +239,7 @@ start_instance() {
       SKIP_JAX_PRECOMPILE=1 \
       TPU_CHIPS_PER_PROCESS_BOUNDS="1,1,1" \
       TPU_PROCESS_BOUNDS="${TPU_PROCESS_BOUNDS}" \
-      TPU_VISIBLE_CHIPS="$(( chip_base + i ))" \
+      TPU_VISIBLE_CHIPS="${visible_chip}" \
       CLOUD_TPU_TASK_ID="${i}" \
       TPU_PROCESS_ADDRESSES="${joined}" \
       TPU_PROCESS_PORT="${ports[$i]}" \
@@ -229,7 +248,7 @@ start_instance() {
     sleep 1
   done
 
-  echo "--- started $role Ray cluster: ${NUM_HOSTS_PER_INSTANCE} processes, chips ${chip_base}-$(( chip_base + NUM_HOSTS_PER_INSTANCE - 1 )) ---"
+  echo "--- started $role Ray cluster: ${NUM_HOSTS_PER_INSTANCE} processes, chips ${instance_chips[*]} ---"
 
   env \
     VLLM_XLA_CHECK_RECOMPILATION=0 \
@@ -242,7 +261,7 @@ start_instance() {
     SKIP_JAX_PRECOMPILE=1 \
     TPU_CHIPS_PER_PROCESS_BOUNDS="1,1,1" \
     TPU_PROCESS_BOUNDS="${TPU_PROCESS_BOUNDS}" \
-    TPU_VISIBLE_CHIPS="${chip_base}" \
+    TPU_VISIBLE_CHIPS="${ORDERED_CHIPS[$chip_base]}" \
     CLOUD_TPU_TASK_ID=0 \
     TPU_PROCESS_ADDRESSES="${joined}" \
     TPU_PROCESS_PORT="${ports[0]}" \
