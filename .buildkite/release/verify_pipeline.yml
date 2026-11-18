@@ -1,0 +1,58 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# tpu-inference-release-verify: verifies a release's staged image and wheels on
+# TPU before the release reaches its approval block. Two independent checks,
+# one v6e chip each, both using serve_and_verify.sh:
+#   verify_image   the staged image's own vLLM (verify_image_on_tpu.sh)
+#   verify_wheels  the wheels, installed into a fresh venv
+#                  (verify_wheels_on_tpu.sh, serve_wheels.sh)
+#
+# Runs on the TPU CI cluster, which has the TPUs but none of the release
+# credentials. The release build's verify_on_tpu step (pipeline.yml, with
+# VLLM_SERVE_TEST=1) triggers it on the release commit and waits for the
+# result; only the commit is passed. Each check reads its image, by digest,
+# from the triggering build's meta-data (release_build_image in lib.sh):
+#   release-image          the staged release image
+#   release-wheel-carrier  python:3.12-slim with the wheels as files
+#                          (build_wheel_carrier.sh)
+# A build started by hand sets RELEASE_IMAGE_REF and WHEEL_CARRIER_REF instead.
+#
+# The pipeline settings upload this file:
+#   buildkite-agent pipeline upload .buildkite/release/verify_pipeline.yml
+
+x-tpu-step: &tpu-step
+  agents:
+    queue: kube
+  # As in CI's kube steps (pipeline_jax_kube.yml), the timeout also covers
+  # waiting for a chip. No soft_fail: a failed check must stop the release.
+  timeout_in_minutes: 1440
+  env:
+    SHAPE: "ct6e-standard-1t/1x1"
+  plugins:
+    - kubernetes:
+        podTemplate: tpu-launcher
+
+steps:
+  - label: ":kubernetes: Verify the staged image on TPU"
+    key: verify_image
+    <<: *tpu-step
+    commands:
+      - bash .buildkite/release/verify_image_on_tpu.sh
+
+  - label: ":package: Verify the wheels on TPU"
+    key: verify_wheels
+    <<: *tpu-step
+    commands:
+      - bash .buildkite/release/verify_wheels_on_tpu.sh

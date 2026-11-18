@@ -12,29 +12,47 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# tpu-inference-release: builds the vllm/vllm-tpu image of a release once,
-# waits for approval, then publishes that same image to Docker Hub.
+# tpu-inference-release: builds the image and the wheels of a release once,
+# waits for approval, then publishes those same files to Docker Hub and PyPI.
+# Runs only on releases/vX.Y.Z; the pipeline settings upload this file from
+# the build's own checkout. README.md has the how-to.
 #
-# The pipeline's settings upload this file from the build's own checkout, for
-# builds of main and releases/v* only, so a release branch runs the release
-# tooling it was cut with. README.md has the how-to.
+# Steps, in order. The two marked * run only with VLLM_SERVE_TEST=1 in the
+# build's env; without it they are skipped and the rest runs as before.
 #
-#   releases/vX.Y.Z   settle the version, build, wait for approval, then
-#                     publish (plan_publish.py)
+#   preflight                  settle the version, check PyPI and Docker Hub
+#   build_images               build the image, stage it in GAR
+#   build_tpu_inference_wheel  build the two wheels
+#   build_vllm_tpu_wheel
+#   check_wheels               check they install from PyPI
+# * build_wheel_carrier        stage the wheels in an image for the TPU check
+# * verify_on_tpu              trigger tpu-inference-release-verify on this
+#                              commit and wait until it passes
+#   plan_publish               the approval block, then the publish steps
+
+x-on-release: &on_release
+  'build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/'
+x-on-serve-test: &on_serve_test
+  'build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/ && build.env("VLLM_SERVE_TEST") == "1"'
+x-queue: &queue
+  queue: release-tpu-inference
 
 steps:
+  # --- 1. Preflight -----------------------------------------------------------
+
   - label: ":clipboard: Preflight: version, PyPI"
     key: preflight
-    if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
-    agents: &queue
-      queue: release-tpu-inference
+    if: *on_release
+    agents: *queue
     commands:
       - bash .buildkite/release/preflight.sh
+
+  # --- 2. Build: the image and the wheels -------------------------------------
 
   - label: ":docker: Build and stage the image"
     key: build_images
     depends_on: preflight
-    if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
+    if: *on_release
     agents: *queue
     timeout_in_minutes: 60
     commands:
@@ -43,7 +61,7 @@ steps:
   - label: ":package: Build the tpu-inference wheel"
     key: build_tpu_inference_wheel
     depends_on: preflight
-    if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
+    if: *on_release
     agents: *queue
     env:
       PUBLISH_PYPI: "tpu-inference"  # build_tpu_inference_wheel.sh fails early if it's on PyPI
@@ -53,7 +71,7 @@ steps:
   - label: ":package: Build the vllm-tpu wheel"
     key: build_vllm_tpu_wheel
     depends_on: build_tpu_inference_wheel
-    if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
+    if: *on_release
     agents: *queue
     commands:
       - |
@@ -66,17 +84,52 @@ steps:
   - label: ":mag: Check the wheels install from PyPI"
     key: check_wheels
     depends_on: build_vllm_tpu_wheel
-    if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
+    if: *on_release
     agents: *queue
     commands:
       - bash .buildkite/release/check_wheels.sh
 
+  # --- 3. TPU check: only with VLLM_SERVE_TEST=1 ------------------------------
+
+  # The TPU check runs on the TPU CI cluster, which cannot read this build's
+  # artifacts, so the wheels travel there as plain files in an image.
+  - label: ":docker: Stage the wheel carrier"
+    key: build_wheel_carrier
+    depends_on: check_wheels
+    if: *on_serve_test
+    agents: *queue
+    commands:
+      - bash .buildkite/release/build_wheel_carrier.sh
+
+  # Triggers tpu-inference-release-verify (verify_pipeline.yml) on this commit
+  # and waits; this step passes or fails with that build. Only the commit is
+  # passed: the triggered build reads both image digests from this build's
+  # meta-data, so it checks exactly what this build staged (0.1.0rc1, not
+  # 0.1.0, for releases/v0.1.0 with RELEASE_VERSION=v0.1.0rc1).
+  - label: ":test_tube: Verify the image and the wheels on TPU"
+    key: verify_on_tpu
+    depends_on:
+      - build_images
+      - build_wheel_carrier
+    if: *on_serve_test
+    trigger: tpu-inference-release-verify
+    async: false
+    build:
+      commit: "${BUILDKITE_COMMIT}"
+      branch: "${BUILDKITE_BRANCH}"
+      message: "Verify release build ${BUILDKITE_BUILD_NUMBER} on TPU"
+
+  # --- 4. Approval and publish ------------------------------------------------
+
+  # Also waits for verify_on_tpu. Without VLLM_SERVE_TEST=1 that step is
+  # skipped, and Buildkite treats a skipped dependency as satisfied.
   - label: ":pipeline: Plan the approval and publish"
     key: plan_publish
     depends_on:
       - build_images
       - check_wheels
-    if: build.branch =~ /^releases\/v[0-9]+\.[0-9]+\.[0-9]+$/
+      - verify_on_tpu
+    if: *on_release
     agents: *queue
     commands:
       - python3 .buildkite/release/plan_publish.py | buildkite-agent pipeline upload --no-interpolation
