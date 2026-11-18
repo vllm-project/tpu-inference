@@ -2835,3 +2835,90 @@ class TestKVCacheManager:
             self.runner.max_model_len // 256)
         assert block_tables[1].max_num_blocks_per_req == (
             self.runner.max_model_len // (256 * 4))
+
+    def test_fp8_kv_cache_packing_warning_single_kv_head(self):
+        """Test FP8 warning emitted when 1 KV head yields 0% byte savings."""
+        self.runner.kv_cache_dtype = torch.float8_e4m3fn
+        with patch("tpu_inference.runner.kv_cache_manager.logger.warning_once"
+                   ) as mock_warning:
+            spec = self.runner.kv_cache_manager._create_attention_spec(
+                block_size=16, num_kv_heads=1, head_size=256)
+            mock_warning.assert_called_once()
+            args, _ = mock_warning.call_args
+            formatted_msg = args[0] % args[1:]
+            assert "0% memory savings" in formatted_msg
+            assert "--kv-cache-dtype auto" in formatted_msg
+            assert "enable_dp_attention" not in formatted_msg
+            # FP8 must remain active (not overridden to auto or bf16)
+            assert spec.dtype == torch.float8_e4m3fn
+
+    def test_fp8_kv_cache_packing_warning_hd64(self):
+        """Test FP8 warning emitted when hd64 sublane packing yields 0% savings."""
+        self.runner.kv_cache_dtype = torch.float8_e4m3fn
+        with patch("tpu_inference.runner.kv_cache_manager.logger.warning_once"
+                   ) as mock_warning:
+            spec = self.runner.kv_cache_manager._create_attention_spec(
+                block_size=16, num_kv_heads=2, head_size=64)
+            mock_warning.assert_called_once()
+            args, _ = mock_warning.call_args
+            formatted_msg = args[0] % args[1:]
+            assert "0% memory savings" in formatted_msg
+            assert "enable_dp_attention" not in formatted_msg
+            assert spec.dtype == torch.float8_e4m3fn
+
+    def test_fp8_kv_cache_packing_no_warning_when_savings(self):
+        """Test no warning emitted when FP8 yields actual byte savings."""
+        self.runner.kv_cache_dtype = torch.float8_e4m3fn
+        with patch("tpu_inference.runner.kv_cache_manager.logger.warning_once"
+                   ) as mock_warning:
+            spec = self.runner.kv_cache_manager._create_attention_spec(
+                block_size=16, num_kv_heads=2, head_size=256)
+            mock_warning.assert_not_called()
+            assert spec.dtype == torch.float8_e4m3fn
+
+    def test_fp8_kv_cache_packing_no_warning_for_bf16(self):
+        """Test no warning emitted for non-quantized dtypes like bfloat16."""
+        self.runner.kv_cache_dtype = torch.bfloat16
+        with patch("tpu_inference.runner.kv_cache_manager.logger.warning_once"
+                   ) as mock_warning:
+            spec = self.runner.kv_cache_manager._create_attention_spec(
+                block_size=16, num_kv_heads=1, head_size=256)
+            mock_warning.assert_not_called()
+            assert spec.dtype == torch.bfloat16
+
+    def test_fp8_kv_cache_packing_warning_e5m2(self):
+        """Test FP8 warning emitted for float8_e5m2 when 0% byte savings."""
+        self.runner.kv_cache_dtype = torch.float8_e5m2
+        with patch("tpu_inference.runner.kv_cache_manager.logger.warning_once"
+                   ) as mock_warning:
+            spec = self.runner.kv_cache_manager._create_attention_spec(
+                block_size=16, num_kv_heads=1, head_size=256)
+            mock_warning.assert_called_once()
+            args, _ = mock_warning.call_args
+            formatted_msg = args[0] % args[1:]
+            assert "0% memory savings" in formatted_msg
+            assert spec.dtype == torch.float8_e5m2
+
+    def test_fp8_kv_cache_packing_warning_tp2_sharded_to_single_kv_head(self):
+        """Test FP8 warning emitted when GQA num_kv_heads=2 is sharded across TP=2 (1 head/shard)."""
+        self.runner.kv_cache_dtype = torch.float8_e4m3fn
+        mock_mesh = MagicMock()
+        mock_mesh.shape = {"data": 1, "attn_dp": 1, "model": 2, "expert": 1}
+        original_mesh = self.runner.mesh
+        try:
+            self.runner.mesh = mock_mesh
+            with patch(
+                    "tpu_inference.runner.kv_cache_manager.logger.warning_once"
+            ) as mock_warning:
+                spec = self.runner.kv_cache_manager._create_attention_spec(
+                    block_size=16, num_kv_heads=2, head_size=256)
+                mock_warning.assert_called_once()
+                args, _ = mock_warning.call_args
+                formatted_msg = args[0] % args[1:]
+                assert "0% memory savings" in formatted_msg
+                assert "kv_head_shards=2" in formatted_msg
+                assert "reducing tensor parallel size" in formatted_msg
+                assert "enable_dp_attention" in formatted_msg
+                assert spec.dtype == torch.float8_e4m3fn
+        finally:
+            self.runner.mesh = original_mesh
