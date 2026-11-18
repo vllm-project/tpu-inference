@@ -355,6 +355,59 @@ class TestTpuPlatform:
             assert vllm_config.cache_config.mamba_cache_mode == "none"
             assert vllm_config.cache_config.mamba_block_size == 4096
 
+    @pytest.mark.parametrize("opted_in", [True, False])
+    @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
+           "")
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    @patch(
+        "tpu_inference.core.hybrid_coordinator.install_hybrid_coordinator_hooks"
+    )
+    def test_check_and_update_config_jax_hybrid_model(self, mock_install_hooks,
+                                                      mock_update,
+                                                      mock_sharding,
+                                                      vllm_config, opted_in,
+                                                      monkeypatch):
+        """JAX model classes that declare a hybrid HF config get vLLM's hybrid
+        config defaults (align mode under prefix caching) before the TPU
+        mamba_cache_mode handling runs; other JAX models are unaffected."""
+        from tpu_inference.models.common import model_loader
+
+        class FakeJaxModel:
+            pass
+
+        if opted_in:
+            FakeJaxModel.is_hybrid_config = classmethod(
+                lambda cls, hf_text_config: True)
+        monkeypatch.setitem(model_loader._MODEL_REGISTRY,
+                            "FakeHybridJaxForCausalLM", FakeJaxModel)
+
+        vllm_config.parallel_config.pipeline_parallel_size = 1
+        vllm_config.scheduler_config.is_multimodal_model = False
+        vllm_config.scheduler_config.enable_chunked_prefill = True
+        vllm_config.compilation_config.mode = "dummy"
+        vllm_config.compilation_config.backend = ""
+        vllm_config.model_config.architecture = "FakeHybridJaxForCausalLM"
+        vllm_config.model_config.hf_text_config = MagicMock()
+        vllm_config.model_config.supports_mamba_prefix_caching = False
+        vllm_config.model_config.max_model_len = 4096
+        vllm_config.cache_config.enable_prefix_caching = True
+        mock_sharding.from_vllm_config.return_value.total_dp_size = 1
+
+        TpuPlatform.check_and_update_config(vllm_config)
+
+        if opted_in:
+            assert vllm_config.cache_config.mamba_cache_mode == "align"
+            assert vllm_config.cache_config.mamba_block_size == 16
+            mock_install_hooks.assert_called_once_with(vllm_config)
+        else:
+            assert vllm_config.cache_config.mamba_cache_mode == "none"
+            assert vllm_config.cache_config.mamba_block_size is None
+            mock_install_hooks.assert_not_called()
+        assert vllm_config.cache_config.enable_prefix_caching
+
     @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
            "")
     @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")

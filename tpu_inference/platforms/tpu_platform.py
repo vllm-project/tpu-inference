@@ -393,6 +393,15 @@ class TpuPlatform(Platform):
                 )
         cls._initialize_sharding_config(vllm_config)
 
+        # vLLM only applies its hybrid attention+mamba config defaults (e.g.
+        # mamba_cache_mode="align" under prefix caching) when
+        # `model_config.is_hybrid`, which is False for JAX model classes.
+        # Apply them for JAX models that declare a hybrid config, before the
+        # mamba_cache_mode checks below.
+        from tpu_inference.models.common.hybrid import \
+            maybe_apply_jax_hybrid_config
+        maybe_apply_jax_hybrid_config(vllm_config)
+
         cache_config = vllm_config.cache_config
         if (cache_config and getattr(cache_config, "mamba_cache_mode", "none")
                 == "all"):

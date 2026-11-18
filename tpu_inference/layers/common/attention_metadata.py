@@ -141,6 +141,16 @@ class AttentionMetadata(object):
     # of its own type (AttentionBackend.prepare_step); None for RPA.
     backend_metadata: Any = None
 
+    @property
+    def mamba_state_indices(self) -> jax.Array | None:
+        """Read-only alias of `mamba.state_indices`.
+
+        Kept for model code written against the former top-level
+        `mamba_state_indices` field. Not a dataclass field, so it is neither
+        a pytree leaf nor a constructor argument.
+        """
+        return None if self.mamba is None else self.mamba.state_indices
+
 
 @functools.partial(
     jax.tree_util.register_dataclass,
