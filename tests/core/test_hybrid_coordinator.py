@@ -13,7 +13,7 @@ from vllm.v1.request import Request, RequestStatus
 
 from tpu_inference.core.hybrid_coordinator import (
     MambaBlockPool, MirrorMambaBlockPool, TPUDualBlockPool,
-    TPUHybridKVCacheCoordinator, TPUKVCacheManager,
+    TPUHybridKVCacheCoordinator, TPUKVCacheManager, TPUMambaManager,
     install_hybrid_coordinator_hooks, set_mamba_num_blocks)
 
 
@@ -769,3 +769,274 @@ class TestTPUKVCacheManager:
                                                  num_new_tokens=16)
         assert blocks_no_mamba is None
         coord.mamba_block_pool.free_blocks(allocated_mamba)
+
+
+class _FakeBlock:
+
+    def __init__(self, block_id: int):
+        self.block_id = block_id
+        self.block_hash = None
+        self.block_hash_num_tokens = None
+        self.is_null = block_id == 0
+
+
+class _FakePool:
+    """A minimal block pool matching BlockPool's cache interface."""
+
+    def __init__(self, hash_block_size: int = 256):
+        self.cached_block_hash_to_block: dict[BlockHash, _FakeBlock] = {}
+        self.null_block = _FakeBlock(0)
+        self.hash_block_size = hash_block_size
+
+    def cache_full_blocks(
+        self,
+        request,
+        blocks,
+        num_cached_blocks,
+        num_full_blocks,
+        block_size,
+        kv_cache_group_id,
+        block_mask=None,
+    ):
+        for i in range(num_cached_blocks, num_full_blocks):
+            if block_mask is not None and not block_mask[i -
+                                                         num_cached_blocks]:
+                continue
+            block = blocks[i]
+            block_hash = BlockHash(f"hash_{i}".encode())
+            block.block_hash = block_hash
+            block.block_hash_num_tokens = (i + 1) * block_size
+            self.cached_block_hash_to_block[block_hash] = block
+
+    def get_cached_block(self, block_hash, kv_cache_group_ids):
+        block = self.cached_block_hash_to_block.get(block_hash)
+        return [block] * len(kv_cache_group_ids) if block else None
+
+    def cache_partial_block(self, *args, **kwargs):
+        return None
+
+
+def _make_test_mamba_spec(block_size: int = 256) -> MambaSpec:
+    spec = MambaSpec(
+        shapes=((3, 64), (8, 64, 16)),
+        dtypes=(torch.bfloat16, torch.float32),
+        block_size=block_size,
+        mamba_cache_mode="align",
+    )
+    return spec
+
+
+def _make_test_mamba_manager(spec: MambaSpec,
+                             pool: _FakePool) -> TPUMambaManager:
+    return TPUMambaManager(
+        kv_cache_spec=spec,
+        block_pool=pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=spec.block_size,
+    )
+
+
+class TestTPUMambaManager:
+
+    def test_coordinator_instantiates_tpu_mamba_manager(self):
+        attn_spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=8,
+            head_size=128,
+            dtype=torch.bfloat16,
+        )
+        mamba_spec = MambaSpec(
+            shapes=((3, 64), (8, 64, 16)),
+            dtypes=(torch.bfloat16, torch.float32),
+            block_size=16,
+            mamba_cache_mode="align",
+        )
+        groups = [
+            KVCacheGroupSpec(kv_cache_spec=attn_spec, layer_names=["attn_0"]),
+            KVCacheGroupSpec(kv_cache_spec=mamba_spec,
+                             layer_names=["mamba_0"]),
+        ]
+        set_mamba_num_blocks(50)
+        cfg = KVCacheConfig(
+            num_blocks=100,
+            kv_cache_tensors=[],
+            kv_cache_groups=groups,
+        )
+        coord = TPUHybridKVCacheCoordinator(
+            kv_cache_config=cfg,
+            max_model_len=1024,
+            max_in_flight_tokens=128,
+            use_eagle=False,
+            enable_caching=True,
+            enable_kv_cache_events=False,
+            dcp_world_size=1,
+            pcp_world_size=1,
+            scheduler_block_size=16,
+            hash_block_size=16,
+        )
+        assert isinstance(coord.single_type_managers[1], TPUMambaManager)
+
+    def test_tpu_mamba_manager_init_filters_unsupported_kwargs(self):
+        """Ensure TPUMambaManager drops args like max_in_flight_tokens and max_model_len
+        for compatibility with older vLLM releases whose SingleTypeKVCacheManager.__init__
+        does not accept them."""
+        spec = _make_test_mamba_spec()
+        pool = _FakePool()
+        mgr = TPUMambaManager(
+            kv_cache_spec=spec,
+            block_pool=pool,
+            enable_caching=True,
+            kv_cache_group_id=0,
+            scheduler_block_size=16,
+            max_in_flight_tokens=128,
+            max_model_len=2048,
+        )
+        assert mgr.kv_cache_spec is spec
+        assert mgr.block_pool is pool
+
+    def test_cache_blocks_without_replay_boundaries(self):
+        """Calling cache_blocks without replay_boundaries (as standard vLLM coordinator does) succeeds."""
+        spec = _make_test_mamba_spec()
+        pool = _FakePool()
+        mgr = _make_test_mamba_manager(spec, pool)
+        blocks = [_FakeBlock(100 + i) for i in range(8)]
+        mgr.req_to_blocks["req1"] = blocks
+
+        request = MagicMock()
+        request.request_id = "req1"
+        request.num_prompt_tokens = 2048
+
+        mgr.cache_blocks(request, 2048)
+
+    def test_cache_blocks_only_indexes_written_checkpoint(self):
+        """Chunk of 2048 tokens (8 blocks) must only index block 7 in the cache."""
+        spec = _make_test_mamba_spec()
+        pool = _FakePool()
+        mgr = _make_test_mamba_manager(spec, pool)
+        blocks = [_FakeBlock(100 + i) for i in range(8)]
+        mgr.req_to_blocks["req1"] = blocks
+
+        request = MagicMock()
+        request.request_id = "req1"
+        request.num_prompt_tokens = 2048
+
+        mgr.cache_blocks(request, 2048, replay_boundaries=[])
+
+        # Intermediate blocks 0..6 must NOT be indexed
+        for i in range(7):
+            h = BlockHash(f"hash_{i}".encode())
+            assert h not in pool.cached_block_hash_to_block
+
+        # Only block 7 was written and indexed
+        h7 = BlockHash(b"hash_7")
+        assert h7 in pool.cached_block_hash_to_block
+        assert pool.cached_block_hash_to_block[h7].block_id == 107
+
+    def test_cache_blocks_multiple_chunks(self):
+        """Chunked prefill across two passes must only index the end of each pass."""
+        spec = _make_test_mamba_spec()
+        pool = _FakePool()
+        mgr = _make_test_mamba_manager(spec, pool)
+        blocks = [_FakeBlock(100 + i) for i in range(16)]
+        mgr.req_to_blocks["req1"] = blocks
+
+        request = MagicMock()
+        request.request_id = "req1"
+        request.num_prompt_tokens = 4096
+
+        # Pass 1: first 2048 tokens -> checkpoints block 7
+        mgr.cache_blocks(request, 2048, replay_boundaries=[])
+        assert BlockHash(b"hash_7") in pool.cached_block_hash_to_block
+        assert BlockHash(b"hash_6") not in pool.cached_block_hash_to_block
+
+        # Pass 2: remaining 2048 tokens (total 4096) -> checkpoints block 15
+        mgr.cache_blocks(request, 4096, replay_boundaries=[])
+        assert BlockHash(b"hash_15") in pool.cached_block_hash_to_block
+        # Intermediate blocks 8..14 must NOT be indexed
+        for i in range(8, 15):
+            assert BlockHash(
+                f"hash_{i}".encode()) not in pool.cached_block_hash_to_block
+
+    def test_find_longest_cache_hit_rejects_unwritten_boundaries(self):
+        """Subsequent request of length 512 matches blocks 0 and 1, neither of which
+        was checkpointed; cache hit must be 0 rather than returning dirty memory."""
+        spec = _make_test_mamba_spec()
+        pool = _FakePool()
+        mgr = _make_test_mamba_manager(spec, pool)
+        blocks = [_FakeBlock(100 + i) for i in range(8)]
+        mgr.req_to_blocks["req1"] = blocks
+
+        request = MagicMock()
+        request.request_id = "req1"
+        request.num_prompt_tokens = 2048
+        mgr.cache_blocks(request, 2048, replay_boundaries=[])
+
+        # A request needing only 512 tokens (blocks 0..1)
+        hashes = [BlockHash(f"hash_{i}".encode()) for i in range(2)]
+        computed, hit_length = TPUMambaManager.find_longest_cache_hit(
+            block_hashes=hashes,
+            max_length=512,
+            kv_cache_group_ids=[0],
+            block_pool=pool,
+            kv_cache_spec=spec,
+            drop_eagle_block=False,
+            alignment_tokens=256,
+        )
+        assert hit_length == 0
+
+    def test_find_longest_cache_hit_matches_written_checkpoint(self):
+        """Subsequent request of length 2048 matches the checkpoint at block 7."""
+        spec = _make_test_mamba_spec()
+        pool = _FakePool()
+        mgr = _make_test_mamba_manager(spec, pool)
+        blocks = [_FakeBlock(100 + i) for i in range(8)]
+        mgr.req_to_blocks["req1"] = blocks
+
+        request = MagicMock()
+        request.request_id = "req1"
+        request.num_prompt_tokens = 2048
+        mgr.cache_blocks(request, 2048, replay_boundaries=[])
+
+        hashes = [BlockHash(f"hash_{i}".encode()) for i in range(16)]
+        computed, hit_length = TPUMambaManager.find_longest_cache_hit(
+            block_hashes=hashes,
+            max_length=2048,
+            kv_cache_group_ids=[0],
+            block_pool=pool,
+            kv_cache_spec=spec,
+            drop_eagle_block=False,
+            alignment_tokens=256,
+        )
+        assert hit_length == 2048
+        assert computed[0][-1].block_id == 107
+
+    def test_find_longest_cache_hit_falls_back_to_earlier_written_checkpoint(
+            self):
+        """Subsequent request of length 3000 (after 2048 and 4096 were written)
+        falls back cleanly to token 2048 (block 7), without hitting unwritten
+        blocks 8..10."""
+        spec = _make_test_mamba_spec()
+        pool = _FakePool()
+        mgr = _make_test_mamba_manager(spec, pool)
+        blocks = [_FakeBlock(100 + i) for i in range(16)]
+        mgr.req_to_blocks["req1"] = blocks
+
+        request = MagicMock()
+        request.request_id = "req1"
+        request.num_prompt_tokens = 4096
+        mgr.cache_blocks(request, 2048, replay_boundaries=[])
+        mgr.cache_blocks(request, 4096, replay_boundaries=[])
+
+        hashes = [BlockHash(f"hash_{i}".encode()) for i in range(16)]
+        computed, hit_length = TPUMambaManager.find_longest_cache_hit(
+            block_hashes=hashes,
+            max_length=3000,
+            kv_cache_group_ids=[0],
+            block_pool=pool,
+            kv_cache_spec=spec,
+            drop_eagle_block=False,
+            alignment_tokens=256,
+        )
+        assert hit_length == 2048
+        assert computed[0][-1].block_id == 107
