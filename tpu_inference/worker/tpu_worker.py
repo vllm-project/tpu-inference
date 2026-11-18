@@ -320,6 +320,12 @@ class TPUWorker(WorkerBase):
         os.environ["TPU_PROCESS_PORT"] = str(tpu_port)
         os.environ["TPU_PROCESS_ADDRESSES"] = f"localhost:{tpu_port}"
         os.environ["CLOUD_TPU_TASK_ID"] = "0"
+        # XLA's TryAcquireTpuLock() treats TPU_CHIPS_PER_PROCESS_BOUNDS="2,2,1"
+        # as full-host usage and contends on /tmp/libtpu_lockfile when multiple
+        # 4-chip worker processes share an 8-chip host unless
+        # ALLOW_MULTIPLE_LIBTPU_LOAD is enabled.
+        if not os.environ.get("ALLOW_MULTIPLE_LIBTPU_LOAD"):
+            os.environ["ALLOW_MULTIPLE_LIBTPU_LOAD"] = "true"
         logger.info(
             "Multi-process DP | rank=%d | TPU_VISIBLE_CHIPS=%s | "
             "TPU_CHIPS_PER_PROCESS_BOUNDS=%s | TPU_PROCESS_PORT=%d", dp_rank,
@@ -345,6 +351,7 @@ class TPUWorker(WorkerBase):
                 "TPU_PROCESS_BOUNDS",
                 "TPU_CHIPS_PER_PROCESS_BOUNDS",
                 "TPU_VISIBLE_CHIPS",
+                "ALLOW_MULTIPLE_LIBTPU_LOAD",
             ]
             env_dump = {v: os.environ.get(v) for v in tpu_env_vars}
             logger.debug(
@@ -386,6 +393,13 @@ class TPUWorker(WorkerBase):
                 "TPU_VISIBLE_CHIPS"] = tpu_visible_chips \
                     if tpu_visible_chips \
                         else self.pp_config.default_tpu_visible_chips
+
+            # XLA's TryAcquireTpuLock() treats TPU_CHIPS_PER_PROCESS_BOUNDS="2,2,1"
+            # as full-host usage and contends on /tmp/libtpu_lockfile when two
+            # 4-chip PP stage processes share an 8-chip host unless
+            # ALLOW_MULTIPLE_LIBTPU_LOAD is enabled.
+            if not os.environ.get("ALLOW_MULTIPLE_LIBTPU_LOAD"):
+                os.environ["ALLOW_MULTIPLE_LIBTPU_LOAD"] = "true"
 
             env_dump = {v: os.environ.get(v) for v in tpu_env_vars}
             logger.debug(

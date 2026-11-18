@@ -197,9 +197,44 @@ class TestTPUWorker:
                            devices=['tpu:0'])
 
         with patch.dict('os.environ', {}, clear=False):
+            os.environ.pop("ALLOW_MULTIPLE_LIBTPU_LOAD", None)
             worker._setup_dp_chip_isolation()
             assert os.environ["TPU_VISIBLE_CHIPS"] == "4,0,7,5"
             assert os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] == "2,2,1"
+            assert os.environ["ALLOW_MULTIPLE_LIBTPU_LOAD"] == "true"
+
+    @patch('tpu_inference.worker.tpu_worker.jax_parallel_state')
+    @patch('tpu_inference.worker.tpu_worker.ensure_model_parallel_initialized')
+    @patch('tpu_inference.worker.tpu_worker.init_distributed_environment')
+    @patch('tpu_inference.worker.tpu_worker.TPUModelRunner')
+    @patch('tpu_inference.worker.tpu_worker.utils')
+    @patch('tpu_inference.worker.tpu_worker.jax')
+    @patch('tpu_inference.tpu_info.get_ordered_chip_ids',
+           return_value=[1, 2, 6, 3, 4, 0, 7, 5])
+    @patch('tpu_inference.tpu_info.get_num_cores_per_chip', return_value=1)
+    def test_init_device_pp_sets_allow_multiple_libtpu_load(
+            self, mock_get_cores, mock_ordered_chips, mock_jax, mock_utils,
+            mock_runner_cls, mock_init_dist, mock_ensure_mp,
+            mock_jax_parallel_state, mock_vllm_config):
+        """Tests PP init_device sets ALLOW_MULTIPLE_LIBTPU_LOAD for 2,2,1 trays."""
+        mock_jax_parallel_state.BASE_TPU_PROCESS_PORT = 8476
+        mock_vllm_config.parallel_config.pipeline_parallel_size = 2
+        mock_vllm_config.sharding_config.total_devices = 4
+        mock_devices = ['tpu:0', 'tpu:1', 'tpu:2', 'tpu:3']
+
+        worker = TPUWorker(vllm_config=mock_vllm_config,
+                           local_rank=1,
+                           rank=1,
+                           distributed_init_method="test_method",
+                           devices=mock_devices)
+
+        with patch.dict('os.environ', {}, clear=False):
+            os.environ.pop("TPU_VISIBLE_CHIPS", None)
+            os.environ.pop("ALLOW_MULTIPLE_LIBTPU_LOAD", None)
+            worker.init_device()
+            assert os.environ["TPU_VISIBLE_CHIPS"] == "4,0,7,5"
+            assert os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] == "2,2,1"
+            assert os.environ["ALLOW_MULTIPLE_LIBTPU_LOAD"] == "true"
 
     #
     # --- Initialization Tests ---
