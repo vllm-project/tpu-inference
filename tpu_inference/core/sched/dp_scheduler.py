@@ -1318,12 +1318,15 @@ class DPScheduler(SchedulerInterface):
         """
         total_running_reqs = 0
         total_waiting_reqs = 0
+        total_skipped_waiting_reqs = 0
+        total_preempted_reqs = 0
         total_kv_cache_usage = 0.0
 
         combined_prefix_cache_stats = PrefixCacheStats()
         combined_connector_prefix_cache_stats: Optional[
             PrefixCacheStats] = None
         combined_spec_decoding_stats: Optional[SpecDecodingStats] = None
+        combined_iteration_records = []
         has_any_stats = False
 
         for rank_stats in rank_stats_list:
@@ -1333,7 +1336,11 @@ class DPScheduler(SchedulerInterface):
 
             total_running_reqs += rank_stats.num_running_reqs
             total_waiting_reqs += rank_stats.num_waiting_reqs
+            total_skipped_waiting_reqs += rank_stats.num_skipped_waiting_reqs
+            total_preempted_reqs += rank_stats.num_preempted_reqs
             total_kv_cache_usage += rank_stats.kv_cache_usage
+            if rank_stats.iteration_records:
+                combined_iteration_records.extend(rank_stats.iteration_records)
 
             # Combine prefix cache stats
             if rank_stats.prefix_cache_stats:
@@ -1394,7 +1401,10 @@ class DPScheduler(SchedulerInterface):
         return SchedulerStats(
             num_running_reqs=total_running_reqs,
             num_waiting_reqs=total_waiting_reqs,
+            num_skipped_waiting_reqs=total_skipped_waiting_reqs,
+            num_preempted_reqs=total_preempted_reqs,
             kv_cache_usage=avg_kv_cache_usage,
+            iteration_records=combined_iteration_records,
             prefix_cache_stats=combined_prefix_cache_stats,
             connector_prefix_cache_stats=combined_connector_prefix_cache_stats,
             spec_decoding_stats=combined_spec_decoding_stats,
@@ -1580,6 +1590,8 @@ class DPScheduler(SchedulerInterface):
                     rid: aux_output[rid]
                     for rid in req_ids if rid in aux_output
                 }),
+                iteration_records=(list(g.iteration_records) if rank == 0
+                                   and g.iteration_records else []),
             )
             outputs.append(rank_model_runner_output)
 
@@ -1737,6 +1749,8 @@ class DPScheduler(SchedulerInterface):
         # Aggregate stats from all schedulers
         total_running_reqs = 0
         total_waiting_reqs = 0
+        total_skipped_waiting_reqs = 0
+        total_preempted_reqs = 0
         total_kv_cache_usage = 0.0
 
         combined_prefix_cache_stats = PrefixCacheStats()
@@ -1756,6 +1770,8 @@ class DPScheduler(SchedulerInterface):
 
             total_running_reqs += rank_stats.num_running_reqs
             total_waiting_reqs += rank_stats.num_waiting_reqs
+            total_skipped_waiting_reqs += rank_stats.num_skipped_waiting_reqs
+            total_preempted_reqs += rank_stats.num_preempted_reqs
             total_kv_cache_usage += rank_stats.kv_cache_usage
 
             # Combine prefix cache stats
@@ -1783,6 +1799,8 @@ class DPScheduler(SchedulerInterface):
         return SchedulerStats(
             num_running_reqs=total_running_reqs,
             num_waiting_reqs=total_waiting_reqs,
+            num_skipped_waiting_reqs=total_skipped_waiting_reqs,
+            num_preempted_reqs=total_preempted_reqs,
             kv_cache_usage=avg_kv_cache_usage,
             prefix_cache_stats=combined_prefix_cache_stats,
             connector_prefix_cache_stats=combined_connector_prefix_cache_stats,
