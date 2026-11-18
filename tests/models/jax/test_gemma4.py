@@ -13,10 +13,14 @@
 # limitations under the License.
 
 import gc
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import jax
+import numpy as np
 import pytest
+import torch
+from flax import nnx
 from jax import numpy as jnp
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.model_loader import get_model_loader
@@ -26,10 +30,193 @@ from tpu_inference.distributed.jax_parallel_state import \
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     get_kv_cache_shape
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.process_weights.moe_weights import \
+    get_w13_padding_config
 from tpu_inference.layers.jax.moe.moe import JaxRoutedExperts
 from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
+from tpu_inference.layers.jax.quantization.unquantized import (
+    MOE_WEIGHTS_STAGED_ON_HOST, UnquantizedConfig)
 from tpu_inference.models.jax.gemma4 import Gemma4DecoderLayer, Gemma4MoE
 from tpu_inference.models.jax.gemma4_mm import Gemma4ForConditionalGeneration
+
+
+class TestGemma4MoE:
+
+    @staticmethod
+    def _mock_vllm_parallel_config():
+        return SimpleNamespace(parallel_config=SimpleNamespace(
+            data_parallel_size=1,
+            prefill_context_parallel_size=1,
+            tensor_parallel_size=1,
+            enable_expert_parallel=False,
+        ))
+
+    def test_load_weights_stages_fused_weights_until_postprocess(self, mesh):
+        config = SimpleNamespace(num_experts=4,
+                                 hidden_size=8,
+                                 moe_intermediate_size=16,
+                                 top_k_experts=2)
+        vllm_cfg = self._mock_vllm_parallel_config()
+        with jax.set_mesh(mesh), set_current_vllm_config(vllm_cfg):
+            layer = Gemma4MoE(config=config,
+                              dtype=jnp.bfloat16,
+                              mesh=mesh,
+                              rngs=nnx.Rngs(0),
+                              quant_config=UnquantizedConfig({}),
+                              prefix="layers.0.mlp")
+
+        gate_up_proj = torch.zeros(
+            (config.num_experts, 2 * config.moe_intermediate_size,
+             config.hidden_size),
+            dtype=torch.bfloat16)
+        down_proj = torch.zeros(
+            (config.num_experts, config.hidden_size,
+             config.moe_intermediate_size),
+            dtype=torch.bfloat16,
+        )
+
+        loaded = layer.load_weights([
+            ("gate_up_proj", gate_up_proj),
+            ("down_proj", down_proj),
+        ])
+
+        assert loaded == {
+            "kernel_gating_EDF",
+            "kernel_up_proj_EDF",
+            "kernel_down_proj_EFD",
+        }
+        assert layer.kernel_gating_EDF.value.shape == (
+            config.num_experts, config.hidden_size,
+            config.moe_intermediate_size)
+        assert layer.kernel_down_proj_EFD.value.shape == (
+            config.num_experts, config.moe_intermediate_size,
+            config.hidden_size)
+        assert layer.kernel_gating_EDF._weights_to_load[0].shape == (
+            config.num_experts, config.moe_intermediate_size,
+            config.hidden_size)
+        assert layer.kernel_up_proj_EDF._weights_to_load[0].shape == (
+            config.num_experts, config.moe_intermediate_size,
+            config.hidden_size)
+        assert layer.kernel_down_proj_EFD._weights_to_load[0].shape == (
+            config.num_experts, config.hidden_size,
+            config.moe_intermediate_size)
+        assert layer.kernel_gating_EDF.get_metadata(
+        )[MOE_WEIGHTS_STAGED_ON_HOST]
+        assert layer.kernel_up_proj_EDF.get_metadata(
+        )[MOE_WEIGHTS_STAGED_ON_HOST]
+        assert layer.kernel_down_proj_EFD.get_metadata(
+        )[MOE_WEIGHTS_STAGED_ON_HOST]
+
+        with jax.set_mesh(mesh):
+            assert layer.quant_method.process_weights_after_loading(layer)
+
+        assert not hasattr(layer, "kernel_gating_EDF")
+        assert not hasattr(layer, "kernel_up_proj_EDF")
+        assert hasattr(layer, "kernel_gating_upproj_EDF")
+        assert hasattr(layer, "kernel_down_proj_EFD")
+        padding_config = get_w13_padding_config(
+            config.moe_intermediate_size,
+            reorder_size=mesh.shape["model"],
+            align=128,
+        )
+        assert layer.kernel_gating_upproj_EDF.value.shape == (
+            config.num_experts,
+            config.hidden_size,
+            2 * padding_config.padded_intermediate_size,
+        )
+        assert layer.kernel_down_proj_EFD.value.shape == (
+            config.num_experts,
+            config.moe_intermediate_size,
+            config.hidden_size,
+        )
+
+    def test_load_weights_rejects_bad_staged_weight_shape(self, mesh):
+        config = SimpleNamespace(num_experts=4,
+                                 hidden_size=8,
+                                 moe_intermediate_size=16,
+                                 top_k_experts=2)
+        vllm_cfg = self._mock_vllm_parallel_config()
+        with jax.set_mesh(mesh), set_current_vllm_config(vllm_cfg):
+            layer = Gemma4MoE(config=config,
+                              dtype=jnp.bfloat16,
+                              mesh=mesh,
+                              rngs=nnx.Rngs(0),
+                              quant_config=UnquantizedConfig({}),
+                              prefix="layers.0.mlp")
+
+        bad_gate_up_proj = torch.zeros(
+            (config.num_experts, 2 * config.moe_intermediate_size,
+             config.hidden_size + 1),
+            dtype=torch.bfloat16)
+
+        with pytest.raises(ValueError,
+                           match="Unexpected Gemma4 MoE weight shape"):
+            layer.load_weights([("gate_up_proj", bad_gate_up_proj)])
+
+    def test_load_weights_fused_matches_per_expert_weights(self, mesh):
+        config = SimpleNamespace(num_experts=4,
+                                 hidden_size=8,
+                                 moe_intermediate_size=16,
+                                 top_k_experts=2)
+        vllm_cfg = self._mock_vllm_parallel_config()
+        with jax.set_mesh(mesh), set_current_vllm_config(vllm_cfg):
+            fused_layer = Gemma4MoE(config=config,
+                                    dtype=jnp.bfloat16,
+                                    mesh=mesh,
+                                    rngs=nnx.Rngs(0),
+                                    quant_config=UnquantizedConfig({}),
+                                    prefix="layers.0.mlp")
+            unfused_layer = Gemma4MoE(config=config,
+                                      dtype=jnp.bfloat16,
+                                      mesh=mesh,
+                                      rngs=nnx.Rngs(0),
+                                      quant_config=UnquantizedConfig({}),
+                                      prefix="layers.0.mlp")
+
+        torch.manual_seed(0)
+        gate_up_proj = torch.randn(
+            (config.num_experts, 2 * config.moe_intermediate_size,
+             config.hidden_size),
+            dtype=torch.bfloat16)
+        down_proj = torch.randn((config.num_experts, config.hidden_size,
+                                 config.moe_intermediate_size),
+                                dtype=torch.bfloat16)
+
+        per_expert_weights = []
+        f_dim = config.moe_intermediate_size
+        for i in range(config.num_experts):
+            per_expert_weights.append(
+                (f"experts.{i}.gate_proj.weight", gate_up_proj[i, :f_dim, :]))
+            per_expert_weights.append(
+                (f"experts.{i}.up_proj.weight", gate_up_proj[i, f_dim:, :]))
+            per_expert_weights.append(
+                (f"experts.{i}.down_proj.weight", down_proj[i]))
+
+        with jax.set_mesh(mesh):
+            assert fused_layer.load_weights([
+                ("gate_up_proj", gate_up_proj),
+                ("down_proj", down_proj),
+            ]) == {
+                "kernel_gating_EDF",
+                "kernel_up_proj_EDF",
+                "kernel_down_proj_EFD",
+            }
+            assert unfused_layer.load_weights(per_expert_weights) == {
+                "kernel_gating_EDF",
+                "kernel_up_proj_EDF",
+                "kernel_down_proj_EFD",
+            }
+            assert fused_layer.quant_method.process_weights_after_loading(
+                fused_layer)
+            assert unfused_layer.quant_method.process_weights_after_loading(
+                unfused_layer)
+
+        np.testing.assert_array_equal(
+            np.asarray(fused_layer.kernel_gating_upproj_EDF.value),
+            np.asarray(unfused_layer.kernel_gating_upproj_EDF.value))
+        np.testing.assert_array_equal(
+            np.asarray(fused_layer.kernel_down_proj_EFD.value),
+            np.asarray(unfused_layer.kernel_down_proj_EFD.value))
 
 
 class TestGemma4ForConditionalGeneration:

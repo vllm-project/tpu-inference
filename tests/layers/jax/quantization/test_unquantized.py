@@ -31,7 +31,9 @@ from tpu_inference.layers.jax.linear import (JaxEinsum, JaxLinear,
 from tpu_inference.layers.jax.moe.moe import JaxRoutedExperts
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.unquantized import (
-    UnquantizedConfig, UnquantizedMergedLinearMethod)
+    MOE_WEIGHTS_STAGED_ON_HOST, UnquantizedConfig, UnquantizedFusedMoEMethod,
+    UnquantizedMergedLinearMethod, _concat_staged_moe_weights,
+    _moe_staged_weights_ready)
 
 
 @pytest.fixture
@@ -237,6 +239,78 @@ class TestUnquantizedJaxMoe:
                                (num_experts, hidden_size, intermediate_size),
                                dtype=jnp.bfloat16)
         return w13, w2
+
+    def test_concat_staged_moe_weights_concatenates_per_expert_chunks(self):
+        chunks = [
+            jnp.full((1, 3, 4), expert_id, dtype=jnp.bfloat16)
+            for expert_id in range(4)
+        ]
+        param = nnx.Param(jnp.zeros((4, 3, 4), dtype=jnp.bfloat16))
+        param.set_metadata("_weights_to_load", chunks)
+
+        assert _moe_staged_weights_ready(param)
+        weights = _concat_staged_moe_weights(param)
+
+        assert weights.shape == (4, 3, 4)
+        np.testing.assert_array_equal(np.asarray(weights[:, 0, 0]),
+                                      np.arange(4))
+
+    def test_concat_staged_moe_weights_returns_single_chunk(self):
+        chunk = jnp.ones((4, 3, 4), dtype=jnp.bfloat16)
+        param = nnx.Param(jnp.zeros((4, 3, 4), dtype=jnp.bfloat16))
+        param.set_metadata("_weights_to_load", [chunk])
+
+        assert _moe_staged_weights_ready(param)
+        assert _concat_staged_moe_weights(param) is chunk
+
+    def test_staged_host_postprocess_matches_unstaged_path(self, mesh):
+        from types import SimpleNamespace
+
+        w13, w2 = self._make_inputs(num_experts=4,
+                                    hidden_size=16,
+                                    intermediate_size=32)
+        w_gate = w13[:, :32, :]
+        w_up = w13[:, 32:, :]
+
+        def _make_mock_moe_layer(staged_on_host: bool):
+            gating = nnx.Param(jnp.zeros((4, 16, 32), dtype=jnp.bfloat16),
+                               eager_sharding=False)
+            up_proj = nnx.Param(jnp.zeros((4, 16, 32), dtype=jnp.bfloat16),
+                                eager_sharding=False)
+            down_proj = nnx.Param(jnp.zeros((4, 32, 16), dtype=jnp.bfloat16),
+                                  eager_sharding=False)
+            for param, arr in [(gating, w_gate), (up_proj, w_up),
+                               (down_proj, w2)]:
+                if staged_on_host:
+                    param.set_metadata("_weights_to_load",
+                                       [jax.device_get(arr)])
+                    param.set_metadata(MOE_WEIGHTS_STAGED_ON_HOST, True)
+                else:
+                    param.set_value(arr)
+                    param.set_metadata("_weights_to_load", [arr])
+            return SimpleNamespace(
+                moe_backend=MoEBackend.GMM_TP,
+                activation=MoEActivation.SILU,
+                mesh=mesh,
+                kernel_gating_EDF=gating,
+                kernel_up_proj_EDF=up_proj,
+                kernel_down_proj_EFD=down_proj,
+            )
+
+        staged_layer = _make_mock_moe_layer(staged_on_host=True)
+        ref_layer = _make_mock_moe_layer(staged_on_host=False)
+        method = UnquantizedFusedMoEMethod(staged_layer)
+
+        with jax.set_mesh(mesh):
+            assert method.process_weights_after_loading(staged_layer)
+            assert method.process_weights_after_loading(ref_layer)
+
+        np.testing.assert_array_equal(
+            np.asarray(staged_layer.kernel_gating_upproj_EDF.value),
+            np.asarray(ref_layer.kernel_gating_upproj_EDF.value))
+        np.testing.assert_array_equal(
+            np.asarray(staged_layer.kernel_down_proj_EFD.value),
+            np.asarray(ref_layer.kernel_down_proj_EFD.value))
 
     @pytest.mark.parametrize("requantize_dtype,expect_w_dtype,expect_scale", [
         ("", jnp.bfloat16, None),
