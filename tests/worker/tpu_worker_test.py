@@ -236,6 +236,12 @@ class TestTPUWorker:
             assert os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] == "2,2,1"
             assert os.environ["ALLOW_MULTIPLE_LIBTPU_LOAD"] == "true"
 
+        with patch.dict('os.environ', {"TPU_MULTIHOST_BACKEND": "ray"},
+                        clear=False):
+            os.environ.pop("ALLOW_MULTIPLE_LIBTPU_LOAD", None)
+            worker.init_device()
+            assert "ALLOW_MULTIPLE_LIBTPU_LOAD" not in os.environ
+
     #
     # --- Initialization Tests ---
     #
