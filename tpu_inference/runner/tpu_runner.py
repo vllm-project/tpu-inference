@@ -2266,25 +2266,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         logits = logits.astype(jnp.float32)
         if full_logits is not None:
             full_logits = full_logits.astype(jnp.float32)
-        use_processed_spec_logprobs = (tpu_sampling_metadata.logprobs
-                                       and spec_decode_metadata is not None
-                                       and self.model_config.logprobs_mode
-                                       == "processed_logprobs"
-                                       and tpu_sampling_metadata.do_sampling)
-        if use_processed_spec_logprobs:
-            # `_precompile_process_and_extend_logits` compiles with float32
-            # `target_logits` (whereas `_precompile_extend_logits_simple`
-            # compiles with `bfloat16`); cast before `maybe_forbid_compile`.
-            processed_target_logits = target_logits.astype(jnp.float32)
         # Provide mesh context for out_shardings=P() on logprobs jits.
         with self.maybe_forbid_compile, jax.set_mesh(self.mesh):
             if tpu_sampling_metadata.logprobs:
                 if spec_decode_metadata is not None:
-                    if use_processed_spec_logprobs:
+                    if (logprobs_use_processed_logits(
+                            self.model_config.logprobs_mode)
+                            and tpu_sampling_metadata.do_sampling):
                         extended_logits = process_and_extend_logits(
-                            self.mesh, processed_target_logits,
-                            processed_bonus_logits, spec_decode_metadata,
-                            tpu_sampling_metadata)
+                            self.mesh, target_logits, processed_bonus_logits,
+                            spec_decode_metadata, tpu_sampling_metadata)
                     else:
                         extended_logits = extend_logits_simple(
                             target_logits, bonus_logits, self.mesh)

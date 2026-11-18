@@ -1059,6 +1059,7 @@ class TestTPUJaxRunner:
         ("logprobs_mode", "do_sampling", "expect_processed"),
         [
             ("processed_logprobs", True, True),
+            ("processed_logits", True, True),
             ("processed_logprobs", False, False),
             ("raw_logprobs", True, False),
         ],
@@ -1086,7 +1087,7 @@ class TestTPUJaxRunner:
         do_sampling,
         expect_processed,
     ):
-        """`process_and_extend_logits` receives float32 `target_logits` (cast before `maybe_forbid_compile`), while `extend_logits_simple` keeps bfloat16."""
+        """Processed logprob modes with sampling dispatch to `process_and_extend_logits` with model-dtype `target_logits` and float32 `processed_bonus_logits`, while raw/greedy modes dispatch to `extend_logits_simple`."""
         self.runner.scheduler_config.async_scheduling = False
         self.runner.speculative_config = SimpleNamespace(
             num_speculative_tokens=3)
@@ -1200,7 +1201,9 @@ class TestTPUJaxRunner:
             mock_process_and_extend.assert_called_once()
             mock_extend_simple.assert_not_called()
             passed_target_logits = mock_process_and_extend.call_args[0][1]
-            assert passed_target_logits.dtype == jnp.float32
+            passed_bonus_logits = mock_process_and_extend.call_args[0][2]
+            assert passed_target_logits.dtype == jnp.bfloat16
+            assert passed_bonus_logits.dtype == jnp.float32
         else:
             mock_extend_simple.assert_called_once()
             mock_process_and_extend.assert_not_called()
