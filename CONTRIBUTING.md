@@ -38,7 +38,7 @@ We prefer enabling Pytorch based vLLM models via Torchax first and then followin
 
 ## Testing
 
-When checking in a new feature, we expect that you you add relevant unit tests as well as CI tests.  You can read more about the latter [here](https://github.com/vllm-project/tpu-inference/tree/main/.buildkite#adding-a-new-feature-to-ci).
+When checking in a new feature, we expect that you add relevant unit tests as well as CI tests.  You can read more about the latter [here](https://github.com/vllm-project/tpu-inference/tree/main/.buildkite#adding-a-new-feature-to-ci).
 
 ## Setting up linting, formatting, and static type checking
 
