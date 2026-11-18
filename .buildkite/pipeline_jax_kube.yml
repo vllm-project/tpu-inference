@@ -46,6 +46,27 @@ steps:
   - group: "${TESTS_GROUP_LABEL:-[jax] TPU6e Tests Group}"
     depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
     steps:
+      # DO NOT MERGE: A/B repro for the Qwen1.5-MoE EP accuracy collapse.
+      - label: ":kubernetes: tpu6e [repro] Qwen1.5-MoE EP - vLLM Transformers backend (default)"
+        key: "${TPU_VERSION:-tpu6e}_repro_qwen2moe_tf"
+        if: "'${TPU_VERSION:-tpu6e}' == 'tpu6e'"
+        env:
+          SHAPE: *shape_multi
+        <<: *tpu_step
+        commands:
+          - |
+            .buildkite/kubernetes/run.sh bash -c 'bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh --model_name "Qwen/Qwen1.5-MoE-A2.7B" --use_moe_ep_kernel 0 --tensor_parallel_size 4 --max_model_len 1024 --max_num_batched_tokens 128 --max_gen_toks 128 --enable_expert_parallel 1 --flex_threshold 0.37 --strict_threshold 0.06 --limit 250'
+
+      - label: ":kubernetes: tpu6e [repro] Qwen1.5-MoE EP - native vLLM Qwen2MoeForCausalLM"
+        key: "${TPU_VERSION:-tpu6e}_repro_qwen2moe_native"
+        if: "'${TPU_VERSION:-tpu6e}' == 'tpu6e'"
+        env:
+          SHAPE: *shape_multi
+        <<: *tpu_step
+        commands:
+          - |
+            .buildkite/kubernetes/run.sh bash -c 'TPU_INFERENCE_NATIVE_QWEN2_MOE=1 bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh --model_name "Qwen/Qwen1.5-MoE-A2.7B" --use_moe_ep_kernel 0 --tensor_parallel_size 4 --max_model_len 1024 --max_num_batched_tokens 128 --max_gen_toks 128 --enable_expert_parallel 1 --flex_threshold 0.37 --strict_threshold 0.06 --limit 250'
+
       - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E MLPerf tests for JAX models"
         key: "${TPU_VERSION:-tpu6e}_test_0"
         env:

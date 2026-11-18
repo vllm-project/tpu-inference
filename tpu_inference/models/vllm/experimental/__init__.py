@@ -28,7 +28,16 @@ def register_models():
     Called from the ``vllm.general_plugins`` entrypoint so it runs at vLLM
     startup, before any model is resolved from its architecture name.
     """
+    import os
+
     from vllm import ModelRegistry
 
-    for arch, model_cls in _TPU_VLLM_MODELS.items():
+    models = dict(_TPU_VLLM_MODELS)
+    # Experiment only: opt back into the native vLLM Qwen2-MoE implementation
+    # that vllm-project/vllm#66827 replaced with the Transformers backend.
+    if os.environ.get("TPU_INFERENCE_NATIVE_QWEN2_MOE") == "1":
+        models["Qwen2MoeForCausalLM"] = (
+            "tpu_inference.models.vllm.experimental.qwen2_moe:"
+            "Qwen2MoeForCausalLM")
+    for arch, model_cls in models.items():
         ModelRegistry.register_model(arch, model_cls)
