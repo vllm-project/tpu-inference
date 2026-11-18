@@ -252,6 +252,8 @@ fi
 # Order TPU_VISIBLE_CHIPS indices by (NUMA node, PCI BDF) so that on 8-chip VMs
 # spanning two 4-chip trays (e.g. ct6e-standard-8t 2x4), prefill and decode each
 # receive a contiguous 2x2 tray even when /dev/vfio/* group IDs are interleaved.
+# Inline stdlib mirror of tpu_inference.tpu_info.get_ordered_chip_ids(): this
+# script runs on the Docker host where tpu_inference is not installed.
 TOTAL_CHIPS_NEEDED=$(( NUM_HOSTS_PER_INSTANCE * 2 ))
 mapfile -t ORDERED_CHIPS < <(python3 - <<'PY' 2>/dev/null || true
 import glob
@@ -273,7 +275,8 @@ else:
         dev_dir = f"/sys/kernel/iommu_groups/{group}/devices"
         devs = sorted(os.listdir(dev_dir))
         if not devs:
-            raise RuntimeError("empty iommu devices")
+            entries = []
+            break
         bdf = devs[0]
         vendor_path = f"/sys/bus/pci/devices/{bdf}/vendor"
         if os.path.exists(vendor_path):
@@ -289,9 +292,20 @@ else:
         bdf_key = tuple(int(g or "0", 16) for g in m.groups()) if m else (0, 0, 0, 0)
         entries.append((numa, bdf_key, scanner_id))
         scanner_id += 1
-    entries.sort()
-    for _, _, sid in entries:
-        print(sid)
+    slot_to_numa = {}
+    for numa, bdf_key, _ in entries:
+        slot_to_numa.setdefault(bdf_key[:3], numa)
+    if len(slot_to_numa) < len(entries):
+        slot_entries = sorted(
+            (slot_to_numa[slot], slot, idx)
+            for idx, slot in enumerate(sorted(slot_to_numa))
+        )
+        for _, _, sid in slot_entries:
+            print(sid)
+    else:
+        entries.sort()
+        for _, _, sid in entries:
+            print(sid)
 PY
 )
 if [ "${#ORDERED_CHIPS[@]}" -lt "$TOTAL_CHIPS_NEEDED" ]; then

@@ -17,8 +17,8 @@
 # no docker daemon and runs under PodSecurity `baseline`, which rejects the
 # --privileged that run_disagg_multi_host.sh's `docker run` asks for.
 #
-#   prefill  4 processes, chips 0-3, Ray cluster on 8100, vLLM on 8400
-#   decode   4 processes, chips 4-7, Ray cluster on 9100, vLLM on 9400
+#   prefill  first tray-ordered slice (4 chips on v6e, 2 on v7x), Ray 8100, vLLM 8400
+#   decode   second tray-ordered slice (4 chips on v6e, 2 on v7x), Ray 9100, vLLM 9400
 #   proxy    1 process, port 8000, no chips
 #
 # TPU_VISIBLE_CHIPS, CLOUD_TPU_TASK_ID and TPU_PROCESS_PORT differ per process,

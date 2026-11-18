@@ -208,6 +208,65 @@ def test_get_ordered_chip_ids_interleaved_vfio_trays(tmp_path):
     assert ordered == [1, 2, 6, 3, 4, 0, 7, 5]
 
 
+def test_get_ordered_chip_ids_multi_vf_per_chip(tmp_path):
+    """Test multi-VF chips (e.g. tpu7x with 2 VFs/chip) return 1 ID per slot."""
+    # Simulate a 4-chip tpu7x host with 8 /dev/vfio/0..7 entries (2 VFs per
+    # physical PCI domain:bus:slot, interleaved across IOMMU groups).
+    vfio_layout = [
+        ("0", "0000:00:07.1", "0x1ae0", "0"),
+        ("1", "0000:00:06.0", "0x1ae0", "0"),
+        ("2", "0000:00:05.0", "0x1ae0", "0"),
+        ("3", "0000:00:04.1", "0x1ae0", "0"),
+        ("4", "0000:00:04.0", "0x1ae0", "0"),
+        ("5", "0000:00:05.1", "0x1ae0", "0"),
+        ("6", "0000:00:06.1", "0x1ae0", "0"),
+        ("7", "0000:00:07.0", "0x1ae0", "0"),
+    ]
+
+    vfio_dir = tmp_path / "dev" / "vfio"
+    vfio_dir.mkdir(parents=True)
+    vfio_paths = []
+    iommu_map = {}
+    pci_map = {}
+    for group, bdf, vendor, numa in vfio_layout:
+        vfio_file = vfio_dir / group
+        vfio_file.write_text("", encoding="utf-8")
+        vfio_paths.append(str(vfio_file))
+        iommu_map[f"/sys/kernel/iommu_groups/{group}/devices"] = [bdf]
+        pci_dir = tmp_path / "pci" / bdf
+        pci_dir.mkdir(parents=True)
+        (pci_dir / "vendor").write_text(vendor + "\n", encoding="utf-8")
+        (pci_dir / "numa_node").write_text(numa + "\n", encoding="utf-8")
+        pci_map[f"/sys/bus/pci/devices/{bdf}/vendor"] = str(pci_dir / "vendor")
+        pci_map[f"/sys/bus/pci/devices/{bdf}/numa_node"] = str(pci_dir /
+                                                               "numa_node")
+
+    real_open = open
+
+    def fake_glob(pattern):
+        if pattern == "/dev/accel*":
+            return []
+        if pattern == "/dev/vfio/[0-9]*":
+            return vfio_paths
+        return []
+
+    def fake_listdir(path):
+        if path in iommu_map:
+            return iommu_map[path]
+        raise FileNotFoundError(path)
+
+    def fake_open(path, *args, **kwargs):
+        return real_open(pci_map.get(path, path), *args, **kwargs)
+
+    with (
+            patch("tpu_inference.tpu_info.glob.glob", side_effect=fake_glob),
+            patch("tpu_inference.tpu_info.os.listdir",
+                  side_effect=fake_listdir),
+            patch("builtins.open", side_effect=fake_open),
+    ):
+        assert get_ordered_chip_ids() == [0, 1, 2, 3]
+
+
 def test_get_ordered_chip_ids_missing_sysfs_fallback(tmp_path):
     """Test get_ordered_chip_ids falls back to sequential IDs if sysfs is absent."""
     vfio_dir = tmp_path / "dev" / "vfio"

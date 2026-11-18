@@ -98,16 +98,22 @@ def _parse_pci_bdf(pci_bdf: str) -> tuple[int, int, int, int]:
 def get_ordered_chip_ids() -> list[int]:
     """Returns TPU_VISIBLE_CHIPS indices ordered by physical tray (NUMA, PCI BDF).
 
-    On multi-tray TPU VMs such as ct6e-standard-8t (2x4), libtpu enumerates
-    devices in /dev/vfio/[0-9]* order, whereas Linux guest PCI bus probing can
-    interleave IOMMU group IDs across the two PCI root complexes / NUMA nodes.
-    Sorting the libtpu scanner indices by (numa_node, pci_bdf) groups each 4-chip
-    2x2 tray contiguously ([0:4] and [4:8]).
+    - Single-VF TPU VMs (e.g. ct6e-standard-8t 2x4): libtpu's VFIO scanner
+      enumerates /dev/vfio/[0-9]* in ASCII-lexicographic path order, whereas
+      asynchronous guest PCI bus probing can interleave IOMMU group IDs across
+      the two PCI root complexes / NUMA nodes. Sorting scanner IDs by
+      (numa_node, pci_bdf) groups each 4-chip 2x2 tray contiguously.
+    - Multi-VF TPU VMs (e.g. tpu7x-standard-4t, where each physical chip exposes
+      multiple VFs sharing the same PCI domain:bus:slot): libtpu already groups
+      VFs by sorted (domain, bus, slot) and selects one primary VF per physical
+      chip (0..num_physical_chips-1), so scanner IDs are indexed per unique
+      (domain, bus, slot) rather than per /dev/vfio/* entry.
     """
     accel_files = glob.glob("/dev/accel*")
     if accel_files:
         return list(range(len(accel_files)))
 
+    # Matches libtpu's GetMatchingPaths("/dev/vfio/[0-9]*") ASCII path sort.
     vfio_paths = sorted(glob.glob("/dev/vfio/[0-9]*"))
     if not vfio_paths:
         return []
@@ -149,6 +155,18 @@ def get_ordered_chip_ids() -> list[int]:
 
         chip_entries.append((numa_node, _parse_pci_bdf(pci_bdf), scanner_id))
         scanner_id += 1
+
+    slot_to_numa: dict[tuple[int, int, int], int] = {}
+    for numa_node, bdf, _ in chip_entries:
+        slot_to_numa.setdefault(bdf[:3], numa_node)
+
+    if len(slot_to_numa) < len(chip_entries):
+        slot_entries = [
+            (slot_to_numa[slot], slot, slot_scanner_id)
+            for slot_scanner_id, slot in enumerate(sorted(slot_to_numa))
+        ]
+        slot_entries.sort()
+        return [slot_scanner_id for _, _, slot_scanner_id in slot_entries]
 
     chip_entries.sort()
     return [entry_scanner_id for _, _, entry_scanner_id in chip_entries]

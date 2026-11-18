@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -196,7 +197,6 @@ class TestTPUWorker:
                            devices=['tpu:0'])
 
         with patch.dict('os.environ', {}, clear=False):
-            import os
             worker._setup_dp_chip_isolation()
             assert os.environ["TPU_VISIBLE_CHIPS"] == "4,0,7,5"
             assert os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] == "2,2,1"

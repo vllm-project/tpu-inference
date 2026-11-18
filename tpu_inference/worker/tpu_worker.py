@@ -37,10 +37,9 @@ logger = init_logger(__name__)
 
 
 def _chips_per_process_bounds(num_chips: int) -> str:
+    # A 4-chip TPU tray / sub-slice has a 2x2x1 2D ICI topology rather than 1x4x1.
     if num_chips == 4:
         return "2,2,1"
-    if num_chips == 8:
-        return "2,4,1"
     return f"1,{num_chips},1"
 
 
