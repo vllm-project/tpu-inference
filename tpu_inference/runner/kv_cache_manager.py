@@ -14,7 +14,7 @@
 import dataclasses
 import os
 from collections import defaultdict
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, Callable, List
 
 import jax
 import jax.numpy as jnp
@@ -24,7 +24,8 @@ from torchax.ops.mappings import t2j_dtype
 from vllm.config import get_layers_from_vllm_config, set_current_vllm_config
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.abstract import (
+    MambaBase, get_mamba_num_speculative_blocks)
 from vllm.model_executor.layers.mla import MLAAttention
 from vllm.models.deepseek_v4.attention import (DeepseekV4Attention,
                                                DeepseekV4IndexerCache)
@@ -33,6 +34,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.core.single_type_kv_cache_manager import (FullAttentionManager,
+                                                       MambaManager,
                                                        SlidingWindowManager)
 from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
                                         KVCacheLayerConfig, KVCacheSpec,
@@ -43,11 +45,13 @@ from tpu_inference import utils
 from tpu_inference import utils as common_utils
 from tpu_inference.core.hybrid_coordinator import (  # noqa: F401
     DEFAULT_MAMBA_CACHE_MULTIPLIER, is_mamba_group, mamba_blocks_per_request,
-    mamba_pool_size, set_mamba_num_blocks)
+    mamba_pool_size, maybe_install_hybrid_coordinator_hooks,
+    set_mamba_num_blocks)
 from tpu_inference.core.runner_slot_mamba import \
     maybe_runner_slot_mamba_layer_config
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
+from tpu_inference.models.common import hybrid
 from tpu_inference.models.common.kv_share import compute_kv_share_map
 from tpu_inference.offload.utils import get_kv_connector_cache_layout
 from tpu_inference.runner import utils as runner_utils
@@ -251,6 +255,29 @@ class KVCacheManager:
         unpadded_mamba_page_size = dataclasses.replace(
             first_mamba_cfg.spec, page_size_padded=None).page_size_bytes
 
+        self._set_hybrid_uniform_page_size(attn_page_size_bytes,
+                                           unpadded_mamba_page_size,
+                                           len(attn_modules),
+                                           len(mamba_modules))
+
+    def _set_hybrid_uniform_page_size(self, attn_page_size_bytes: int,
+                                      unpadded_mamba_page_size_bytes: int,
+                                      num_attn: int, num_mamba: int) -> None:
+        """Sets the uniform padded page size for a hybrid attention+mamba model.
+
+        Shared by the torchax path (`update_mamba_page_size_padded`) and the
+        JAX path (`get_kv_cache_layer_configs` for models that opt in through
+        `tpu_inference.models.common.hybrid`). See
+        `update_mamba_page_size_padded` for why the padding is needed.
+
+        Args:
+            attn_page_size_bytes: TPU-actual bytes per block per attention
+                layer (from `get_attention_page_size_bytes`).
+            unpadded_mamba_page_size_bytes: bytes per slot per mamba layer
+                (`prod(shape) x dtype_size` summed over the state tensors).
+            num_attn: number of attention layers that get a KV cache spec.
+            num_mamba: number of mamba layers that get a KV cache spec.
+        """
         # Derive vLLM's kv-cache group layout. vLLM splits each type into
         # equal-sized groups of `group_size` layers, then allocates
         # `group_size` `KVCacheTensor`s, each `layers` one layer from
@@ -276,8 +303,6 @@ class KVCacheManager:
         # spec creation depends on padding). Keep in sync if that
         # heuristic ever changes — it has been stable since the hybrid
         # allocator landed.
-        num_attn = len(attn_modules)
-        num_mamba = len(mamba_modules)
         min_count = min(num_attn, num_mamba)
         max_count = max(num_attn, num_mamba)
         # Match vLLM exactly: float comparison, no int() truncation (matters
@@ -289,8 +314,9 @@ class KVCacheManager:
         num_attn_groups = (num_attn + group_size - 1) // group_size
         num_mamba_groups = (num_mamba + group_size - 1) // group_size
 
-        uniform_page_size_bytes = (num_attn_groups * attn_page_size_bytes +
-                                   num_mamba_groups * unpadded_mamba_page_size)
+        uniform_page_size_bytes = (
+            num_attn_groups * attn_page_size_bytes +
+            num_mamba_groups * unpadded_mamba_page_size_bytes)
 
         logger.info(
             "Hybrid KV cache: padding every layer spec to %d bytes "
@@ -299,7 +325,7 @@ class KVCacheManager:
             "num_blocks match per-layer TPU allocation when mamba layers "
             "cannot be truly shared.", uniform_page_size_bytes,
             num_attn_groups, attn_page_size_bytes, num_mamba_groups,
-            unpadded_mamba_page_size)
+            unpadded_mamba_page_size_bytes)
 
         self._hybrid_uniform_page_size_bytes = int(uniform_page_size_bytes)
         self.runner.cache_config.mamba_page_size_padded = int(
@@ -308,8 +334,21 @@ class KVCacheManager:
         # Size the mamba and attention pools out of the profiled HBM budget.
         # See `_maybe_set_compact_mamba_num_blocks_override`.
         self._maybe_set_compact_mamba_num_blocks_override(
-            attn_page_size_bytes, int(unpadded_mamba_page_size), num_attn,
-            num_mamba)
+            attn_page_size_bytes, int(unpadded_mamba_page_size_bytes),
+            num_attn, num_mamba)
+
+        # Make sure the engine-core process uses the dual-pool
+        # TPUHybridKVCacheCoordinator. The platform config hook installs it
+        # only in the process that built the config, and only the TPU
+        # Multiproc/Ray executors and the DP scheduler re-install it in the
+        # engine core. With vLLM's UniProcExecutor (single host, no DP
+        # attention) the worker runs inside the engine core, and this runs
+        # before the engine core builds its Scheduler. Without the hooks,
+        # vLLM's single-pool coordinator hands out mamba block ids beyond
+        # `_mamba_num_blocks`, which clip onto the last mamba state slot.
+        # No-op unless prefix caching is on with mamba_cache_mode="align";
+        # installing again is harmless.
+        maybe_install_hybrid_coordinator_hooks(self.runner.vllm_config)
 
     def _maybe_set_compact_mamba_num_blocks_override(
             self, attn_page_size_bytes: int,
@@ -593,6 +632,59 @@ class KVCacheManager:
                       for (heads, dim), size in page_sizes.items()))
         return True
 
+    def _jax_hybrid_mamba_layer_configs(
+        self,
+        num_layers: int,
+        kv_share_map: dict[int, int],
+        layer_kv_shape: Callable[[int], tuple[int, int]],
+    ) -> dict[int, KVCacheLayerConfig]:
+        """Mamba layer configs (by layer index) for JAX models that opt in via
+        `tpu_inference.models.common.hybrid`; `{}` for all other models."""
+        vllm_config = self.runner.vllm_config
+        kinds = hybrid.get_jax_hybrid_layer_kinds(vllm_config, num_layers)
+        if kinds is None:
+            return {}
+        assert not self.use_mla, "Hybrid JAX models with MLA are not supported."
+        layers = [i for i in range(num_layers) if i not in kv_share_map]
+        mamba = [i for i in layers if kinds[i] == hybrid.MAMBA_LAYER_KIND]
+        attn = [i for i in layers if kinds[i] != hybrid.MAMBA_LAYER_KIND]
+        attn_shapes = {layer_kv_shape(i) for i in attn}
+        if not mamba or len(attn_shapes) != 1:
+            raise ValueError(
+                "Hybrid JAX model needs >=1 mamba layer and exactly one "
+                f"attention shape; got {len(mamba)} mamba layers, shapes "
+                f"{sorted(attn_shapes)}.")
+        cache_config = self.runner.cache_config
+        if cache_config.mamba_block_size is None:
+            raise ValueError(
+                "mamba_block_size is unset: the hybrid cache config was not "
+                "applied for this model.")
+        model_cls = hybrid.get_jax_model_class(vllm_config)
+        spec = MambaSpec(
+            block_size=cache_config.mamba_block_size,
+            shapes=tuple(
+                tuple(int(dim) for dim in shape) for shape in
+                model_cls.get_mamba_state_shape_from_config(vllm_config)),
+            dtypes=tuple(
+                model_cls.get_mamba_state_dtype_from_config(vllm_config)),
+            mamba_type=hybrid.get_jax_mamba_type(vllm_config))
+        num_kv_heads, head_size = attn_shapes.pop()
+        attn_page_bytes = get_attention_page_size_bytes(
+            self.runner.mesh, cache_config.block_size, num_kv_heads, head_size,
+            self.runner.kv_cache_dtype, False, self.runner.attention_backend)
+        self._set_hybrid_uniform_page_size(attn_page_bytes,
+                                           spec.page_size_bytes, len(attn),
+                                           len(mamba))
+        spec = dataclasses.replace(
+            spec, page_size_padded=self._hybrid_uniform_page_size_bytes)
+        layer_config = maybe_runner_slot_mamba_layer_config(
+            MambaManager.layer_config(
+                spec,
+                mamba_cache_mode=cache_config.mamba_cache_mode,
+                num_speculative_blocks=get_mamba_num_speculative_blocks(
+                    vllm_config)), vllm_config)
+        return dict.fromkeys(mamba, layer_config)
+
     def get_kv_cache_layer_configs(self) -> dict[str, KVCacheLayerConfig]:
         # TODO(xiang): this hack tricks engine core to init successfully
 
@@ -637,7 +729,39 @@ class KVCacheManager:
             # the common case.
             kv_share_map = compute_kv_share_map(text_config)
 
-            for i in range(model_config.get_num_layers(parallel_config)):
+            def jax_layer_kv_shape(i: int) -> tuple[int, int]:
+                """Padded (num_kv_heads, head_size) of attention layer i."""
+                layer_type = "full_attention"
+                if hasattr(text_config, "layer_types") and i < len(
+                        text_config.layer_types):
+                    layer_type = text_config.layer_types[i]
+
+                # transformers >= 5.15 stores head_dim / num_kv_heads per
+                # layer; older versions use flat attributes split by
+                # layer_types (see utils.get_layer_kv_params). `or`
+                # instead of plain defaults so we also handle values that
+                # are present but None (e.g. Gemma-4 E2B has
+                # num_global_key_value_heads=None). `or` also coerces 0 →
+                # fallback, which is fine because 0 num_kv_heads /
+                # head_dim is never a valid config and would crash
+                # get_padded_num_heads downstream anyway.
+                layer_head_size, layer_num_kv_heads = (
+                    common_utils.get_layer_kv_params(text_config, layer_type))
+                num_kv_heads = layer_num_kv_heads or base_num_kv_heads
+                head_size = layer_head_size or base_head_size
+                # Pad num_kv_heads to multiple of TP size.
+                num_kv_heads = common_utils.get_padded_num_heads(
+                    num_kv_heads, model_cnt)
+                head_size = common_utils.get_padded_head_dim(head_size)
+                return num_kv_heads, head_size
+
+            num_layers = model_config.get_num_layers(parallel_config)
+            # Hybrid attention+mamba JAX models opt in through
+            # `tpu_inference.models.common.hybrid`; `{}` for all others.
+            hybrid_mamba_configs = self._jax_hybrid_mamba_layer_configs(
+                num_layers, kv_share_map, jax_layer_kv_shape)
+
+            for i in range(num_layers):
                 # If this layer is KV-shared, register the redirect and skip
                 # spec creation (so no slot is allocated). The forward-time
                 # remap at line ~835 picks the source layer's slot.
@@ -646,35 +770,17 @@ class KVCacheManager:
                         f"layer.{i}"] = f"layer.{kv_share_map[i]}"
                     continue
 
+                if i in hybrid_mamba_configs:
+                    layer_configs[f"layer.{i}"] = hybrid_mamba_configs[i]
+                    continue
+
                 if self.use_mla:
                     layer_configs[
                         f"layer.{i}"] = self._create_attention_layer_config(
                             block_size, 1, mla_head_size)
                 else:
                     # TODO(kwang3939): unify the hybrid kv cache of jax path and tochax path.
-                    layer_type = "full_attention"
-                    if hasattr(text_config, "layer_types") and i < len(
-                            text_config.layer_types):
-                        layer_type = text_config.layer_types[i]
-
-                    # transformers >= 5.15 stores head_dim / num_kv_heads per
-                    # layer; older versions use flat attributes split by
-                    # layer_types (see utils.get_layer_kv_params). `or`
-                    # instead of plain defaults so we also handle values that
-                    # are present but None (e.g. Gemma-4 E2B has
-                    # num_global_key_value_heads=None). `or` also coerces 0 →
-                    # fallback, which is fine because 0 num_kv_heads /
-                    # head_dim is never a valid config and would crash
-                    # get_padded_num_heads downstream anyway.
-                    layer_head_size, layer_num_kv_heads = (
-                        common_utils.get_layer_kv_params(
-                            text_config, layer_type))
-                    num_kv_heads = layer_num_kv_heads or base_num_kv_heads
-                    head_size = layer_head_size or base_head_size
-                    # Pad num_kv_heads to multiple of TP size.
-                    num_kv_heads = common_utils.get_padded_num_heads(
-                        num_kv_heads, model_cnt)
-                    head_size = common_utils.get_padded_head_dim(head_size)
+                    num_kv_heads, head_size = jax_layer_kv_shape(i)
                     # TODO(kwang3939): Re-enable sliding_window once mixed dims with sliding_window is supported.
                     sliding_window = None
                     layer_configs[
