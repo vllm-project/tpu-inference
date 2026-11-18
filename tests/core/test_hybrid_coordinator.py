@@ -7,8 +7,10 @@ import torch
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (BlockHash,
                                          make_block_hash_with_group_id)
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheGroupSpec, MambaSpec)
+from vllm.v1.core.single_type_kv_cache_manager import (FullAttentionManager,
+                                                       MambaManager)
+from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
+                                        KVCacheGroup, MambaSpec)
 from vllm.v1.request import Request, RequestStatus
 
 from tpu_inference.core.hybrid_coordinator import (
@@ -22,7 +24,7 @@ def _make_mock_hybrid_kv_cache_config(
     mamba_num_blocks: int | None = 50,
     block_size: int = 16,
 ) -> KVCacheConfig:
-    attn_spec = FullAttentionSpec(
+    attn_spec = AttentionSpec(
         block_size=block_size,
         num_kv_heads=8,
         head_size=128,
@@ -32,11 +34,14 @@ def _make_mock_hybrid_kv_cache_config(
         shapes=((3, 64), (8, 64, 16)),
         dtypes=(torch.bfloat16, torch.float32),
         block_size=block_size,
-        mamba_cache_mode="align",
     )
     groups = [
-        KVCacheGroupSpec(kv_cache_spec=attn_spec, layer_names=["attn_0"]),
-        KVCacheGroupSpec(kv_cache_spec=mamba_spec, layer_names=["mamba_0"]),
+        KVCacheGroup.from_layers(
+            {"attn_0": FullAttentionManager.layer_config(attn_spec)}),
+        KVCacheGroup.from_layers({
+            "mamba_0":
+            MambaManager.layer_config(mamba_spec, mamba_cache_mode="align")
+        }),
     ]
     cfg = KVCacheConfig(
         num_blocks=num_attn_blocks,
@@ -295,18 +300,22 @@ class TestTPUHybridKVCacheCoordinator:
 
     def _make_multi_mamba_group_config(self, num_mamba_groups=3):
         """The Qwen3.5 shape: vLLM splits the mamba layers across groups."""
-        attn_spec = FullAttentionSpec(block_size=16,
-                                      num_kv_heads=8,
-                                      head_size=128,
-                                      dtype=torch.bfloat16)
+        attn_spec = AttentionSpec(block_size=16,
+                                  num_kv_heads=8,
+                                  head_size=128,
+                                  dtype=torch.bfloat16)
         mamba_spec = MambaSpec(shapes=((3, 64), (8, 64, 16)),
                                dtypes=(torch.bfloat16, torch.float32),
-                               block_size=16,
-                               mamba_cache_mode="align")
-        groups = [KVCacheGroupSpec(["attn_0"], attn_spec)]
+                               block_size=16)
+        groups = [
+            KVCacheGroup.from_layers(
+                {"attn_0": FullAttentionManager.layer_config(attn_spec)})
+        ]
         groups += [
-            KVCacheGroupSpec([f"mamba_{i}"], mamba_spec)
-            for i in range(num_mamba_groups)
+            KVCacheGroup.from_layers({
+                f"mamba_{i}":
+                MambaManager.layer_config(mamba_spec, mamba_cache_mode="align")
+            }) for i in range(num_mamba_groups)
         ]
         set_mamba_num_blocks(50)
         return KVCacheConfig(num_blocks=500,

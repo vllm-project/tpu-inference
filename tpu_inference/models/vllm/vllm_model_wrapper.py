@@ -35,6 +35,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.ir import enable_torch_wrap
 from vllm.lora.layers import BaseLayerWithLoRA
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.model_executor.models import supports_lora, supports_multimodal
@@ -258,6 +259,10 @@ class VllmModelWrapper:
             replace_set_lora(vllm_model)
 
         static_forward_context = vllm_config_for_load.compilation_config.static_forward_context
+        if self.is_draft_model:
+            for layer in static_forward_context.values():
+                if isinstance(layer, AttentionLayerBase):
+                    layer.is_draft_layer = True
         self.vllm_config.compilation_config.static_forward_context.update(
             static_forward_context)
         self.vllm_config.compilation_config.static_all_moe_layers.extend(

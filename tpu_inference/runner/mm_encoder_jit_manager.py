@@ -434,20 +434,20 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         """Copy each replay tensor into a template-shaped buffer.
 
         Mirrors the GPU manager's per-key copy in ``_run_budget_graph``: the
-        buffer starts zeroed and the model-supplied
-        ``EncoderCudaGraphConfig.padding_logics`` entry for the key decides how
-        the replay values land in it, falling back to the upstream
-        ``_copy_padded_buffer`` (zero tail) when the key has no entry. Here we
-        pad *every* template key because the jit call needs a fresh, fully
-        materialised input dict each step (no persistent buffers).
+        buffer starts zeroed and ``EncoderCudaGraphManager._get_padding_logic``
+        resolves the per-key copy helper from ``EncoderCudaGraphConfig.padding_logics``,
+        defaulting to repeat-last padding for cumulative sequence-length keys
+        (``cu_seqlens``, ``cu_window_seqlens``) and ``_copy_padded_buffer``
+        (zero tail) otherwise. Here we pad *every* template key because the jit
+        call needs a fresh, fully materialised input dict each step (no
+        persistent buffers).
 
-        Honouring ``padding_logics`` is required for correctness, not just
-        parity: Qwen2.5-VL registers ``_pad_cumulative_seqlens_buffer`` for
-        ``cu_seqlens`` / ``cu_window_seqlens`` and leaves ``cu_window_seqlens``
-        UNPADDED at replay time. A zero tail there makes
-        ``lens = cu[1:] - cu[:-1]`` go negative and the ViT attention build
-        garbage segment ids; the registered logic repeats the last cumulative
-        offset instead, which represents empty trailing sequences.
+        Honouring ``_get_padding_logic`` is required for correctness, not just
+        parity: models like Qwen2.5-VL leave ``cu_window_seqlens`` UNPADDED at
+        replay time. A zero tail there makes ``lens = cu[1:] - cu[:-1]`` go
+        negative and the ViT attention build garbage segment ids; repeat-last
+        padding repeats the final cumulative offset instead, representing empty
+        trailing sequences.
         """
         template = self._get_template_for_budget(budget, axis_keys)
         if template is None:
@@ -489,10 +489,11 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
                     f"max_batch_size={self.max_batch_size}; the batch was "
                     f"packed into a token budget whose capture inputs do not "
                     f"fit this key.")
-            # General case: zeroed buffer + the model's per-key padding logic.
+            # General case: zeroed buffer + the model's per-key padding logic
+            # (with upstream's repeat-last default for cumulative offset keys).
             buf = torch.zeros_like(tmpl)
-            padding_logic = self.config.padding_logics.get(
-                key, EncoderCudaGraphManager._copy_padded_buffer)
+            padding_logic = EncoderCudaGraphManager._get_padding_logic(
+                self.config, key)
             padding_logic(buf, src.to(dtype=tmpl.dtype, device=tmpl.device))
             padded[key] = buf
         return padded

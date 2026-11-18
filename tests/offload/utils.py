@@ -30,8 +30,9 @@ from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
                                          init_none_hash)
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheGroupSpec)
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
+                                        KVCacheGroup)
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -168,15 +169,16 @@ class TPURequestRunner:
         )
         vllm_config.scheduler_config.async_scheduling = async_scheduling
         kv_cache_groups = [
-            KVCacheGroupSpec(
-                ["layer"],
-                FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
-                ),
-            )
+            KVCacheGroup.from_layers({
+                "layer":
+                FullAttentionManager.layer_config(
+                    AttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ))
+            })
         ]
         kv_cache_config = KVCacheConfig(
             num_blocks=num_blocks,
