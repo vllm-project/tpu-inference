@@ -333,7 +333,7 @@ class TestOptimizerModule(unittest.TestCase):
             "   \n",
             "non-json log line\n",
             "\n",
-            '{"status": "ready"}\n',
+            '__JSON__{"status": "ready"}\n',
         ]
 
         resp = mgr._read_json_response(timeout=10)

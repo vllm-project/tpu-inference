@@ -252,8 +252,8 @@ class ExecutorProcessManager:
     def _read_json_response(self, timeout: int) -> dict:
         """Reads lines from executor stdout until a valid protocol JSON line is received.
 
-        Filters out non-JSON log lines that third-party libraries (e.g. vllm, JAX)
-        may write to stdout.
+        Only accepts lines with the executor's ``__JSON__`` prefix, since
+        third-party libraries may also write valid JSON logs to stdout.
         """
         start_time = time.time()
         while True:
@@ -269,8 +269,11 @@ class ExecutorProcessManager:
             if not line_str:
                 continue
 
-            if line_str.startswith("__JSON__"):
-                line_str = line_str[len("__JSON__"):].strip()
+            if not line_str.startswith("__JSON__"):
+                logger.debug("Ignoring non-protocol executor stdout: %s",
+                             line_str)
+                continue
+            line_str = line_str[len("__JSON__"):].strip()
 
             try:
                 return json.loads(line_str)
