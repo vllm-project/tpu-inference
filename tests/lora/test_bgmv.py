@@ -13,10 +13,13 @@
 # limitations under the License.
 
 import jax
+import pytest
 import torch
 import torchax
+from torchax.interop import jax_jit
 
 from tpu_inference.lora.torch_lora_ops import bgmv_torch
+from tpu_inference.lora.torch_punica_tpu import PunicaWrapperTPU
 
 
 def test_bgmv_torch():
@@ -55,3 +58,60 @@ def _ref_bgmv_torch(inputs, loras, idxs):
         outputs.append(out)
 
     return torch.stack(outputs, axis=0)
+
+
+@pytest.mark.parametrize("offset_start", [0, 2])
+@pytest.mark.parametrize("output_slices", [(3, ), (3, 2)])
+@pytest.mark.parametrize("add_inputs", [False, True])
+def test_add_expand_preserves_output_slices(offset_start, output_slices,
+                                            add_inputs):
+    num_tokens, rank, num_loras = 3, 4, 2
+    output_size = offset_start + sum(output_slices) + 2
+    y = torch.arange(num_tokens * output_size, dtype=torch.float32).reshape(
+        num_tokens, output_size) / 8
+    x = torch.arange(len(output_slices) * num_tokens * rank,
+                     dtype=torch.float32).reshape(len(output_slices),
+                                                  num_tokens, rank) / 16
+    weights = tuple(
+        torch.arange(num_loras * size * rank, dtype=torch.float32).reshape(
+            num_loras, 1, size, rank) / 8 for size in output_slices)
+    indices = torch.tensor([0, 1, 0], dtype=torch.int32)
+    expected = y.clone()
+    offset = offset_start
+    for slice_idx, size in enumerate(output_slices):
+        for token_idx, lora_idx in enumerate(indices.tolist()):
+            delta = weights[slice_idx][lora_idx, 0] @ x[slice_idx, token_idx]
+            if add_inputs:
+                expected[token_idx, offset:offset + size] += delta
+            else:
+                expected[token_idx, offset:offset + size] = delta
+        offset += size
+
+    class DummyWrapper:
+
+        def _get_token_lora_indices(self, inputs):
+            return self.indices
+
+    with torchax.default_env(), jax.default_device(jax.devices()[0]), \
+            jax.default_matmul_precision("highest"):
+        wrapper = DummyWrapper()
+        wrapper.indices = indices.to('jax')
+        y_device = y.to('jax')
+
+        def expand(y, x, weights):
+            return PunicaWrapperTPU.add_expand(wrapper,
+                                               y,
+                                               x,
+                                               weights,
+                                               output_slices,
+                                               offset_start=offset_start,
+                                               add_inputs=add_inputs)
+
+        for apply in (expand, jax_jit(expand)):
+            actual = apply(y_device, x.to('jax'),
+                           tuple(w.to('jax') for w in weights))
+            torch.testing.assert_close(actual.torch(),
+                                       expected,
+                                       rtol=1e-5,
+                                       atol=1e-5)
+            torch.testing.assert_close(y_device.torch(), y, rtol=0, atol=0)
