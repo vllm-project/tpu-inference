@@ -1318,7 +1318,8 @@ class CompilationManager:
                 dp_sharding = NamedSharding(self.runner.mesh, PartitionSpec())
 
                 target_logits = self._create_dummy_tensor(
-                    (num_logits, vocab_size), jnp.float32, logits_sharding)
+                    (num_logits, vocab_size), self.runner.model_config.dtype,
+                    logits_sharding)
 
                 processed_bonus_logits = self._create_dummy_tensor(
                     (num_reqs, vocab_size), jnp.float32, logits_sharding)
@@ -1390,9 +1391,11 @@ class CompilationManager:
                 logits_sharding = NamedSharding(self.runner.mesh, logits_spec)
 
                 target_logits = self._create_dummy_tensor(
-                    (num_logits, vocab_size), jnp.bfloat16, logits_sharding)
+                    (num_logits, vocab_size), self.runner.model_config.dtype,
+                    logits_sharding)
                 bonus_logits = self._create_dummy_tensor(
-                    (num_reqs, vocab_size), jnp.bfloat16, logits_sharding)
+                    (num_reqs, vocab_size), self.runner.model_config.dtype,
+                    logits_sharding)
 
                 self._run_compilation(
                     f"worker{self.runner.rank} _extend_logits_simple",

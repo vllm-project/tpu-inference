@@ -2242,7 +2242,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             bonus_token_ids, processed_bonus_logits = sample(
                 bonus_rng,
                 self.mesh,
-                bonus_logits,
+                bonus_logits.astype(jnp.float32),
                 tpu_sampling_metadata,
                 allow_distributed_sampling=allow_distributed_sampling,
             )
@@ -2270,7 +2270,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         with self.maybe_forbid_compile, jax.set_mesh(self.mesh):
             if tpu_sampling_metadata.logprobs:
                 if spec_decode_metadata is not None:
-                    if (self.model_config.logprobs_mode == "processed_logprobs"
+                    if (logprobs_use_processed_logits(
+                            self.model_config.logprobs_mode)
                             and tpu_sampling_metadata.do_sampling):
                         extended_logits = process_and_extend_logits(
                             self.mesh, target_logits, processed_bonus_logits,
