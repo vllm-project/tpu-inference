@@ -77,6 +77,7 @@ def _get_max_cache_hit_length(request: Request) -> int:
 class SchedulerCommand(Enum):
     """Enum for scheduler worker process commands."""
     ADD_REQUEST = "add_request"
+    ADD_REQUESTS = "add_requests"
     SCHEDULE = "schedule"
     FINISH_REQUESTS = "finish_requests"
     UPDATE_DRAFT_TOKEN_IDS = "update_draft_token_ids"
@@ -318,6 +319,11 @@ def _scheduler_worker_process(
                 case SchedulerCommand.ADD_REQUEST:
                     request = data
                     scheduler.add_request(request)
+                    _send_result(None)  # Signal completion
+
+                case SchedulerCommand.ADD_REQUESTS:
+                    for request in data:
+                        scheduler.add_request(request)
                     _send_result(None)  # Signal completion
 
                 case SchedulerCommand.SCHEDULE:
@@ -568,6 +574,11 @@ class DPScheduler(SchedulerInterface):
         self._routing_policy = self.RoutingPolicy(
             envs.DP_SCHED_ROUTING.lower())
         self._round_robin_next_rank: int = 0
+        # Round-robin requests that are routed (in assigned_dp_rank) but
+        # not sent yet. _send_command() sends them first, one ADD_REQUESTS
+        # per rank, so each rank gets the same commands in the same order
+        # as with one ADD_REQUEST round trip per request.
+        self._unsent_requests: Dict[int, List[Request]] = defaultdict(list)
         self._last_dp_balance_log_time: float = 0.0
 
         # Initialize NONE_HASH global before starting worker processes.
@@ -734,7 +745,12 @@ class DPScheduler(SchedulerInterface):
                       rank: int,
                       command: SchedulerCommand,
                       data: Any = None) -> None:
-        """Send a command to a worker process via its input pipe."""
+        """Send a command to a worker process via its input pipe.
+
+        Held round-robin requests go out first (see _send_unsent_requests).
+        """
+        if self._unsent_requests:
+            self._send_unsent_requests()
         start_time = time()
         payload = cloudpickle.dumps((command, data))
         serialize_time = time() - start_time
@@ -938,12 +954,45 @@ class DPScheduler(SchedulerInterface):
         return self._find_best_rank_for_request(request)
 
     def _route_and_forward_request(self, request: Request) -> None:
-        """Route a single request to a DP rank and send ADD_REQUEST IPC."""
+        """Route a single request to a DP rank and send it there.
+
+        Round robin holds the request; the next command sends it.
+        """
         rank = self._pick_rank_for_request(request)
         self.assigned_dp_rank[request.request_id] = rank
 
+        if self._routing_policy == self.RoutingPolicy.ROUND_ROBIN:
+            # Round robin never reads rank state, so the send can wait for
+            # the next command (see _send_command).
+            self._unsent_requests[rank].append(request)
+            return
         self._send_command(rank, SchedulerCommand.ADD_REQUEST, request)
         self._get_result(rank, SchedulerCommand.ADD_REQUEST)
+
+    def _send_unsent_requests(self) -> None:
+        """Send held round-robin requests as one ADD_REQUESTS message per rank.
+
+        Sends to all ranks before reading acks so workers unpickle in parallel.
+        """
+        unsent = self._unsent_requests
+        self._unsent_requests = defaultdict(list)
+        sent_ranks: List[int] = []
+        first_exc: Optional[Exception] = None
+        try:
+            for rank, requests in unsent.items():
+                self._send_command(rank, SchedulerCommand.ADD_REQUESTS,
+                                   requests)
+                sent_ranks.append(rank)
+        except Exception as e:
+            first_exc = e
+        for rank in sent_ranks:
+            try:
+                self._get_result(rank, SchedulerCommand.ADD_REQUESTS)
+            except Exception as e:
+                if first_exc is None:
+                    first_exc = e
+        if first_exc is not None:
+            raise first_exc
 
     def _flush_pending(self) -> None:
         """Drain the pending reqs."""
@@ -1065,6 +1114,13 @@ class DPScheduler(SchedulerInterface):
         for output in rank_outputs:
             combined_finished_req_ids.update(output.finished_req_ids)
 
+        # Combine preempted request IDs: the worker drops a preempted
+        # request's state (and mamba slot) when it sees it here.
+        # SchedulerOutput.preempted_req_ids defaults to None, hence `or ()`.
+        combined_preempted_req_ids: set[str] = set()
+        for output in rank_outputs:
+            combined_preempted_req_ids.update(output.preempted_req_ids or ())
+
         # Create DP rank assignment mapping for scheduled requests
         assigned_dp_rank = {}
         for req_id in combined_num_scheduled_tokens.keys():
@@ -1139,6 +1195,7 @@ class DPScheduler(SchedulerInterface):
             scheduled_spec_decode_tokens=combined_spec_decode_tokens,
             scheduled_encoder_inputs=combined_encoder_inputs,
             finished_req_ids=combined_finished_req_ids,
+            preempted_req_ids=combined_preempted_req_ids,
             free_encoder_mm_hashes=set(),
             assigned_dp_rank=assigned_dp_rank,
             max_num_scheduled_tokens_per_dp_rank=max_scheduled_tokens_per_rank,
@@ -1181,9 +1238,7 @@ class DPScheduler(SchedulerInterface):
             self, rank_outputs: List[SchedulerOutput]) -> CachedRequestData:
         """Combine cached request data from all DP rank schedulers."""
         combined_req_ids = []
-        combined_resumed_req_ids = []
         combined_new_token_ids = []
-        combined_all_token_ids = {}
         combined_new_block_ids = []
         combined_num_computed_tokens = []
         combined_num_output_tokens = []
@@ -1192,9 +1247,7 @@ class DPScheduler(SchedulerInterface):
             cached_data = output.scheduled_cached_reqs
 
             combined_req_ids.extend(cached_data.req_ids)
-            combined_resumed_req_ids.extend(cached_data.resumed_req_ids)
             combined_new_token_ids.extend(cached_data.new_token_ids)
-            combined_all_token_ids.update(cached_data.all_token_ids)
             combined_new_block_ids.extend(cached_data.new_block_ids)
             combined_num_computed_tokens.extend(
                 cached_data.num_computed_tokens)
@@ -1202,9 +1255,7 @@ class DPScheduler(SchedulerInterface):
 
         return CachedRequestData(
             req_ids=combined_req_ids,
-            resumed_req_ids=combined_resumed_req_ids,
             new_token_ids=combined_new_token_ids,
-            all_token_ids=combined_all_token_ids,
             new_block_ids=combined_new_block_ids,
             num_computed_tokens=combined_num_computed_tokens,
             num_output_tokens=combined_num_output_tokens,
@@ -1318,8 +1369,13 @@ class DPScheduler(SchedulerInterface):
                 combined_spec_decoding_stats.num_drafts += rank_spec.num_drafts
                 combined_spec_decoding_stats.num_draft_tokens += (
                     rank_spec.num_draft_tokens)
+                combined_spec_decoding_stats.num_verified_tokens += (
+                    rank_spec.num_verified_tokens)
                 combined_spec_decoding_stats.num_accepted_tokens += (
                     rank_spec.num_accepted_tokens)
+                for i, v in enumerate(rank_spec.num_verified_tokens_per_pos):
+                    combined_spec_decoding_stats.num_verified_tokens_per_pos[
+                        i] += v
                 for i, v in enumerate(rank_spec.num_accepted_tokens_per_pos):
                     combined_spec_decoding_stats.num_accepted_tokens_per_pos[
                         i] += v
@@ -1493,17 +1549,17 @@ class DPScheduler(SchedulerInterface):
         aux_output = g.aux_output_connector_output
 
         outputs = []
+        # ModelRunnerOutput fields are indexed by position in req_ids.
+        global_req_id_to_index = {rid: i for i, rid in enumerate(g.req_ids)}
 
         for rank in range(self.dp_size):
             req_ids = scheduler_output.req_ids_per_rank.get(rank, [])
 
             # Map each rank-local index to the corresponding global index.
-            global_indices = [g.req_id_to_index[rid] for rid in req_ids]
-            rank_req_id_to_index = {rid: i for i, rid in enumerate(req_ids)}
+            global_indices = [global_req_id_to_index[rid] for rid in req_ids]
 
             rank_model_runner_output = ModelRunnerOutput(
                 req_ids=req_ids,
-                req_id_to_index=rank_req_id_to_index,
                 sampled_token_ids=(
                     [g.sampled_token_ids[i]
                      for i in global_indices] if g.sampled_token_ids else []),
@@ -1770,6 +1826,7 @@ class DPScheduler(SchedulerInterface):
     def shutdown(self) -> None:
         """Shutdown all DP rank scheduler worker processes."""
         atexit.unregister(self._atexit_cleanup)
+        self._unsent_requests.clear()  # never sent: ranks may be dead
 
         # Send shutdown command to all workers, skipping dead ones
         for rank in range(self.dp_size):
@@ -1787,7 +1844,7 @@ class DPScheduler(SchedulerInterface):
                 continue
             try:
                 self._get_result(rank, SchedulerCommand.SHUTDOWN)
-            except (RuntimeError, OSError) as e:
+            except (RuntimeError, OSError, SchedulerWorkerError) as e:
                 logger.warning(
                     f"Rank {rank}: Failed to get shutdown acknowledgment: {e}")
 

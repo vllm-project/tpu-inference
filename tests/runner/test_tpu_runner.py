@@ -27,6 +27,7 @@ from vllm.distributed.aux_output_connector.connector import \
 
 from tpu_inference.models.common.interface import (ModelInterface,
                                                    MultiModalInterface)
+from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.routed_experts import TPUAuxOutputWorker
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
@@ -683,7 +684,7 @@ class TestTPUJaxRunner:
         # Verify generated tokens are trimmed at EOS and placed in output
         output = runner._continue_decode_output
         assert output is not None
-        assert output.req_id_to_index == {"req1": 0, "req2": 1, "req3": 2}
+        assert output.req_ids == ["req1", "req2", "req3"]
 
         # req1: [101, 102, 999] (length 3)
         assert output.sampled_token_ids[0] == [101, 102, 999]
@@ -947,6 +948,187 @@ class TestTPUJaxRunner:
             assert layer_md.mamba is not None
             assert layer_md.mamba.read_offsets is not None
             assert int(np.asarray(layer_md.mamba.read_offsets)[0]) == 2
+
+    @patch("tpu_inference.runner.tpu_runner.extract_last_sampled_tokens")
+    @patch(
+        "tpu_inference.runner.tpu_runner.runner_utils.host_extract_sampled_tokens"
+    )
+    def test_sample_from_logits_sync_updates_tokens_and_mamba_offset_before_propose(
+        self,
+        mock_host_extract,
+        mock_extract_last,
+    ):
+        """In sync mode, _sample_from_logits updates token_ids_cpu, num_tokens_no_spec, and mamba_read_offset BEFORE calling propose_draft_token_ids."""
+        self.runner.scheduler_config.async_scheduling = False
+        self.runner.speculative_config = SimpleNamespace(
+            num_speculative_tokens=3)
+        self.runner.kv_cache_config = SimpleNamespace(has_mamba_layers=True)
+        self.runner.aux_output_worker = None
+        self.runner.rng_params_for_sampling = self.mock_rng_key
+
+        req_state = SimpleNamespace(
+            req_id="req1",
+            num_computed_tokens=4,
+            num_tokens=4,
+            output_token_ids=[],
+            mamba_read_offset=0,
+        )
+        self.runner.requests = {"req1": req_state}
+        self.runner.input_batch = MagicMock()
+        self.runner.input_batch.num_reqs = 1
+        self.runner.input_batch.req_ids = ["req1"]
+        self.runner.input_batch.req_id_to_index = {"req1": 0}
+        self.runner.input_batch.vocab_size = 1000
+        self.runner.input_batch.token_ids_cpu = np.zeros((16, 64),
+                                                         dtype=np.int32)
+        self.runner.input_batch.token_ids_cpu[0, :4] = [10, 20, 30, 40]
+        self.runner.input_batch.num_tokens_no_spec = np.zeros(16,
+                                                              dtype=np.int32)
+        self.runner.input_batch.num_tokens_no_spec[0] = 4
+        self.runner.input_batch.num_tokens = np.zeros(16, dtype=np.int32)
+        self.runner.input_batch.num_tokens[0] = 4
+        self.runner.input_batch.num_prompt_logprobs = {}
+
+        # Simulate a verify step with 3 draft tokens (q_len=4), where 2 drafts + 1 bonus = 3 tokens are accepted (1 rejected -> mamba_read_offset = 4 - 1 - 1 = 2)
+        mock_host_extract.return_value = [[50, 60, 70]]
+        mock_extract_last.return_value = (
+            jnp.array([70], dtype=jnp.int32),
+            jnp.array([1], dtype=jnp.int32),
+        )
+
+        observed_in_propose = {}
+
+        def fake_propose(*args, **kwargs):
+            n = int(self.runner.input_batch.num_tokens_no_spec[0])
+            observed_in_propose["num_tokens_no_spec"] = n
+            observed_in_propose["tokens"] = (
+                self.runner.input_batch.token_ids_cpu[0, :n].tolist())
+            observed_in_propose["mamba_read_offset"] = (
+                req_state.mamba_read_offset)
+
+        self.runner.speculative_decoding_manager.propose_draft_token_ids = (
+            MagicMock(side_effect=fake_propose))
+        self.runner._select_from_array_fn = MagicMock(
+            return_value=jnp.zeros((1, 16), dtype=jnp.float32))
+        self.runner._extract_draft_token_ids = MagicMock(
+            return_value=jnp.zeros((3, ), dtype=jnp.int32))
+        self.runner.rejection_sampler = MagicMock(
+            return_value=jnp.array([[50, 60, 70, -1]], dtype=jnp.int32))
+
+        tpu_sampling_metadata = SimpleNamespace(do_sampling=False,
+                                                logprobs=False)
+        spec_decode_metadata = SimpleNamespace(
+            bonus_logits_indices=jnp.array([0], dtype=jnp.int32),
+            target_logits_indices=jnp.array([0, 1, 2], dtype=jnp.int32),
+            final_logits_indices=jnp.array([0, 1, 2, 3], dtype=jnp.int32),
+            draft_lengths=jnp.array([3], dtype=jnp.int32),
+        )
+        scheduler_output = SimpleNamespace(
+            num_scheduled_tokens={"req1": 4},
+            scheduled_spec_decode_tokens={"req1": [50, 60, 99]},
+            total_num_scheduled_tokens=4,
+        )
+
+        with patch(
+                "tpu_inference.runner.tpu_runner.sample",
+                return_value=(
+                    jnp.array([70], dtype=jnp.int32),
+                    jnp.zeros((1, 16), dtype=jnp.float32),
+                ),
+        ):
+            self.runner._sample_from_logits(
+                scheduler_output=scheduler_output,
+                attn_metadata=MagicMock(),
+                tpu_sampling_metadata=tpu_sampling_metadata,
+                input_ids=jnp.zeros((4, ), dtype=jnp.int32),
+                hidden_states=jnp.zeros((4, 8), dtype=jnp.float32),
+                logits=jnp.zeros((4, 16), dtype=jnp.float32),
+                aux_hidden_states=None,
+                spec_decode_metadata=spec_decode_metadata,
+                kv_connector_output=None,
+                padded_num_reqs=1,
+            )
+
+        assert observed_in_propose["num_tokens_no_spec"] == 7
+        assert observed_in_propose["tokens"] == [10, 20, 30, 40, 50, 60, 70]
+        assert observed_in_propose["mamba_read_offset"] == 2
+
+    def test_jax_logprobs_materialize_spec_decode_zero_draft_tokens(self):
+        from vllm.v1.outputs import LogprobsTensors
+
+        from tpu_inference.runner.tpu_runner import _jax_logprobs_materialize
+
+        # Simulate a prefill or 0-draft step with spec_decode enabled:
+        # 4 padded draft slots (all -1 placeholders) + 2 bonus slots (tokens 42, 99).
+        logprob_token_ids = jnp.array(
+            [[-1, 5], [-1, 5], [-1, 5], [-1, 5], [42, 7], [99, 8]],
+            dtype=jnp.int32,
+        )
+        logprobs = jnp.zeros((6, 2), dtype=jnp.float32)
+        selected_token_ranks = jnp.ones((6, ), dtype=jnp.int32)
+        tensors = LogprobsTensors(
+            logprob_token_ids=logprob_token_ids,
+            logprobs=logprobs,
+            selected_token_ranks=selected_token_ranks,
+        )
+        spec_decode_metadata = SimpleNamespace(
+            final_logits_indices=jnp.zeros((4, ), dtype=jnp.int32),
+            draft_lengths_cpu=np.array([0, 0], dtype=np.int32),
+            req_indices_dp={0: [0, 1]},
+        )
+        self.runner.input_batch.vocab_size = 1000
+        self.runner.dp_size = 1
+
+        res = _jax_logprobs_materialize(
+            tensors,
+            logits_indices_selector=[0, 1],
+            runner=self.runner,
+            spec_decode_metadata=spec_decode_metadata,
+            num_reqs=2,
+        )
+        assert res.logprob_token_ids[:, 0].tolist() == [42, 99]
+        assert res.cu_num_generated_tokens == [0, 1, 2]
+
+    def test_init_speculative_decoding_ngram_resizes_buffers_for_dp(self):
+        """With dp_size > 1, _init_speculative_decoding resizes NgramProposer buffers from max_num_seqs to max_num_reqs."""
+        max_num_seqs = 16
+        dp_size = 2
+        max_num_reqs = max_num_seqs * dp_size
+        k = 3
+
+        spec_cfg = SimpleNamespace(
+            method="ngram",
+            prompt_lookup_min=2,
+            prompt_lookup_max=4,
+            num_speculative_tokens=k,
+        )
+        self.runner.vllm_config.speculative_config = spec_cfg
+        self.runner.speculative_config = spec_cfg
+        self.runner.vllm_config.scheduler_config.max_num_seqs = max_num_seqs
+        self.runner.dp_size = dp_size
+        self.runner.max_num_reqs = max_num_reqs
+
+        self.runner._init_speculative_decoding()
+
+        assert self.runner.drafter.valid_ngram_draft.shape == (max_num_reqs, k)
+        assert self.runner.drafter.valid_ngram_num_drafts.shape == (
+            max_num_reqs, )
+
+        # Verify propose() succeeds across all max_num_reqs DP slots without IndexError.
+        sampled_token_ids = [[1] for _ in range(max_num_reqs)]
+        num_tokens_no_spec = np.full(max_num_reqs, 6, dtype=np.int32)
+        token_ids_cpu = np.tile(
+            np.array([10, 20, 30, 40, 10, 20], dtype=np.int32),
+            (max_num_reqs, 1),
+        )
+        drafts = self.runner.drafter.propose(
+            k,
+            sampled_token_ids,
+            num_tokens_no_spec,
+            token_ids_cpu,
+        )
+        assert len(drafts) == max_num_reqs
+        assert drafts[-1] == [30, 40, 10]
 
 
 class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
@@ -1276,7 +1458,6 @@ class TestTPUJaxRunnerDisableMM:
             req_ids=["req1"],
             num_computed_tokens=[10],  # Stale, should be updated to 25
             num_output_tokens=[0],  # Stale, should be updated to 5
-            resumed_req_ids=set(),
         )
         scheduler_output = MagicMock()
         scheduler_output.total_num_scheduled_tokens = 1
@@ -1474,3 +1655,59 @@ class TestTPUJaxRunnerDisableMM:
                 assert entry["dummy_shape"] == (1 if logprobs else 2, )
                 assert entry["temp_shape"] == ((num_reqs, )
                                                if do_sampling else None)
+
+
+def _modify_prev_results_runner(req_state_in_prev_step, current_req_state):
+    """A minimal runner for TPUModelRunner._modify_prev_results: request
+    "req" was in the previous async step (with one placeholder token) and is
+    in the current batch at index 0."""
+    input_batch = SimpleNamespace(
+        req_id_to_index={"req": 0},
+        num_tokens_no_spec=np.array([4], dtype=np.int32),
+        num_tokens=np.array([4], dtype=np.int32),
+        token_ids_cpu=np.zeros((1, 8), dtype=np.int32),
+    )
+    pre = SimpleNamespace(
+        req_ids=["req"],
+        next_tokens=None,
+        request_seq_lens=[(0, req_state_in_prev_step, 3)],
+        discard_sampled_tokens_req_indices=[],
+        logits_indices_selector=None,
+        spec_decode_metadata=None,
+        scheduler_output=SimpleNamespace(scheduled_spec_decode_tokens={}),
+        is_continue_decode=False,
+    )
+    return SimpleNamespace(_pre_async_results=pre,
+                           input_batch=input_batch,
+                           requests={"req": current_req_state},
+                           max_model_len=8)
+
+
+def test_modify_prev_results_writes_sampled_token():
+    req_state = SimpleNamespace(output_token_ids=[0])  # 0 = placeholder
+    runner = _modify_prev_results_runner(req_state, req_state)
+    with patch.object(runner_utils,
+                      "host_extract_sampled_tokens",
+                      return_value=[[42]]):
+        TPUModelRunner._modify_prev_results(runner)
+    assert req_state.output_token_ids == [42]
+    assert runner.input_batch.token_ids_cpu[0, 3] == 42
+
+
+def test_modify_prev_results_skips_request_resent_after_preemption():
+    """Under async scheduling a request can be preempted and re-sent as a new
+    request (vllm-project/vllm#63373) in the step right after it ran.
+    update_states then gives it a new CachedRequestState that is re-prefilled
+    from prefill_token_ids; the previous step's sampled token belongs to the
+    dropped state and must not be written into the new one (this used to trip
+    an identity assert and crash the worker)."""
+    old_state = SimpleNamespace(output_token_ids=[0])
+    new_state = SimpleNamespace(output_token_ids=[7, 8])
+    runner = _modify_prev_results_runner(old_state, new_state)
+    with patch.object(runner_utils,
+                      "host_extract_sampled_tokens",
+                      return_value=[[42]]):
+        TPUModelRunner._modify_prev_results(runner)
+    assert new_state.output_token_ids == [7, 8]
+    assert runner.input_batch.token_ids_cpu[0].tolist() == [0] * 8
+    assert runner.input_batch.num_tokens_no_spec[0] == 4

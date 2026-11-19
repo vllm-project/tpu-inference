@@ -12,7 +12,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import (
-    CrossAttentionManager, get_manager_for_kv_cache_spec)
+    CrossAttentionManager, MambaManager, create_single_type_manager)
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.request import Request, RequestStatus
 
@@ -115,6 +115,12 @@ def is_mamba_spec(spec: Any) -> bool:
 
 def is_mamba_group(group: Any) -> bool:
     """Check if a KV cache group contains Mamba layers."""
+    manager_cls = getattr(group, "manager_cls", None)
+    if isinstance(manager_cls, type) and issubclass(manager_cls, MambaManager):
+        return True
+    if hasattr(group, "kv_cache_specs"):
+        return any(
+            isinstance(s, MambaSpec) for s in group.kv_cache_specs.values())
     spec = getattr(group, "kv_cache_spec", group)
     return is_mamba_spec(spec)
 
@@ -217,6 +223,8 @@ class TPUDualBlockPool(BlockPool):
         self.cached_block_hash_to_block = attention_pool.cached_block_hash_to_block
         self.cached_block_hashes_by_block = attention_pool.cached_block_hashes_by_block
         self.kv_event_queue = attention_pool.kv_event_queue
+        # Read by vLLM's KV cache coordinator (replay_boundaries).
+        self.num_hash_lookahead_tokens = attention_pool.num_hash_lookahead_tokens
 
     def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
         attn_blocks: list[KVCacheBlock] = []
@@ -407,8 +415,8 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             pool = self.mamba_block_pool
             if self.mirror_mamba_groups and i != self.primary_mamba_group_id:
                 pool = self._mirror_pool
-            new_managers[i] = get_manager_for_kv_cache_spec(
-                kv_cache_spec=kv_cache_config.kv_cache_groups[i].kv_cache_spec,
+            new_managers[i] = create_single_type_manager(
+                kv_cache_config.kv_cache_groups[i],
                 max_in_flight_tokens=max_in_flight_tokens,
                 max_model_len=max_model_len,
                 block_pool=pool,

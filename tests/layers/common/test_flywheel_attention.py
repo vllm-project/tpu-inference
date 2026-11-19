@@ -24,8 +24,9 @@ import pytest
 import torch
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheGroupSpec,
-                                        MambaSpec)
+from vllm.v1.core.single_type_kv_cache_manager import (FullAttentionManager,
+                                                       MambaManager)
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheGroup, MambaSpec
 
 from tpu_inference.layers.common import attention_interface
 from tpu_inference.layers.common import flywheel_attention as fa
@@ -331,22 +332,24 @@ PAGE_SIZES = (128, 256)
 MAX_REQS_PER_RANK, PAGES_PER_REQ = 4, 8
 
 
-def kv_cache_groups() -> list[KVCacheGroupSpec]:
+def kv_cache_groups() -> list[KVCacheGroup]:
     """Two attention groups of different page sizes, and a mamba group."""
     attention_groups = [
-        KVCacheGroupSpec(layer_names=[f"attn_{gid}"],
-                         kv_cache_spec=FullAttentionSpec(
-                             block_size=page_size,
-                             num_kv_heads=NUM_KV_HEADS,
-                             head_size=HEAD_DIM,
-                             dtype=torch.bfloat16))
-        for gid, page_size in enumerate(PAGE_SIZES)
+        KVCacheGroup.from_layers({
+            f"attn_{gid}":
+            FullAttentionManager.layer_config(
+                AttentionSpec(block_size=page_size,
+                              num_kv_heads=NUM_KV_HEADS,
+                              head_size=HEAD_DIM,
+                              dtype=torch.bfloat16))
+        }) for gid, page_size in enumerate(PAGE_SIZES)
     ]
-    mamba_group = KVCacheGroupSpec(layer_names=["mamba"],
-                                   kv_cache_spec=MambaSpec(
-                                       block_size=1,
-                                       shapes=((1, ), ),
-                                       dtypes=(torch.float32, )))
+    mamba_group = KVCacheGroup.from_layers({
+        "mamba":
+        MambaManager.layer_config(
+            MambaSpec(block_size=1, shapes=((1, ), ),
+                      dtypes=(torch.float32, )))
+    })
     return [*attention_groups, mamba_group]
 
 

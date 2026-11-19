@@ -195,7 +195,7 @@ class _DisaggOrchestrator:
                 logger.debug(f"Prefill result: {model_output}")
 
                 kv_cache_map: dict[str, Tuple(list[jax.Array], list[Any])] = {}
-                for req_id, idx in model_output.req_id_to_index.items():
+                for idx, req_id in enumerate(model_output.req_ids):
                     if len(model_output.sampled_token_ids[idx]) > 0:
                         request = self._requests[req_id]
                         block_ids = (prefill_engine.scheduler.kv_cache_manager.
@@ -212,7 +212,7 @@ class _DisaggOrchestrator:
                 engine_core_outputs = prefill_engine.scheduler.update_from_output(
                     scheduler_output, model_output)  # type: ignore
 
-                for req_id, idx in model_output.req_id_to_index.items():
+                for idx, req_id in enumerate(model_output.req_ids):
                     if len(model_output.sampled_token_ids[idx]) > 0:
                         request = self._requests[req_id]
                         logger.debug(
