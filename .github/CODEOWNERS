@@ -57,7 +57,7 @@
 /tpu_inference/worker/ @sixiang-google @mrjunwan-lang @jrplatin @vanbasten23 @wenxindongwork @Lumosis
 
 # RL Rollout / Weight Sync
-/tpu_inference/rl/ @wenxindongwork @pv97
+/tpu_inference/rl/ @wenxindongwork @pv97 @yixinshi
 
 # Speculative Decoding
 /tpu_inference/spec_decode/ @Lumosis @gxd3
@@ -68,8 +68,8 @@
 /tpu_inference/platforms/ @sixiang-google @mrjunwan-lang @Lumosis
 
 # LoRA and Adapters
-/tpu_inference/lora/ @vanbasten23 @kyuyeunk
-/tpu_inference/runner/lora_utils.py @vanbasten23 @kyuyeunk
+/tpu_inference/lora/ @aman2930 @kyuyeunk
+/tpu_inference/runner/lora_utils.py @aman2930 @kyuyeunk
 
 # Docker Configuration
 /docker/ @jrplatin @QiliangCui @yiw-wang QiliangCui
@@ -93,7 +93,7 @@
 /tests/kernels/rpa_v3_cp/ @kyuyeunk @wenxindongwork @weiyu0824 
 /tests/layers/ @kyuyeunk @lk-chen @jrplatin
 /tests/layers/jax/ @kyuyeunk @lk-chen @jrplatin
-/tests/lora/ @vanbasten23 @kyuyeunk
+/tests/lora/ @aman2930 @kyuyeunk
 /tests/models/ @kyuyeunk @lk-chen @jrplatin
 /tests/models/jax/ @kyuyeunk @lk-chen @jrplatin
 /tests/layers/jax/sample/test_rejection_sampler.py @Lumosis @gxd3
