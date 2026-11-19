@@ -49,6 +49,13 @@ class VllmRowParallelLinear(RowParallelLinear):
 
     @reduce_results.setter
     def reduce_results(self, value: bool) -> None:
+        # vLLM rejects reduce_results=False with an in-layer bias only in
+        # __init__; enforce the same once constructed, otherwise the bias
+        # would be summed TP times by the deferred all-reduce.
+        if (not value and getattr(self, "bias", None) is not None
+                and not getattr(self, "skip_bias_add", False)):
+            raise ValueError("When not reduce the results, adding bias to the "
+                             "results can lead to incorrect results")
         self._reduce_results = value
         self._sync_defer_all_reduce()
 

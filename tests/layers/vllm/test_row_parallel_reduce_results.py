@@ -16,6 +16,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from tpu_inference.layers.vllm.custom_ops.linear import VllmRowParallelLinear
@@ -48,3 +49,16 @@ def test_defer_all_reduce_follows_reduce_results_set_after_init():
     assert layer.quant_method.linear_config.defer_all_reduce is True
     layer.reduce_results = True
     assert layer.quant_method.linear_config.defer_all_reduce is False
+
+
+def test_reduce_results_false_after_init_rejects_bias():
+    layer = _bare_layer(True)
+    layer.bias = torch.nn.Parameter(torch.zeros(4))
+    layer.skip_bias_add = False
+    with pytest.raises(ValueError):
+        layer.reduce_results = False
+    assert layer.quant_method.linear_config.defer_all_reduce is False
+    # A skipped bias is returned to the caller, so deferring is fine.
+    layer.skip_bias_add = True
+    layer.reduce_results = False
+    assert layer.quant_method.linear_config.defer_all_reduce is True
