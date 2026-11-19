@@ -201,9 +201,9 @@ def test_copy_gdn_state_slots_noop_without_mask(mesh):
     np.testing.assert_array_equal(np.asarray(new_rec), np.asarray(rec))
 
 
-def test_resolve_gdn_state_slots_dp_align_spec(mesh):
+def test_resolve_gdn_state_slots_dp_align_spec():
     """resolve_gdn_state_slots slices per-DP-rank block tables, scratch bases,
-    and read offsets, and applies boundary copies."""
+    and read offsets, and emits per-rank boundary copy descriptors."""
     # dp_size=2, max_num_reqs_per_dp=2, padded_num_reqs_per_dp=1
     md = AttentionMetadata(
         input_positions=jnp.zeros(8, dtype=jnp.int32),
@@ -238,10 +238,9 @@ def test_resolve_gdn_state_slots_dp_align_spec(mesh):
     assert slots.read_offsets.tolist() == [0, 0]
     assert slots.num_spec_tokens == 3
     assert slots.boundary_copies is not None
-    src, dst, mask = [np.asarray(x).tolist() for x in slots.boundary_copies]
-    assert mask == [True, False]
-    assert src[0] == 41
-    assert dst[0] == 10
+    assert slots.boundary_copies.mask.tolist() == [True, False]
+    assert int(slots.boundary_copies.src[0]) == 41
+    assert int(slots.boundary_copies.dst[0]) == 10
 
 
 def test_resolve_gdn_state_slots_non_align_forwards_and_clamps_read_offsets():
@@ -275,3 +274,59 @@ def test_resolve_gdn_state_slots_non_align_forwards_and_clamps_read_offsets():
     assert slots.read_offsets.tolist() == [2, 0]
     assert slots.num_spec_tokens == 3
     assert slots.boundary_copies is None
+
+
+def test_resolve_gdn_state_slots_rejects_window_spanning_multiple_boundaries():
+    """Align + spec decode requires num_spec_tokens < mamba_block_size so a
+    single verify window cannot cross more than one block boundary."""
+    md = AttentionMetadata(
+        input_positions=jnp.zeros(17, dtype=jnp.int32),
+        block_tables=jnp.array([[1, 2, 3]], dtype=jnp.int32),
+        seq_lens=jnp.array([32], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 17], dtype=jnp.int32),
+        request_distribution=jnp.array([1, 1, 1], dtype=jnp.int32),
+        mamba=MambaMetadata(
+            state_indices=jnp.array([10], dtype=jnp.int32),
+            read_offsets=jnp.array([0], dtype=jnp.int32),
+        ),
+        padded_num_reqs=1,
+    )
+    with pytest.raises(ValueError, match="num_spec_tokens.*mamba_block_size"):
+        resolve_gdn_state_slots(
+            md,
+            seq_lens=md.seq_lens,
+            query_start_loc=md.query_start_loc,
+            padded_num_reqs_per_dp=1,
+            dp_size=1,
+            num_local_rows=32,
+            mamba_block_size=BLOCK_SIZE,
+            num_spec_tokens=BLOCK_SIZE,
+        )
+
+
+@pytest.mark.parametrize("mamba_block_size", [0, BLOCK_SIZE])
+def test_resolve_gdn_state_slots_requires_mamba_metadata_for_spec_decode(
+        mamba_block_size):
+    """Missing MambaMetadata fields with num_spec_tokens > 0 fail fast instead
+    of silently falling back to num_spec_tokens=0."""
+    md = AttentionMetadata(
+        input_positions=jnp.zeros(4, dtype=jnp.int32),
+        block_tables=jnp.array([[1, 2]], dtype=jnp.int32),
+        seq_lens=jnp.array([8], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 4], dtype=jnp.int32),
+        request_distribution=jnp.array([1, 1, 1], dtype=jnp.int32),
+        mamba=MambaMetadata(state_indices=jnp.array([4], dtype=jnp.int32),
+                            read_offsets=None),
+        padded_num_reqs=1,
+    )
+    with pytest.raises(ValueError, match="read_offsets"):
+        resolve_gdn_state_slots(
+            md,
+            seq_lens=md.seq_lens,
+            query_start_loc=md.query_start_loc,
+            padded_num_reqs_per_dp=1,
+            dp_size=1,
+            num_local_rows=16,
+            mamba_block_size=mamba_block_size,
+            num_spec_tokens=3,
+        )

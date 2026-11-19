@@ -17,7 +17,7 @@ Bridge the torch gdn_attention_core op for gated deltanet attention TPU impl
 """
 import dataclasses
 import functools
-from typing import Optional, Tuple
+from typing import NamedTuple, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -196,6 +196,17 @@ def run_jax_gdn_attention(
     return (new_conv_state, new_recurrent_state), output
 
 
+def _lookup_mamba_block(
+    block_tables: jnp.ndarray,
+    col: jnp.ndarray,
+    max_row: int,
+) -> jnp.ndarray:
+    """Reads `block_tables[req, col[req]]` per request, clamped to `[0, max_row]`."""
+    col = jnp.clip(col, 0, block_tables.shape[1] - 1)
+    blocks = jnp.take_along_axis(block_tables, col[:, None], axis=1).squeeze(1)
+    return jnp.clip(blocks, 0, max_row).astype(jnp.int32)
+
+
 def compute_align_spec_state_indices(
     block_tables: jnp.ndarray,
     query_lens: jnp.ndarray,
@@ -213,28 +224,31 @@ def compute_align_spec_state_indices(
     consecutive slots for its per-position checkpoints. Each request
     therefore also owns a runner-side scratch group (base `scratch_bases`):
 
-    * Verify windows (`is_window`) write their checkpoints to the scratch
-      group. Prefill chunks write their final state to the block covering
-      their last token, exactly as in align mode without spec decode.
+    * Verify windows (`is_window`) have `query_lens <= mamba_block_size`
+      (`num_spec_tokens < mamba_block_size`) and write their checkpoints to the
+      scratch group. Prefill chunks write their final state to the block
+      covering their last token, exactly as in align mode without spec decode.
     * A request resumes from scratch checkpoint `scratch_base + offset` when
-      its previous step was a verify window (`read_offsets !=
-      MAMBA_READ_OFFSET_FROM_BLOCK_TABLE`), and from the block covering its
-      last computed token otherwise (`MAMBA_READ_OFFSET_FROM_BLOCK_TABLE`:
-      after a prefill chunk or a prefix-cache hit).
+      its previous step was a verify window (`read_offsets >= 0`), and from
+      the block covering its last computed token otherwise
+      (`MAMBA_READ_OFFSET_FROM_BLOCK_TABLE`: after a prefill chunk or a
+      prefix-cache hit).
     * When a window covers a block boundary `b` (`n < b <= n + q_len` with
-      `n` computed tokens), its checkpoint for `b` (window position
-      `b - n - 1`) is copied into the block holding tokens up to `b`, which
-      the scheduler caches once `b` is verified. The copy happens whether or
-      not the drafts past `b` are later accepted: the block is only cached
-      after a later step verified `b`, and the last window that covers `b`
-      is always the one whose accepted tokens reach it.
+      `n` computed tokens; at most one boundary since `q_len <=
+      mamba_block_size`), its checkpoint for `b` (window position `b - n - 1`)
+      is copied into the block holding tokens up to `b`, which the scheduler
+      caches once `b` is verified. The copy happens whether or not the drafts
+      past `b` are later accepted: the block is only cached after a later step
+      verified `b`, and the last window that covers `b` is always the one
+      whose accepted tokens reach it.
 
     All arrays are per request, flattened over DP ranks, with rank-local slot
     ids.
 
     Args:
         block_tables: `(num_reqs, max_blocks)` mamba block table.
-        query_lens: `(num_reqs,)` scheduled tokens.
+        query_lens: `(num_reqs,)` scheduled tokens (`<= mamba_block_size` on
+            verify-window rows).
         seq_lens: `(num_reqs,)` computed + scheduled tokens.
         is_window: `(num_reqs,)` bool, True for verify-window (decode
             segment) sequences.
@@ -253,34 +267,34 @@ def compute_align_spec_state_indices(
         and `copy_mask` selects the boundary checkpoints to copy from
         `copy_src` to `copy_dst` after the kernel.
     """
-    num_reqs = seq_lens.shape[0]
-    batch_idx = jnp.arange(num_reqs)
     max_row = num_local_rows - 1
     num_computed = seq_lens - query_lens
 
-    def block_at(col):
-        col = jnp.clip(col, 0, block_tables.shape[1] - 1)
-        return jnp.clip(block_tables[batch_idx, col], 0, max_row)
-
-    read_block = block_at(jnp.maximum(num_computed - 1, 0) // mamba_block_size)
-    write_block = block_at(jnp.maximum(seq_lens - 1, 0) // mamba_block_size)
+    read_block = _lookup_mamba_block(
+        block_tables,
+        jnp.maximum(num_computed - 1, 0) // mamba_block_size, max_row)
+    write_block = _lookup_mamba_block(
+        block_tables,
+        jnp.maximum(seq_lens - 1, 0) // mamba_block_size, max_row)
 
     assert MAMBA_READ_OFFSET_FROM_BLOCK_TABLE == -1
     from_scratch = read_offsets >= 0
-    state_indices = jnp.where(is_window, scratch_bases, write_block)
+    scratch_bases_clamped = jnp.clip(scratch_bases, 0, max_row)
+    state_indices = jnp.where(is_window, scratch_bases_clamped, write_block)
     read_state_indices = jnp.where(
         from_scratch, jnp.clip(scratch_bases + read_offsets, 0, max_row),
         read_block)
 
     boundary = (num_computed // mamba_block_size + 1) * mamba_block_size
-    copy_dst = block_at(num_computed // mamba_block_size)
+    copy_dst = _lookup_mamba_block(block_tables,
+                                   num_computed // mamba_block_size, max_row)
     copy_src = jnp.clip(scratch_bases + (boundary - num_computed - 1), 0,
                         max_row)
     copy_mask = (is_window & (query_lens > 0) & (boundary <= seq_lens)
                  & (scratch_bases > 0) & (copy_dst > 0))
     return (state_indices.astype(jnp.int32),
             read_state_indices.astype(jnp.int32), copy_src.astype(jnp.int32),
-            copy_dst.astype(jnp.int32), copy_mask)
+            copy_dst, copy_mask)
 
 
 def copy_gdn_state_slots(
@@ -339,6 +353,13 @@ def copy_gdn_state_slots(
     return mapped_fn(conv_state, recurrent_state, src, dst, mask)
 
 
+class BoundaryCopies(NamedTuple):
+    """Block-boundary checkpoints to copy from scratch slots into mamba blocks."""
+    src: jnp.ndarray
+    dst: jnp.ndarray
+    mask: jnp.ndarray
+
+
 @dataclasses.dataclass(frozen=True)
 class GDNStateSlots:
     """Per-request GDN state slots for one step (see `resolve_gdn_state_slots`)."""
@@ -346,7 +367,7 @@ class GDNStateSlots:
     read_state_indices: jnp.ndarray
     read_offsets: Optional[jnp.ndarray]
     num_spec_tokens: int
-    boundary_copies: Optional[Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]
+    boundary_copies: Optional[BoundaryCopies]
 
     def kernel_kwargs(self) -> dict:
         kwargs = dict(read_state_indices=self.read_state_indices)
@@ -380,7 +401,19 @@ def resolve_gdn_state_slots(
     mamba_block_size: int,
     num_spec_tokens: int = 0,
 ) -> GDNStateSlots:
-    """Picks the GDN state slots each request reads and writes this step."""
+    """Picks the GDN state slots each request reads and writes this step.
+
+    `seq_lens` (`(dp_size * padded_num_reqs_per_dp,)`) and `query_start_loc`
+    (`(dp_size * (padded_num_reqs_per_dp + 1),)`) must already be truncated to
+    `padded_num_reqs_per_dp` per DP rank, whereas `attn_metadata` holds the
+    full `(dp_size * max_num_reqs_per_dp, ...)` per-batch metadata arrays.
+    """
+    expected_reqs = dp_size * padded_num_reqs_per_dp
+    if seq_lens.shape != (expected_reqs, ):
+        raise ValueError(
+            f"Expected DP-truncated seq_lens of shape ({expected_reqs},), "
+            f"got {seq_lens.shape}.")
+
     mamba_md = attn_metadata.mamba
     mamba_state_indices = (mamba_md.state_indices
                            if mamba_md is not None else None)
@@ -398,27 +431,41 @@ def resolve_gdn_state_slots(
         # not by `block_tables[:, 0]` (vLLM's GPU convention): compact-mamba
         # sizing caps the mamba pool below the attention block range, and
         # `InputBatch.condense` moves the slot id with each request.
+        if mamba_state_indices is None:
+            raise ValueError(
+                "Mamba non-align mode requires attn_metadata.mamba.state_indices."
+            )
         state_indices = truncate(mamba_state_indices)
         read_offsets = None
-        if num_spec_tokens > 0 and mamba_read_offsets is not None:
+        if num_spec_tokens > 0:
+            if mamba_read_offsets is None:
+                raise ValueError("Speculative decoding on GDN layers requires "
+                                 "attn_metadata.mamba.read_offsets.")
             # Clamp `MAMBA_READ_OFFSET_FROM_BLOCK_TABLE` (-1) to 0 so requests
             # without a prior verify window resume from `state_indices + 0`.
             read_offsets = jnp.maximum(truncate(mamba_read_offsets), 0)
-        return GDNStateSlots(
-            state_indices, state_indices, read_offsets,
-            num_spec_tokens if read_offsets is not None else 0, None)
+        return GDNStateSlots(state_indices, state_indices, read_offsets,
+                             num_spec_tokens, None)
 
-    num_reqs_total = attn_metadata.seq_lens.shape[0]
-    block_tables = attn_metadata.block_tables.reshape(num_reqs_total, -1)
-    max_num_reqs_per_dp = num_reqs_total // dp_size
-    block_tables = block_tables.reshape(
+    max_num_reqs_per_dp = attn_metadata.seq_lens.shape[0] // dp_size
+    block_tables = attn_metadata.block_tables.reshape(
         dp_size, max_num_reqs_per_dp,
-        -1)[:, :padded_num_reqs_per_dp, :].reshape(-1, block_tables.shape[-1])
+        -1)[:, :padded_num_reqs_per_dp, :].reshape(expected_reqs, -1)
     qsl = query_start_loc.reshape(dp_size, padded_num_reqs_per_dp + 1)
     query_lens = (qsl[:, 1:] - qsl[:, :-1]).reshape(-1)
 
-    if (num_spec_tokens > 0 and mamba_state_indices is not None
-            and mamba_read_offsets is not None):
+    if num_spec_tokens > 0:
+        if num_spec_tokens >= mamba_block_size:
+            raise ValueError(
+                f"Mamba align mode with speculative decoding requires "
+                f"num_spec_tokens ({num_spec_tokens}) < mamba_block_size "
+                f"({mamba_block_size}) so a verify window crosses at most one "
+                f"block boundary.")
+        if mamba_state_indices is None or mamba_read_offsets is None:
+            raise ValueError(
+                "Mamba align mode with speculative decoding requires both "
+                "attn_metadata.mamba.state_indices and "
+                "attn_metadata.mamba.read_offsets.")
         num_windows = attn_metadata.request_distribution.reshape(dp_size,
                                                                  -1)[:, :1]
         is_window = (jnp.arange(padded_num_reqs_per_dp)[None, :]
@@ -436,16 +483,15 @@ def resolve_gdn_state_slots(
          )
         return GDNStateSlots(state_indices, read_state_indices,
                              jnp.zeros_like(state_indices), num_spec_tokens,
-                             (copy_src, copy_dst, copy_mask))
+                             BoundaryCopies(copy_src, copy_dst, copy_mask))
 
     # Slot ids are rank-local in [0, mamba_num_blocks // dp_size); clamp below
     # `num_local_rows` since the kernel DMAs them with bounds checks disabled.
     num_computed = seq_lens - query_lens
-    batch_idx = jnp.arange(seq_lens.shape[0])
-    read_col = jnp.maximum(num_computed - 1, 0) // mamba_block_size
-    write_col = jnp.maximum(seq_lens - 1, 0) // mamba_block_size
-    read_state_indices = jnp.clip(block_tables[batch_idx, read_col], 0,
-                                  max_row).astype(jnp.int32)
-    state_indices = jnp.clip(block_tables[batch_idx, write_col], 0,
-                             max_row).astype(jnp.int32)
+    read_state_indices = _lookup_mamba_block(
+        block_tables,
+        jnp.maximum(num_computed - 1, 0) // mamba_block_size, max_row)
+    state_indices = _lookup_mamba_block(
+        block_tables,
+        jnp.maximum(seq_lens - 1, 0) // mamba_block_size, max_row)
     return GDNStateSlots(state_indices, read_state_indices, None, 0, None)
