@@ -292,6 +292,10 @@ def quantize_tensor(
     scale_inv = jnp.nan_to_num(1 / scale, jnp.inf)
 
     tensor_q = jnp.clip(tensor * scale_inv, dtype_min, dtype_max)
+    if jnp.issubdtype(dtype, jnp.integer):
+        # astype truncates toward zero for integer targets, so round to the
+        # nearest level first.
+        tensor_q = jnp.round(tensor_q)
     tensor_q = tensor_q.reshape(orig_shape)
     tensor_q = tensor_q.astype(dtype)
 
@@ -313,7 +317,10 @@ def static_per_tensor_quantize_tensor(
     dtype_max = float(dtype_info.max)
     dtype_min = float(dtype_info.min)
 
-    return jnp.clip(tensor / scale, dtype_min, dtype_max).astype(dtype)
+    tensor_q = jnp.clip(tensor / scale, dtype_min, dtype_max)
+    if jnp.issubdtype(dtype, jnp.integer):
+        tensor_q = jnp.round(tensor_q)
+    return tensor_q.astype(dtype)
 
 
 def quantize_kv(
