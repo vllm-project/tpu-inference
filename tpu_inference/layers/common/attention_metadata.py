@@ -58,9 +58,10 @@ class PCPMetadata:
     num_reqs: int = 1
 
 
-# Sentinel value in `MambaMetadata.read_offsets` (align mode + spec decode)
-# indicating that the request should resume from `block_tables` (e.g. after a
-# prefill chunk or prefix-cache hit) rather than from its scratch group.
+# Sentinel value in `MambaMetadata.read_offsets` indicating that the request has
+# no prior verify-window checkpoint (e.g. before the first verify window, after
+# a prefill chunk, or after a prefix-cache hit): resumes from `block_tables` in
+# align mode, and clamps to `0` (base slot `state_indices + 0`) in none mode.
 MAMBA_READ_OFFSET_FROM_BLOCK_TABLE = -1
 
 
@@ -87,9 +88,10 @@ class MambaMetadata:
     state_indices: jax.Array | None = None
     # (max_num_seqs,) int32 — per-request offset ∈ [0, num_spec_tokens] into
     # the strided mamba/GDN state slot group indicating which accepted
-    # checkpoint from the previous speculative verification step to read from.
-    # In align mode, may also be `MAMBA_READ_OFFSET_FROM_BLOCK_TABLE` (-1) to
-    # resume from the mamba block table after a prefill chunk or prefix hit.
+    # checkpoint from the previous speculative verification step to read from,
+    # or `MAMBA_READ_OFFSET_FROM_BLOCK_TABLE` (-1) when no prior verify-window
+    # checkpoint is active (resumes from `block_tables` in align mode; clamped
+    # to `0` in none mode).
     # None when speculative decoding or mamba/GDN state is disabled.
     read_offsets: jax.Array | None = None
 

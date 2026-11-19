@@ -265,7 +265,8 @@ def compute_align_spec_state_indices(
     read_block = block_at(jnp.maximum(num_computed - 1, 0) // mamba_block_size)
     write_block = block_at(jnp.maximum(seq_lens - 1, 0) // mamba_block_size)
 
-    from_scratch = read_offsets != MAMBA_READ_OFFSET_FROM_BLOCK_TABLE
+    assert MAMBA_READ_OFFSET_FROM_BLOCK_TABLE == -1
+    from_scratch = read_offsets >= 0
     state_indices = jnp.where(is_window, scratch_bases, write_block)
     read_state_indices = jnp.where(
         from_scratch, jnp.clip(scratch_bases + read_offsets, 0, max_row),
@@ -400,7 +401,9 @@ def resolve_gdn_state_slots(
         state_indices = truncate(mamba_state_indices)
         read_offsets = None
         if num_spec_tokens > 0 and mamba_read_offsets is not None:
-            read_offsets = truncate(mamba_read_offsets)
+            # Clamp `MAMBA_READ_OFFSET_FROM_BLOCK_TABLE` (-1) to 0 so requests
+            # without a prior verify window resume from `state_indices + 0`.
+            read_offsets = jnp.maximum(truncate(mamba_read_offsets), 0)
         return GDNStateSlots(
             state_indices, state_indices, read_offsets,
             num_spec_tokens if read_offsets is not None else 0, None)

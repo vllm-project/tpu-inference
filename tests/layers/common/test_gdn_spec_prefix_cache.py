@@ -214,8 +214,9 @@ def test_resolve_gdn_state_slots_dp_align_spec(mesh):
         request_distribution=jnp.array([1, 1, 1, 1, 1, 1], dtype=jnp.int32),
         mamba=MambaMetadata(
             state_indices=jnp.array([40, 0, 44, 0], dtype=jnp.int32),
-            read_offsets=jnp.array([2, 0, MAMBA_READ_OFFSET_FROM_BLOCK_TABLE, 0],
-                                   dtype=jnp.int32),
+            read_offsets=jnp.array(
+                [2, 0, MAMBA_READ_OFFSET_FROM_BLOCK_TABLE, 0],
+                dtype=jnp.int32),
         ),
         padded_num_reqs=2,
     )
@@ -243,32 +244,34 @@ def test_resolve_gdn_state_slots_dp_align_spec(mesh):
     assert dst[0] == 10
 
 
-def test_resolve_gdn_state_slots_non_align_forwards_read_offsets():
-    """In non-align mode (mamba_block_size=0), read_offsets are forwarded
-    directly with no boundary copies."""
+def test_resolve_gdn_state_slots_non_align_forwards_and_clamps_read_offsets():
+    """In non-align mode (mamba_block_size=0), positive read_offsets are
+    forwarded directly while MAMBA_READ_OFFSET_FROM_BLOCK_TABLE (-1) clamps to
+    0 so the request reads its base slot."""
     md = AttentionMetadata(
-        input_positions=jnp.zeros(4, dtype=jnp.int32),
-        seq_lens=jnp.array([20], dtype=jnp.int32),
-        query_start_loc=jnp.array([0, 4], dtype=jnp.int32),
-        request_distribution=jnp.array([1, 1, 1], dtype=jnp.int32),
+        input_positions=jnp.zeros(8, dtype=jnp.int32),
+        seq_lens=jnp.array([20, 16], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 4, 8], dtype=jnp.int32),
+        request_distribution=jnp.array([2, 2, 2], dtype=jnp.int32),
         mamba=MambaMetadata(
-            state_indices=jnp.array([5], dtype=jnp.int32),
-            read_offsets=jnp.array([2], dtype=jnp.int32),
+            state_indices=jnp.array([5, 9], dtype=jnp.int32),
+            read_offsets=jnp.array([2, MAMBA_READ_OFFSET_FROM_BLOCK_TABLE],
+                                   dtype=jnp.int32),
         ),
-        padded_num_reqs=1,
+        padded_num_reqs=2,
     )
     slots = resolve_gdn_state_slots(
         md,
-        seq_lens=jnp.array([20], dtype=jnp.int32),
-        query_start_loc=jnp.array([0, 4], dtype=jnp.int32),
-        padded_num_reqs_per_dp=1,
+        seq_lens=jnp.array([20, 16], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 4, 8], dtype=jnp.int32),
+        padded_num_reqs_per_dp=2,
         dp_size=1,
         num_local_rows=16,
         mamba_block_size=0,
         num_spec_tokens=3,
     )
-    assert slots.state_indices.tolist() == [5]
-    assert slots.read_state_indices.tolist() == [5]
-    assert slots.read_offsets.tolist() == [2]
+    assert slots.state_indices.tolist() == [5, 9]
+    assert slots.read_state_indices.tolist() == [5, 9]
+    assert slots.read_offsets.tolist() == [2, 0]
     assert slots.num_spec_tokens == 3
     assert slots.boundary_copies is None
