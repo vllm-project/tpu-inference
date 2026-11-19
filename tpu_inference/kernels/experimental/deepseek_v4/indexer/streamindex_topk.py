@@ -370,7 +370,9 @@ def _scores_kernel(
             for batch_idx in range(seq_batch_size):
                 q_pos = (seq_lens[batch_idx] - q_lens[batch_idx] +
                          bq_idx * bq_sz + jnp.arange(bq_sz, dtype=jnp.int32))
-                bq_pos_compressed_vec.append(q_pos // compression_ratio)
+                # A compressed group becomes visible at its final token.
+                bq_pos_compressed_vec.append((q_pos + 1) // compression_ratio -
+                                             1)
 
             # Wait for cur bq if not ready yet
             wait_fetch_bq(batch_start_seq_idx, bq_idx, bq_sem_idx)
