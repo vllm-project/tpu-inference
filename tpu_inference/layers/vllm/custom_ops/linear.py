@@ -36,10 +36,34 @@ class VllmRowParallelLinear(RowParallelLinear):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._sync_defer_all_reduce()
 
-        linear_config = getattr(self.quant_method, "linear_config", None)
-        if linear_config is not None:
-            linear_config.defer_all_reduce = not self.reduce_results
+    # `reduce_results` may be flipped after construction: vLLM's Transformers
+    # modeling backend sets `down_proj.reduce_results = False` on fused shared
+    # experts once the model is built, so the MoE runner can reduce shared and
+    # routed outputs together. Keep `defer_all_reduce` in sync, otherwise the
+    # shared-expert output is all-reduced here *and* again by the MoE runner.
+    @property
+    def reduce_results(self) -> bool:
+        return self._reduce_results
+
+    @reduce_results.setter
+    def reduce_results(self, value: bool) -> None:
+        # vLLM rejects reduce_results=False with an in-layer bias only in
+        # __init__; enforce the same once constructed, otherwise the bias
+        # would be summed TP times by the deferred all-reduce.
+        if (not value and getattr(self, "bias", None) is not None
+                and not getattr(self, "skip_bias_add", False)):
+            raise ValueError("When not reduce the results, adding bias to the "
+                             "results can lead to incorrect results")
+        self._reduce_results = value
+        self._sync_defer_all_reduce()
+
+    def _sync_defer_all_reduce(self) -> None:
+        linear_config = getattr(getattr(self, "quant_method", None),
+                                "linear_config", None)
+        if linear_config is not None and hasattr(self, "_reduce_results"):
+            linear_config.defer_all_reduce = not self._reduce_results
 
     def forward(
         self,
