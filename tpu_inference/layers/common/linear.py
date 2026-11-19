@@ -23,6 +23,8 @@ from tokamax._src.ops.gmm_v2.gmm_v2 import (TilingRequest,
                                             calculate_tiling_from_request,
                                             gmm_v2)
 
+from tpu_inference import envs
+from tpu_inference.kernels.collectives import quantized_matmul_reduce_scatter
 from tpu_inference.kernels.quantized_matmul.util import (
     quantize_tensor, xla_quantized_batched_matmul)
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -300,6 +302,27 @@ def sharded_matmul(x: jax.Array,
     return out
 
 
+def _fused_reduce_scatter_axis(mesh: Mesh | None, in_axis, w_q: jax.Array,
+                               w_s: jax.Array | None) -> str | None:
+    """The mesh axis to run quantized_matmul_reduce_scatter over, or None.
+
+    The fused kernel handles an int8 weight with a per-channel scale whose K
+    dim is sharded over exactly one non-trivial mesh axis spanning every
+    device (the kernel addresses ring neighbours by that axis alone).
+    """
+    if not envs.FUSED_MATMUL_REDUCE_SCATTER or mesh is None:
+        return None
+    if w_q.dtype != jnp.int8 or w_s is None or w_s.ndim != 1:
+        return None
+    axes = in_axis if isinstance(in_axis, tuple) else (in_axis, )
+    if any(a not in mesh.shape for a in axes):
+        return None
+    big = [a for a in axes if mesh.shape[a] > 1]
+    if len(big) != 1 or mesh.shape[big[0]] != mesh.devices.size:
+        return None
+    return big[0]
+
+
 def sharded_quantized_matmul(x: jax.Array,
                              w_q: jax.Array,
                              w_s: jax.Array,
@@ -372,7 +395,33 @@ def sharded_quantized_matmul(x: jax.Array,
         x,
         NamedSharding(mesh, x_sharding) if mesh else x_sharding)
 
+    fused_rs_axis = None
+    if (sp_row_parallel and not enable_quantized_matmul_kernel
+            and not defer_all_reduce):
+        fused_rs_axis = _fused_reduce_scatter_axis(mesh, in_axis, w_q, w_s)
+    fused_rs_order = (quantized_matmul_reduce_scatter.ring_order(
+        list(mesh.devices.flat)) if fused_rs_axis else None)
+
+    def fused_reduce_scatter(x, w_q, w_s):
+        """matmul + psum_scatter as one kernel, or None if x's shape is
+        unsupported (e.g. decode-sized batches)."""
+        D = len(fused_rs_order)
+        if quantized_matmul_reduce_scatter.choose_blocks(
+                x.shape[0], x.shape[1], w_q.shape[1], D,
+                maybe_quantize_x) is None:
+            return None
+        out_dtype, sx = x.dtype, None
+        if maybe_quantize_x:
+            x, sx = quantize_tensor(x, w_q.dtype)
+        out = quantized_matmul_reduce_scatter.quantized_matmul_reduce_scatter(
+            x, w_q, w_s, axis=fused_rs_axis, order=fused_rs_order, sx=sx)
+        return out.astype(out_dtype)
+
     def wrapper(x, w_q, w_s):
+        if fused_rs_axis is not None:
+            out = fused_reduce_scatter(x, w_q, w_s)
+            if out is not None:
+                return out
         if enable_quantized_matmul_kernel:
             if sp_col_parallel:
                 # gmm_v2 quantizes the LHS itself, so on this path the tokens
