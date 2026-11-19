@@ -252,7 +252,7 @@ def compute_align_spec_state_indices(
     """
     num_reqs = seq_lens.shape[0]
     batch_idx = jnp.arange(num_reqs)
-    max_row = max(num_local_rows - 1, 0)
+    max_row = num_local_rows - 1
     num_computed = seq_lens - query_lens
 
     def block_at(col):
@@ -382,7 +382,7 @@ def resolve_gdn_state_slots(
                            if mamba_md is not None else None)
     mamba_read_offsets = (mamba_md.read_offsets
                           if mamba_md is not None else None)
-    max_row = max(num_local_rows - 1, 0)
+    max_row = num_local_rows - 1
 
     def truncate(x):
         return truncate_sharded_tensor(x.astype(jnp.int32),

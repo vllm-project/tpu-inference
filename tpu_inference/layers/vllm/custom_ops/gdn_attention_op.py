@@ -121,10 +121,8 @@ def gdn_attention_core_tpu(
                                               dp_size)
 
     cache_config = vllm_context.vllm_config.cache_config
-    spec_config = getattr(vllm_context.vllm_config, "speculative_config", None)
-    raw_spec = getattr(spec_config, "num_speculative_tokens", 0)
-    num_spec_tokens = (int(raw_spec) if isinstance(raw_spec, int)
-                       and not isinstance(raw_spec, bool) else 0)
+    spec_config = vllm_context.vllm_config.speculative_config
+    num_spec_tokens = spec_config.num_speculative_tokens if spec_config else 0
     mamba_block_size = (cache_config.mamba_block_size
                         if cache_config.mamba_cache_mode == "align" else 0)
     slots = resolve_gdn_state_slots(
@@ -133,7 +131,7 @@ def gdn_attention_core_tpu(
         query_start_loc=query_start_loc_sliced,
         padded_num_reqs_per_dp=padded_num_reqs_per_dp,
         dp_size=dp_size,
-        num_local_rows=max(conv_state.shape[0] // dp_size, 1),
+        num_local_rows=conv_state.shape[0] // dp_size,
         mamba_block_size=mamba_block_size,
         num_spec_tokens=num_spec_tokens,
     )
