@@ -25,6 +25,7 @@ from jax.sharding import PartitionSpec as P
 
 from tpu_inference.layers.common.attention_backend import (
     Conv1dGDNKernel, GDNLinearAttentionBackend)
+from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import truncate_sharded_tensor
 from tpu_inference.utils import get_mesh_shape_product
@@ -365,7 +366,7 @@ class GDNStateSlots:
 
 
 def resolve_gdn_state_slots(
-    attn_metadata,
+    attn_metadata: AttentionMetadata,
     *,
     seq_lens: jnp.ndarray,
     query_start_loc: jnp.ndarray,
@@ -376,10 +377,7 @@ def resolve_gdn_state_slots(
     num_spec_tokens: int = 0,
 ) -> GDNStateSlots:
     """Picks the GDN state slots each request reads and writes this step."""
-    num_spec_tokens = (int(num_spec_tokens)
-                       if isinstance(num_spec_tokens, int)
-                       and not isinstance(num_spec_tokens, bool) else 0)
-    mamba_md = getattr(attn_metadata, "mamba", None)
+    mamba_md = attn_metadata.mamba
     mamba_state_indices = (mamba_md.state_indices
                            if mamba_md is not None else None)
     mamba_read_offsets = (mamba_md.read_offsets
