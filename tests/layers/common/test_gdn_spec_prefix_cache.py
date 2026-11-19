@@ -19,8 +19,8 @@ import numpy as np
 import pytest
 from jax.sharding import Mesh
 
-from tpu_inference.layers.common.attention_metadata import (AttentionMetadata,
-                                                            MambaMetadata)
+from tpu_inference.layers.common.attention_metadata import (
+    MAMBA_READ_OFFSET_FROM_BLOCK_TABLE, AttentionMetadata, MambaMetadata)
 from tpu_inference.layers.common.gdn_attention import (
     compute_align_spec_state_indices, copy_gdn_state_slots,
     resolve_gdn_state_slots)
@@ -82,16 +82,16 @@ def test_window_resumes_from_scratch_and_copies_boundary():
 
 
 def test_window_resumes_from_block_after_prefill():
-    """Offset -1 (after a prefill chunk or a prefix hit) resumes from the
-    block covering the last computed token; no boundary inside the window
-    means no copy."""
+    """MAMBA_READ_OFFSET_FROM_BLOCK_TABLE (after a prefill chunk or a prefix
+    hit) resumes from the block covering the last computed token; no boundary
+    inside the window means no copy."""
     state, read, _, _, mask = _indices(
         block_tables=[[20, 21, 22]],
         query_lens=[2],
         seq_lens=[34],
         is_window=[True],
         scratch_bases=[44],
-        read_offsets=[-1],
+        read_offsets=[MAMBA_READ_OFFSET_FROM_BLOCK_TABLE],
     )
     assert state.tolist() == [44]
     assert read.tolist() == [21]  # token 31 lives in block column 1
@@ -123,7 +123,7 @@ def test_prefill_uses_block_table_slots():
         seq_lens=[32],
         is_window=[False],
         scratch_bases=[48],
-        read_offsets=[-1],
+        read_offsets=[MAMBA_READ_OFFSET_FROM_BLOCK_TABLE],
     )
     assert state.tolist() == [31]
     assert read.tolist() == [30]
@@ -214,7 +214,8 @@ def test_resolve_gdn_state_slots_dp_align_spec(mesh):
         request_distribution=jnp.array([1, 1, 1, 1, 1, 1], dtype=jnp.int32),
         mamba=MambaMetadata(
             state_indices=jnp.array([40, 0, 44, 0], dtype=jnp.int32),
-            read_offsets=jnp.array([2, 0, -1, 0], dtype=jnp.int32),
+            read_offsets=jnp.array([2, 0, MAMBA_READ_OFFSET_FROM_BLOCK_TABLE, 0],
+                                   dtype=jnp.int32),
         ),
         padded_num_reqs=2,
     )
@@ -242,9 +243,9 @@ def test_resolve_gdn_state_slots_dp_align_spec(mesh):
     assert dst[0] == 10
 
 
-def test_resolve_gdn_state_slots_non_align_clamps_negative_read_offset():
-    """In non-align mode (mamba_block_size=0), a -1 read offset from a prefill
-    chunk is clamped to 0 so the request reads its base slot."""
+def test_resolve_gdn_state_slots_non_align_forwards_read_offsets():
+    """In non-align mode (mamba_block_size=0), read_offsets are forwarded
+    directly with no boundary copies."""
     md = AttentionMetadata(
         input_positions=jnp.zeros(4, dtype=jnp.int32),
         seq_lens=jnp.array([20], dtype=jnp.int32),
@@ -252,7 +253,7 @@ def test_resolve_gdn_state_slots_non_align_clamps_negative_read_offset():
         request_distribution=jnp.array([1, 1, 1], dtype=jnp.int32),
         mamba=MambaMetadata(
             state_indices=jnp.array([5], dtype=jnp.int32),
-            read_offsets=jnp.array([-1], dtype=jnp.int32),
+            read_offsets=jnp.array([2], dtype=jnp.int32),
         ),
         padded_num_reqs=1,
     )
@@ -268,6 +269,6 @@ def test_resolve_gdn_state_slots_non_align_clamps_negative_read_offset():
     )
     assert slots.state_indices.tolist() == [5]
     assert slots.read_state_indices.tolist() == [5]
-    assert slots.read_offsets.tolist() == [0]
+    assert slots.read_offsets.tolist() == [2]
     assert slots.num_spec_tokens == 3
     assert slots.boundary_copies is None

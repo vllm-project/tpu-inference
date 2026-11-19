@@ -25,7 +25,8 @@ from jax.sharding import PartitionSpec as P
 
 from tpu_inference.layers.common.attention_backend import (
     Conv1dGDNKernel, GDNLinearAttentionBackend)
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.attention_metadata import (
+    MAMBA_READ_OFFSET_FROM_BLOCK_TABLE, AttentionMetadata)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import truncate_sharded_tensor
 from tpu_inference.utils import get_mesh_shape_product
@@ -216,9 +217,10 @@ def compute_align_spec_state_indices(
       group. Prefill chunks write their final state to the block covering
       their last token, exactly as in align mode without spec decode.
     * A request resumes from scratch checkpoint `scratch_base + offset` when
-      its previous step was a verify window (`read_offsets >= 0`), and from
-      the block covering its last computed token otherwise (`-1`: after a
-      prefill chunk or a prefix-cache hit).
+      its previous step was a verify window (`read_offsets !=
+      MAMBA_READ_OFFSET_FROM_BLOCK_TABLE`), and from the block covering its
+      last computed token otherwise (`MAMBA_READ_OFFSET_FROM_BLOCK_TABLE`:
+      after a prefill chunk or a prefix-cache hit).
     * When a window covers a block boundary `b` (`n < b <= n + q_len` with
       `n` computed tokens), its checkpoint for `b` (window position
       `b - n - 1`) is copied into the block holding tokens up to `b`, which
@@ -237,8 +239,9 @@ def compute_align_spec_state_indices(
         is_window: `(num_reqs,)` bool, True for verify-window (decode
             segment) sequences.
         scratch_bases: `(num_reqs,)` scratch group base slot.
-        read_offsets: `(num_reqs,)` scratch checkpoint to resume from, or -1
-            to resume from the block table.
+        read_offsets: `(num_reqs,)` scratch checkpoint to resume from, or
+            `MAMBA_READ_OFFSET_FROM_BLOCK_TABLE` (-1) to resume from the block
+            table.
         mamba_block_size: Tokens per mamba block.
         num_local_rows: Rows in each rank's shard of the state arrays; ids
             are clamped below it since the kernel DMAs them unchecked.
@@ -262,7 +265,7 @@ def compute_align_spec_state_indices(
     read_block = block_at(jnp.maximum(num_computed - 1, 0) // mamba_block_size)
     write_block = block_at(jnp.maximum(seq_lens - 1, 0) // mamba_block_size)
 
-    from_scratch = read_offsets >= 0
+    from_scratch = read_offsets != MAMBA_READ_OFFSET_FROM_BLOCK_TABLE
     state_indices = jnp.where(is_window, scratch_bases, write_block)
     read_state_indices = jnp.where(
         from_scratch, jnp.clip(scratch_bases + read_offsets, 0, max_row),
@@ -397,7 +400,7 @@ def resolve_gdn_state_slots(
         state_indices = truncate(mamba_state_indices)
         read_offsets = None
         if num_spec_tokens > 0 and mamba_read_offsets is not None:
-            read_offsets = jnp.maximum(truncate(mamba_read_offsets), 0)
+            read_offsets = truncate(mamba_read_offsets)
         return GDNStateSlots(
             state_indices, state_indices, read_offsets,
             num_spec_tokens if read_offsets is not None else 0, None)

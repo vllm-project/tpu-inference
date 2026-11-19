@@ -557,6 +557,8 @@ class TestVllmGatedDeltaNetAttention:
         assert call_kwargs["num_spec_tokens"] == 3
 
     def test_compute_align_spec_state_indices(self):
+        from tpu_inference.layers.common.attention_metadata import \
+            MAMBA_READ_OFFSET_FROM_BLOCK_TABLE
         from tpu_inference.layers.common.gdn_attention import \
             compute_align_spec_state_indices
 
@@ -564,7 +566,7 @@ class TestVllmGatedDeltaNetAttention:
         #   req 0: verify window (q=4, seq=18 -> n=14), crosses block 0 boundary
         #          (16) at window pos 1, resumes from scratch offset 2.
         #   req 1: verify window (q=4, seq=8 -> n=4), does NOT reach boundary
-        #          16, resumes from block table (-1 offset, right after prefill).
+        #          16, resumes from block table (after prefill).
         #   req 2: prefill chunk (q=16, seq=32 -> n=16), not a window.
         #   req 3: padded dummy (q=0, seq=0).
         block_tables = jax.numpy.array(
@@ -575,7 +577,13 @@ class TestVllmGatedDeltaNetAttention:
         seq_lens = jax.numpy.array([18, 8, 32, 0], dtype=jax.numpy.int32)
         is_window = jax.numpy.array([True, True, False, False])
         scratch_bases = jax.numpy.array([40, 44, 48, 0], dtype=jax.numpy.int32)
-        read_offsets = jax.numpy.array([2, -1, -1, 0], dtype=jax.numpy.int32)
+        read_offsets = jax.numpy.array(
+            [
+                2, MAMBA_READ_OFFSET_FROM_BLOCK_TABLE,
+                MAMBA_READ_OFFSET_FROM_BLOCK_TABLE, 0
+            ],
+            dtype=jax.numpy.int32,
+        )
 
         (state_indices, read_state_indices, copy_src, copy_dst,
          copy_mask) = compute_align_spec_state_indices(
@@ -646,7 +654,8 @@ class TestVllmGatedDeltaNetAttention:
         slots and copies block-boundary states into the scheduler's mamba
         blocks after the kernel runs."""
         from tpu_inference.layers.common.attention_metadata import (
-            AttentionMetadata, MambaMetadata)
+            MAMBA_READ_OFFSET_FROM_BLOCK_TABLE, AttentionMetadata,
+            MambaMetadata)
         from tpu_inference.layers.vllm.custom_ops.gdn_attention_op import \
             gdn_attention_core_tpu
 
@@ -671,7 +680,8 @@ class TestVllmGatedDeltaNetAttention:
         #          window position 1 (scratch slot 20 + 1 = 21 -> block id 3),
         #          resumes from scratch checkpoint 20 + 2 = 22.
         #   req 1: computed 16 -> seq_len 20, resumes from block 0 (id 5) via
-        #          read_offsets = -1, does not cross block 1 boundary (32).
+        #          MAMBA_READ_OFFSET_FROM_BLOCK_TABLE, does not cross block 1
+        #          boundary (32).
         attn_metadata = AttentionMetadata(
             input_positions=jax.numpy.zeros(num_tokens, dtype=jax.numpy.int32),
             block_tables=jax.numpy.array([[3, 4], [5, 6]],
@@ -682,7 +692,9 @@ class TestVllmGatedDeltaNetAttention:
                                                  dtype=jax.numpy.int32),
             mamba=MambaMetadata(
                 state_indices=jax.numpy.array([20, 24], dtype=jax.numpy.int32),
-                read_offsets=jax.numpy.array([2, -1], dtype=jax.numpy.int32),
+                read_offsets=jax.numpy.array(
+                    [2, MAMBA_READ_OFFSET_FROM_BLOCK_TABLE],
+                    dtype=jax.numpy.int32),
             ),
             padded_num_reqs=2,
         )
