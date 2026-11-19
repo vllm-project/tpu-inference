@@ -31,6 +31,7 @@ RUN apt-get update && apt-get install -y \
     rclone \
     wget \
     ca-certificates \
+    protobuf-compiler \
     build-essential \
     cmake \
     g++ \
