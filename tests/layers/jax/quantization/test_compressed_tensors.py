@@ -13,26 +13,29 @@
 # limitations under the License.
 """Unit tests for the JAX-native compressed-tensors config (issue #2261).
 
-These tests exercise the *dispatch* logic (`get_quant_method`): given a
-compressed-tensors `quantization_config`, does each layer get routed to the
-right JAX quant method (or skipped)? They mirror `test_fp8.py::TestFp8Config`,
-which asserts `layer.quant_method` types rather than running a forward pass.
+Tests cover quant-method dispatch and checkpoint loading followed by a
+forward pass for merged layers skipped by the quantization config.
 """
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
+import torch
 from flax import nnx
 from jax.sharding import Mesh
 
 from tpu_inference.layers.common.sharding import MESH_AXIS_NAMES
-from tpu_inference.layers.jax.linear import JaxLinear
+from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax.linear import (JaxLinear,
+                                             JaxMergedColumnParallelLinear)
 from tpu_inference.layers.jax.quantization.compressed_tensors import \
     CompressedTensorsConfig
 from tpu_inference.layers.jax.quantization.fp8 import (
     Fp8BlockwiseLinearMethod, Fp8TensorwiseLinearMethod)
 from tpu_inference.layers.jax.quantization.unquantized import \
     UnquantizedLinearMethod
+from tpu_inference.models.jax.utils.weight_utils import JaxAutoWeightsLoader
 
 
 # A compressed-tensors `quantization_config` modeled on
@@ -184,3 +187,62 @@ class TestCompressedTensorsConfig:
             mlp = _MLP(16, 16, rngs, config, prefix="mlp")
         assert isinstance(mlp.proj1.quant_method, Fp8BlockwiseLinearMethod)
         assert isinstance(mlp.proj2.quant_method, UnquantizedLinearMethod)
+
+    @pytest.mark.parametrize("skip_reason", ["ignored", "unmatched"])
+    @pytest.mark.parametrize("consolidated", [False, True])
+    @pytest.mark.parametrize("use_bias", [False, True])
+    def test_skipped_merged_layer_load_and_forward(self, rngs, mesh,
+                                                   skip_reason, consolidated,
+                                                   use_bias):
+        cfg = _fp8_block_config()
+        if skip_reason == "ignored":
+            cfg["ignore"] = ["re:.*gate_up_proj"]
+        else:
+            cfg["config_groups"]["group_0"]["targets"] = ["other_proj"]
+        config = CompressedTensorsConfig(cfg)
+
+        class Model(JaxModule):
+            packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+
+            def __init__(self):
+                self.gate_up_proj = JaxMergedColumnParallelLinear(
+                    4, [6, 8],
+                    rngs=rngs,
+                    use_bias=use_bias,
+                    quant_config=config,
+                    prefix="gate_up_proj")
+
+        gate = torch.arange(24, dtype=torch.float32).reshape(6, 4) / 16
+        up = -torch.arange(32, dtype=torch.float32).reshape(8, 4) / 16
+        gate_bias = torch.arange(6, dtype=torch.float32) / 8
+        up_bias = -torch.arange(8, dtype=torch.float32) / 8
+        if consolidated:
+            checkpoint = [("gate_up_proj.weight", torch.cat([gate, up]))]
+            if use_bias:
+                checkpoint.append(
+                    ("gate_up_proj.bias", torch.cat([gate_bias, up_bias])))
+        else:
+            # Deliver projections in reverse order to exercise accumulation.
+            checkpoint = [("up_proj.weight", up), ("gate_proj.weight", gate)]
+            if use_bias:
+                checkpoint.extend([("up_proj.bias", up_bias),
+                                   ("gate_proj.bias", gate_bias)])
+
+        x = jnp.arange(12, dtype=jnp.float32).reshape(3, 4) / 8
+        with jax.set_mesh(mesh), jax.default_matmul_precision("highest"):
+            model = Model()
+            loaded = JaxAutoWeightsLoader(model).load_weights(checkpoint)
+            actual = jax.jit(model.gate_up_proj)(x)
+            expected = jnp.concatenate([
+                x @ jnp.asarray(gate.numpy()).T, x @ jnp.asarray(up.numpy()).T
+            ],
+                                       axis=-1)
+            if use_bias:
+                expected += jnp.asarray(
+                    torch.cat([gate_bias, up_bias]).numpy())
+
+        assert "gate_up_proj.weight" in loaded
+        if use_bias:
+            assert "gate_up_proj.bias" in loaded
+        assert actual.shape == expected.shape == (3, 14)
+        np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-5)
