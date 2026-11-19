@@ -394,6 +394,9 @@ def _connector(hash_block_size=_BLOCK_SIZE):
                                         single_type_managers=[manager]),
             block_pool=SimpleNamespace(hash_block_size=hash_block_size),
             kv_cache_config=SimpleNamespace(num_blocks=16))
+        if "num_objects" in params:
+            num_objects = 16 * (_BLOCK_SIZE // hash_block_size)
+            return AuxOutputSchedulerConnector(kv_cache_manager, num_objects)
         return AuxOutputSchedulerConnector(kv_cache_manager)
     if params:
         return AuxOutputSchedulerConnector(hash_block_size)
