@@ -47,7 +47,8 @@ steps:
     depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
     steps:
       # DO NOT MERGE: A/B repro for the Qwen1.5-MoE EP accuracy collapse.
-      - label: ":kubernetes: tpu6e [repro] Qwen1.5-MoE EP - vLLM Transformers backend (default)"
+      # The default step now includes the VllmRowParallelLinear reduce_results fix.
+      - label: ":kubernetes: tpu6e [repro] Qwen1.5-MoE EP - Transformers backend + reduce_results fix"
         key: "${TPU_VERSION:-tpu6e}_repro_qwen2moe_tf"
         if: "'${TPU_VERSION:-tpu6e}' == 'tpu6e'"
         env:
