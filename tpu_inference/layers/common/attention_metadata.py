@@ -71,15 +71,18 @@ class MambaMetadata:
     """Mamba / GDN linear-attention metadata, passed via AttentionMetadata.mamba."""
     # (max_num_seqs,) int32 — physical slot id (∈ [0, _mamba_num_blocks))
     # in the mamba kv-cache for the request currently in each persistent-
-    # batch position. Used by mamba/GDN ops to read/write recurrent state
-    # without going through `block_tables`, since the mamba pool is
-    # smaller than the attention pool under compact-mamba sizing.
-    # None for models without mamba layers; pure-mamba models would also
-    # use this field, only hybrid models exercise it today.
+    # batch position (or the base of its verify-window scratch slot group
+    # when mamba prefix caching is combined with speculative decoding).
+    # Used by mamba/GDN ops to read/write recurrent state without going
+    # through `block_tables`, since the mamba pool is smaller than the
+    # attention pool under compact-mamba sizing.
+    # None for models without mamba layers, or in align mode without
+    # speculative decoding.
     state_indices: jax.Array | None = None
-    # (max_num_seqs,) int32 — per-request offset ∈ [0, num_spec_tokens] into the
+    # (max_num_seqs,) int32 — per-request offset ∈ [-1, num_spec_tokens] into the
     # strided mamba/GDN state slot group indicating which accepted checkpoint
-    # from the previous speculative verification step to read from.
+    # from the previous speculative verification step to read from (-1 resumes
+    # from the mamba block table in align mode after prefill or a prefix hit).
     # None when speculative decoding or mamba/GDN state is disabled.
     read_offsets: jax.Array | None = None
 
