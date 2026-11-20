@@ -567,9 +567,10 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                     # Placeholder shape [E, N, 1]: N is the output-channel count.
                     # Actual per-expert scale loaded by load_weights as [1, N, 1]
                     # and concatenated to [E, N, 1] in process_weights_after_loading.
-                    scale_value = jnp.zeros((E, N, 1),
-                                            dtype=jnp.float32,
-                                            device=jax.devices('cpu')[0])
+                    scale_value = jnp.zeros(
+                        (E, N, 1),
+                        dtype=jnp.float32,
+                        device=jax.local_devices(backend='cpu')[0])
                     setattr(
                         layer, f"{param_name}_{self.weight_scale_name}",
                         nnx.Param(scale_value,
@@ -595,9 +596,10 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                                     jnp.float8_e4m3fn)
                     param.set_raw_value(value)
 
-                    scale_value = jnp.zeros((E, (K + block_k - 1) // block_k,
-                                             (N + block_n - 1) // block_n),
-                                            device=jax.devices('cpu')[0])
+                    scale_value = jnp.zeros(
+                        (E, (K + block_k - 1) // block_k,
+                         (N + block_n - 1) // block_n),
+                        device=jax.local_devices(backend='cpu')[0])
                     setattr(
                         layer, f"{param_name}_{self.weight_scale_name}",
                         nnx.Param(scale_value,

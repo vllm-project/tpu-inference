@@ -54,7 +54,7 @@ def shard_model_to_tpu(model: torch.nn.Module,
         torch.func.functional_call
     """
 
-    with jax.default_device(jax.devices("cpu")[0]):
+    with jax.default_device(jax.local_devices(backend="cpu")[0]):
         _shard_module_to_tpu(model, mesh)
 
         params, buffers = _extract_all_params_buffers(model)
@@ -89,7 +89,7 @@ def _tensor_is_in_cpu(tensor: torch.tensor) -> bool:
     if not isinstance(tensor, torchax.tensor.Tensor):
         return True
     # Check if torchax tensor is still in CPU.
-    return tensor.jax_device == jax.devices('cpu')[0]
+    return tensor.jax_device == jax.local_devices(backend='cpu')[0]
 
 
 def _convert_to_torchax_and_shard(tensor: torch.Tensor,

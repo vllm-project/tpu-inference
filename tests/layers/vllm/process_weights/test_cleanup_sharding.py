@@ -35,13 +35,13 @@ def test_shard_model_to_tpu_simplification():
     # Mock jax device calls to prevent TPU multi-host initialization hangs
     with (
             patch(
-                "tpu_inference.layers.vllm.process_weights.cleanup_sharding.jax.devices"
-            ) as mock_jax_devices,
+                "tpu_inference.layers.vllm.process_weights.cleanup_sharding.jax.local_devices"
+            ) as mock_local_devices,
             patch(
                 "tpu_inference.layers.vllm.process_weights.cleanup_sharding.jax.default_device"
             ),
     ):
-        mock_jax_devices.return_value = ["mock_cpu_device"]
+        mock_local_devices.return_value = ["mock_cpu_device"]
 
         # Mock the internal functions that do the actual sharding/device checks
         with patch(
