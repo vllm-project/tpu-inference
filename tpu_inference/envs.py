@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     NUM_SLICES: int = 1
     RAY_USAGE_STATS_ENABLED: bool = False
     ENABLE_QUANTIZED_MATMUL_KERNEL: bool = False
+    FUSED_MATMUL_REDUCE_SCATTER: bool = False
     REQUANTIZE_BLOCK_SIZE: int | None = None
     REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
     BF16_LINEAR_REQUANTIZE_PATTERNS: list[str] = []
@@ -322,6 +323,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("RAY_USAGE_STATS_ENABLED"),
     "ENABLE_QUANTIZED_MATMUL_KERNEL":
     env_bool("ENABLE_QUANTIZED_MATMUL_KERNEL"),
+    # Under sequence parallelism, run int8 row-parallel linears as one Pallas
+    # kernel that overlaps the matmul with the token reduce-scatter
+    # (kernels/collectives/quantized_matmul_reduce_scatter.py).
+    "FUSED_MATMUL_REDUCE_SCATTER":
+    env_bool("FUSED_MATMUL_REDUCE_SCATTER"),
     # Specify block quantization size
     "REQUANTIZE_BLOCK_SIZE":
     lambda: int(block_size) if
