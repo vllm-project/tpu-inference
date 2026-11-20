@@ -11,6 +11,7 @@ from jax._src import test_util as jtu
 from tpu_inference import utils
 from tpu_inference.kernels.collectives import \
     quantized_matmul_reduce_scatter as qmrs
+from tpu_inference.kernels.quantized_matmul.util import quantize_tensor
 
 jax.config.parse_flags_with_absl()
 
@@ -37,7 +38,6 @@ def _reference(x, w, s, axis, int8_act):
 
 
 def qmrs_quantize(x):
-    from tpu_inference.kernels.quantized_matmul.util import quantize_tensor
     return quantize_tensor(x, jnp.int8)
 
 

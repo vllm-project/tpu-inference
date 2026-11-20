@@ -47,37 +47,25 @@ import numpy as np
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from tpu_inference.kernels.collectives import util
+
 # Barrier-semaphore id for this kernel. Every instance syncs with the same two
 # ring neighbours on the same axis, so all instances can share it. Distinct
 # from the 0 used by all_gather_matmul.
 COLLECTIVE_ID = 3
 
-# Scoped VMEM limit requested from Mosaic, and the share of it tile selection
-# may plan for (the rest is headroom for compiler temporaries).
-VMEM_LIMIT_BYTES = 110 * 1024 * 1024
-VMEM_PLAN_BYTES = 96 * 1024 * 1024
 
+def _vmem_limits() -> tuple[int, int]:
+    """(scoped VMEM limit to request, share of it tile selection may plan for).
 
-def _neighbour_barrier(left, right, axis):
-    barrier_sem = pltpu.get_barrier_semaphore()
-    for nb in (left, right):
-        pl.semaphore_signal(barrier_sem,
-                            inc=1,
-                            device_id={axis: nb},
-                            device_id_type=pl.DeviceIdType.MESH)
-    pl.semaphore_wait(barrier_sem, 2)
-
-    # Second round: a neighbour that already re-entered the next call must not
-    # be able to release us early.
-    @functools.partial(pl.run_scoped,
-                       second_barrier=pltpu.SemaphoreType.REGULAR)
-    def _(second_barrier):
-        for nb in (left, right):
-            pl.semaphore_signal(second_barrier,
-                                inc=1,
-                                device_id={axis: nb},
-                                device_id_type=pl.DeviceIdType.MESH)
-        pl.semaphore_wait(second_barrier, 2)
+    Sized from the chip: 7/8 of VMEM capacity as the limit and 3/4 for the
+    plan, leaving headroom for compiler temporaries (112 / 96 MiB on v6e).
+    """
+    try:
+        cap = int(pltpu.get_tpu_info().vmem_capacity_bytes)
+    except Exception:  # noqa: BLE001  (no TPU backend, e.g. CPU unit tests)
+        cap = 128 * 1024 * 1024
+    return cap * 7 // 8, cap * 3 // 4
 
 
 def _kernel(tbl_ref, *refs, D, grid_n, bk, int8_act, bidir, axis):
@@ -107,7 +95,7 @@ def _kernel(tbl_ref, *refs, D, grid_n, bk, int8_act, bidir, axis):
 
     @pl.when(jnp.logical_and(j == 0, n == 0))
     def _barrier():
-        _neighbour_barrier(left, right, axis)
+        util.local_barrier(left, right, axis_name=axis)
 
     def body(x_ref, sx_ref, dev):
         acc = None
@@ -159,7 +147,19 @@ def _kernel(tbl_ref, *refs, D, grid_n, bk, int8_act, bidir, axis):
     def _drain():
         for st in range(D - 1):
             for t in range(grid_n):
-                rcopy(st, t, right).wait_send()
+                # Same destination as the .start() for this tile.
+                dev = left if (bidir and t % 2 == 1) else right
+                rcopy(st, t, dev).wait_send()
+
+
+def axis_devices(mesh, axis: str) -> list:
+    """The devices along `axis` in the group that holds mesh position 0 on
+    every other axis, in axis order. All groups run the same program, so this
+    group's physical layout picks the ring order for all of them."""
+    i = mesh.axis_names.index(axis)
+    index = tuple(
+        slice(None) if j == i else 0 for j in range(mesh.devices.ndim))
+    return list(mesh.devices[index])
 
 
 def ring_order(devices: Sequence) -> list[int]:
@@ -238,7 +238,7 @@ def choose_blocks(T: int, K: int, N: int, D: int, int8_act: bool):
     bidir = bn is not None
     if not bidir:
         bn = _largest_div(N, 896)
-    if _vmem_bytes(tm, K, N, bn, bk, D, int8_act, bidir) > VMEM_PLAN_BYTES:
+    if _vmem_bytes(tm, K, N, bn, bk, D, int8_act, bidir) > _vmem_limits()[1]:
         return None
     return bn, bk, bidir
 
@@ -345,7 +345,7 @@ def quantized_matmul_reduce_scatter(x: jax.Array,
         compiler_params=pltpu.CompilerParams(
             collective_id=COLLECTIVE_ID,
             dimension_semantics=("arbitrary", "arbitrary"),
-            vmem_limit_bytes=VMEM_LIMIT_BYTES,
+            vmem_limit_bytes=_vmem_limits()[0],
         ),
         cost_estimate=pl.CostEstimate(flops=2 * T * K * N,
                                       bytes_accessed=K * N + 2 * T * K +

@@ -7,7 +7,10 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
 
-def local_barrier(left_neighbor, right_neighbor, double_barrier=True):
+def local_barrier(left_neighbor,
+                  right_neighbor,
+                  double_barrier=True,
+                  axis_name=None):
     """Performs a barrier with neighbors on the global barrier semaphore.
 
   Optionally performs a second barrier, which prevents a potential race
@@ -17,13 +20,21 @@ def local_barrier(left_neighbor, right_neighbor, double_barrier=True):
     left_neighbor: Left neighbor device id.
     right_neighbor: Right neighbor device id.
     double_barrier: Whether to perform a second barrier.
+    axis_name: If set, the neighbor ids are indices along this mesh axis and
+      the other mesh axes keep the current device's coordinates (for kernels
+      inside a shard_map over a multi-axis mesh). Otherwise they are ids on a
+      1D mesh.
   """
+
+    def device_id(neighbor):
+        return {axis_name: neighbor} if axis_name is not None else (neighbor, )
+
     barrier_sem = pltpu.get_barrier_semaphore()
     for neighbor in [left_neighbor, right_neighbor]:
         pl.semaphore_signal(
             barrier_sem,
             inc=1,
-            device_id=(neighbor, ),
+            device_id=device_id(neighbor),
             device_id_type=pl.DeviceIdType.MESH,
         )
     pl.semaphore_wait(barrier_sem, 2)
@@ -41,7 +52,7 @@ def local_barrier(left_neighbor, right_neighbor, double_barrier=True):
                 pl.semaphore_signal(
                     second_barrier,
                     inc=1,
-                    device_id=(neighbor, ),
+                    device_id=device_id(neighbor),
                     device_id_type=pl.DeviceIdType.MESH,
                 )
             pl.semaphore_wait(second_barrier, 2)

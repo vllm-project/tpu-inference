@@ -307,8 +307,10 @@ def _fused_reduce_scatter_axis(mesh: Mesh | None, in_axis, w_q: jax.Array,
     """The mesh axis to run quantized_matmul_reduce_scatter over, or None.
 
     The fused kernel handles an int8 weight with a per-channel scale whose K
-    dim is sharded over exactly one non-trivial mesh axis spanning every
-    device (the kernel addresses ring neighbours by that axis alone).
+    dim is sharded over exactly one non-trivial mesh axis. The ring runs over
+    that axis inside each group of devices that share their other mesh
+    coordinates (e.g. each attention-DP replica), like the psum_scatter it
+    replaces.
     """
     if not envs.FUSED_MATMUL_REDUCE_SCATTER or mesh is None:
         return None
@@ -318,7 +320,7 @@ def _fused_reduce_scatter_axis(mesh: Mesh | None, in_axis, w_q: jax.Array,
     if any(a not in mesh.shape for a in axes):
         return None
     big = [a for a in axes if mesh.shape[a] > 1]
-    if len(big) != 1 or mesh.shape[big[0]] != mesh.devices.size:
+    if len(big) != 1:
         return None
     return big[0]
 
@@ -400,7 +402,8 @@ def sharded_quantized_matmul(x: jax.Array,
             and not defer_all_reduce):
         fused_rs_axis = _fused_reduce_scatter_axis(mesh, in_axis, w_q, w_s)
     fused_rs_order = (quantized_matmul_reduce_scatter.ring_order(
-        list(mesh.devices.flat)) if fused_rs_axis else None)
+        quantized_matmul_reduce_scatter.axis_devices(mesh, fused_rs_axis))
+                      if fused_rs_axis else None)
 
     def fused_reduce_scatter(x, w_q, w_s):
         """matmul + psum_scatter as one kernel, or None if x's shape is
