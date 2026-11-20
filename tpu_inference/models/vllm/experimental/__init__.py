@@ -19,6 +19,10 @@
 _TPU_VLLM_MODELS = {
     "DeepseekV4ForCausalLM":
     "tpu_inference.models.vllm.experimental.deepseek_v4:DeepseekV4ForCausalLM",
+    # vllm-project/vllm#66547 maps LlamaForCausalLM to the Transformers
+    # modeling backend, which halves TP=8 throughput on TPU (see #4004). Keep
+    # vLLM's native implementation, which vLLM still ships for nested models.
+    "LlamaForCausalLM": "vllm.model_executor.models.llama:LlamaForCausalLM",
 }
 
 
