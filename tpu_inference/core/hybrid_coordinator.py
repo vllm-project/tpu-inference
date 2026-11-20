@@ -3,6 +3,7 @@
 from collections.abc import Iterable, Sequence
 from typing import Any
 
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (HybridKVCacheCoordinator,
                                                KVCacheCoordinator)
@@ -12,7 +13,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import (
-    CrossAttentionManager, get_manager_for_kv_cache_spec)
+    CrossAttentionManager, MambaManager, create_single_type_manager)
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.request import Request, RequestStatus
 
@@ -115,6 +116,12 @@ def is_mamba_spec(spec: Any) -> bool:
 
 def is_mamba_group(group: Any) -> bool:
     """Check if a KV cache group contains Mamba layers."""
+    manager_cls = getattr(group, "manager_cls", None)
+    if isinstance(manager_cls, type) and issubclass(manager_cls, MambaManager):
+        return True
+    if hasattr(group, "kv_cache_specs"):
+        return any(
+            isinstance(s, MambaSpec) for s in group.kv_cache_specs.values())
     spec = getattr(group, "kv_cache_spec", group)
     return is_mamba_spec(spec)
 
@@ -217,6 +224,8 @@ class TPUDualBlockPool(BlockPool):
         self.cached_block_hash_to_block = attention_pool.cached_block_hash_to_block
         self.cached_block_hashes_by_block = attention_pool.cached_block_hashes_by_block
         self.kv_event_queue = attention_pool.kv_event_queue
+        # Read by vLLM's KV cache coordinator (replay_boundaries).
+        self.num_hash_lookahead_tokens = attention_pool.num_hash_lookahead_tokens
 
     def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
         attn_blocks: list[KVCacheBlock] = []
@@ -407,8 +416,8 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             pool = self.mamba_block_pool
             if self.mirror_mamba_groups and i != self.primary_mamba_group_id:
                 pool = self._mirror_pool
-            new_managers[i] = get_manager_for_kv_cache_spec(
-                kv_cache_spec=kv_cache_config.kv_cache_groups[i].kv_cache_spec,
+            new_managers[i] = create_single_type_manager(
+                kv_cache_config.kv_cache_groups[i],
                 max_in_flight_tokens=max_in_flight_tokens,
                 max_model_len=max_model_len,
                 block_pool=pool,
@@ -419,6 +428,8 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 scheduler_block_size=self.scheduler_block_size,
                 needs_kv_cache_zeroing=self.kv_cache_config.
                 needs_kv_cache_zeroing,
+                retention_interval=kv_cache_config.
+                prefix_cache_retention_interval,
             )
         self.single_type_managers = tuple(new_managers)
 
@@ -477,16 +488,22 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     apply_admission_cap=apply_admission_cap,
                 )
             else:
-                needed = manager.get_num_blocks_to_allocate(
-                    request.request_id,
-                    num_tokens,
-                    new_computed_blocks[i],
-                    total_computed_tokens,
-                    num_local_computed_tokens,
-                    num_tokens_main_model,
-                    apply_admission_cap=apply_admission_cap,
-                    prefill_end=prefill_end,
-                )
+                reservation = (manager.get_num_blocks_to_reserve(
+                    request.request_id, num_tokens)
+                               if apply_admission_cap else None)
+                if reservation is not None:
+                    needed = reservation
+                else:
+                    needed = manager.get_num_blocks_to_allocate(
+                        request.request_id,
+                        num_tokens,
+                        new_computed_blocks[i],
+                        total_computed_tokens,
+                        num_local_computed_tokens,
+                        num_tokens_main_model,
+                        apply_admission_cap=apply_admission_cap,
+                        prefill_end=prefill_end,
+                    )
 
             if is_mamba:
                 # Mirrored groups reuse the primary's ids
@@ -538,6 +555,12 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     apply_admission_cap=apply_admission_cap,
                 )
             else:
+                if apply_admission_cap:
+                    reservation = manager.get_num_blocks_to_reserve(
+                        request_id, num_tokens)
+                    if reservation is not None:
+                        num_blocks_to_allocate += reservation
+                        continue
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
                     request_id,
                     num_tokens,
@@ -585,13 +608,22 @@ class TPUKVCacheManager(KVCacheManager):
                 skip_zeroing_group_ids=skip_zeroing_group_ids,
             )
 
-        if num_new_tokens == 0 and num_external_computed_tokens == 0:
+        if (num_new_tokens == 0 and num_external_computed_tokens == 0
+                and num_new_computed_tokens == 0):
             raise ValueError(
                 "num_new_tokens must be greater than 0 when there are no "
-                "external computed tokens")
+                "computed tokens to adopt")
 
         if new_computed_blocks is not None:
             new_computed_block_list = new_computed_blocks.blocks
+            if self.retained_hit_group_ids:
+                reused = num_new_computed_tokens + num_external_computed_tokens
+                groups = list(new_computed_block_list)
+                for group_id in self.retained_hit_group_ids:
+                    manager = self.coordinator.single_type_managers[group_id]
+                    groups[group_id] = groups[
+                        group_id][:cdiv(reused, manager.block_size)]
+                new_computed_block_list = tuple(groups)
         else:
             new_computed_block_list = self.empty_kv_cache_blocks.blocks
 
@@ -665,6 +697,7 @@ class TPUKVCacheManager(KVCacheManager):
                 new_computed_blocks=new_computed_block_list,
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,
+                num_tokens_main_model=num_tokens_main_model,
                 skip_zeroing_group_ids=skip_zeroing_group_ids,
             )
 

@@ -17,11 +17,14 @@ device-bound methods, inheriting everything algorithmic:
   Inherited unchanged
     * ``__init__`` budget derivation + validation (reads the upstream
       ``compilation_config.encoder_cudagraph_*`` knobs).
-    * ``_generate_budgets`` / ``_find_smallest_fitting_budget_given_tokens``.
+    * ``_find_smallest_fitting_budget_given_tokens``.
     * ``_execute_local`` — the greedy smallest-first bin-packing loop.
     * ``supports_modality`` / ``get_cumulative_stats`` / ``capture``.
 
   Overridden for XLA
+    * ``_generate_budgets`` — keeps power-of-two budgets. Each budget is a
+      separate XLA compile at warmup, so upstream's finer CUDA-graph grid
+      (vllm-project/vllm#65227) would multiply compile time on TPU.
     * ``_capture_budget_graph`` — prime the ``jax.jit`` cache for a budget
       (the XLA analog of CUDA-graph capture) instead of recording a graph.
     * ``_run_budget_graph`` — host-pad the replay buffers to the budget's
@@ -159,7 +162,15 @@ class _TorchaxEncoderModelAdapter:
         # ops (e.g. ``vllm_ir.rms_norm`` in the ViT block norms) reach torchax
         # as opaque OpOverloads it has no lowering for, and dispatch dies with
         # "torchax Tensors can only do math within the torchax environment".
-        with torchax.default_env(), enable_torch_wrap(False):
+        # ``inference_mode(False)`` + ``no_grad``: vLLM's _execute_local calls
+        # this under ``torch.inference_mode()`` (vllm-project/vllm#65227).
+        # Inference mode skips the autograd dispatch keys where composite ops
+        # (chunk, split, view, layer_norm, ...) decompose, so on the weights
+        # (torchax tensors created outside inference mode) they reach torchax
+        # undecomposed and fail with "aten::chunk has no lowering". torchax
+        # does not use torch autograd, so plain no_grad keeps the same intent.
+        with torch.inference_mode(False), torch.no_grad(), \
+                torchax.default_env(), enable_torch_wrap(False):
             torchax_kwargs = {
                 k: jax.tree.map(self._torchax_view_if_torch, v)
                 for k, v in mm_kwargs.items()
@@ -346,6 +357,32 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
             self._capture_axes, self.max_batch_size, self.max_frames_per_batch,
             len(self.budget_templates))
 
+    @staticmethod
+    def _generate_budgets(
+        min_budget: int,
+        max_budget: int,
+        cap: int | None = None,
+    ) -> list[int]:
+        """Power-of-two token budgets from min_budget up to max_budget.
+
+        Upstream (vllm-project/vllm#65227) switched to a finer grid, which is
+        cheap for CUDA graphs (shared capture buffers) but costs one XLA compile
+        per budget here, so keep the power-of-two grid. `cap` (from
+        `encoder_cudagraph_max_token_budget`) limits the largest budget, as
+        upstream does.
+        """
+        if cap is not None:
+            max_budget = min(max_budget, max(cap, min_budget))
+        budgets: list[int] = []
+        b = min_budget
+        while b <= max_budget:
+            budgets.append(b)
+            b *= 2
+        # Always include max_budget if it is not a power-of-two step.
+        if not budgets or budgets[-1] < max_budget:
+            budgets.append(max_budget)
+        return budgets
+
     def _call_prepare_capture_inputs(self, budget: int, max_batch_size: int,
                                      max_frames_per_batch: int,
                                      device: torch.device, dtype: torch.dtype,
@@ -397,20 +434,20 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         """Copy each replay tensor into a template-shaped buffer.
 
         Mirrors the GPU manager's per-key copy in ``_run_budget_graph``: the
-        buffer starts zeroed and the model-supplied
-        ``EncoderCudaGraphConfig.padding_logics`` entry for the key decides how
-        the replay values land in it, falling back to the upstream
-        ``_copy_padded_buffer`` (zero tail) when the key has no entry. Here we
-        pad *every* template key because the jit call needs a fresh, fully
-        materialised input dict each step (no persistent buffers).
+        buffer starts zeroed and ``EncoderCudaGraphManager._get_padding_logic``
+        resolves the per-key copy helper from ``EncoderCudaGraphConfig.padding_logics``,
+        defaulting to repeat-last padding for cumulative sequence-length keys
+        (``cu_seqlens``, ``cu_window_seqlens``) and ``_copy_padded_buffer``
+        (zero tail) otherwise. Here we pad *every* template key because the jit
+        call needs a fresh, fully materialised input dict each step (no
+        persistent buffers).
 
-        Honouring ``padding_logics`` is required for correctness, not just
-        parity: Qwen2.5-VL registers ``_pad_cumulative_seqlens_buffer`` for
-        ``cu_seqlens`` / ``cu_window_seqlens`` and leaves ``cu_window_seqlens``
-        UNPADDED at replay time. A zero tail there makes
-        ``lens = cu[1:] - cu[:-1]`` go negative and the ViT attention build
-        garbage segment ids; the registered logic repeats the last cumulative
-        offset instead, which represents empty trailing sequences.
+        Honouring ``_get_padding_logic`` is required for correctness, not just
+        parity: models like Qwen2.5-VL leave ``cu_window_seqlens`` UNPADDED at
+        replay time. A zero tail there makes ``lens = cu[1:] - cu[:-1]`` go
+        negative and the ViT attention build garbage segment ids; repeat-last
+        padding repeats the final cumulative offset instead, representing empty
+        trailing sequences.
         """
         template = self._get_template_for_budget(budget, axis_keys)
         if template is None:
@@ -452,10 +489,11 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
                     f"max_batch_size={self.max_batch_size}; the batch was "
                     f"packed into a token budget whose capture inputs do not "
                     f"fit this key.")
-            # General case: zeroed buffer + the model's per-key padding logic.
+            # General case: zeroed buffer + the model's per-key padding logic
+            # (with upstream's repeat-last default for cumulative offset keys).
             buf = torch.zeros_like(tmpl)
-            padding_logic = self.config.padding_logics.get(
-                key, EncoderCudaGraphManager._copy_padded_buffer)
+            padding_logic = EncoderCudaGraphManager._get_padding_logic(
+                self.config, key)
             padding_logic(buf, src.to(dtype=tmpl.dtype, device=tmpl.device))
             padded[key] = buf
         return padded

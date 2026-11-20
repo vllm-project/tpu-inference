@@ -66,6 +66,7 @@ def create_request(
     req.req_id = request_id  # for NewRequestData
     req.prompt_token_ids = prompt_token_ids
     req.all_token_ids = prompt_token_ids + generated_token_ids
+    req.prefill_token_ids = req.all_token_ids
     req.num_computed_tokens = num_computed_tokens + len(generated_token_ids)
     req.block_size = block_size
     req.block_ids = [[]]

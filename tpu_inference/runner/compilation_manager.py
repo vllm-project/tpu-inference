@@ -199,9 +199,14 @@ class CompilationManager:
                 # AOT lower not supported here (e.g. a jit whose body contains a
                 # nested jit with compiler_options). Fall back to warmup-only — the
                 # warmup pass will trigger inline compile.
+                # exc_info keeps the traceback: without it a lowering failure
+                # that also breaks warmup only shows up as a bare message
+                # (e.g. through RayDistributedExecutor workers).
                 logger.info(
                     "AOT lower skipped for %s (%r); will compile in warmup.",
-                    name, e)
+                    name,
+                    e,
+                    exc_info=True)
                 return
 
         # Compilation is thread-safe
@@ -1313,7 +1318,8 @@ class CompilationManager:
                 dp_sharding = NamedSharding(self.runner.mesh, PartitionSpec())
 
                 target_logits = self._create_dummy_tensor(
-                    (num_logits, vocab_size), jnp.float32, logits_sharding)
+                    (num_logits, vocab_size), self.runner.model_config.dtype,
+                    logits_sharding)
 
                 processed_bonus_logits = self._create_dummy_tensor(
                     (num_reqs, vocab_size), jnp.float32, logits_sharding)
@@ -1385,9 +1391,11 @@ class CompilationManager:
                 logits_sharding = NamedSharding(self.runner.mesh, logits_spec)
 
                 target_logits = self._create_dummy_tensor(
-                    (num_logits, vocab_size), jnp.bfloat16, logits_sharding)
+                    (num_logits, vocab_size), self.runner.model_config.dtype,
+                    logits_sharding)
                 bonus_logits = self._create_dummy_tensor(
-                    (num_reqs, vocab_size), jnp.bfloat16, logits_sharding)
+                    (num_reqs, vocab_size), self.runner.model_config.dtype,
+                    logits_sharding)
 
                 self._run_compilation(
                     f"worker{self.runner.rank} _extend_logits_simple",

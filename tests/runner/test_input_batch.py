@@ -65,6 +65,7 @@ def create_dummy_request(req_id: str,
     return CachedRequestState(
         req_id=req_id,
         prompt_token_ids=prompt_token_ids,
+        prefill_token_ids=prompt_token_ids + output_token_ids,
         mm_features=[],
         sampling_params=sampling_params,
         pooling_params=pooling_params,

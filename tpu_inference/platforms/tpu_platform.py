@@ -550,6 +550,10 @@ class TpuPlatform(Platform):
             if is_pooling_model:
                 raise ValueError(
                     "continue_decode is not supported for pooling models")
+            if vllm_config.speculative_config is not None:
+                raise ValueError(
+                    "continue_decode is not supported with speculative decoding"
+                )
 
             from tpu_inference.core.sched.utils import \
                 patch_vllm_scheduler_for_continue_decode
@@ -635,14 +639,6 @@ class TpuPlatform(Platform):
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         return True
-
-    @classmethod
-    def register_custom_kv_cache_specs(cls, vllm_config: VllmConfig) -> None:
-        # Unconditional: the manager is only used for specs the runner emits
-        # under SKIP_MAMBA_SCHEDULER_BLOCKS.
-        from tpu_inference.core.runner_slot_mamba import \
-            register_runner_slot_mamba_spec
-        register_runner_slot_mamba_spec()
 
     @classmethod
     def current_device(cls) -> torch.device:

@@ -294,3 +294,57 @@ class TestDecodeOnlyBackboneShapes:
                                      attn_req_paddings_per_dp=[16, 64],
                                      max_decode_tokens=4)
         assert shapes == {(16, 16), (32, 16), (32, 64)}
+
+
+class TestPrecompileSpecDecodeExtendLogitsDtypes:
+    """`target_logits` (and `bonus_logits` for `extend_logits_simple`) arrive
+    straight from `_select_from_array_fn` in `model_config.dtype` (each helper
+    fuses `.astype(jnp.float32)` inside its `@jax.jit`), whereas
+    `processed_bonus_logits` comes from `sample()` in `jnp.float32`.
+    """
+
+    def _make_manager(self, model_dtype):
+        devices = np.array(jax.devices()[:1]).reshape(
+            (1, ) * len(MESH_AXIS_NAMES))
+        mesh = Mesh(devices, MESH_AXIS_NAMES)
+        manager = CompilationManager.__new__(CompilationManager)
+        manager.runner = SimpleNamespace(
+            mesh=mesh,
+            rank=0,
+            vocab_size=256,
+            num_logits_paddings=[8],
+            num_reqs_paddings=[4],
+            model_config=SimpleNamespace(dtype=model_dtype),
+            vllm_config=SimpleNamespace(parallel_config=None),
+        )
+        return manager
+
+    @pytest.mark.parametrize("model_dtype", [jnp.bfloat16, jnp.float32])
+    def test_process_and_extend_logits_uses_model_dtype_for_target_logits(
+            self, model_dtype):
+        manager = self._make_manager(model_dtype)
+        recorded = []
+
+        def record(_name, _fn, _mesh, target_logits, processed_bonus_logits,
+                   *_args, **_kwargs):
+            recorded.append(
+                (target_logits.dtype, processed_bonus_logits.dtype))
+
+        manager._run_compilation = record
+        manager._precompile_process_and_extend_logits()
+
+        assert recorded == [(jnp.dtype(model_dtype), jnp.dtype(jnp.float32))]
+
+    @pytest.mark.parametrize("model_dtype", [jnp.bfloat16, jnp.float32])
+    def test_extend_logits_simple_uses_model_dtype_for_both_inputs(
+            self, model_dtype):
+        manager = self._make_manager(model_dtype)
+        recorded = []
+
+        def record(_name, _fn, target_logits, bonus_logits, *_args, **_kwargs):
+            recorded.append((target_logits.dtype, bonus_logits.dtype))
+
+        manager._run_compilation = record
+        manager._precompile_extend_logits_simple()
+
+        assert recorded == [(jnp.dtype(model_dtype), jnp.dtype(model_dtype))]

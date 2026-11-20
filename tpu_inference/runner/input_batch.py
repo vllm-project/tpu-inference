@@ -11,7 +11,6 @@ import torch
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.utils.collection_utils import swap_dict_values
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 
@@ -19,6 +18,25 @@ from tpu_inference import envs
 from tpu_inference.runner.block_table import MultiGroupBlockTable
 
 _SAMPLING_EPS = 1e-5
+
+
+def swap_dict_values(obj: dict, key1: Any, key2: Any) -> None:
+    """Swap the values of two keys, keeping a missing key missing.
+
+    Copied from vllm.utils.collection_utils, which upstream removed in
+    vllm-project/vllm#63373.
+    """
+    v1 = obj.get(key1)
+    v2 = obj.get(key2)
+    if v1 is not None:
+        obj[key2] = v1
+    else:
+        obj.pop(key2, None)
+    if v2 is not None:
+        obj[key1] = v2
+    else:
+        obj.pop(key1, None)
+
 
 # TODO(xiang): fix cpu tensor init
 
