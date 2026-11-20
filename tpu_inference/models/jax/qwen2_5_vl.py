@@ -75,7 +75,7 @@ class SegmentIds(NamedTuple):
 
 class Qwen2_5_VLImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    pixel_values: jax.Array
+    pixel_values: np.ndarray | jax.Array
     """Shape:
     `(num_patches, num_channels * patch_size * patch_size)`
     """
@@ -810,7 +810,7 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         self,
         input_tokens: list[int],
         mm_features: list[MultiModalFeatureSpec],
-    ) -> tuple[jax.Array, int]:
+    ) -> tuple[np.ndarray, int]:
         """Get mrope input positions and delta value."""
 
         image_grid_thw = []
@@ -897,25 +897,25 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             st_idx = llm_pos_ids_list[-1].max().item() + 1 if len(
                 llm_pos_ids_list) > 0 else 0
             llm_pos_ids_list.append(
-                jnp.broadcast_to(
-                    jnp.arange(text_len, dtype=jnp.int32).reshape(1, -1),
+                np.broadcast_to(
+                    np.arange(text_len, dtype=np.int32).reshape(1, -1),
                     (3, text_len)) + st_idx)
 
-            t_index = ((jnp.broadcast_to(
-                jnp.arange(llm_grid_t, dtype=jnp.int32).reshape(-1, 1),
+            t_index = ((np.broadcast_to(
+                np.arange(llm_grid_t, dtype=np.int32).reshape(-1, 1),
                 (llm_grid_t, llm_grid_h * llm_grid_w)) *
                         video_second_per_grid_t * tokens_per_second).astype(
-                            jnp.int32).flatten())
+                            np.int32).flatten())
 
-            h_index = (jnp.broadcast_to(
-                jnp.arange(llm_grid_h, dtype=jnp.int32).reshape(1, -1, 1),
+            h_index = (np.broadcast_to(
+                np.arange(llm_grid_h, dtype=np.int32).reshape(1, -1, 1),
                 (llm_grid_t, llm_grid_h, llm_grid_w)).flatten())
-            w_index = (jnp.broadcast_to(
-                jnp.arange(llm_grid_w, dtype=jnp.int32).reshape(1, 1, -1),
+            w_index = (np.broadcast_to(
+                np.arange(llm_grid_w, dtype=np.int32).reshape(1, 1, -1),
                 (llm_grid_t, llm_grid_h, llm_grid_w)).flatten())
 
             llm_pos_ids_list.append(
-                jnp.stack([t_index, h_index, w_index]) + text_len + st_idx)
+                np.stack([t_index, h_index, w_index]) + text_len + st_idx)
             st = ed + llm_grid_t * llm_grid_h * llm_grid_w
 
         if st < len(input_tokens):
@@ -924,28 +924,28 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             text_len = len(input_tokens) - st
 
             llm_pos_ids_list.append(
-                jnp.broadcast_to(
-                    jnp.arange(text_len, dtype=jnp.int32).reshape(1, -1),
+                np.broadcast_to(
+                    np.arange(text_len, dtype=np.int32).reshape(1, -1),
                     (3, text_len)) + st_idx)
 
-        llm_positions = jnp.concatenate(llm_pos_ids_list,
-                                        axis=1).reshape(3, -1)
+        llm_positions = np.concatenate(llm_pos_ids_list, axis=1).reshape(3, -1)
         mrope_position_delta = (llm_positions.max() + 1 -
                                 len(input_tokens)).item()
 
         return llm_positions, mrope_position_delta
 
     def _validate_and_reshape_mm_tensor(self, mm_input: object,
-                                        name: str) -> jax.Array:
+                                        name: str) -> np.ndarray | jax.Array:
         if isinstance(mm_input, list):
             # Assuming it's a list of arrays (e.g., np.ndarray, torch.Tensor)
-            # that can be concatenated.
-            arrays_to_concat = [jnp.asarray(item) for item in mm_input]
-            return jnp.concatenate(arrays_to_concat, axis=0)
+            # that can be concatenated on CPU.
+            arrays_to_concat = [np.asarray(item) for item in mm_input]
+            return np.concatenate(arrays_to_concat, axis=0)
 
         # Handle single array-like objects (np.ndarray, torch.Tensor, jax.Array)
         if hasattr(mm_input, 'ndim'):
-            array_input = jnp.asarray(mm_input)
+            array_input = mm_input if isinstance(
+                mm_input, (np.ndarray, jax.Array)) else np.asarray(mm_input)
             if array_input.ndim == 2:
                 return array_input
             if array_input.ndim == 3:
@@ -968,7 +968,7 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             pixel_values = self._validate_and_reshape_mm_tensor(
                 pixel_values, "image pixel values")
 
-            if not isinstance(pixel_values, jax.Array):
+            if not isinstance(pixel_values, (np.ndarray, jax.Array)):
                 raise ValueError("Incorrect type of image pixel values. "
                                  f"Got type: {type(pixel_values)}")
 
@@ -980,7 +980,7 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         # if image_embeds is not None:
         #     image_embeds = self._validate_and_reshape_mm_tensor(
         #         image_embeds, "image embeds")
-
+        #
         #     if not isinstance(image_embeds, jax.Array):
         #         raise ValueError("Incorrect type of image embeddings. "
         #                          f"Got type: {type(image_embeds)}")
@@ -1043,12 +1043,13 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
                 t, h, w = image_thw
                 image_size = t * h * w
                 end_idx = current_idx + image_size
-                image_pixel_values = pixel_values[current_idx:end_idx, :]
+                image_pixel_values = jnp.asarray(
+                    pixel_values[current_idx:end_idx, :])
                 image_embeds.append(
                     self.get_single_image_embedding(image_pixel_values,
                                                     image_thw))
                 current_idx = end_idx
-            image_embeds = jnp.concatenate(image_embeds, axis=0)
+            return tuple(image_embeds)
 
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.config.spatial_merge_size
@@ -1233,16 +1234,14 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
                                       vc.spatial_merge_size // vc.patch_size)
 
             for num_patches in num_patches_paddings:
-                dummy_x_padded = jnp.ones(
-                    (num_patches, patch_input_dim),
-                    dtype=self.vllm_config.model_config.dtype)
+                dummy_x_padded = jnp.ones((num_patches, patch_input_dim),
+                                          dtype=self.visual.dtype)
 
                 num_tokens = num_patches // spatial_merge_unit
                 dummy_window_index = jnp.arange(num_tokens, dtype=jnp.int32)
 
-                dummy_rotary_pos_emb = jnp.ones(
-                    (num_patches, rotary_dim),
-                    dtype=self.vllm_config.model_config.dtype)
+                dummy_rotary_pos_emb = jnp.ones((num_patches, rotary_dim),
+                                                dtype=self.visual.dtype)
 
                 dummy_cu_seqlens = jnp.array([0, num_patches, num_patches],
                                              dtype=jnp.int32)
@@ -1283,7 +1282,7 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
 
                 dummy_pixel_values = jnp.ones(
                     (num_patches, patch_input_dim),
-                    self.vllm_config.model_config.dtype,
+                    dtype=self.visual.dtype,
                 )
                 dummy_grid_thw = (grid_thw, )
 
