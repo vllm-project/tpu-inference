@@ -659,6 +659,77 @@ class TestHybridCoordinatorHooks:
         assert vllm_config.cache_config.mamba_num_blocks == 640
         assert hc_mod.get_mamba_num_blocks() == 640
 
+    def test_propagate_num_gpu_blocks_override_publishes_worker_value(self):
+        from tpu_inference.core.hybrid_coordinator import \
+            propagate_num_gpu_blocks_override
+
+        vllm_config = _make_mock_vllm_config(dp_size=8, max_num_seqs=16)
+        vllm_config.cache_config.num_gpu_blocks_override = None
+        engine_core = MagicMock()
+        engine_core.collective_rpc.return_value = [27376, 27376, 27376, 27376]
+
+        assert propagate_num_gpu_blocks_override(engine_core,
+                                                 vllm_config) == 27376
+        engine_core.collective_rpc.assert_called_once_with(
+            "get_num_gpu_blocks_override")
+        assert vllm_config.cache_config.num_gpu_blocks_override == 27376
+
+        # Disagreeing workers: the smallest pool is the one every worker can
+        # back.
+        vllm_config.cache_config.num_gpu_blocks_override = None
+        engine_core.collective_rpc.return_value = [27376, 27200]
+        assert propagate_num_gpu_blocks_override(engine_core,
+                                                 vllm_config) == 27200
+        assert vllm_config.cache_config.num_gpu_blocks_override == 27200
+
+        # Workers that did not size a compact pool leave the engine alone.
+        vllm_config.cache_config.num_gpu_blocks_override = None
+        engine_core.collective_rpc.return_value = [None, None]
+        assert propagate_num_gpu_blocks_override(engine_core,
+                                                 vllm_config) is None
+        assert vllm_config.cache_config.num_gpu_blocks_override is None
+
+        # A smaller user-pinned value wins.
+        vllm_config.cache_config.num_gpu_blocks_override = 5000
+        engine_core.collective_rpc.return_value = [27376]
+        assert propagate_num_gpu_blocks_override(engine_core,
+                                                 vllm_config) == 5000
+        assert vllm_config.cache_config.num_gpu_blocks_override == 5000
+
+    def test_executor_mixin_publishes_override_with_layer_configs(self):
+        from tpu_inference.core.hybrid_coordinator import \
+            MambaPoolSyncExecutorMixin
+
+        vllm_config = _make_mock_vllm_config(dp_size=1, max_num_seqs=8)
+        vllm_config.cache_config.num_gpu_blocks_override = None
+        calls = []
+
+        class FakeBaseExecutor:
+
+            def __init__(self, vllm_config):
+                self.vllm_config = vllm_config
+
+            def get_kv_cache_layer_configs(self):
+                # Workers run compact-mamba sizing while building these.
+                calls.append("layer_configs")
+                return [{"layer.0": "spec"}]
+
+            def collective_rpc(self, method):
+                assert method == "get_num_gpu_blocks_override"
+                assert calls == [
+                    "layer_configs"
+                ], ("RPC must run after the workers sized their pools")
+                return [3456, 3456]
+
+        class FakeExecutor(MambaPoolSyncExecutorMixin, FakeBaseExecutor):
+            pass
+
+        assert FakeExecutor(vllm_config).get_kv_cache_layer_configs() == [{
+            "layer.0":
+            "spec"
+        }]
+        assert vllm_config.cache_config.num_gpu_blocks_override == 3456
+
     def test_tpu_get_kv_cache_coordinator_resolves_from_kv_cache_config(self):
         import tpu_inference.core.hybrid_coordinator as hc_mod
         from tpu_inference.core.hybrid_coordinator import \

@@ -763,10 +763,62 @@ def propagate_mamba_num_blocks(rpc_owner: Any, kv_cache_config: Any,
     return mamba_num_blocks
 
 
+def propagate_num_gpu_blocks_override(rpc_owner: Any,
+                                      vllm_config: Any) -> int | None:
+    """Publish the attention block count the workers' compact-mamba sizing
+    chose (`cache_config.num_gpu_blocks_override`) in the engine-core process.
+
+    `KVCacheManager._maybe_set_compact_mamba_num_blocks_override` runs inside
+    `get_kv_cache_layer_configs` on each worker and writes the attention pool
+    size to the worker's `cache_config`. With a uniproc executor that object is
+    shared with the engine core; with multi-process executors (Ray,
+    multiproc) it is not, so the engine core would size the block pool from
+    the padded uniform page spec (`attn_page + num_mamba_groups *
+    mamba_page` bytes per block) instead -- about 38x fewer attention blocks
+    for Qwen3.5/3.8-style models -- and the workers then cap their attention
+    arrays at that count. Must run before `get_kv_cache_configs`.
+
+    Returns the override now set on the engine core (None if the workers did
+    not set one)."""
+    cache_config = vllm_config.cache_config
+    reported = [
+        int(v) for v in rpc_owner.collective_rpc("get_num_gpu_blocks_override")
+        if v is not None
+    ]
+    if not reported:
+        return cache_config.num_gpu_blocks_override
+    override = min(reported)
+    if len(set(reported)) != 1:
+        logger.warning(
+            "[tpu_inference] Workers disagree on num_gpu_blocks_override: %s; "
+            "using the smallest (%d).", sorted(set(reported)), override)
+    current = cache_config.num_gpu_blocks_override
+    if current is not None and current <= override:
+        # User-pinned (or already-propagated) value; the workers honour it.
+        return current
+    cache_config.num_gpu_blocks_override = override
+    logger.info(
+        "[tpu_inference] num_gpu_blocks_override=%d (compact-mamba attention "
+        "pool) propagated from %d worker(s) to the engine core.", override,
+        len(reported))
+    return override
+
+
 class MambaPoolSyncExecutorMixin:
-    """Publish the workers' allocated mamba pool size in the engine-core
-    process as soon as the caches exist: `initialize_from_config` runs there
-    after every worker has allocated and before the scheduler is built."""
+    """Keep the engine core's KV cache sizing in sync with the workers for
+    hybrid attention+mamba models under multi-process executors.
+
+    - `get_kv_cache_layer_configs`: the workers' compact-mamba sizing picks
+      the attention pool size while building their layer configs; publish it
+      before the engine core turns available memory into `num_blocks`.
+    - `initialize_from_config`: publish the mamba pool size the workers
+      allocated, after every worker has allocated and before the scheduler is
+      built."""
+
+    def get_kv_cache_layer_configs(self) -> Any:
+        layer_configs = super().get_kv_cache_layer_configs()
+        propagate_num_gpu_blocks_override(self, self.vllm_config)
+        return layer_configs
 
     def initialize_from_config(self, kv_cache_configs: Any) -> None:
         super().initialize_from_config(kv_cache_configs)

@@ -726,6 +726,12 @@ class TPUWorker(WorkerBase):
         mamba layers). Read by the engine core over `collective_rpc`."""
         return self.model_runner.kv_cache_manager.actual_mamba_num_blocks
 
+    def get_num_gpu_blocks_override(self) -> int | None:
+        """Attention block count chosen by this worker's compact-mamba sizing
+        (or pinned by the user); None if unset. Read by the engine core over
+        `collective_rpc` before it sizes the KV cache."""
+        return self.model_runner.cache_config.num_gpu_blocks_override
+
     def get_kv_connector_handshake_metadata(self) -> dict | None:
         """Get KV connector metadata from this worker if available."""
         # NOTE: we are not using it right now.
