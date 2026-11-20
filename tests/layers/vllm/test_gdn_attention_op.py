@@ -629,11 +629,12 @@ class TestVllmGatedDeltaNetAttention:
 
         conv_state = jax.numpy.zeros((30, kernel_size - 1, conv_dim))
         recurrent_state = jax.numpy.zeros((30, n_v, d_k, d_v))
-        # Kernel writes checkpoints into scratch slots; put a distinctive value
-        # at req 0's boundary checkpoint (slot 21) and verify it lands in
-        # scheduler block 3.
-        kernel_conv = conv_state.at[21].set(7.0)
-        kernel_rec = recurrent_state.at[21].set(9.0)
+        # Kernel writes checkpoints into scratch slots; put distinctive values
+        # at req 0's boundary checkpoint (slot 21) and req 1's scratch group
+        # (slots 24..27) so we verify req 0's boundary lands in block 3 while
+        # req 1's blocks remain untouched.
+        kernel_conv = conv_state.at[21].set(7.0).at[24:28].set(11.0)
+        kernel_rec = recurrent_state.at[21].set(9.0).at[24:28].set(13.0)
         mock_run_jax.return_value = (
             (kernel_conv, kernel_rec),
             jax.numpy.zeros((num_tokens, n_v * d_v)),
@@ -667,4 +668,103 @@ class TestVllmGatedDeltaNetAttention:
 
         updated_conv, updated_rec = kv_caches[0]
         assert np.all(np.asarray(updated_conv[3]) == 7.0)
+        assert np.all(np.asarray(updated_rec[3]) == 9.0)
+        assert np.all(np.asarray(updated_conv[4]) == 0.0)
+        assert np.all(np.asarray(updated_rec[4]) == 0.0)
+        assert np.all(np.asarray(updated_conv[5:7]) == 0.0)
+        assert np.all(np.asarray(updated_rec[5:7]) == 0.0)
+
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.torch_view",
+        side_effect=lambda t: torch.as_tensor(np.array(t)),
+    )
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.jax_view",
+        side_effect=lambda t: jax.numpy.array(t.detach().cpu().numpy())
+        if isinstance(t, torch.Tensor) else t,
+    )
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.run_jax_gdn_attention"
+    )
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.get_forward_context"
+    )
+    def test_gdn_attention_core_tpu_align_spec_padded_conv_state_boundary_copy(
+            self, mock_get_fc, mock_run_jax, mock_jax_v, mock_torch_v, mesh):
+        """When conv_state has padded width (state_len > kernel_size - 1),
+        boundary copy runs after re-concatenating the trailing slice."""
+        from tpu_inference.layers.common.attention_metadata import (
+            AttentionMetadata, MambaMetadata)
+        from tpu_inference.layers.vllm.custom_ops.gdn_attention_op import \
+            gdn_attention_core_tpu
+
+        layer_name = "test_layer"
+        num_tokens = 4
+        n_kq, n_v, d_k, d_v, kernel_size = 2, 4, 16, 16, 4
+        conv_dim = (n_kq * d_k) * 2 + n_v * d_v
+        padded_state_len = kernel_size + 1  # > kernel_size - 1
+
+        layer_module = MagicMock()
+        layer_module.num_k_heads = n_kq
+        layer_module.num_v_heads = n_v
+        layer_module.head_k_dim = d_k
+        layer_module.head_v_dim = d_v
+        layer_module.conv_kernel_size = kernel_size
+        layer_module.conv1d.weight = torch.randn(conv_dim, 1, kernel_size)
+        layer_module.conv1d.bias = None
+        layer_module.A_log = torch.randn(n_v)
+        layer_module.dt_bias = torch.randn(n_v)
+
+        attn_metadata = AttentionMetadata(
+            input_positions=jax.numpy.zeros(num_tokens, dtype=jax.numpy.int32),
+            block_tables=jax.numpy.array([[3, 4]], dtype=jax.numpy.int32),
+            seq_lens=jax.numpy.array([18], dtype=jax.numpy.int32),
+            query_start_loc=jax.numpy.array([0, 4], dtype=jax.numpy.int32),
+            request_distribution=jax.numpy.array([1, 1, 1],
+                                                 dtype=jax.numpy.int32),
+            mamba=MambaMetadata(
+                state_indices=jax.numpy.array([20], dtype=jax.numpy.int32),
+                read_offsets=jax.numpy.array([2], dtype=jax.numpy.int32),
+            ),
+            padded_num_reqs=1,
+        )
+
+        fc = MagicMock()
+        fc.attn_metadata = {layer_name: attn_metadata}
+        fc.no_compile_layers = {layer_name: layer_module}
+        mock_get_fc.return_value = fc
+
+        conv_state = jax.numpy.zeros((30, padded_state_len, conv_dim))
+        conv_state = conv_state.at[21, kernel_size - 1:, :].set(3.0)
+        recurrent_state = jax.numpy.zeros((30, n_v, d_k, d_v))
+        kernel_conv = jax.numpy.zeros((30, kernel_size - 1, conv_dim)).at[
+            21].set(7.0)
+        kernel_rec = recurrent_state.at[21].set(9.0)
+        mock_run_jax.return_value = (
+            (kernel_conv, kernel_rec),
+            jax.numpy.zeros((num_tokens, n_v * d_v)),
+        )
+
+        vllm_config = MagicMock()
+        vllm_config.cache_config.mamba_cache_mode = "align"
+        vllm_config.cache_config.mamba_block_size = 16
+        vllm_config.speculative_config.num_speculative_tokens = 3
+
+        kv_caches = [(conv_state, recurrent_state)]
+        with set_vllm_model_wrapper_context(
+                kv_caches=kv_caches,
+                mesh=mesh,
+                layer_name_to_kvcache_index={layer_name: 0},
+                vllm_config=vllm_config,
+        ):
+            gdn_attention_core_tpu(torch.randn(num_tokens, conv_dim),
+                                   torch.randn(num_tokens, n_v),
+                                   torch.randn(num_tokens, n_v),
+                                   torch.zeros(num_tokens, n_v, d_v),
+                                   layer_name, mesh)
+
+        updated_conv, updated_rec = kv_caches[0]
+        assert updated_conv.shape == (30, padded_state_len, conv_dim)
+        assert np.all(np.asarray(updated_conv[3, :kernel_size - 1]) == 7.0)
+        assert np.all(np.asarray(updated_conv[3, kernel_size - 1:]) == 3.0)
         assert np.all(np.asarray(updated_rec[3]) == 9.0)

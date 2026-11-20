@@ -45,8 +45,13 @@ def mesh():
     return Mesh(devices, tuple(names))
 
 
-def _indices(block_tables, query_lens, seq_lens, is_window, scratch_bases,
-             read_offsets):
+def _indices(block_tables,
+             query_lens,
+             seq_lens,
+             is_window,
+             scratch_bases,
+             read_offsets,
+             num_local_rows=100):
     out = compute_align_spec_state_indices(
         jnp.asarray(block_tables, dtype=jnp.int32),
         jnp.asarray(query_lens, dtype=jnp.int32),
@@ -55,7 +60,7 @@ def _indices(block_tables, query_lens, seq_lens, is_window, scratch_bases,
         jnp.asarray(scratch_bases, dtype=jnp.int32),
         jnp.asarray(read_offsets, dtype=jnp.int32),
         BLOCK_SIZE,
-        num_local_rows=100,
+        num_local_rows=num_local_rows,
     )
     return [np.asarray(x) for x in out]
 
@@ -146,6 +151,41 @@ def test_prefill_after_short_window_chunk_resumes_from_scratch():
     assert mask.tolist() == [False]
 
 
+def test_window_crossing_boundary_at_first_position():
+    """A window whose first position (offset 0) completes a block copies
+    `scratch_base + 0` into that block."""
+    # 15 computed tokens + 4-token window (seq_len 19) crosses 16 at offset 0.
+    state, read, src, dst, mask = _indices(
+        block_tables=[[10, 11]],
+        query_lens=[4],
+        seq_lens=[19],
+        is_window=[True],
+        scratch_bases=[40],
+        read_offsets=[MAMBA_READ_OFFSET_FROM_BLOCK_TABLE],
+    )
+    assert state.tolist() == [40]
+    assert read.tolist() == [10]
+    assert mask.tolist() == [True]
+    assert src.tolist() == [40]
+    assert dst.tolist() == [10]
+
+
+def test_single_token_window_boundary_and_non_boundary():
+    """1-token decode windows (e.g. 0 draft tokens on an ngram miss) copy
+    only when the single token lands on a block boundary."""
+    _, _, src, dst, mask = _indices(
+        block_tables=[[10, 11], [20, 21]],
+        query_lens=[1, 1],
+        seq_lens=[16, 17],
+        is_window=[True, True],
+        scratch_bases=[40, 44],
+        read_offsets=[0, 0],
+    )
+    assert mask.tolist() == [True, False]
+    assert int(src[0]) == 40
+    assert int(dst[0]) == 10
+
+
 def test_padded_requests_never_copy():
     """Padding rows (no tokens, null scratch base) must not copy."""
     _, _, _, _, mask = _indices(
@@ -157,6 +197,45 @@ def test_padded_requests_never_copy():
         read_offsets=[0],
     )
     assert mask.tolist() == [False]
+
+
+def test_copy_mask_guards_isolate_invalid_window_copies():
+    """Each copy_mask guard independently suppresses copying even when the
+    request is marked as a verify window."""
+    # Row 0: valid boundary crossing (control -> True)
+    # Row 1: scratch_bases == 0 (null scratch -> False)
+    # Row 2: copy_dst == 0 (null block in block_tables -> False)
+    # Row 3: query_lens == 0 (empty window -> False)
+    _, _, _, _, mask = _indices(
+        block_tables=[[10, 11], [12, 13], [0, 15], [16, 17]],
+        query_lens=[4, 4, 4, 0],
+        seq_lens=[18, 18, 18, 16],
+        is_window=[True, True, True, True],
+        scratch_bases=[40, 0, 44, 48],
+        read_offsets=[0, 0, 0, 0],
+    )
+    assert mask.tolist() == [True, False, False, False]
+
+
+def test_compute_align_spec_state_indices_clamps_out_of_range_ids():
+    """Block-table columns and rank-local row ids clamp below num_local_rows."""
+    # Row 0: window with out-of-range scratch_base and block id
+    # Row 1: prefill whose seq_len exceeds block_tables columns and block id
+    #        exceeds num_local_rows - 1
+    state, read, src, dst, mask = _indices(
+        block_tables=[[90, 95], [10, 80]],
+        query_lens=[4, 16],
+        seq_lens=[18, 64],
+        is_window=[True, False],
+        scratch_bases=[50, 40],
+        read_offsets=[5, MAMBA_READ_OFFSET_FROM_BLOCK_TABLE],
+        num_local_rows=52,
+    )
+    assert state.tolist() == [50, 51]  # row 1 col clamped to 1 (80 -> 51)
+    assert read.tolist() == [51, 51]  # row 0: 50+5 -> 51; row 1: col 2 -> 1 (80 -> 51)
+    assert mask.tolist() == [True, False]
+    assert int(src[0]) == 51  # 50 + 1 -> 51
+    assert int(dst[0]) == 51  # 90 -> 51
 
 
 def test_copy_gdn_state_slots_copies_only_masked_pairs(mesh):
@@ -188,8 +267,8 @@ def test_copy_gdn_state_slots_copies_only_masked_pairs(mesh):
 
 
 def test_copy_gdn_state_slots_noop_without_mask(mesh):
-    conv = jnp.ones((4, 3, 8))
-    rec = jnp.ones((4, 2, 4, 4))
+    conv = jnp.arange(4 * 3 * 8, dtype=jnp.float32).reshape(4, 3, 8)
+    rec = jnp.arange(4 * 2 * 4 * 4, dtype=jnp.float32).reshape(4, 2, 4, 4)
     zeros = jnp.zeros((2, ), dtype=jnp.int32)
     new_conv, new_rec = copy_gdn_state_slots(conv,
                                              rec,
@@ -207,7 +286,8 @@ def test_resolve_gdn_state_slots_dp_align_spec():
     # dp_size=2, max_num_reqs_per_dp=2, padded_num_reqs_per_dp=1
     md = AttentionMetadata(
         input_positions=jnp.zeros(8, dtype=jnp.int32),
-        block_tables=jnp.array([[10, 11], [99, 99], [20, 21], [99, 99]],
+        block_tables=jnp.array([[10, 11, 12], [99, 99, 99], [20, 21, 22],
+                                [99, 99, 99]],
                                dtype=jnp.int32),
         seq_lens=jnp.array([18, 0, 34, 0], dtype=jnp.int32),
         query_start_loc=jnp.array([0, 4, 4, 0, 2, 2], dtype=jnp.int32),
@@ -329,4 +409,163 @@ def test_resolve_gdn_state_slots_requires_mamba_metadata_for_spec_decode(
             num_local_rows=16,
             mamba_block_size=mamba_block_size,
             num_spec_tokens=3,
+        )
+
+
+def test_resolve_gdn_state_slots_dp_mixed_window_and_prefill():
+    """Mixed decode-window and prefill batches across DP ranks derive
+    per-rank `is_window` from `request_distribution`."""
+    # dp_size=2, max_num_reqs_per_dp=3, padded_num_reqs_per_dp=2
+    # Rank 0: 1 window + 1 prefill (request_distribution=[1, 2, 2])
+    # Rank 1: 0 windows + 2 prefills (request_distribution=[0, 2, 2])
+    md = AttentionMetadata(
+        input_positions=jnp.zeros(44, dtype=jnp.int32),
+        block_tables=jnp.array(
+            [
+                [10, 11, 12],
+                [13, 14, 15],
+                [99, 99, 99],
+                [20, 21, 22],
+                [23, 24, 25],
+                [99, 99, 99],
+            ],
+            dtype=jnp.int32,
+        ),
+        seq_lens=jnp.array([18, 32, 0, 35, 8, 0], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 4, 20, 20, 0, 16, 24, 24],
+                                  dtype=jnp.int32),
+        request_distribution=jnp.array([1, 2, 2, 0, 2, 2], dtype=jnp.int32),
+        mamba=MambaMetadata(
+            state_indices=jnp.array([40, 44, 0, 48, 52, 0], dtype=jnp.int32),
+            read_offsets=jnp.array(
+                [
+                    2,
+                    MAMBA_READ_OFFSET_FROM_BLOCK_TABLE,
+                    0,
+                    1,
+                    MAMBA_READ_OFFSET_FROM_BLOCK_TABLE,
+                    0,
+                ],
+                dtype=jnp.int32,
+            ),
+        ),
+        padded_num_reqs=4,
+    )
+    slots = resolve_gdn_state_slots(
+        md,
+        seq_lens=jnp.array([18, 32, 35, 8], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 4, 20, 0, 16, 24], dtype=jnp.int32),
+        padded_num_reqs_per_dp=2,
+        dp_size=2,
+        num_local_rows=64,
+        mamba_block_size=BLOCK_SIZE,
+        num_spec_tokens=3,
+    )
+    # Rank 0 req 0 (window): write scratch 40, read 40+2=42, copy 41 -> 10
+    # Rank 0 req 1 (prefill 16->32): write block 14, read block 13, no copy
+    # Rank 1 req 0 (prefill 19->35 after window): write block 22, read 48+1=49
+    # Rank 1 req 1 (first prefill 0->8): write block 23, read block 23
+    assert slots.state_indices.tolist() == [40, 14, 22, 23]
+    assert slots.read_state_indices.tolist() == [42, 13, 49, 23]
+    assert slots.read_offsets.tolist() == [0, 0, 0, 0]
+    assert slots.boundary_copies is not None
+    assert slots.boundary_copies.mask.tolist() == [True, False, False, False]
+    assert int(slots.boundary_copies.src[0]) == 41
+    assert int(slots.boundary_copies.dst[0]) == 10
+
+
+def test_resolve_gdn_state_slots_dp_plain_align_1d_block_tables(mesh):
+    """Plain align mode (num_spec_tokens=0) supports 1D flattened block_tables
+    across DP ranks with no spec kwargs or boundary copies."""
+    block_tables_1d = jnp.array(
+        [10, 11, 99, 99, 20, 21, 99, 99],
+        dtype=jnp.int32,
+    )
+    md = AttentionMetadata(
+        input_positions=jnp.zeros(24, dtype=jnp.int32),
+        block_tables=block_tables_1d,
+        seq_lens=jnp.array([32, 0, 8, 0], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 16, 16, 0, 8, 8], dtype=jnp.int32),
+        request_distribution=jnp.array([0, 1, 1, 0, 1, 1], dtype=jnp.int32),
+        mamba=None,
+        padded_num_reqs=2,
+    )
+    slots = resolve_gdn_state_slots(
+        md,
+        seq_lens=jnp.array([32, 8], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 16, 0, 8], dtype=jnp.int32),
+        padded_num_reqs_per_dp=1,
+        dp_size=2,
+        num_local_rows=64,
+        mamba_block_size=BLOCK_SIZE,
+        num_spec_tokens=0,
+    )
+    assert slots.state_indices.tolist() == [11, 20]
+    assert slots.read_state_indices.tolist() == [10, 20]
+    assert slots.read_offsets is None
+    assert slots.num_spec_tokens == 0
+    assert slots.boundary_copies is None
+    kwargs = slots.kernel_kwargs()
+    assert "read_offsets" not in kwargs
+    assert "num_spec_tokens" not in kwargs
+
+    conv = jnp.arange(4 * 3 * 8, dtype=jnp.float32).reshape(4, 3, 8)
+    rec = jnp.arange(4 * 2 * 4 * 4, dtype=jnp.float32).reshape(4, 2, 4, 4)
+    out_conv, out_rec = slots.apply_boundary_copies(conv, rec, mesh)
+    assert out_conv is conv
+    assert out_rec is rec
+
+
+def test_resolve_gdn_state_slots_rejects_mismatched_seq_lens_shape():
+    md = AttentionMetadata(
+        input_positions=jnp.zeros(4, dtype=jnp.int32),
+        block_tables=jnp.array([[1, 2], [3, 4]], dtype=jnp.int32),
+        seq_lens=jnp.array([8, 8], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 4, 8], dtype=jnp.int32),
+        request_distribution=jnp.array([2, 2, 2], dtype=jnp.int32),
+        mamba=MambaMetadata(state_indices=jnp.array([4, 8], dtype=jnp.int32)),
+        padded_num_reqs=2,
+    )
+    with pytest.raises(ValueError, match="Expected DP-truncated seq_lens"):
+        resolve_gdn_state_slots(
+            md,
+            seq_lens=jnp.array([8, 8], dtype=jnp.int32),
+            query_start_loc=jnp.array([0, 4], dtype=jnp.int32),
+            padded_num_reqs_per_dp=1,
+            dp_size=1,
+            num_local_rows=16,
+            mamba_block_size=0,
+            num_spec_tokens=0,
+        )
+
+
+@pytest.mark.parametrize("mamba_block_size,num_spec_tokens,mamba", [
+    (0, 0, None),
+    (0, 0, MambaMetadata(state_indices=None, read_offsets=None)),
+    (BLOCK_SIZE, 3, None),
+    (BLOCK_SIZE, 3,
+     MambaMetadata(state_indices=None,
+                   read_offsets=jnp.array([0], dtype=jnp.int32))),
+])
+def test_resolve_gdn_state_slots_requires_state_indices(
+        mamba_block_size, num_spec_tokens, mamba):
+    md = AttentionMetadata(
+        input_positions=jnp.zeros(4, dtype=jnp.int32),
+        block_tables=jnp.array([[1, 2]], dtype=jnp.int32),
+        seq_lens=jnp.array([8], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 4], dtype=jnp.int32),
+        request_distribution=jnp.array([1, 1, 1], dtype=jnp.int32),
+        mamba=mamba,
+        padded_num_reqs=1,
+    )
+    with pytest.raises(ValueError, match="state_indices"):
+        resolve_gdn_state_slots(
+            md,
+            seq_lens=md.seq_lens,
+            query_start_loc=md.query_start_loc,
+            padded_num_reqs_per_dp=1,
+            dp_size=1,
+            num_local_rows=16,
+            mamba_block_size=mamba_block_size,
+            num_spec_tokens=num_spec_tokens,
         )
