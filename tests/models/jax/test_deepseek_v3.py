@@ -24,7 +24,7 @@ import torch
 from flax import nnx
 from jax.sharding import Mesh, PartitionSpec
 from parameterized import parameterized
-from vllm.config import AuxOutputConfig, ModelConfig
+from vllm.config import AuxOutputConfig, LoadConfig, ModelConfig
 
 # Assuming the model file is named deepseek_v3.py
 import tpu_inference.kernels.mla.v1.kernel as mla
@@ -75,8 +75,7 @@ class MockVllmConfig:
         hf_config.num_nextn_predict_layers = 1
         self.model_config.hf_config = hf_config
 
-        self.load_config = MagicMock()
-        self.load_config.download_dir = None
+        self.load_config = LoadConfig()
 
         self.cache_config = MagicMock()
         self.cache_config.cache_dtype = "auto"

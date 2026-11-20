@@ -30,8 +30,9 @@ from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
                                          init_none_hash)
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheGroupSpec)
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
+                                        KVCacheGroup)
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -55,7 +56,6 @@ def create_model_runner_output(
 
     # Make request data.
     req_ids = [req.request_id for req in reqs]
-    req_id_to_index = {req_id: idx for idx, req_id in enumerate(req_ids)}
 
     # Make sampled tokens.
     sampled_token = EOS_TOKEN_ID if use_eos else token_id
@@ -74,7 +74,6 @@ def create_model_runner_output(
     # Make output data structure.
     return ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index=req_id_to_index,
         sampled_token_ids=sampled_token_ids,
         logprobs=None,
         prompt_logprobs_dict={},
@@ -98,6 +97,7 @@ def create_vllm_config(
     attention_backend: str | None = None,
     kv_load_failure_policy: Literal["recompute", "fail"] = "fail",
     kv_connector: str = "NixlConnector",
+    kv_connector_module_path: str | None = None,
     kv_role: str = "kv_both",
     disable_hybrid_kv_cache_manager: bool | None = None,
 ) -> VllmConfig:
@@ -126,6 +126,7 @@ def create_vllm_config(
     )
     kv_transfer_config = KVTransferConfig(
         kv_connector=kv_connector,
+        kv_connector_module_path=kv_connector_module_path,
         kv_role=kv_role,
         enable_permute_local_kv=enable_permute_local_kv,
         kv_connector_extra_config=kv_connector_extra_config or {},
@@ -160,24 +161,24 @@ class TPURequestRunner:
             block_size=block_size,
             max_num_batched_tokens=1000,
             disable_hybrid_kv_cache_manager=False,
+            # vLLM resolves the connector class when VllmConfig is built, so an
+            # external connector needs its module path (as in production).
             kv_connector="TPUOffloadConnector",
+            kv_connector_module_path=
+            "tpu_inference.offload.tpu_offload_connector",
         )
         vllm_config.scheduler_config.async_scheduling = async_scheduling
-        vllm_config.kv_transfer_config = KVTransferConfig(
-            kv_connector=
-            "tpu_inference.offload.tpu_offload_connector.TPUOffloadConnector",
-            kv_role="kv_both",
-        )
         kv_cache_groups = [
-            KVCacheGroupSpec(
-                ["layer"],
-                FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
-                ),
-            )
+            KVCacheGroup.from_layers({
+                "layer":
+                FullAttentionManager.layer_config(
+                    AttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ))
+            })
         ]
         kv_cache_config = KVCacheConfig(
             num_blocks=num_blocks,

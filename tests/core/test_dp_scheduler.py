@@ -12,24 +12,43 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import MagicMock, patch
+import threading
+import types
+from types import SimpleNamespace
+from unittest.mock import MagicMock, call, patch
 
+import cloudpickle
 import numpy as np
 import pytest
 from vllm.config import VllmConfig
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata, AuxRequestOutput)
+from vllm.v1.core import kv_cache_utils
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
+from vllm.v1.metrics.stats import (PrefixCacheStats, SchedulerIterationDetails,
+                                   SchedulerStats)
 from vllm.v1.outputs import LogprobsLists, ModelRunnerOutput
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
+from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
+from tpu_inference.core.sched import dp_scheduler as dp_scheduler_module
 from tpu_inference.core.sched.dp_scheduler import (
-    DPScheduler, DPSchedulerOutput, SchedulerCommand,
+    DPScheduler, DPSchedulerOutput, SchedulerCommand, SchedulerWorkerError,
+    _get_max_cache_hit_length, _resolve_start_method,
+    _scheduler_worker_process, _scheduler_worker_trampoline,
     update_vllm_config_for_dp_scheduler)
+
+
+@pytest.fixture(autouse=True)
+def _fork_workers(monkeypatch):
+    """Most tests use MagicMock configs, which cloudpickle cannot serialize
+    for spawned workers, so they exercise the fork path (used under
+    Pathways). Tests of the default spawn path restore the real resolver."""
+    monkeypatch.setattr(dp_scheduler_module, "_resolve_start_method",
+                        lambda: "fork")
 
 
 def _make_mock_mp_context():
@@ -58,6 +77,9 @@ class TestDPScheduler:
         config.cache_config.enable_prefix_caching = False
         config.cache_config.prefix_caching_hash_algo = "sha256"
         config.cache_config.mamba_num_blocks = None
+        config.compilation_config = MagicMock()
+        config.compilation_config.static_forward_context = {}
+        config.device_config = MagicMock(slice=None)
         return config
 
     @pytest.fixture
@@ -440,7 +462,8 @@ class TestDPScheduler:
     def test_round_robin_routing_skips_rank_queries(
             self, mock_vllm_config, mock_kv_cache_config,
             mock_structured_output_manager):
-        """round_robin assigns ranks cyclically without querying rank state."""
+        """round_robin assigns ranks cyclically without querying rank state,
+        and holds the requests until they go out as one batch per rank."""
         scheduler = self._create_scheduler(mock_vllm_config,
                                            mock_kv_cache_config,
                                            mock_structured_output_manager)
@@ -460,8 +483,280 @@ class TestDPScheduler:
 
         assert [scheduler.assigned_dp_rank[r.request_id]
                 for r in requests] == [0, 1, 0, 1, 0]
-        sent = [c.args[1] for c in scheduler._send_command.call_args_list]
-        assert sent == [SchedulerCommand.ADD_REQUEST] * 5
+        scheduler._send_command.assert_not_called()
+
+        scheduler._send_unsent_requests()
+
+        r = requests
+        assert scheduler._send_command.call_args_list == [
+            call(0, SchedulerCommand.ADD_REQUESTS, [r[0], r[2], r[4]]),
+            call(1, SchedulerCommand.ADD_REQUESTS, [r[1], r[3]]),
+        ]
+
+    @staticmethod
+    def _record_ipc(scheduler, results=None):
+        """Keep the real _send_command, and log every command sent and
+        every result read, in order."""
+        log = []
+
+        def pipe(rank):
+            conn = MagicMock()
+            conn.send_bytes.side_effect = lambda payload: log.append(
+                ("send", rank, *cloudpickle.loads(payload)))
+            return conn
+
+        def get_result(rank, command=None):
+            log.append(("get", rank, command))
+            table = results or {}
+            result = table.get((rank, command), table.get(command))
+            if isinstance(result, Exception):
+                raise result  # as _get_result does for a worker error
+            return result
+
+        scheduler.input_conns = [pipe(i) for i in range(scheduler.dp_size)]
+        scheduler._get_result = MagicMock(side_effect=get_result)
+        return log
+
+    def test_next_command_sends_held_requests_first(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
+        """The next command first sends the held requests, one ADD_REQUESTS
+        per rank, and reads their acks. So each rank gets the same commands
+        in the same order as with one ADD_REQUEST per add_request()."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+        scheduler._routing_policy = DPScheduler.RoutingPolicy.ROUND_ROBIN
+        scheduler._batch_prefills = True
+        unfinished = SchedulerCommand.GET_NUM_UNFINISHED_REQUESTS
+        log = self._record_ipc(scheduler, {unfinished: 0})
+
+        r = [SimpleNamespace(request_id=f"req-{i}") for i in range(3)]
+        for req in r:
+            scheduler.add_request(req)  # no step yet: ranks idle, flushes
+        assert scheduler._pending_new_requests == []
+        assert log == []
+
+        scheduler.get_num_unfinished_requests()  # what step() asks first
+
+        add = SchedulerCommand.ADD_REQUESTS
+        assert log == [
+            ("send", 0, add, [r[0], r[2]]),
+            ("send", 1, add, [r[1]]),
+            ("get", 0, add),
+            ("get", 1, add),
+            ("send", 0, unfinished, None),
+            ("send", 1, unfinished, None),
+            ("get", 0, unfinished),
+            ("get", 1, unfinished),
+        ]
+
+    def test_finish_held_request_adds_it_first(self, mock_vllm_config,
+                                               mock_kv_cache_config,
+                                               mock_structured_output_manager):
+        """Aborting a held request adds it and then finishes it on its rank,
+        as without holding."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+        scheduler._routing_policy = DPScheduler.RoutingPolicy.ROUND_ROBIN
+        scheduler._batch_prefills = False
+        finish = SchedulerCommand.FINISH_REQUESTS
+        log = self._record_ipc(scheduler, {finish: []})
+
+        req = SimpleNamespace(request_id="req-0")
+        scheduler.add_request(req)
+        scheduler.finish_requests("req-0", RequestStatus.FINISHED_ABORTED)
+
+        assert log == [
+            ("send", 0, SchedulerCommand.ADD_REQUESTS, [req]),
+            ("get", 0, SchedulerCommand.ADD_REQUESTS),
+            ("send", 0, finish, (["req-0"], RequestStatus.FINISHED_ABORTED)),
+            ("get", 0, finish),
+        ]
+
+    def test_has_request_sees_held_request(self, mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager):
+        """has_request() on a held request adds it to its rank first, so the
+        rank answers for it (True here) as without holding."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+        scheduler._routing_policy = DPScheduler.RoutingPolicy.ROUND_ROBIN
+        scheduler._batch_prefills = False
+        has = SchedulerCommand.HAS_REQUEST
+        log = self._record_ipc(scheduler, {has: True})
+
+        req = SimpleNamespace(request_id="req-0")
+        scheduler.add_request(req)
+
+        assert scheduler.has_request("req-0") is True
+        assert log == [
+            ("send", 0, SchedulerCommand.ADD_REQUESTS, [req]),
+            ("get", 0, SchedulerCommand.ADD_REQUESTS),
+            ("send", 0, has, "req-0"),
+            ("get", 0, has),
+        ]
+        assert not scheduler._unsent_requests
+        assert scheduler.has_request("unknown") is False
+
+    def test_failed_held_add_raises_from_next_command(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
+        """If a rank fails to add its held requests (or is dead), every
+        already-sent rank's reply is still drained before raising so surviving
+        pipes stay aligned, and the requests are not held for a retry."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+        scheduler._routing_policy = DPScheduler.RoutingPolicy.ROUND_ROBIN
+        scheduler._batch_prefills = False
+        add = SchedulerCommand.ADD_REQUESTS
+        error = SchedulerWorkerError(0, "add failed")
+        log = self._record_ipc(scheduler, {(0, add): error})
+
+        r0 = SimpleNamespace(request_id="req-0")  # rank 0
+        r1 = SimpleNamespace(request_id="req-1")  # rank 1
+        scheduler.add_request(r0)
+        scheduler.add_request(r1)
+        with pytest.raises(SchedulerWorkerError):
+            scheduler.get_num_unfinished_requests()
+
+        assert log == [
+            ("send", 0, add, [r0]),
+            ("send", 1, add, [r1]),
+            ("get", 0, add),
+            ("get", 1, add),
+        ]
+        assert not scheduler._unsent_requests
+
+        # Also check send failure on rank 1: only rank 0 (already sent) is
+        # drained; rank 1 never got a message so we don't block reading it.
+        log = self._record_ipc(scheduler)
+        scheduler.input_conns[1].send_bytes.side_effect = BrokenPipeError()
+        r2 = SimpleNamespace(request_id="req-2")  # rank 0
+        r3 = SimpleNamespace(request_id="req-3")  # rank 1
+        scheduler.add_request(r2)
+        scheduler.add_request(r3)
+        with pytest.raises(BrokenPipeError):
+            scheduler.get_num_unfinished_requests()
+
+        assert log == [("send", 0, add, [r2]), ("get", 0, add)]
+        assert not scheduler._unsent_requests
+
+    def test_least_loaded_sends_each_add_at_once(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
+        """Only round robin holds requests. least_loaded reads rank state to
+        route, so add_request() still sends each request and waits for its
+        ack."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+        scheduler._routing_policy = DPScheduler.RoutingPolicy.LEAST_LOADED
+        scheduler._batch_prefills = False
+        scheduler._find_best_rank_for_request = MagicMock(return_value=1)
+        log = self._record_ipc(scheduler)
+
+        req = SimpleNamespace(request_id="req-0")
+        scheduler.add_request(req)
+
+        add = SchedulerCommand.ADD_REQUEST
+        assert log == [("send", 1, add, req), ("get", 1, add)]
+        assert not scheduler._unsent_requests
+
+    def test_shutdown_drops_held_requests(self, mock_vllm_config,
+                                          mock_kv_cache_config,
+                                          mock_structured_output_manager):
+        """shutdown() does not send held requests, so a dead rank holding
+        some cannot make it fail."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+        scheduler._routing_policy = DPScheduler.RoutingPolicy.ROUND_ROBIN
+        scheduler._batch_prefills = False
+        log = self._record_ipc(scheduler)
+        scheduler.add_request(SimpleNamespace(request_id="req-0"))  # rank 0
+        dead, alive = MagicMock(), MagicMock()
+        dead.is_alive.return_value = False
+        alive.is_alive.side_effect = [True, True, False]  # send, ack, join
+        scheduler.processes = [dead, alive]
+
+        scheduler.shutdown()
+
+        shutdown = SchedulerCommand.SHUTDOWN
+        assert log == [("send", 1, shutdown, None), ("get", 1, shutdown)]
+
+    def test_shutdown_catches_worker_error(self, mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager):
+        """An unread SchedulerWorkerError on a rank's pipe must not abort
+        shutdown() before joining workers and closing pipes."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+        shutdown = SchedulerCommand.SHUTDOWN
+        stale = SchedulerWorkerError(0, "unread error")
+        log = self._record_ipc(scheduler, {(0, shutdown): stale})
+        procs = [MagicMock(), MagicMock()]
+        for p in procs:
+            p.is_alive.side_effect = [True, True, False]  # send, ack, join
+        scheduler.processes = procs
+        scheduler.output_conns = [
+            MagicMock() for _ in range(scheduler.dp_size)
+        ]
+
+        scheduler.shutdown()
+
+        assert log == [
+            ("send", 0, shutdown, None),
+            ("send", 1, shutdown, None),
+            ("get", 0, shutdown),
+            ("get", 1, shutdown),
+        ]
+        for p in procs:
+            p.join.assert_called_once()
+        for conn in scheduler.input_conns + scheduler.output_conns:
+            conn.close.assert_called_once()
+
+    def test_worker_add_requests_adds_in_order_with_one_ack(self):
+        """The worker adds every request of an ADD_REQUESTS in order and
+        answers once."""
+        added = []
+
+        class _RankScheduler:
+
+            def __init__(self, **kwargs):
+                pass
+
+            def add_request(self, request):
+                added.append(request)
+
+            def shutdown(self):
+                pass
+
+        vllm_config = MagicMock()
+        vllm_config.additional_config = {}
+        vllm_config.cache_config.mamba_cache_mode = "none"
+        input_conn = MagicMock()
+        batch = (SchedulerCommand.ADD_REQUESTS, ["a", "b", "c"])
+        input_conn.recv_bytes.side_effect = [
+            cloudpickle.dumps(batch),
+            KeyboardInterrupt(),  # ends the worker loop
+        ]
+        output_conn = MagicMock()
+
+        with patch("atexit._clear"), patch("os._exit", side_effect=SystemExit):
+            with pytest.raises(SystemExit):
+                _scheduler_worker_process(0, input_conn, output_conn,
+                                          vllm_config, None, None, 16, 16,
+                                          None, False, False, _RankScheduler)
+
+        assert added == ["a", "b", "c"]
+        output_conn.send_bytes.assert_called_once()
+        assert cloudpickle.loads(
+            output_conn.send_bytes.call_args.args[0]) is None
 
     def test_schedule_sends_commands_and_combines_output(
             self, mock_vllm_config, mock_kv_cache_config,
@@ -479,16 +774,13 @@ class TestDPScheduler:
         mock_output_0.finished_req_ids = set()
         mock_output_0.scheduled_cached_reqs = CachedRequestData(
             req_ids=[],
-            resumed_req_ids=[],
             new_token_ids=[],
-            all_token_ids={},
             new_block_ids=[],
             num_computed_tokens=[],
             num_output_tokens=[],
         )
         mock_output_0.scheduled_spec_decode_tokens = {}
         mock_output_0.scheduled_encoder_inputs = {}
-        mock_output_0.num_common_prefix_blocks = []
         mock_output_0.aux_output_connector_metadata = None
 
         mock_output_1 = MagicMock(spec=SchedulerOutput)
@@ -498,16 +790,13 @@ class TestDPScheduler:
         mock_output_1.finished_req_ids = set()
         mock_output_1.scheduled_cached_reqs = CachedRequestData(
             req_ids=[],
-            resumed_req_ids=[],
             new_token_ids=[],
-            all_token_ids={},
             new_block_ids=[],
             num_computed_tokens=[],
             num_output_tokens=[],
         )
         mock_output_1.scheduled_spec_decode_tokens = {}
         mock_output_1.scheduled_encoder_inputs = {}
-        mock_output_1.num_common_prefix_blocks = []
         mock_output_1.aux_output_connector_metadata = None
 
         # Mock _send_command and _collect_results_unordered
@@ -551,16 +840,13 @@ class TestDPScheduler:
         mock_output_0.finished_req_ids = set()
         mock_output_0.scheduled_cached_reqs = CachedRequestData(
             req_ids=[],
-            resumed_req_ids=[],
             new_token_ids=[],
-            all_token_ids={},
             new_block_ids=[],
             num_computed_tokens=[],
             num_output_tokens=[],
         )
         mock_output_0.scheduled_spec_decode_tokens = {}
         mock_output_0.scheduled_encoder_inputs = {}
-        mock_output_0.num_common_prefix_blocks = []
         mock_output_0.aux_output_connector_metadata = None
 
         mock_output_1 = MagicMock(spec=SchedulerOutput)
@@ -570,16 +856,13 @@ class TestDPScheduler:
         mock_output_1.finished_req_ids = set()
         mock_output_1.scheduled_cached_reqs = CachedRequestData(
             req_ids=[],
-            resumed_req_ids=[],
             new_token_ids=[],
-            all_token_ids={},
             new_block_ids=[],
             num_computed_tokens=[],
             num_output_tokens=[],
         )
         mock_output_1.scheduled_spec_decode_tokens = {}
         mock_output_1.scheduled_encoder_inputs = {}
-        mock_output_1.num_common_prefix_blocks = []
         mock_output_1.aux_output_connector_metadata = None
 
         scheduler._send_command = MagicMock()
@@ -610,9 +893,7 @@ class TestDPScheduler:
         output_0 = MagicMock(spec=SchedulerOutput)
         output_0.scheduled_cached_reqs = CachedRequestData(
             req_ids=["req1"],
-            resumed_req_ids=["req1"],
             new_token_ids=[[1, 2, 3]],
-            all_token_ids={"req1": [1, 2, 3, 4, 5]},
             new_block_ids=[[10, 11]],
             num_computed_tokens=[5],
             num_output_tokens=[3],
@@ -621,9 +902,7 @@ class TestDPScheduler:
         output_1 = MagicMock(spec=SchedulerOutput)
         output_1.scheduled_cached_reqs = CachedRequestData(
             req_ids=["req2"],
-            resumed_req_ids=[],
             new_token_ids=[[6, 7]],
-            all_token_ids={"req2": [6, 7, 8, 9]},
             new_block_ids=[[20, 21]],
             num_computed_tokens=[4],
             num_output_tokens=[2],
@@ -633,12 +912,7 @@ class TestDPScheduler:
 
         # Verify combined data
         assert combined.req_ids == ["req1", "req2"]
-        assert combined.resumed_req_ids == ["req1"]
         assert combined.new_token_ids == [[1, 2, 3], [6, 7]]
-        assert combined.all_token_ids == {
-            "req1": [1, 2, 3, 4, 5],
-            "req2": [6, 7, 8, 9]
-        }
         assert combined.num_computed_tokens == [5, 4]
         assert combined.num_output_tokens == [3, 2]
 
@@ -889,6 +1163,8 @@ class TestDPScheduler:
         stats_0 = SchedulerStats(
             num_running_reqs=3,
             num_waiting_reqs=2,
+            num_skipped_waiting_reqs=1,
+            num_preempted_reqs=2,
             kv_cache_usage=0.5,
             prefix_cache_stats=PrefixCacheStats(reset=False,
                                                 requests=10,
@@ -905,6 +1181,8 @@ class TestDPScheduler:
         stats_1 = SchedulerStats(
             num_running_reqs=4,
             num_waiting_reqs=1,
+            num_skipped_waiting_reqs=3,
+            num_preempted_reqs=1,
             kv_cache_usage=0.7,
             prefix_cache_stats=PrefixCacheStats(reset=False,
                                                 requests=15,
@@ -931,7 +1209,105 @@ class TestDPScheduler:
 
         assert combined_stats.num_running_reqs == 7
         assert combined_stats.num_waiting_reqs == 3
+        assert combined_stats.num_skipped_waiting_reqs == 4
+        assert combined_stats.num_preempted_reqs == 3
         assert combined_stats.kv_cache_usage == 0.6
+
+    def test_combine_scheduler_stats_preemptions_and_iteration_records(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
+        """Test _combine_scheduler_stats sums preemptions and iteration_records."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager,
+                                           log_stats=True)
+        rec_0 = SchedulerIterationDetails(
+            iteration_index=1,
+            num_ctx_requests=1,
+            num_ctx_tokens=16,
+            num_generation_requests=0,
+            num_generation_tokens=0,
+        )
+        stats_0 = SchedulerStats(
+            num_running_reqs=1,
+            num_waiting_reqs=0,
+            num_skipped_waiting_reqs=2,
+            num_preempted_reqs=3,
+            kv_cache_usage=0.2,
+            iteration_records=[rec_0],
+        )
+        stats_1 = SchedulerStats(
+            num_running_reqs=2,
+            num_waiting_reqs=1,
+            num_skipped_waiting_reqs=1,
+            num_preempted_reqs=4,
+            kv_cache_usage=0.4,
+            iteration_records=[],
+        )
+
+        combined = scheduler._combine_scheduler_stats([stats_0, stats_1])
+        assert combined.num_skipped_waiting_reqs == 3
+        assert combined.num_preempted_reqs == 7
+        assert combined.iteration_records == [rec_0]
+
+        sched_out = MagicMock(spec=DPSchedulerOutput)
+        sched_out.req_ids_per_rank = {0: ["r0"], 1: ["r1"]}
+        global_out = ModelRunnerOutput(
+            req_ids=["r0", "r1"],
+            sampled_token_ids=[[10], [20]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=None,
+            iteration_records=[rec_0],
+        )
+        rank_outs = scheduler._split_model_output_by_rank(
+            sched_out, global_out)
+        assert rank_outs[0].iteration_records == [rec_0]
+        assert rank_outs[1].iteration_records == []
+
+    def test_combine_scheduler_stats_spec_decoding_verified_tokens(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
+        """Test _combine_scheduler_stats sums verified and accepted tokens."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager,
+                                           log_stats=True)
+
+        spec_0 = SpecDecodingStats.new(3)
+        spec_0.num_drafts = 2
+        spec_0.num_draft_tokens = 6
+        spec_0.num_verified_tokens = 5
+        spec_0.num_accepted_tokens = 4
+        spec_0.num_verified_tokens_per_pos = [2, 2, 1]
+        spec_0.num_accepted_tokens_per_pos = [2, 1, 1]
+
+        spec_1 = SpecDecodingStats.new(3)
+        spec_1.num_drafts = 3
+        spec_1.num_draft_tokens = 9
+        spec_1.num_verified_tokens = 8
+        spec_1.num_accepted_tokens = 6
+        spec_1.num_verified_tokens_per_pos = [3, 3, 2]
+        spec_1.num_accepted_tokens_per_pos = [3, 2, 1]
+
+        stats_0 = SchedulerStats(num_running_reqs=1,
+                                 num_waiting_reqs=0,
+                                 kv_cache_usage=0.2,
+                                 spec_decoding_stats=spec_0)
+        stats_1 = SchedulerStats(num_running_reqs=1,
+                                 num_waiting_reqs=0,
+                                 kv_cache_usage=0.4,
+                                 spec_decoding_stats=spec_1)
+
+        combined_stats = scheduler._combine_scheduler_stats([stats_0, stats_1])
+        combined_spec = combined_stats.spec_decoding_stats
+        assert combined_spec is not None
+        assert combined_spec.num_drafts == 5
+        assert combined_spec.num_draft_tokens == 15
+        assert combined_spec.num_verified_tokens == 13
+        assert combined_spec.num_accepted_tokens == 10
+        assert combined_spec.num_verified_tokens_per_pos == [5, 5, 3]
+        assert combined_spec.num_accepted_tokens_per_pos == [5, 3, 2]
 
     def test_make_stats_returns_none_when_disabled(
             self, mock_vllm_config, mock_kv_cache_config,
@@ -1028,13 +1404,10 @@ class TestDPScheduler:
         output_0.finished_req_ids = set()
         output_0.scheduled_cached_reqs = MagicMock(spec=CachedRequestData)
         output_0.scheduled_cached_reqs.req_ids = ["req1"]
-        output_0.scheduled_cached_reqs.resumed_req_ids = set()
         output_0.scheduled_cached_reqs.new_token_ids = [[1, 2]]
-        output_0.scheduled_cached_reqs.all_token_ids = {}
         output_0.scheduled_cached_reqs.new_block_ids = [None]
         output_0.scheduled_cached_reqs.num_computed_tokens = [10]
         output_0.scheduled_cached_reqs.num_output_tokens = [1]
-        output_0.num_common_prefix_blocks = []
 
         output_1 = MagicMock(spec=SchedulerOutput)
         output_1.num_scheduled_tokens = {"req2": 20}
@@ -1045,13 +1418,10 @@ class TestDPScheduler:
         output_1.finished_req_ids = set()
         output_1.scheduled_cached_reqs = MagicMock(spec=CachedRequestData)
         output_1.scheduled_cached_reqs.req_ids = ["req2"]
-        output_1.scheduled_cached_reqs.resumed_req_ids = set()
         output_1.scheduled_cached_reqs.new_token_ids = [[3, 4]]
-        output_1.scheduled_cached_reqs.all_token_ids = {}
         output_1.scheduled_cached_reqs.new_block_ids = [None]
         output_1.scheduled_cached_reqs.num_computed_tokens = [20]
         output_1.scheduled_cached_reqs.num_output_tokens = [2]
-        output_1.num_common_prefix_blocks = []
 
         scheduler.assigned_dp_rank = {"req1": 0, "req2": 1}
 
@@ -1072,9 +1442,15 @@ class TestDPScheduler:
             block_hashes={},
             finished_requests=("old1", ))
 
+        # One rank preempted a request; the other left the field at its
+        # SchedulerOutput default of None.
+        output_0.preempted_req_ids = {"req_p"}
+        output_1.preempted_req_ids = None
+
         combined = scheduler._combine_scheduler_outputs([output_0, output_1])
 
         assert combined.total_num_scheduled_tokens == 30
+        assert combined.preempted_req_ids == {"req_p"}
 
         # Verify new per-rank fields and structured output propagation
         assert combined.req_ids_per_rank == {0: ["req1"], 1: ["req2"]}
@@ -1100,9 +1476,7 @@ class TestDPScheduler:
             scheduled_new_reqs=[],
             scheduled_cached_reqs=CachedRequestData(
                 req_ids=[],
-                resumed_req_ids=[],
                 new_token_ids=[],
-                all_token_ids={},
                 new_block_ids=[],
                 num_computed_tokens=[],
                 num_output_tokens=[],
@@ -1115,7 +1489,6 @@ class TestDPScheduler:
             total_num_scheduled_tokens=18,
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=[],
             finished_req_ids=set(),
             free_encoder_mm_hashes=set(),
             assigned_dp_rank={
@@ -1132,11 +1505,6 @@ class TestDPScheduler:
 
         model_runner_output = ModelRunnerOutput(
             req_ids=["req1", "req2", "req3"],
-            req_id_to_index={
-                "req1": 0,
-                "req2": 1,
-                "req3": 2
-            },
             sampled_token_ids=[[42], [99], [77]],
             logprobs=None,
             prompt_logprobs_dict={"req2": MagicMock()},
@@ -1156,7 +1524,6 @@ class TestDPScheduler:
 
         # Rank 0 should have req1, req3
         assert outputs[0].req_ids == ["req1", "req3"]
-        assert outputs[0].req_id_to_index == {"req1": 0, "req3": 1}
         assert outputs[0].sampled_token_ids == [[42], [77]]
         # req3 emitted no routed experts this step.
         assert outputs[0].aux_output_connector_output == {
@@ -1165,7 +1532,6 @@ class TestDPScheduler:
 
         # Rank 1 should have req2
         assert outputs[1].req_ids == ["req2"]
-        assert outputs[1].req_id_to_index == {"req2": 0}
         assert outputs[1].sampled_token_ids == [[99]]
         assert "req2" in outputs[1].prompt_logprobs_dict
         assert outputs[1].aux_output_connector_output == {
@@ -1186,9 +1552,7 @@ class TestDPScheduler:
             scheduled_new_reqs=[],
             scheduled_cached_reqs=CachedRequestData(
                 req_ids=[],
-                resumed_req_ids=[],
                 new_token_ids=[],
-                all_token_ids={},
                 new_block_ids=[],
                 num_computed_tokens=[],
                 num_output_tokens=[],
@@ -1200,7 +1564,6 @@ class TestDPScheduler:
             total_num_scheduled_tokens=15,
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
-            num_common_prefix_blocks=[],
             finished_req_ids=set(),
             free_encoder_mm_hashes=set(),
             assigned_dp_rank={
@@ -1224,10 +1587,6 @@ class TestDPScheduler:
 
         model_runner_output = ModelRunnerOutput(
             req_ids=["req1", "req2"],
-            req_id_to_index={
-                "req1": 0,
-                "req2": 1
-            },
             sampled_token_ids=[[42], [99]],
             logprobs=logprobs,
             prompt_logprobs_dict={},
@@ -1345,7 +1704,6 @@ class TestDPScheduler:
 
         model_runner_output = ModelRunnerOutput(
             req_ids=["req1"],
-            req_id_to_index={"req1": 0},
             sampled_token_ids=[[42]],
             logprobs=None,
             prompt_logprobs_dict={},
@@ -1366,6 +1724,361 @@ class TestDPScheduler:
 
         # num_scheduled_tokens should remain 100 for prefill, not overwritten with len(sampled_token_ids) == 1
         assert scheduler_output.num_scheduled_tokens["req1"] == 100
+
+    def test_init_detaches_unpicklable_compiled_state_during_worker_spawn(
+        self,
+        mock_kv_cache_config,
+        mock_structured_output_manager,
+    ):
+        """Test that unpicklable compiled state is detached during Process spawn and restored after."""
+        import gc
+        import pickle
+        import threading
+        import types
+
+        unpicklable_attn = threading.Lock()
+        unpicklable_slice = threading.Lock()
+        moe_layer_names = ["model.layers.0.mlp.experts"]
+
+        vllm_config = types.SimpleNamespace(
+            sharding_config=types.SimpleNamespace(total_dp_size=2),
+            scheduler_config=types.SimpleNamespace(
+                _original_scheduler_cls=Scheduler,
+                max_num_seqs=8,
+                max_num_batched_tokens=1024,
+                async_scheduling=False,
+            ),
+            cache_config=types.SimpleNamespace(
+                enable_prefix_caching=False,
+                prefix_caching_hash_algo="sha256",
+                mamba_num_blocks=None,
+            ),
+            compilation_config=types.SimpleNamespace(
+                static_forward_context={"layer_0": unpicklable_attn},
+                static_all_moe_layers=list(moe_layer_names),
+            ),
+            device_config=types.SimpleNamespace(slice=unpicklable_slice),
+        )
+
+        with pytest.raises(TypeError):
+            pickle.dumps(vllm_config)
+
+        observed_during_spawn = []
+
+        def inspect_process(*args, **kwargs):
+            spawn_vllm_config = kwargs["kwargs"]["vllm_config"]
+            # The full vllm_config payload must be picklable while detached during worker spawn,
+            # with static_all_moe_layers (list[str]) kept intact.
+            pickle.dumps(spawn_vllm_config)
+            observed_during_spawn.append((
+                dict(spawn_vllm_config.compilation_config.
+                     static_forward_context),
+                list(spawn_vllm_config.compilation_config.static_all_moe_layers
+                     ),
+                spawn_vllm_config.device_config.slice,
+            ))
+            proc = MagicMock()
+            proc.start.side_effect = lambda: pickle.dumps(spawn_vllm_config)
+            return proc
+
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
+            with patch('multiprocessing.get_context') as mock_get_context:
+                mock_ctx = _make_mock_mp_context()
+                mock_ctx.Process.side_effect = inspect_process
+                mock_get_context.return_value = mock_ctx
+
+                DPScheduler(
+                    vllm_config=vllm_config,
+                    kv_cache_config=mock_kv_cache_config,
+                    structured_output_manager=mock_structured_output_manager,
+                    block_size=16,
+                    log_stats=False,
+                )
+
+        assert observed_during_spawn == [
+            ({}, moe_layer_names, None),
+            ({}, moe_layer_names, None),
+        ]
+        assert vllm_config.compilation_config.static_forward_context == {
+            "layer_0": unpicklable_attn
+        }
+        assert (vllm_config.compilation_config.static_all_moe_layers ==
+                moe_layer_names)
+        assert vllm_config.device_config.slice is unpicklable_slice
+        with pytest.raises(TypeError):
+            pickle.dumps(vllm_config)
+        assert gc.isenabled()
+
+    def test_init_restores_unpicklable_state_and_gc_on_spawn_error(
+        self,
+        mock_vllm_config,
+        mock_kv_cache_config,
+        mock_structured_output_manager,
+    ):
+        """Test that unpicklable compiled state and gc are restored if Process spawn raises."""
+        import gc
+        import threading
+
+        unpicklable_attn = threading.Lock()
+        unpicklable_slice = threading.Lock()
+
+        mock_vllm_config.compilation_config = MagicMock()
+        mock_vllm_config.compilation_config.static_forward_context = {
+            "layer_0": unpicklable_attn
+        }
+        mock_vllm_config.device_config = MagicMock()
+        mock_vllm_config.device_config.slice = unpicklable_slice
+
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
+            with patch('multiprocessing.get_context') as mock_get_context:
+                mock_ctx = _make_mock_mp_context()
+                mock_ctx.Process.side_effect = RuntimeError("spawn failed")
+                mock_get_context.return_value = mock_ctx
+
+                with pytest.raises(RuntimeError, match="spawn failed"):
+                    DPScheduler(
+                        vllm_config=mock_vllm_config,
+                        kv_cache_config=mock_kv_cache_config,
+                        structured_output_manager=
+                        mock_structured_output_manager,
+                        block_size=16,
+                        log_stats=False,
+                    )
+
+        assert mock_vllm_config.compilation_config.static_forward_context == {
+            "layer_0": unpicklable_attn
+        }
+        assert mock_vllm_config.device_config.slice is unpicklable_slice
+        assert gc.isenabled()
+
+    def test_init_fork_passes_worker_kwargs(
+        self,
+        mock_vllm_config,
+        mock_kv_cache_config,
+        mock_structured_output_manager,
+    ):
+        """Test that forked workers (under Pathways) get keyword args."""
+
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ) as mock_worker:
+            with patch('multiprocessing.get_context') as mock_get_context:
+                mock_ctx = _make_mock_mp_context()
+                mock_get_context.return_value = mock_ctx
+
+                DPScheduler(
+                    vllm_config=mock_vllm_config,
+                    kv_cache_config=mock_kv_cache_config,
+                    structured_output_manager=mock_structured_output_manager,
+                    block_size=16,
+                    log_stats=False,
+                )
+
+        mock_get_context.assert_called_once_with("fork")
+        assert mock_ctx.Process.call_count == 2
+        for rank, process_call in enumerate(mock_ctx.Process.call_args_list):
+            assert process_call.kwargs["target"] is mock_worker
+            args = process_call.kwargs["args"]
+            assert len(args) == 3
+            assert args[0] == rank
+            worker_kwargs = process_call.kwargs["kwargs"]
+            assert set(worker_kwargs) == {
+                "vllm_config",
+                "kv_cache_config",
+                "structured_output_manager",
+                "block_size",
+                "hash_block_size",
+                "mm_registry",
+                "include_finished_set",
+                "log_stats",
+                "original_scheduler_cls",
+            }
+            assert worker_kwargs["vllm_config"] is mock_vllm_config
+            assert (worker_kwargs["structured_output_manager"]
+                    is mock_structured_output_manager)
+            assert worker_kwargs["block_size"] == 16
+
+    def test_init_spawns_workers_by_default(
+        self,
+        monkeypatch,
+        mock_structured_output_manager,
+    ):
+        """Test that workers are spawned by default, with their args sent as
+        cloudpickle bytes."""
+        monkeypatch.setattr(dp_scheduler_module, "_resolve_start_method",
+                            _resolve_start_method)
+        monkeypatch.delenv("JAX_PLATFORMS", raising=False)
+        monkeypatch.setattr(kv_cache_utils,
+                            "NONE_HASH",
+                            b"parent-none-hash",
+                            raising=False)
+
+        unpicklable_attn = threading.Lock()
+        vllm_config = types.SimpleNamespace(
+            sharding_config=types.SimpleNamespace(total_dp_size=2),
+            scheduler_config=types.SimpleNamespace(
+                _original_scheduler_cls=Scheduler,
+                max_num_seqs=8,
+                max_num_batched_tokens=1024,
+                async_scheduling=False,
+            ),
+            cache_config=types.SimpleNamespace(
+                enable_prefix_caching=False,
+                prefix_caching_hash_algo="sha256",
+                mamba_num_blocks=None,
+            ),
+            compilation_config=types.SimpleNamespace(
+                static_forward_context={"layer_0": unpicklable_attn}),
+            device_config=types.SimpleNamespace(slice=None),
+        )
+        kv_cache_config = types.SimpleNamespace(num_blocks=100)
+
+        with patch('multiprocessing.get_context') as mock_get_context:
+            mock_ctx = _make_mock_mp_context()
+            mock_get_context.return_value = mock_ctx
+
+            DPScheduler(
+                vllm_config=vllm_config,
+                kv_cache_config=kv_cache_config,
+                # A MagicMock cannot be pickled, so this also checks that
+                # the manager is never part of the payload.
+                structured_output_manager=mock_structured_output_manager,
+                block_size=16,
+                mm_registry="mm_registry",
+                log_stats=True,
+            )
+
+        mock_get_context.assert_called_once_with("spawn")
+        assert mock_ctx.Process.call_count == 2
+        for rank, process_call in enumerate(mock_ctx.Process.call_args_list):
+            assert (process_call.kwargs["target"]
+                    is _scheduler_worker_trampoline)
+            args = process_call.kwargs["args"]
+            assert len(args) == 4
+            assert args[0] == rank
+            assert isinstance(args[3], bytes)
+
+            worker_kwargs, none_hash_state = cloudpickle.loads(args[3])
+            assert set(worker_kwargs) == {
+                "vllm_config", "kv_cache_config", "block_size",
+                "hash_block_size", "mm_registry", "include_finished_set",
+                "log_stats", "original_scheduler_cls"
+            }
+            assert worker_kwargs["kv_cache_config"].num_blocks == 50
+            assert worker_kwargs["block_size"] == 16
+            assert worker_kwargs["hash_block_size"] == 16
+            assert worker_kwargs["mm_registry"] == "mm_registry"
+            assert worker_kwargs["include_finished_set"] is False
+            assert worker_kwargs["log_stats"] is True
+            assert worker_kwargs["original_scheduler_cls"] is Scheduler
+            # Unpicklable compiled state is detached while pickling.
+            assert (worker_kwargs["vllm_config"].compilation_config.
+                    static_forward_context == {})
+            assert none_hash_state["NONE_HASH"] == b"parent-none-hash"
+
+        assert vllm_config.compilation_config.static_forward_context == {
+            "layer_0": unpicklable_attn
+        }
+
+
+class TestResolveStartMethod:
+
+    @pytest.mark.parametrize("jax_platforms, expected", [
+        (None, "spawn"),
+        ("", "spawn"),
+        ("tpu", "spawn"),
+        ("proxy", "fork"),
+        ("cpu,proxy", "fork"),
+    ])
+    def test_resolve_start_method(self, monkeypatch, jax_platforms, expected):
+        """Workers are spawned, except under Pathways."""
+        if jax_platforms is None:
+            monkeypatch.delenv("JAX_PLATFORMS", raising=False)
+        else:
+            monkeypatch.setenv("JAX_PLATFORMS", jax_platforms)
+        assert _resolve_start_method() == expected
+
+    def test_ignores_vllm_worker_multiproc_method(self, monkeypatch):
+        """vLLM's own start method setting does not apply to these
+        workers."""
+        monkeypatch.delenv("JAX_PLATFORMS", raising=False)
+        monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
+        assert _resolve_start_method() == "spawn"
+
+
+class TestSchedulerWorkerTrampoline:
+    """Test the entry point of spawned scheduler worker processes."""
+
+    def test_trampoline_unpacks_payload_and_rebuilds_manager(
+            self, monkeypatch):
+        """Test that the trampoline restores worker args and NONE_HASH."""
+        monkeypatch.setattr(kv_cache_utils,
+                            "NONE_HASH",
+                            b"child-none-hash",
+                            raising=False)
+        vllm_config = types.SimpleNamespace(name="vllm_config")
+        worker_kwargs = dict(
+            vllm_config=vllm_config,
+            kv_cache_config=types.SimpleNamespace(num_blocks=50),
+            block_size=16,
+            hash_block_size=32,
+            mm_registry="mm_registry",
+            include_finished_set=False,
+            log_stats=True,
+            original_scheduler_cls=Scheduler,
+        )
+        payload = cloudpickle.dumps((worker_kwargs, {
+            "NONE_HASH": b"parent-none-hash"
+        }))
+        input_conn, output_conn = MagicMock(), MagicMock()
+        calls = []
+        real_loads = cloudpickle.loads
+
+        def recording_loads(data):
+            calls.append("unpickle")
+            return real_loads(data)
+
+        def record_start_method(method, force):
+            calls.append(("start_method", method, force))
+
+        dp = 'tpu_inference.core.sched.dp_scheduler'
+        worker_patch = patch(f'{dp}._scheduler_worker_process')
+        manager_patch = patch(f'{dp}.StructuredOutputManager')
+        plugins_patch = patch(f'{dp}.load_general_plugins',
+                              side_effect=lambda: calls.append("plugins"))
+        loads_patch = patch(f'{dp}.cloudpickle.loads',
+                            side_effect=recording_loads)
+        start_method_patch = patch(f'{dp}.multiprocessing.set_start_method',
+                                   side_effect=record_start_method)
+        with worker_patch as mock_worker, manager_patch as mock_manager_cls, \
+                plugins_patch, loads_patch, start_method_patch:
+            _scheduler_worker_trampoline(1, input_conn, output_conn, payload)
+
+        # The platform default start method is restored first, then plugins
+        # are loaded, and only then is the config unpickled.
+        assert calls == [("start_method", None, True), "plugins", "unpickle"]
+
+        mock_manager_cls.assert_called_once()
+        (rebuilt_from, ) = mock_manager_cls.call_args.args
+        assert rebuilt_from.name == "vllm_config"
+
+        mock_worker.assert_called_once()
+        assert mock_worker.call_args.args == (1, input_conn, output_conn)
+        called_kwargs = mock_worker.call_args.kwargs
+        assert (called_kwargs["structured_output_manager"]
+                is mock_manager_cls.return_value)
+        # The manager is built from the same config the scheduler gets.
+        assert called_kwargs["vllm_config"] is rebuilt_from
+        assert called_kwargs["kv_cache_config"].num_blocks == 50
+        assert called_kwargs["hash_block_size"] == 32
+        assert called_kwargs["log_stats"] is True
+        assert called_kwargs["original_scheduler_cls"] is Scheduler
+
+        assert kv_cache_utils.NONE_HASH == b"parent-none-hash"
 
 
 class TestUpdateVllmConfigForDPScheduler:
@@ -1396,6 +2109,43 @@ class TestUpdateVllmConfigForDPScheduler:
 
         # Verify config was NOT changed
         assert mock_config.scheduler_config.scheduler_cls == original_scheduler_cls
+
+
+class TestGetMaxCacheHitLength:
+    """PROBE_COMPUTED_BLOCKS must follow the same prefix-cache bound as vLLM's
+    Scheduler. Newer vLLM exposes Request.get_max_cache_hit_length(); older
+    vLLM only had the Request.skip_reading_prefix_cache flag."""
+
+    def test_real_request_matches_upstream(self):
+        from vllm.sampling_params import SamplingParams
+        req = Request(request_id="r",
+                      prompt_token_ids=list(range(10)),
+                      sampling_params=SamplingParams(max_tokens=4),
+                      pooling_params=None,
+                      block_hasher=None)
+        if hasattr(req, "get_max_cache_hit_length"):
+            assert _get_max_cache_hit_length(req) == \
+                req.get_max_cache_hit_length()
+        # Last token is always recomputed.
+        assert _get_max_cache_hit_length(req) == 9
+
+    def test_skip_reading_prefix_cache_disables_hit(self):
+        from vllm.sampling_params import SamplingParams
+        req = Request(request_id="r",
+                      prompt_token_ids=list(range(10)),
+                      sampling_params=SamplingParams(
+                          max_tokens=4, skip_reading_prefix_cache=True),
+                      pooling_params=None,
+                      block_hasher=None)
+        assert _get_max_cache_hit_length(req) == 0
+
+    def test_legacy_request_without_new_api(self):
+        legacy = MagicMock(spec=["num_tokens", "skip_reading_prefix_cache"])
+        legacy.num_tokens = 10
+        legacy.skip_reading_prefix_cache = False
+        assert _get_max_cache_hit_length(legacy) == 9
+        legacy.skip_reading_prefix_cache = True
+        assert _get_max_cache_hit_length(legacy) == 0
 
 
 if __name__ == "__main__":

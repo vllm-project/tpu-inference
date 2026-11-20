@@ -23,7 +23,7 @@ import pytest
 import torch
 from jax.sharding import Mesh
 from transformers import PretrainedConfig
-from vllm.config import (ModelConfig, ParallelConfig, VllmConfig,
+from vllm.config import (LoadConfig, ModelConfig, ParallelConfig, VllmConfig,
                          set_current_vllm_config)
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
@@ -70,10 +70,7 @@ def vllm_config() -> MagicMock:
     mock_config = MagicMock(spec=VllmConfig)
     mock_config.model_config = ModelConfig(model)
     mock_config.model_config.dtype = jnp.bfloat16
-    mock_config.load_config = MagicMock()
-    mock_config.load_config.download_dir = None
-    mock_config.load_config.load_format = "auto"
-    mock_config.load_config.model_loader_extra_config = dict()
+    mock_config.load_config = LoadConfig()
     mock_config.additional_config = dict()
     mock_config.cache_config = MagicMock(cache_dtype="auto")
     mock_config.parallel_config = ParallelConfig(pipeline_parallel_size=1)
@@ -669,3 +666,37 @@ class TestGetModel:
         mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh, False,
                                               None)
         assert result == "vllm_model_sentinel"
+
+    def test_get_model_auto_selects_native_sequence_classification(
+            self, monkeypatch, rng, mesh):
+        from tests.models.jax.test_gemma4_classification import \
+            _make_supported_vllm_config
+        from tpu_inference.models.jax.gemma4_classification import \
+            Gemma4ForSequenceClassification
+
+        monkeypatch.setattr(model_loader.envs, "MODEL_IMPL_TYPE", "auto")
+        cfg = _make_supported_vllm_config()
+        assert model_loader.resolve_model_impl_type(cfg) == "flax_nnx"
+
+        unsupported_cfg = _make_supported_vllm_config()
+        unsupported_cfg.model_config.pooler_config.seq_pooling_type = "MEAN"
+        assert model_loader.resolve_model_impl_type(unsupported_cfg) == "vllm"
+        # An explicit flax_nnx request still falls back through get_model's
+        # UnsupportedArchitectureError handler instead of loading the class.
+        with pytest.raises(model_loader.UnsupportedArchitectureError):
+            model_loader.get_flax_model(unsupported_cfg, rng, mesh)
+
+        captured = []
+
+        class SentinelError(Exception):
+            pass
+
+        def fake_get_nnx_model(model_class, *args, **kwargs):
+            captured.append(model_class)
+            raise SentinelError
+
+        monkeypatch.setattr(model_loader, "_get_nnx_model", fake_get_nnx_model)
+        # Goes through get_model so the default "auto" resolution is covered.
+        with set_current_vllm_config(cfg), pytest.raises(SentinelError):
+            model_loader.get_model(cfg, rng, mesh)
+        assert captured == [Gemma4ForSequenceClassification]

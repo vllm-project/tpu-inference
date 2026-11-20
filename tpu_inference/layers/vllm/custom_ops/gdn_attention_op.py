@@ -121,6 +121,11 @@ def gdn_attention_core_tpu(
                                               dp_size)
 
     cache_config = vllm_context.vllm_config.cache_config
+    spec_config = getattr(vllm_context.vllm_config, "speculative_config", None)
+    raw_spec = getattr(spec_config, "num_speculative_tokens", 0)
+    num_spec_tokens = (int(raw_spec) if isinstance(raw_spec, int)
+                       and not isinstance(raw_spec, bool) else 0)
+    read_offsets_sliced = None
     if cache_config.mamba_cache_mode == "align":
         # Mamba prefix caching ("align" mode): derive read/write state slots
         # from the mamba block table directly on TPU.
@@ -166,11 +171,22 @@ def gdn_attention_core_tpu(
         #     requests into lower-index slots after earlier ones finish), the
         #     slot id moves with the request so the kernel still reads/writes
         #     the slot that holds this request's real state.
-        state_indices = attn_metadata.mamba_state_indices.astype(jnp.int32)
+        state_indices = attn_metadata.mamba.state_indices.astype(jnp.int32)
         state_indices_sliced = truncate_sharded_tensor(state_indices,
                                                        padded_num_reqs_per_dp,
                                                        dp_size)
         read_state_indices_sliced = state_indices_sliced
+        if (num_spec_tokens > 0 and attn_metadata.mamba is not None
+                and attn_metadata.mamba.read_offsets is not None):
+            read_offsets_sliced = jnp.maximum(
+                truncate_sharded_tensor(
+                    attn_metadata.mamba.read_offsets.astype(jnp.int32),
+                    padded_num_reqs_per_dp, dp_size), 0)
+
+    extra_gdn_kwargs = {}
+    if read_offsets_sliced is not None:
+        extra_gdn_kwargs["read_offsets"] = read_offsets_sliced
+        extra_gdn_kwargs["num_spec_tokens"] = num_spec_tokens
 
     linear_attention_backend = layer_module.linear_attention_backend
     (new_conv_state_extracted,
@@ -196,6 +212,7 @@ def gdn_attention_core_tpu(
          mesh=mesh,
          read_state_indices=read_state_indices_sliced,
          conv1d_gdn_kernel=linear_attention_backend.conv1d_gdn_kernel(),
+         **extra_gdn_kwargs,
      )
     if state_len > kernel_size - 1:
         remaining_old_state = conv_state[:, kernel_size - 1:, :]

@@ -21,8 +21,7 @@ from torchax.interop import jax_view, torch_view
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
-    from vllm.v1.worker.kv_connector_model_runner_mixin import \
-        KVConnectorOutput
+    from vllm.v1.outputs import KVConnectorOutput
 else:
     KVConnectorOutput = Any
 

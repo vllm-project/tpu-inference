@@ -21,7 +21,6 @@ import pytest
 from jax._src import test_util as jtu
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
-from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import (MultiModalBatchedField,
                                     MultiModalFeatureSpec, MultiModalFieldElem,
                                     MultiModalKwargsItem, PlaceholderRange)
@@ -108,6 +107,7 @@ class TestMultiModalManager:
         req_state = CachedRequestState(
             req_id="req-1",
             prompt_token_ids=[1, 2, 3],
+            prefill_token_ids=[1, 2, 3],
             output_token_ids=[],
             sampling_params=MagicMock(),
             block_ids=(),
@@ -188,6 +188,7 @@ class TestMultiModalManager:
         req_state_1 = CachedRequestState(
             req_id="req-1",
             prompt_token_ids=[],
+            prefill_token_ids=[],
             output_token_ids=[],
             sampling_params=MagicMock(),
             block_ids=(),
@@ -215,6 +216,7 @@ class TestMultiModalManager:
         req_state_2 = CachedRequestState(
             req_id="req-2",
             prompt_token_ids=[],
+            prefill_token_ids=[],
             output_token_ids=[],
             sampling_params=MagicMock(),
             block_ids=(),
@@ -295,6 +297,7 @@ class TestMultiModalManager:
         req_state = CachedRequestState(
             req_id=req_id,
             prompt_token_ids=list(range(prompt_token_len)),
+            prefill_token_ids=list(range(prompt_token_len)),
             output_token_ids=[],
             sampling_params=mock_sampling_params,
             block_ids=([], ),
@@ -427,6 +430,7 @@ class TestMultiModalManager:
         req_state = CachedRequestState(
             req_id=req_id,
             prompt_token_ids=list(range(prompt_len)),
+            prefill_token_ids=list(range(prompt_len)),
             output_token_ids=[],
             sampling_params=mock_sampling_params,
             block_ids=([], ),
@@ -447,31 +451,26 @@ class TestMultiModalManager:
         mock_scheduler_output = MagicMock(spec=VllmSchedulerOutput)
         mock_scheduler_output.num_scheduled_tokens = {req_id: num_scheduled}
 
-        # Patch the static method that computes completion positions
-        with patch.object(MRotaryEmbedding,
-                          "get_next_input_positions_tensor") as mock_get_next:
-            # 2. ===== Act =====
-            self.runner.mm_manager.calc_mrope_positions(
-                mock_scheduler_output,
-                req_ids_dp={0: [req_id]},
-                padded_num_scheduled_tokens_per_dp_rank=num_scheduled)
+        # 2. ===== Act =====
+        self.runner.mm_manager.calc_mrope_positions(
+            mock_scheduler_output,
+            req_ids_dp={0: [req_id]},
+            padded_num_scheduled_tokens_per_dp_rank=num_scheduled)
 
-            # 3. ===== Assert =====
-            # The first 5 positions should be copied from the pre-computed prompt positions
-            expected_prompt_part = mock_mrope_positions[:, 15:20]
-            actual_prompt_part = self.runner.mrope_positions_cpu[:, 0:5]
-            np.testing.assert_array_equal(actual_prompt_part,
-                                          expected_prompt_part)
+        # 3. ===== Assert =====
+        # The first 5 positions should be copied from the pre-computed prompt positions
+        expected_prompt_part = mock_mrope_positions[:, 15:20]
+        actual_prompt_part = self.runner.mrope_positions_cpu[:, 0:5]
+        np.testing.assert_array_equal(actual_prompt_part, expected_prompt_part)
 
-            # The next 5 positions should be computed on-the-fly
-            mock_get_next.assert_called_once()
-            call_kwargs = mock_get_next.call_args.kwargs
-            np.testing.assert_array_equal(call_kwargs["out"],
-                                          self.runner.mrope_positions_cpu)
-            assert call_kwargs["out_offset"] == 5
-            assert call_kwargs["mrope_position_delta"] == mrope_delta
-            assert call_kwargs["context_len"] == prompt_len
-            assert call_kwargs["num_new_tokens"] == 5
+        # The next 5 (completion) positions are computed on the fly: the same
+        # position in all three M-RoPE sections, starting at
+        # context_len (= prompt_len here) + mrope_position_delta.
+        expected_completion = np.tile(
+            np.arange(prompt_len + mrope_delta, prompt_len + mrope_delta + 5),
+            (3, 1))
+        np.testing.assert_array_equal(self.runner.mrope_positions_cpu[:, 5:10],
+                                      expected_completion)
 
     # The test is slow on v6e, causing timeouts in presubmit. See b/513860288.
     @pytest.mark.skipif(not jtu.is_device_tpu_at_least(version=7),
@@ -507,6 +506,7 @@ class TestMultiModalManager:
             return CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=list(range(20)),
+                prefill_token_ids=list(range(20)),
                 output_token_ids=[],
                 sampling_params=mock_sampling_params,
                 block_ids=([], ),
@@ -600,6 +600,7 @@ class TestMultiModalManager:
             return CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=list(range(prompt_len)),
+                prefill_token_ids=list(range(prompt_len)),
                 output_token_ids=[],
                 sampling_params=mock_sampling_params,
                 block_ids=([], ),

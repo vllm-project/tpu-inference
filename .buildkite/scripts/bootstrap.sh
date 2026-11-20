@@ -27,29 +27,36 @@ source "${SCRIPT_DIR}/kube_suites.sh"
 
 determine_job_priority() {
   local priority=""
+  local workload_priority=""
   echo "--- Determining job priority" >&2
   if [[ "${NIGHTLY:-0}" == "1" ]]; then
-    # Nightly build (Lowest priority)
+    # Nightly build (Lowest priority). Unclassed on kube, level with the
+    # vllm-torchtpu nightlies it shares the TPU queues with, which record no
+    # class either.
     priority="$PRIORITY_NIGHTLY"
     echo "Build type: Nightly - Priority: $priority" >&2
   elif [[ "$BUILDKITE_PIPELINE_SLUG" == "tpu-vllm-integration" ]]; then
     # Integration pipeline
     priority="$PRIORITY_INTEGRATION"
+    workload_priority="integration"
     echo "Build type: Integration - Priority: $priority" >&2
-  elif [[ "$BUILDKITE_PULL_REQUEST" != "false" && -n "$BUILDKITE_PULL_REQUEST" ]]; then
+  elif [[ "${BUILDKITE_PULL_REQUEST:-false}" != "false" && -n "${BUILDKITE_PULL_REQUEST:-}" ]]; then
     local labels="${BUILDKITE_PULL_REQUEST_LABELS:-}"
     if grep -qx "oncall-fix" <<< "${labels//,/$'\n'}"; then
       # PR that fixes a CI or nightly breakage (Highest priority)
       priority="$PRIORITY_ONCALL_FIX"
+      workload_priority="oncall-fix"
       echo "Build type: On-call fix (PR #$BUILDKITE_PULL_REQUEST) - Priority: $priority" >&2
     else
       # Pre-merge PR tests
       priority="$PRIORITY_PRE_MERGE"
+      workload_priority="pre-merge"
       echo "Build type: Pre-merge (PR #$BUILDKITE_PULL_REQUEST) - Priority: $priority" >&2
     fi
-  elif [[ "$BUILDKITE_BRANCH" == "main" && "$BUILDKITE_PULL_REQUEST" == "false" ]]; then
+  elif [[ "${BUILDKITE_BRANCH:-}" == "main" && "${BUILDKITE_PULL_REQUEST:-false}" == "false" ]]; then
     # Post-merge tests on main
     priority="$PRIORITY_POST_MERGE"
+    workload_priority="post-merge"
     echo "Build type: Post-merge (Main branch) - Priority: $priority" >&2
   else
     # Default priority for other branches or manual builds
@@ -57,15 +64,31 @@ determine_job_priority() {
     echo "Build type: General - Priority: $priority" >&2
   fi
 
-  echo "$priority"
+  echo "$priority $workload_priority"
 }
 
-JOB_PRIORITY=$(determine_job_priority)
+job_priorities=$(determine_job_priority)
+read -r JOB_PRIORITY WORKLOAD_PRIORITY <<< "$job_priorities"
 export JOB_PRIORITY
 buildkite-agent meta-data set "JOB_PRIORITY" "$JOB_PRIORITY"
+# The kube launcher submits every workload of the build at this Kueue priority
+# class (ci-infra launch.py). None leaves them unclassed, at 0.
+if [[ -n "$WORKLOAD_PRIORITY" ]]; then
+  buildkite-agent meta-data set "WORKLOAD_PRIORITY" "$WORKLOAD_PRIORITY"
+fi
 if [[ "$JOB_PRIORITY" == "$PRIORITY_ONCALL_FIX" ]]; then
   buildkite-agent annotate --style warning --context oncall-fix \
     "Runs at on-call priority (\`oncall-fix\` label): ahead of every other build, including main."
+fi
+# One concurrency group per author for the TPU steps of their PR builds; see
+# PR_TPU_JOBS_PER_AUTHOR. Keyed on the commit author's email, which every
+# webhook build carries: the Buildkite creator is missing whenever the GitHub
+# account is not linked to a Buildkite user.
+if [[ "${BUILDKITE_PULL_REQUEST:-false}" != "false" && -n "${BUILDKITE_PULL_REQUEST:-}" ]]; then
+  pr_author="${BUILDKITE_BUILD_AUTHOR_EMAIL:-${BUILDKITE_BUILD_CREATOR_EMAIL:-}}"
+  if [[ -n "$pr_author" ]]; then
+    export PR_TPU_CONCURRENCY_GROUP="tpu-pr/${pr_author,,}"
+  fi
 fi
 
 # --- Skip build if only docs, icons, or CODEOWNERS changed ---
@@ -197,6 +220,11 @@ upload_kube_pipeline() {
         for lane in ${CI_LANES}; do
             case "${lane}" in
                 jax)
+                    if [[ "${TPU_VERSION:-tpu6e}" == "tpu7x" ]]; then
+                        export TESTS_GROUP_LABEL="${TESTS_GROUP_LABEL:-[jax] TPU7x Tests Group}"
+                    else
+                        export TESTS_GROUP_LABEL="${TESTS_GROUP_LABEL:-[jax] TPU6e Tests Group}"
+                    fi
                     upload_with_priority .buildkite/pipeline_jax_kube.yml "$JOB_PRIORITY"
                     if [[ "${TPU_VERSION:-tpu6e}" == "tpu6e" ]]; then
                         upload_with_priority .buildkite/pipeline_pypi_kube.yml "$JOB_PRIORITY"
@@ -404,12 +432,19 @@ else
     echo "Sleeping for 5 seconds to ensure GitHub API is updated..."
     sleep 5
 
-    API_URL="https://api.github.com/repos/vllm-project/tpu-inference/pulls/$BUILDKITE_PULL_REQUEST"
+    # Derive owner/repo from BUILDKITE_REPO (HTTPS or SSH) so PR checks work
+    # both before and after the tpu-inference -> vllm-jax rename; curl -L
+    # follows HTTP 301 redirects while the pipeline still uses the legacy URL.
+    REPO_SLUG="${BUILDKITE_REPO:-https://github.com/vllm-project/tpu-inference.git}"
+    REPO_SLUG="${REPO_SLUG%/}"
+    REPO_SLUG="${REPO_SLUG%.git}"
+    REPO_SLUG="${REPO_SLUG#*github.com[:/]}"
+    API_URL="https://api.github.com/repos/${REPO_SLUG}/pulls/$BUILDKITE_PULL_REQUEST"
     echo "Fetching PR details from: $API_URL"
 
     # Fetch the response body and save to a temporary file
     GITHUB_PR_RESPONSE_FILE="github_api_logs.json"
-    curl -s "$API_URL" -o "$GITHUB_PR_RESPONSE_FILE"
+    curl -fsSL "$API_URL" -o "$GITHUB_PR_RESPONSE_FILE"
     
     # Upload the full response body as a Buildkite artifact
     echo "Uploading GitHub API response as artifact..."

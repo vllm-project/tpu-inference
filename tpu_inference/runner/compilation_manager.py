@@ -30,7 +30,8 @@ import tpu_inference.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, GroupedAttentionMetadata, SharedAttentionMetadata)
+    AttentionMetadata, GroupedAttentionMetadata, MambaMetadata,
+    SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (
     compute_and_gather_logprobs, compute_and_gather_prompt_logprobs,
@@ -198,9 +199,14 @@ class CompilationManager:
                 # AOT lower not supported here (e.g. a jit whose body contains a
                 # nested jit with compiler_options). Fall back to warmup-only — the
                 # warmup pass will trigger inline compile.
+                # exc_info keeps the traceback: without it a lowering failure
+                # that also breaks warmup only shows up as a bare message
+                # (e.g. through RayDistributedExecutor workers).
                 logger.info(
                     "AOT lower skipped for %s (%r); will compile in warmup.",
-                    name, e)
+                    name,
+                    e,
+                    exc_info=True)
                 return
 
         # Compilation is thread-safe
@@ -403,7 +409,8 @@ class CompilationManager:
                                     is_last_rank=True,
                                     num_reqs: int,
                                     pcp_has_cached_kv: bool = False,
-                                    pcp_num_reqs: int = 1) -> None:
+                                    pcp_num_reqs: int = 1,
+                                    is_decode: bool = False) -> None:
         num_tokens = None
         if input_ids is not None:
             num_tokens = input_ids.shape[0]
@@ -491,6 +498,25 @@ class CompilationManager:
         else:
             mamba_state_indices = None
 
+        spec_config = getattr(self.runner, "speculative_config", None)
+        num_spec_tokens = (spec_config.num_speculative_tokens if
+                           (spec_config
+                            and self.runner.kv_cache_config.has_mamba_layers)
+                           else 0)
+        if num_spec_tokens > 0:
+            mamba_read_offsets = device_array(self.runner.mesh,
+                                              np.zeros(
+                                                  self.runner.max_num_reqs,
+                                                  dtype=np.int32),
+                                              sharding=metadata_attn_sharding)
+        else:
+            mamba_read_offsets = None
+
+        mamba_metadata = (MambaMetadata(state_indices=mamba_state_indices,
+                                        read_offsets=mamba_read_offsets) if
+                          (mamba_state_indices is not None
+                           or mamba_read_offsets is not None) else None)
+
         def build_block_table(kv_cache_gid: int) -> jax.Array:
             block_table_obj = self.runner.input_batch.block_table[kv_cache_gid]
             shape = (self.runner.max_num_reqs,
@@ -510,11 +536,12 @@ class CompilationManager:
                 seq_lens=seq_lens,
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
-                mamba_state_indices=mamba_state_indices,
+                mamba=mamba_metadata,
                 padded_num_reqs=num_reqs,
                 pcp=pcp,
                 backend_metadata=attention_backend.backend_metadata(
                     attention_arrays, gid),
+                is_decode=is_decode,
             )
 
             return attention_metadata_gid
@@ -525,8 +552,8 @@ class CompilationManager:
                 seq_lens=seq_lens,
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
-                mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=num_reqs,
+                is_decode=is_decode,
             )
 
         attention_metadata: AttentionMetadata | dict[str, AttentionMetadata]
@@ -589,7 +616,12 @@ class CompilationManager:
                 num_tokens=num_tokens,
                 num_reqs=num_reqs,
                 warmup_handler=model_fn_warmup,
-                shared_attention_metadata=shared_attention_metadata,
+                # Pass the metadata through call_kwargs so the AOT-compiled
+                # executable has the same signature as the warm-up and serving
+                # calls; otherwise the warm-up recompiles the backbone.
+                call_kwargs={
+                    "shared_attention_metadata": shared_attention_metadata
+                },
             )
 
     def _precompile_substitute_placeholder_token(self) -> None:
@@ -723,8 +755,55 @@ class CompilationManager:
             num_spec_tokens=num_spec_tokens,
         )
 
+    def _decode_only_backbone_shapes(self) -> set[tuple[int, int]]:
+        """(padded num_tokens, padded num_reqs) pairs a decode-only step can take.
+
+        `is_decode` is a static field of the attention metadata, so the DCP
+        decode-only backbone is a separate compiled variant per padding pair
+        and every pair the runner can produce must be warmed up. This mirrors
+        `_prepare_inputs`: a decode-only step with `n` live requests on the
+        busiest DP rank schedules between `n` and `n * max_decode_tokens`
+        tokens, pads them with `num_tokens_paddings_per_dp` and the request
+        count with `attn_num_reqs_paddings_per_dp`, and scales both by
+        `dp_size`. In particular, the smallest request bucket pairs with the
+        smallest token bucket (e.g. 4 requests -> 16 tokens), which the old
+        `num_tokens == num_reqs` rule never covered and left to a ~30 s JIT
+        compile in the middle of serving.
+        """
+        runner = self.runner
+        dp_size = runner.dp_size
+        token_paddings = runner.num_tokens_paddings_per_dp
+        req_paddings = runner.attn_num_reqs_paddings_per_dp
+        max_decode_tokens = runner.input_batch.max_decode_tokens
+        shapes: set[tuple[int, int]] = set()
+        for num_live in range(1, max(req_paddings) + 1):
+            if num_live > token_paddings[-1]:
+                # One token per live request already exceeds the step's
+                # token budget; the scheduler never builds such a step.
+                break
+            padded_reqs = runner_utils.get_padded_token_len(
+                req_paddings, num_live)
+            lo = runner_utils.get_padded_token_len(token_paddings, num_live)
+            hi = runner_utils.get_padded_token_len(
+                token_paddings,
+                min(num_live * max_decode_tokens, token_paddings[-1]))
+            for padded_tokens in token_paddings:
+                if lo <= padded_tokens <= hi:
+                    shapes.add(
+                        (padded_tokens * dp_size, padded_reqs * dp_size))
+        return shapes
+
     def _precompile_backbone_text_only(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
+        dcp_enabled = bool(
+            hasattr(self.runner, 'mesh') and self.runner.mesh is not None
+            and hasattr(self.runner.mesh, 'shape')
+            and 'dcp' in self.runner.mesh.shape
+            and isinstance(self.runner.mesh.shape['dcp'], (int, np.integer))
+            and self.runner.mesh.shape['dcp'] > 1)
+        needs_decode_compile = dcp_enabled and not self.runner.enable_continue_decode
+        decode_shapes = (self._decode_only_backbone_shapes()
+                         if needs_decode_compile else set())
         for num_tokens in self.runner.num_tokens_paddings:
             for num_reqs in self.runner.attn_num_reqs_paddings:
                 dp_sharding = NamedSharding(
@@ -780,6 +859,17 @@ class CompilationManager:
                             num_reqs=num_reqs,
                             pcp_has_cached_kv=_has_cached_kv,
                             pcp_num_reqs=_pcp_reqs)
+                if (num_tokens, num_reqs) in decode_shapes:
+                    self._precompile_backbone_helper(
+                        f"worker{self.runner.rank} backbone decode",
+                        input_ids=input_ids,
+                        positions=positions,
+                        inputs_embeds=None,
+                        intermediate_tensors=intermediate_tensors,
+                        is_first_rank=is_first_rank,
+                        is_last_rank=is_last_rank,
+                        num_reqs=num_reqs,
+                        is_decode=True)
 
     def _precompile_backbone_with_inputs_embeds(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
@@ -998,6 +1088,11 @@ class CompilationManager:
 
     def _precompile_compute_pooling(self) -> None:
         logger.info("Compiling compute_pooling with different input shapes.")
+        prewarm = getattr(self.runner.pooler_fn, "prewarm", None)
+        if prewarm is not None:
+            # Poolers that consume device logits compile their own path.
+            prewarm(self.runner)
+            return
 
         # vLLM pooling layer design has complex and dynamic logic. There are
         # interoperate between tensors from host and accelerator.
@@ -1223,7 +1318,8 @@ class CompilationManager:
                 dp_sharding = NamedSharding(self.runner.mesh, PartitionSpec())
 
                 target_logits = self._create_dummy_tensor(
-                    (num_logits, vocab_size), jnp.float32, logits_sharding)
+                    (num_logits, vocab_size), self.runner.model_config.dtype,
+                    logits_sharding)
 
                 processed_bonus_logits = self._create_dummy_tensor(
                     (num_reqs, vocab_size), jnp.float32, logits_sharding)
@@ -1295,9 +1391,11 @@ class CompilationManager:
                 logits_sharding = NamedSharding(self.runner.mesh, logits_spec)
 
                 target_logits = self._create_dummy_tensor(
-                    (num_logits, vocab_size), jnp.bfloat16, logits_sharding)
+                    (num_logits, vocab_size), self.runner.model_config.dtype,
+                    logits_sharding)
                 bonus_logits = self._create_dummy_tensor(
-                    (num_reqs, vocab_size), jnp.bfloat16, logits_sharding)
+                    (num_reqs, vocab_size), self.runner.model_config.dtype,
+                    logits_sharding)
 
                 self._run_compilation(
                     f"worker{self.runner.rank} _extend_logits_simple",
@@ -1556,13 +1654,23 @@ class CompilationManager:
         # ForbidCompile guard inside `Eagle3Proposer.propose` raises. None for
         # pure-attention models (the common eagle3 case) so the field stays
         # absent end-to-end.
+        spec_config = getattr(self.runner, "speculative_config", None)
         if self.runner.kv_cache_config.has_mamba_layers:
             eagle3_mamba_state_indices = device_array(
                 self.runner.mesh,
                 np.zeros(self.runner.max_num_reqs, dtype=np.int32),
                 sharding=dp_sharding)
+            eagle3_num_spec_tokens = (spec_config.num_speculative_tokens
+                                      if spec_config else 0)
+            eagle3_mamba_read_offsets = (device_array(
+                self.runner.mesh,
+                np.zeros(self.runner.max_num_reqs, dtype=np.int32),
+                sharding=dp_sharding) if eagle3_num_spec_tokens > 0 else None)
+            eagle3_mamba = MambaMetadata(
+                state_indices=eagle3_mamba_state_indices,
+                read_offsets=eagle3_mamba_read_offsets)
         else:
-            eagle3_mamba_state_indices = None
+            eagle3_mamba = None
 
         num_reqs_dp = self._create_dummy_tensor((dp_size, ),
                                                 jnp.int32,
@@ -1579,7 +1687,7 @@ class CompilationManager:
                     seq_lens=seq_lens,
                     query_start_loc=query_start_loc,
                     request_distribution=request_distribution,
-                    mamba_state_indices=eagle3_mamba_state_indices,
+                    mamba=eagle3_mamba,
                     padded_num_reqs=num_reqs,
                 )
 
@@ -1691,14 +1799,23 @@ class CompilationManager:
         # ForbidCompile guard inside `Eagle3Proposer.propose` raises. None for
         # pure-attention models (the common eagle3 case) so the field stays
         # absent end-to-end.
+        spec_config = getattr(self.runner, "speculative_config", None)
         if self.runner.kv_cache_config.has_mamba_layers:
             mamba_state_indices = device_array(self.runner.mesh,
                                                np.zeros(
                                                    self.runner.max_num_reqs,
                                                    dtype=np.int32),
                                                sharding=dp_sharding)
+            mtp_num_spec_tokens = (spec_config.num_speculative_tokens
+                                   if spec_config else 0)
+            mtp_mamba_read_offsets = (device_array(
+                self.runner.mesh,
+                np.zeros(self.runner.max_num_reqs, dtype=np.int32),
+                sharding=dp_sharding) if mtp_num_spec_tokens > 0 else None)
+            mtp_mamba = MambaMetadata(state_indices=mamba_state_indices,
+                                      read_offsets=mtp_mamba_read_offsets)
         else:
-            mamba_state_indices = None
+            mtp_mamba = None
 
         num_reqs_dp = self._create_dummy_tensor((dp_size, ),
                                                 jnp.int32,
@@ -1723,7 +1840,7 @@ class CompilationManager:
                     seq_lens=seq_lens,
                     query_start_loc=query_start_loc,
                     request_distribution=request_distribution,
-                    mamba_state_indices=mamba_state_indices,
+                    mamba=mtp_mamba,
                     padded_num_reqs=num_reqs,
                 )
 
@@ -1815,13 +1932,23 @@ class CompilationManager:
                                             request_distribution,
                                             sharding=dp_sharding)
 
+        spec_config = getattr(self.runner, "speculative_config", None)
         if self.runner.kv_cache_config.has_mamba_layers:
             dflash_mamba_state_indices = device_array(
                 self.runner.mesh,
                 np.zeros(self.runner.max_num_reqs, dtype=np.int32),
                 sharding=dp_sharding)
+            dflash_num_spec_tokens = (spec_config.num_speculative_tokens
+                                      if spec_config else 0)
+            dflash_mamba_read_offsets = (device_array(
+                self.runner.mesh,
+                np.zeros(self.runner.max_num_reqs, dtype=np.int32),
+                sharding=dp_sharding) if dflash_num_spec_tokens > 0 else None)
+            dflash_mamba = MambaMetadata(
+                state_indices=dflash_mamba_state_indices,
+                read_offsets=dflash_mamba_read_offsets)
         else:
-            dflash_mamba_state_indices = None
+            dflash_mamba = None
 
         num_reqs_dp = self._create_dummy_tensor((dp_size, ),
                                                 jnp.int32,
@@ -1857,7 +1984,7 @@ class CompilationManager:
                     seq_lens=seq_lens,
                     query_start_loc=query_start_loc,
                     request_distribution=request_distribution,
-                    mamba_state_indices=dflash_mamba_state_indices,
+                    mamba=dflash_mamba,
                     padded_num_reqs=num_reqs,
                 )
 
@@ -1916,7 +2043,7 @@ class CompilationManager:
                     seq_lens=seq_lens,
                     query_start_loc=query_start_loc,
                     request_distribution=request_distribution,
-                    mamba_state_indices=dflash_mamba_state_indices,
+                    mamba=dflash_mamba,
                     padded_num_reqs=num_reqs,
                 )
 
@@ -2044,8 +2171,10 @@ class CompilationManager:
                     self.runner.mesh,
                     np.zeros(self.runner.max_num_reqs, dtype=np.int32),
                     sharding=dp_sharding)
+                mamba_metadata = MambaMetadata(
+                    state_indices=mamba_state_indices)
             else:
-                mamba_state_indices = None
+                mamba_metadata = None
 
             def build_block_table(kv_cache_gid: int) -> jax.Array:
                 block_table_obj = self.runner.input_batch.block_table[
@@ -2070,7 +2199,7 @@ class CompilationManager:
                     seq_lens=seq_lens,
                     query_start_loc=query_start_loc,
                     request_distribution=request_distribution,
-                    mamba_state_indices=mamba_state_indices,
+                    mamba=mamba_metadata,
                     padded_num_reqs=attn_padded_num_reqs,
                 )
             else:
@@ -2082,7 +2211,7 @@ class CompilationManager:
                             seq_lens=seq_lens,
                             query_start_loc=query_start_loc,
                             request_distribution=request_distribution,
-                            mamba_state_indices=mamba_state_indices,
+                            mamba=mamba_metadata,
                             padded_num_reqs=attn_padded_num_reqs,
                         ) for gid in range(
                             len(self.runner.kv_cache_config.kv_cache_groups))),

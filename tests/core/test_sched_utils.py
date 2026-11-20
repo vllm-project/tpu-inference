@@ -30,11 +30,15 @@ def restore_scheduler_patch():
     from vllm.v1.core.sched.async_scheduler import AsyncScheduler
     from vllm.v1.core.sched.scheduler import Scheduler
 
+    async_had_own = "_update_request_with_output" in AsyncScheduler.__dict__
     originals = (Scheduler._update_request_with_output, Scheduler.__init__,
                  AsyncScheduler._update_request_with_output)
     yield
-    (Scheduler._update_request_with_output, Scheduler.__init__,
-     AsyncScheduler._update_request_with_output) = originals
+    Scheduler._update_request_with_output, Scheduler.__init__ = originals[:2]
+    if async_had_own:
+        AsyncScheduler._update_request_with_output = originals[2]
+    elif "_update_request_with_output" in AsyncScheduler.__dict__:
+        del AsyncScheduler._update_request_with_output
     for cls in (Scheduler, AsyncScheduler):
         if "_continue_decode_patched" in cls.__dict__:
             del cls._continue_decode_patched

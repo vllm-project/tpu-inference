@@ -47,7 +47,6 @@ _TUNABLE = TunableParams(
     bq_c_sz=16,
     bkv_sz=64,
     batch_size=4,
-    n_buffer=2,
 )
 
 _BLOCK_SIZES = _TUNABLE.to_block_sizes()
@@ -61,16 +60,8 @@ def test_get_tuned_params_fallback_to_calculate_block_sizes():
     """When the key is absent from tuned_params_mapping, get_tuned_params must
     delegate to calculate_block_sizes and return whatever it produces."""
 
-    decode_bs = configs.BlockSizes(bq_sz=1,
-                                   bq_c_sz=1,
-                                   bkv_sz=1,
-                                   batch_size=1,
-                                   n_buffer=1)
-    prefill_bs = configs.BlockSizes(bq_sz=2,
-                                    bq_c_sz=2,
-                                    bkv_sz=2,
-                                    batch_size=2,
-                                    n_buffer=2)
+    decode_bs = configs.BlockSizes(bq_sz=1, bq_c_sz=1, bkv_sz=1, batch_size=1)
+    prefill_bs = configs.BlockSizes(bq_sz=2, bq_c_sz=2, bkv_sz=2, batch_size=2)
 
     import tpu_inference.kernels.experimental.batched_rpa.tuned_params as tp_module
 
@@ -134,37 +125,29 @@ def test_get_tuned_params_populated_mapping_hit():
     [
         # identical params → both True
         (
-            TunableParams(
-                bq_sz=16, bq_c_sz=8, bkv_sz=32, batch_size=4, n_buffer=2),
-            TunableParams(
-                bq_sz=16, bq_c_sz=8, bkv_sz=32, batch_size=4, n_buffer=2),
+            TunableParams(bq_sz=16, bq_c_sz=8, bkv_sz=32, batch_size=4),
+            TunableParams(bq_sz=16, bq_c_sz=8, bkv_sz=32, batch_size=4),
             True,
             True,
         ),
         # lo is strictly smaller in every dimension
         (
-            TunableParams(
-                bq_sz=8, bq_c_sz=4, bkv_sz=16, batch_size=2, n_buffer=1),
-            TunableParams(
-                bq_sz=16, bq_c_sz=8, bkv_sz=32, batch_size=4, n_buffer=2),
+            TunableParams(bq_sz=8, bq_c_sz=4, bkv_sz=16, batch_size=2),
+            TunableParams(bq_sz=16, bq_c_sz=8, bkv_sz=32, batch_size=4),
             True,
             False,
         ),
         # lo is strictly larger in every dimension
         (
-            TunableParams(
-                bq_sz=32, bq_c_sz=16, bkv_sz=64, batch_size=8, n_buffer=4),
-            TunableParams(
-                bq_sz=16, bq_c_sz=8, bkv_sz=32, batch_size=4, n_buffer=2),
+            TunableParams(bq_sz=32, bq_c_sz=16, bkv_sz=64, batch_size=8),
+            TunableParams(bq_sz=16, bq_c_sz=8, bkv_sz=32, batch_size=4),
             False,
             True,
         ),
         # mixed: lo has some dims larger – neither le nor ge should be True
         (
-            TunableParams(
-                bq_sz=8, bq_c_sz=16, bkv_sz=32, batch_size=4, n_buffer=2),
-            TunableParams(
-                bq_sz=16, bq_c_sz=8, bkv_sz=32, batch_size=4, n_buffer=2),
+            TunableParams(bq_sz=8, bq_c_sz=16, bkv_sz=32, batch_size=4),
+            TunableParams(bq_sz=16, bq_c_sz=8, bkv_sz=32, batch_size=4),
             False,
             False,
         ),
@@ -178,16 +161,8 @@ def test_tunable_params_ge_le_single_dim_difference():
     """When only one dimension differs the larger side is >= and the smaller
     side is <=, because both operators require ALL dims to satisfy the
     relation."""
-    base = TunableParams(bq_sz=16,
-                         bq_c_sz=8,
-                         bkv_sz=32,
-                         batch_size=4,
-                         n_buffer=2)
-    bigger_bq = TunableParams(bq_sz=32,
-                              bq_c_sz=8,
-                              bkv_sz=32,
-                              batch_size=4,
-                              n_buffer=2)
+    base = TunableParams(bq_sz=16, bq_c_sz=8, bkv_sz=32, batch_size=4)
+    bigger_bq = TunableParams(bq_sz=32, bq_c_sz=8, bkv_sz=32, batch_size=4)
 
     # base is ≤ bigger_bq in every dimension (all others are equal)
     assert (base <= bigger_bq) is True

@@ -359,7 +359,7 @@ def process_moe_weights(
         w2_bias = w2_bias.astype(jnp.float32)
         w2_bias = jnp.expand_dims(w2_bias, 1)
 
-    match moe_backend:
+    match moe_backend.weights_like():
         case MoEBackend.FUSED_MOE:
             # Kernel expects:
             # w13: (num_experts, 2, hidden_size, intermediate_size)
@@ -560,7 +560,7 @@ def _get_moe_weight_shardings(
     Used by both shard_moe_weights (for device_put) and
     process_quantized_moe_weights (for sharding constraints inside JIT).
     """
-    match moe_backend:
+    match moe_backend.weights_like():
         case MoEBackend.FUSED_MOE | MoEBackend.GMM_EP:
             ep_sharding = NamedSharding(mesh, P(ShardingAxisName.EXPERT))
             return FusedMoEWeights(
@@ -615,7 +615,7 @@ def shard_moe_weights(
 
     weight_shardings = _get_moe_weight_shardings(weights, moe_backend, mesh)
 
-    match moe_backend:
+    match moe_backend.weights_like():
         case MoEBackend.FUSED_MOE:
             weight_layouts = FusedMoEWeights(
                 w13_weight=Layout((0, 1, 2, 3)),

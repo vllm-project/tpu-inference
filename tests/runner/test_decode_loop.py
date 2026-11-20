@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, GroupedAttentionMetadata)
+    AttentionMetadata, GroupedAttentionMetadata, MambaMetadata)
 from tpu_inference.layers.common.sharding import MESH_AXIS_NAMES
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
@@ -128,7 +128,6 @@ def test_continue_decode_early_exit():
     seq_lens = jnp.array([1, 1], dtype=jnp.int32)
     query_start_loc = jnp.array([0, 1, 2], dtype=jnp.int32)
     request_distribution = jnp.array([0, 0], dtype=jnp.int32)
-    mamba_state_indices = None
 
     attn_metadata = AttentionMetadata(
         input_positions=input_positions,
@@ -136,7 +135,7 @@ def test_continue_decode_early_exit():
         seq_lens=seq_lens,
         query_start_loc=query_start_loc,
         request_distribution=request_distribution,
-        mamba_state_indices=mamba_state_indices,
+        mamba=None,
     )
 
     init_state = TpuSamplingState(
@@ -246,7 +245,7 @@ def test_continue_decode_with_experts():
         seq_lens=jnp.array([1, 1], dtype=jnp.int32),
         query_start_loc=jnp.array([0, 1, 2], dtype=jnp.int32),
         request_distribution=jnp.array([0, 0], dtype=jnp.int32),
-        mamba_state_indices=None,
+        mamba=None,
     )
 
     init_state = TpuSamplingState(
@@ -324,7 +323,7 @@ def test_continue_decode_no_exit_on_eos():
         seq_lens=jnp.array([1, 1], dtype=jnp.int32),
         query_start_loc=jnp.array([0, 1, 2], dtype=jnp.int32),
         request_distribution=jnp.array([0, 0], dtype=jnp.int32),
-        mamba_state_indices=None,
+        mamba=None,
     )
 
     init_state = TpuSamplingState(
@@ -520,7 +519,7 @@ def test_continue_decode_exit_on_eos_interval():
         seq_lens=jnp.array([1, 1], dtype=jnp.int32),
         query_start_loc=jnp.array([0, 1, 2], dtype=jnp.int32),
         request_distribution=jnp.array([0, 0], dtype=jnp.int32),
-        mamba_state_indices=None,
+        mamba=None,
     )
 
     init_state = TpuSamplingState(
@@ -722,7 +721,7 @@ def test_continue_decode_grouped_attention_metadata_gdn(uses_mrope):
                 seq_lens=seq_lens,
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
-                mamba_state_indices=mamba_state_indices,
+                mamba=MambaMetadata(state_indices=mamba_state_indices),
                 padded_num_reqs=padded_num_reqs,
             ),
             AttentionMetadata(
@@ -731,7 +730,7 @@ def test_continue_decode_grouped_attention_metadata_gdn(uses_mrope):
                 seq_lens=seq_lens,
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
-                mamba_state_indices=mamba_state_indices,
+                mamba=MambaMetadata(state_indices=mamba_state_indices),
                 padded_num_reqs=padded_num_reqs,
             ),
         ),
@@ -758,7 +757,7 @@ def test_continue_decode_grouped_attention_metadata_gdn(uses_mrope):
         assert shared_am is not None
         assert shared_am.padded_num_reqs == padded_num_reqs
         pos_1d = positions[0] if positions.ndim == 2 else positions
-        hidden_states = (pos_1d + attn_layer1.mamba_state_indices).astype(
+        hidden_states = (pos_1d + attn_layer1.mamba.state_indices).astype(
             jnp.float32)[:, None, None]
         experts = jnp.ones((1, batch_size, 2), dtype=jnp.int32)
         return kv_caches, hidden_states, None, experts
@@ -836,7 +835,7 @@ def test_continue_decode_expert_shape_in_jit():
             query_start_loc=jnp.arange(batch_size + 1, dtype=jnp.int32),
             request_distribution=jnp.array(
                 [batch_size, batch_size, batch_size], dtype=jnp.int32),
-            mamba_state_indices=None,
+            mamba=None,
         )
         return TpuSamplingState(
             current_tokens=jnp.ones((batch_size, ), dtype=jnp.int32),

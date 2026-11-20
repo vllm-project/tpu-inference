@@ -53,3 +53,18 @@ class QuantLinearConfig:
         self.enable_quantized_matmul_kernel = envs.ENABLE_QUANTIZED_MATMUL_KERNEL
         self.requant_block_size = envs.REQUANTIZE_BLOCK_SIZE
         self.requant_weight_dtype = to_jax_dtype(envs.REQUANTIZE_WEIGHT_DTYPE)
+
+    def get_sp_token_axes(self, x: jax.Array):
+        """Mesh axes the tokens of `x` stay sharded over outside attention.
+
+        None (default) keeps the usual ATTN_DATA token sharding in
+        sharded_matmul / sharded_quantized_matmul. VllmQuantLinearConfig
+        returns EXPERT_DATA when the sequence-parallel residual stream is on.
+
+        The default is needed: the common linear methods (quantization/fp8.py,
+        quantization/unquantized.py) call this unconditionally, and they are
+        also used with the JAX-path QuantLinearConfig
+        (layers/jax/quantization/configs.py), which doesn't override it.
+        """
+        del x
+        return None

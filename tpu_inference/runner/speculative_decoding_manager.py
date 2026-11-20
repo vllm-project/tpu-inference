@@ -21,12 +21,12 @@ import numpy as np
 from jax.sharding import NamedSharding, PartitionSpec
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.outputs import DraftTokenIds
-from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.utils import SpecDecodeMetadata
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
+from tpu_inference.spec_decode.ngram_proposer import NgramProposer
 from tpu_inference.utils import device_array
 
 if TYPE_CHECKING:

@@ -104,7 +104,9 @@ def test_replicas_tp_exceeds_kv_heads():
     # mesh ATTN_HEAD product = 8 > num_kv_heads=2 → replicate each KV head 4x.
     layer, parent_kv_heads = _build_qkv(mesh_shape={"model": 8},
                                         total_num_kv_heads=2)
-    assert layer.tp_size == 8
+    assert layer.mesh_tp_size == 8
+    # vLLM's own `tp_size` must not be overridden with the mesh degree.
+    assert "tp_size" not in vars(layer)
     assert layer.num_kv_head_replicas == 4
     # Inflated kv-heads passed to parent: 2 * 4 = 8.
     assert parent_kv_heads == [8]
@@ -114,7 +116,8 @@ def test_replicas_tp_equals_kv_heads():
     # mesh ATTN_HEAD product = 2 == num_kv_heads=2 → no replication.
     layer, parent_kv_heads = _build_qkv(mesh_shape={"model": 2},
                                         total_num_kv_heads=2)
-    assert layer.tp_size == 2
+    assert layer.mesh_tp_size == 2
+    assert "tp_size" not in vars(layer)
     assert layer.num_kv_head_replicas == 1
     assert parent_kv_heads == [2]
 
@@ -137,3 +140,21 @@ def test_tile_kv_along_output_dim_1():
         dtype=torch.float32,
     )
     assert torch.equal(out, expected)
+
+
+def test_tpu_split_sizes_are_de_replicated():
+    # codegemma-2b at TP=2: 8 heads, 1 KV head (replicated 2x), head 256.
+    # output_sizes stay inflated, but forward returns one copy of K/V, so a
+    # caller splitting the fused output needs the de-replicated widths.
+    layer, _ = _build_qkv(mesh_shape={"model": 2}, total_num_kv_heads=1)
+    layer.total_num_heads, layer.head_size, layer.v_head_size = 8, 256, 256
+    layer.output_sizes = [2048, 512, 512]
+    assert layer.num_kv_head_replicas == 2
+    assert layer.tpu_split_sizes == [2048, 256, 256]
+
+
+def test_tpu_split_sizes_without_replication_match_output_sizes():
+    layer, _ = _build_qkv(mesh_shape={"model": 2}, total_num_kv_heads=2)
+    layer.total_num_heads, layer.head_size, layer.v_head_size = 8, 128, 128
+    assert layer.num_kv_head_replicas == 1
+    assert layer.tpu_split_sizes == [1024, 256, 256]

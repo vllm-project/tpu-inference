@@ -43,8 +43,9 @@ from vllm.models.deepseek_v4 import attention as dsv4_attention
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
-from vllm.v1.kv_cache_interface import (KVCacheSpec, MLAAttentionSpec,
-                                        SlidingWindowMLASpec)
+from vllm.v1.core.single_type_kv_cache_manager import (FullAttentionManager,
+                                                       SlidingWindowManager)
+from vllm.v1.kv_cache_interface import KVCacheLayerConfig, MLAAttentionSpec
 
 from tpu_inference.kernels.experimental.deepseek_v4 import rope as rope_kernel
 from tpu_inference.kernels.experimental.deepseek_v4.core_attention.mla import \
@@ -132,16 +133,21 @@ class VllmDeepseekV4SWACache(DeepseekV4SWACache):
         self.block_size = min(
             compressed_kv_cache_bz // csa_compression_ratio // 2, window_size)
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self,
+                            vllm_config: VllmConfig) -> KVCacheLayerConfig:
         # ``mla_swa`` keeps the SWA entries as raw bf16, packed as uint8.
-        return SlidingWindowMLASpec(
+        spec = MLAAttentionSpec(
             block_size=self.block_size,
             num_kv_heads=1,
             head_size=512 * 2,
             dtype=torch.uint8,
-            sliding_window=self.window_size,
             cache_dtype_str=self.cache_config.cache_dtype,
             alignment=None,
+        )
+        return SlidingWindowManager.layer_config(
+            spec,
+            sliding_window=self.window_size,
+            bounded_replay=self.bounded_replay,
         )
 
 
@@ -209,7 +215,8 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
         return num_heads
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+    def get_kv_cache_config(
+            self, vllm_config: VllmConfig) -> KVCacheLayerConfig | None:
         if (self.compress_ratio
                 <= 1):  # SWA part. Allocated separately as DeepseekV4SWACache.
             return None
@@ -223,7 +230,7 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
             # In DSV4 FP8 format
             # 448 fp8, 64 bf16, 7 fp8 scales, 7 e8m0 scale for 448 fp8 (block size 64)
             # packed as uint8
-            return MLAAttentionSpec(
+            spec = MLAAttentionSpec(
                 block_size=vllm_config.cache_config.block_size,
                 num_kv_heads=1,
                 head_size=align_to(448 + 64 * 2 + 7, 128),
@@ -235,7 +242,7 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
             # For HCA, we store raw bf16 values in the KV cache to avoid
             # expernsive DSV4 FP8 quantization and dequantization. The
             # size of HCA cache only take very small memory overall, so it's ok.
-            return MLAAttentionSpec(
+            spec = MLAAttentionSpec(
                 block_size=vllm_config.cache_config.block_size,
                 num_kv_heads=1,
                 head_size=512 * 2,
@@ -243,6 +250,7 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
                 tokens_per_state=self.compress_ratio,
                 alignment=None,
             )
+        return FullAttentionManager.layer_config(spec)
 
     def _o_proj(self, o: torch.Tensor,
                 positions: torch.Tensor) -> torch.Tensor:

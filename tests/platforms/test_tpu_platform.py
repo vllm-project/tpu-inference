@@ -54,6 +54,7 @@ class TestTpuPlatform:
         vllm_config.sharding_config = MagicMock()
         vllm_config.compilation_config = MagicMock(backend="eager")
         vllm_config.kv_transfer_config = None
+        vllm_config.speculative_config = None
         vllm_config.additional_config = {}
         vllm_config.scheduler_config.async_scheduling = False
         return vllm_config
@@ -120,10 +121,34 @@ class TestTpuPlatform:
                 in TpuPlatform.additional_env_vars)
         assert "MOE_FOLD_ROUTING_INTO_DISPATCH" in envs.environment_variables
 
+    def test_additional_env_vars_covers_full_kvcache_for_sliding_window(self):
+        """The workers build the KV cache specs, so they must see the flag."""
+        assert ("USE_FULL_KVCACHE_FOR_SLIDING_WINDOW"
+                in TpuPlatform.additional_env_vars)
+        assert "USE_FULL_KVCACHE_FOR_SLIDING_WINDOW" in envs.environment_variables
+
     @pytest.mark.parametrize(
         "name", ["MOE_TC_PERMUTE", "MOE_TC_PERMUTE_CAPACITY_FACTOR"])
     def test_additional_env_vars_covers_moe_tc_permute(self, name):
         """Workers trace the TensorCore permute, so they need both env vars."""
+        assert name in TpuPlatform.additional_env_vars
+        assert name in envs.environment_variables
+
+    @pytest.mark.parametrize("name", [
+        "USE_FUSED_EP_MOE_V2", "FUSED_EP_MOE_V2_CAPACITY",
+        "FUSED_EP_MOE_V2_SHARDED_PLAN"
+    ])
+    def test_additional_env_vars_covers_fused_ep_moe_v2(self, name):
+        """Workers pick the MoE backend and trace the kernel, so they need
+        its env vars."""
+        assert name in TpuPlatform.additional_env_vars
+        assert name in envs.environment_variables
+
+    @pytest.mark.parametrize("name",
+                             ["USE_ROUTING_MOE", "ROUTING_MOE_REMOTE_SCATTER"])
+    def test_additional_env_vars_covers_routing_moe(self, name):
+        """Workers pick the MoE backend and trace the kernel, so they need
+        its env vars."""
         assert name in TpuPlatform.additional_env_vars
         assert name in envs.environment_variables
 
@@ -755,12 +780,14 @@ class TestTpuPlatform:
         mock_patch.assert_called_once()
 
     @pytest.mark.parametrize(
-        "pp_size, runner_type, async_sched, expected_error",
+        "pp_size, runner_type, async_sched, spec_config, expected_error",
         [
-            (2, "generate", False,
+            (2, "generate", False, None,
              "continue_decode is not supported with pipeline parallelism"),
-            (1, "pooling", False,
+            (1, "pooling", False, None,
              "continue_decode is not supported for pooling models"),
+            (1, "generate", False, object(),
+             "continue_decode is not supported with speculative decoding"),
         ],
     )
     @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
@@ -779,12 +806,14 @@ class TestTpuPlatform:
         pp_size,
         runner_type,
         async_sched,
+        spec_config,
         expected_error,
     ):
         vllm_config.additional_config = {"enable_continue_decode": True}
         vllm_config.parallel_config.pipeline_parallel_size = pp_size
         vllm_config.model_config.runner_type = runner_type
         vllm_config.scheduler_config.async_scheduling = async_sched
+        vllm_config.speculative_config = spec_config
         vllm_config.cache_config = None
 
         with pytest.raises(ValueError, match=expected_error):
