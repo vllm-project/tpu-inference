@@ -737,8 +737,8 @@ class TestVllmGatedDeltaNetAttention:
         conv_state = jax.numpy.zeros((30, padded_state_len, conv_dim))
         conv_state = conv_state.at[21, kernel_size - 1:, :].set(3.0)
         recurrent_state = jax.numpy.zeros((30, n_v, d_k, d_v))
-        kernel_conv = jax.numpy.zeros((30, kernel_size - 1, conv_dim)).at[
-            21].set(7.0)
+        kernel_conv = jax.numpy.zeros(
+            (30, kernel_size - 1, conv_dim)).at[21].set(7.0)
         kernel_rec = recurrent_state.at[21].set(9.0)
         mock_run_jax.return_value = (
             (kernel_conv, kernel_rec),

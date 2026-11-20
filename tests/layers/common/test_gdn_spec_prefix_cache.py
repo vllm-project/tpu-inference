@@ -232,7 +232,9 @@ def test_compute_align_spec_state_indices_clamps_out_of_range_ids():
         num_local_rows=52,
     )
     assert state.tolist() == [50, 51]  # row 1 col clamped to 1 (80 -> 51)
-    assert read.tolist() == [51, 51]  # row 0: 50+5 -> 51; row 1: col 2 -> 1 (80 -> 51)
+    assert read.tolist() == [
+        51, 51
+    ]  # row 0: 50+5 -> 51; row 1: col 2 -> 1 (80 -> 51)
     assert mask.tolist() == [True, False]
     assert int(src[0]) == 51  # 50 + 1 -> 51
     assert int(dst[0]) == 51  # 90 -> 51
@@ -286,9 +288,9 @@ def test_resolve_gdn_state_slots_dp_align_spec():
     # dp_size=2, max_num_reqs_per_dp=2, padded_num_reqs_per_dp=1
     md = AttentionMetadata(
         input_positions=jnp.zeros(8, dtype=jnp.int32),
-        block_tables=jnp.array([[10, 11, 12], [99, 99, 99], [20, 21, 22],
-                                [99, 99, 99]],
-                               dtype=jnp.int32),
+        block_tables=jnp.array(
+            [[10, 11, 12], [99, 99, 99], [20, 21, 22], [99, 99, 99]],
+            dtype=jnp.int32),
         seq_lens=jnp.array([18, 0, 34, 0], dtype=jnp.int32),
         query_start_loc=jnp.array([0, 4, 4, 0, 2, 2], dtype=jnp.int32),
         request_distribution=jnp.array([1, 1, 1, 1, 1, 1], dtype=jnp.int32),
