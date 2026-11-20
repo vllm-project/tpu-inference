@@ -553,3 +553,223 @@ class TestVllmGatedDeltaNetAttention:
         np.testing.assert_array_equal(np.array(call_kwargs["read_offsets"]),
                                       [2, 1])
         assert call_kwargs["num_spec_tokens"] == 3
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_fp32_4d_conv_state_shape_and_dtype(self, enabled):
+        from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import \
+            QwenGatedDeltaNetAttention
+
+        import tpu_inference.envs as envs
+        from tpu_inference.layers.common.attention_backend import \
+            GDNLinearAttentionBackend
+
+        attn = VllmGatedDeltaNetAttention.__new__(VllmGatedDeltaNetAttention)
+        attn.linear_attention_backend = GDNLinearAttentionBackend()
+
+        with (
+                patch.object(QwenGatedDeltaNetAttention,
+                             "get_state_shape",
+                             return_value=((3, 64), (8, 16, 16))),
+                patch.object(QwenGatedDeltaNetAttention,
+                             "get_state_dtype",
+                             return_value=(torch.bfloat16, torch.float32)),
+                patch.object(envs, "GDN_FP32_4D_CONV_STATE", enabled),
+                patch(
+                    "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.is_conv_state_dim_first",
+                    return_value=False),
+        ):
+            conv_shape, _ = attn.get_state_shape()
+            conv_dtype, _ = attn.get_state_dtype()
+
+        assert conv_shape == ((3, 1, 64) if enabled else (3, 64))
+        assert conv_dtype == (torch.float32 if enabled else torch.bfloat16)
+
+    def test_kv_cache_manager_conv_state_sharding(self, mesh):
+        import jax.numpy as jnp
+        from jax.sharding import PartitionSpec
+        from vllm.config import set_current_vllm_config
+        from vllm.v1.kv_cache_interface import (KVCacheConfig,
+                                                KVCacheGroupSpec,
+                                                KVCacheTensor, MambaSpec)
+
+        from tpu_inference.layers.common.sharding import ShardingAxisName
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+
+        for conv_shape, conv_dtype, expected_spec in (
+            (
+                (3, 1, 64),
+                torch.float32,
+                PartitionSpec(
+                    ShardingAxisName.ATTN_DATA,
+                    None,
+                    None,
+                    ShardingAxisName.ATTN_HEAD,
+                ),
+            ),
+            (
+                (3, 64),
+                torch.bfloat16,
+                PartitionSpec(
+                    ShardingAxisName.ATTN_DATA,
+                    None,
+                    ShardingAxisName.ATTN_HEAD,
+                ),
+            ),
+        ):
+            runner = MagicMock()
+            runner.mesh = mesh
+            runner.model_config.use_mla = False
+            runner.model_config.architectures = ["Qwen3_5MoeForCausalLM"]
+            runner.vllm_config.model_config = runner.model_config
+            runner.vllm_config.kv_transfer_config = None
+            runner.vllm_config.speculative_config = None
+            runner.vllm_config.offload_config.uva.cpu_offload_gb = 0
+            runner.cache_config.block_size = 16
+            runner.cache_config.num_gpu_blocks_override = None
+            runner.cache_config.mamba_cache_mode = "none"
+            runner.max_num_reqs = 4
+            runner.kv_caches = []
+            runner.layer_name_to_kvcache_index = {}
+
+            mgr = KVCacheManager(runner)
+            mgr._mamba_num_blocks = 5
+            spec = MambaSpec(
+                shapes=(conv_shape, (4, 8, 8)),
+                dtypes=(conv_dtype, torch.float32),
+                block_size=16,
+            )
+            page_bytes = spec.page_size_bytes
+            kv_cfg = KVCacheConfig(
+                num_blocks=8,
+                kv_cache_tensors=[
+                    KVCacheTensor(
+                        size=8 * page_bytes,
+                        layers=["layer.0"],
+                        layer_stride=8 * page_bytes,
+                        block_stride=page_bytes,
+                    )
+                ],
+                kv_cache_groups=[KVCacheGroupSpec(["layer.0"], spec)],
+            )
+            with (
+                    set_current_vllm_config(runner.vllm_config),
+                    patch(
+                        "tpu_inference.runner.kv_cache_manager.utils.hbm_usage_gb",
+                        return_value=[(0.0, 0.0)],
+                    ),
+            ):
+                mgr.initialize_kv_cache(kv_cfg)
+            conv_arr, ssm_arr = runner.kv_caches[0]
+            assert conv_arr.shape == (5, *conv_shape)
+            assert conv_arr.dtype == (jnp.float32 if conv_dtype
+                                      == torch.float32 else jnp.bfloat16)
+            assert conv_arr.sharding.spec == expected_spec
+            assert ssm_arr.shape == (5, 4, 8, 8)
+
+    def test_fused_conv1d_gdn_donates_4d_fp32_conv_state(self):
+        import functools
+
+        import jax.numpy as jnp
+        from jax.experimental.pallas import tpu as pltpu
+
+        from tpu_inference.kernels.gdn.v3 import wrapper as gdn_v3_wrapper
+
+        chip = getattr(pltpu.ChipVersion, "TPU_7X", pltpu.ChipVersion.TPU_V6E)
+        tpu_info = pltpu.get_tpu_info_for_chip(chip, 1)
+        n_kq, n_v, d_k, d_v, kernel_size = 2, 4, 128, 128, 4
+        dim = n_kq * d_k * 2 + n_v * d_v
+        batch_size = 4
+        num_seqs = 4
+        num_blocks = 8
+
+        qkv = jax.ShapeDtypeStruct((batch_size, dim), jnp.bfloat16)
+        b = jax.ShapeDtypeStruct((batch_size, n_v), jnp.bfloat16)
+        a = jax.ShapeDtypeStruct((batch_size, n_v), jnp.bfloat16)
+        rec_state = jax.ShapeDtypeStruct((num_blocks, n_v, d_k, d_v),
+                                         jnp.float32)
+        conv_weight = jax.ShapeDtypeStruct((dim, 1, kernel_size), jnp.bfloat16)
+        conv_bias = jax.ShapeDtypeStruct((dim, ), jnp.bfloat16)
+        a_log = jax.ShapeDtypeStruct((n_v, ), jnp.float32)
+        dt_bias = jax.ShapeDtypeStruct((n_v, ), jnp.float32)
+        q_loc = jax.ShapeDtypeStruct((num_seqs + 1, ), jnp.int32)
+        state_indices = jax.ShapeDtypeStruct((num_seqs, ), jnp.int32)
+        distribution = jax.ShapeDtypeStruct((3, ), jnp.int32)
+        seq_lens = jax.ShapeDtypeStruct((num_seqs, ), jnp.int32)
+        read_state_indices = jax.ShapeDtypeStruct((num_seqs, ), jnp.int32)
+
+        fn_unwrapped = functools.partial(
+            gdn_v3_wrapper.fused_conv1d_gdn.__wrapped__,
+            n_kq=n_kq,
+            n_v=n_v,
+            d_k=d_k,
+            d_v=d_v,
+            kernel_size=kernel_size,
+        )
+        fn_jitted = functools.partial(
+            gdn_v3_wrapper.fused_conv1d_gdn,
+            n_kq=n_kq,
+            n_v=n_v,
+            d_k=d_k,
+            d_v=d_v,
+            kernel_size=kernel_size,
+        )
+
+        with (
+                patch.object(pltpu, "get_tpu_info", return_value=tpu_info),
+                patch("jax._src.tpu_info.get_tpu_info", return_value=tpu_info),
+        ):
+            conv_4d_f32 = jax.ShapeDtypeStruct(
+                (num_blocks, kernel_size - 1, 1, dim), jnp.float32)
+            args_4d = (
+                qkv,
+                b,
+                a,
+                conv_4d_f32,
+                rec_state,
+                conv_weight,
+                conv_bias,
+                a_log,
+                dt_bias,
+                q_loc,
+                state_indices,
+                distribution,
+                seq_lens,
+                read_state_indices,
+            )
+            outer_jaxpr = jax.make_jaxpr(fn_jitted)(*args_4d)
+            jit_eqns = [
+                e for e in outer_jaxpr.jaxpr.eqns if e.primitive.name == "jit"
+            ]
+            assert len(jit_eqns) == 1
+            assert jit_eqns[0].params["donated_invars"][3] is True
+            assert jit_eqns[0].params["donated_invars"][4] is True
+
+            closed_4d = jax.make_jaxpr(fn_unwrapped)(*args_4d)
+            conv_invar = closed_4d.jaxpr.invars[3]
+            pallas_eqns = [
+                e for e in closed_4d.jaxpr.eqns
+                if e.primitive.name == "pallas_call"
+            ]
+            assert len(pallas_eqns) == 2
+
+            idx0 = pallas_eqns[0].invars.index(conv_invar)
+            aliases0 = dict(pallas_eqns[0].params["input_output_aliases"])
+            assert aliases0.get(idx0) == 1
+
+            mid_conv_var = pallas_eqns[0].outvars[1]
+            idx1 = pallas_eqns[1].invars.index(mid_conv_var)
+            aliases1 = dict(pallas_eqns[1].params["input_output_aliases"])
+            assert aliases1.get(idx1) == 1
+
+            final_conv_var = pallas_eqns[1].outvars[1]
+            assert closed_4d.jaxpr.outvars[0] is final_conv_var
+
+            conv_chain_vars = {conv_invar, mid_conv_var, final_conv_var}
+            bad_eqns = [
+                e for e in closed_4d.jaxpr.eqns
+                if e.primitive.name in ("convert_element_type",
+                                        "reshape") and any(
+                                            v in conv_chain_vars
+                                            for v in (*e.invars, *e.outvars))
+            ]
+            assert bad_eqns == []

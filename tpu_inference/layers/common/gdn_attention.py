@@ -60,9 +60,9 @@ def run_jax_gdn_attention(
         j_b: Input tensor of shape `(num_tokens, n_v)`.
         j_a: Input tensor of shape `(num_tokens, n_v)`.
         conv_state: Convolutional state tensor of shape `(num_blocks, kernel_size
-          - 1, dim)`. `num_blocks` is always equal or larger than `max_seqs +
-          1`. The first block is a null_block and only used for padded / invalid
-          tokens.
+          - 1, dim)` or native 4D `(num_blocks, kernel_size - 1, 1, dim)`.
+          `num_blocks` is always equal or larger than `max_seqs + 1`. The first
+          block is a null_block and only used for padded / invalid tokens.
         recurrent_state: Recurrent state tensor of shape `(num_blocks, n_v, d_k,
           d_v)`.
         j_conv_weight: Convolutional weight tensor of shape `(dim, 1,
@@ -98,7 +98,8 @@ def run_jax_gdn_attention(
     Returns:
         A tuple containing:
         - A tuple of (new_conv_state, new_recurrent_state).
-          - new_conv_state: `(num_blocks, kernel_size - 1, dim)`
+          - new_conv_state: Same shape as `conv_state`, `(num_blocks,
+            kernel_size - 1, dim)` or `(num_blocks, kernel_size - 1, 1, dim)`.
           - new_recurrent_state: `(num_blocks, n_v, d_k, d_v)`
         - The output tensor of shape `(num_tokens, n_v * d_v)`.
     """
@@ -108,13 +109,17 @@ def run_jax_gdn_attention(
         assert read_offsets is not None, (
             "read_offsets is required when num_spec_tokens > 0")
 
+    # [num_blocks, ..., dim]: blocks over ATTN_DATA, dim over ATTN_HEAD.
+    conv_state_spec = P(ShardingAxisName.ATTN_DATA,
+                        *([None] * (conv_state.ndim - 2)),
+                        ShardingAxisName.ATTN_HEAD)
+
     in_specs = (
         P(ShardingAxisName.ATTN_DATA,
           ShardingAxisName.ATTN_HEAD),  # j_mixed_qkv
         P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # j_b
         P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # j_a
-        P(ShardingAxisName.ATTN_DATA, None,
-          ShardingAxisName.ATTN_HEAD),  # conv_state
+        conv_state_spec,  # conv_state
         P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None,
           None),  # recurrent_state
         P(ShardingAxisName.ATTN_HEAD, None, None),  # j_conv_weight
@@ -135,8 +140,7 @@ def run_jax_gdn_attention(
 
     out_specs = (
         (
-            P(ShardingAxisName.ATTN_DATA, None,
-              ShardingAxisName.ATTN_HEAD),  # new_conv_state
+            conv_state_spec,  # new_conv_state
             P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None,
               None),  # new_recurrent_state
         ),
