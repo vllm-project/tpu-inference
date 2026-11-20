@@ -13,7 +13,7 @@ from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
 from vllm.model_executor.layers.activation import (SiluAndMul,
                                                    SiluAndMulWithClamp)
 from vllm.model_executor.layers.fused_moe import (
-    GateLinear, fused_moe_make_expert_params_mapping)
+    GateLinear, RoutedScaleMode, fused_moe_make_expert_params_mapping)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                RowParallelLinear)
@@ -191,7 +191,9 @@ class DeepseekV4MoE(nn.Module):
             hash_indices_table=self.gate.tid2eid,
             swiglu_limit=self.swiglu_limit,
             router_logits_dtype=torch.float32,
-            apply_routed_scale_to_output=True,
+            # The runner multiplies the routed expert output by
+            # routed_scaling_factor (formerly apply_routed_scale_to_output=True).
+            routed_scale_mode=RoutedScaleMode.OUTPUT,
         )
 
         # The TPU MoE apply path is only handed the `RoutedExperts` layer and
