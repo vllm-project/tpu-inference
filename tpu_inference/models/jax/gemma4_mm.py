@@ -1060,10 +1060,6 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                 n = min(max(valid_patches // k**2, 1), self.max_soft_tokens)
             else:
                 n = per_item_out_tokens[global_idx]
-            # `output` is a stacked (B, T, D) array from the budgeted JIT
-            # forward, or a per-image list from `encoder_eager_forward`
-            # (the eager fallback vLLM takes when a batch exceeds every
-            # captured budget). Index the item first so both work.
             feat = output[local_idx][:n]
             if clone and hasattr(feat, 'clone'):
                 feat = feat.clone()
