@@ -108,6 +108,7 @@ if TYPE_CHECKING:
     ENABLE_TOPK_PREFILTER: bool = False
     RAIDEN_H2D_SETTLE: bool = True
     SKIP_MAMBA_SCHEDULER_BLOCKS: bool = False
+    TPU_PAD_GQA_HEADS: bool = False
     USE_FULL_KVCACHE_FOR_SLIDING_WINDOW: bool = True
     TPU_MOE_SINGLE_SORT: bool = False
     TPU_MOE_ROUTER_TOPK: str = "sort"
@@ -691,6 +692,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # See core/runner_slot_mamba.py.
     "SKIP_MAMBA_SCHEDULER_BLOCKS":
     env_bool("SKIP_MAMBA_SCHEDULER_BLOCKS", default=False),
+    # Pads Grouped-Query Attention (GQA) query heads up to the nearest multiple
+    # of lcm(num_key_value_heads, tensor_parallel_size) when total query heads
+    # are not divisible by tensor_parallel_size (e.g., Qwen2.5-0.5B with 14
+    # query heads on a 2x4 TPU mesh with tensor_parallel_size=8).
+    "TPU_PAD_GQA_HEADS":
+    env_bool("TPU_PAD_GQA_HEADS", default=False),
     # Applies to models whose sliding-window and full-attention layers have
     # different padded head dims (e.g. Gemma 4); models with a single KV cache
     # shape always keep their sliding window. On (default): sliding-window
