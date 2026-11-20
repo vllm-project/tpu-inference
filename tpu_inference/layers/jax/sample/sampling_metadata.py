@@ -38,6 +38,7 @@ DEFAULT_SAMPLING_PARAMS = dict(
         "top_k",
         "top_p",
         "_cache_collision_dummy",
+        "distributed_sampling_supported",
     ],
     meta_fields=["do_sampling", "logprobs"],
 )
@@ -49,6 +50,10 @@ class TPUSupportedSamplingMetadata:
     _cache_collision_dummy: Optional[jnp.ndarray] = None
     do_sampling: bool = False
     logprobs: bool = False
+    # Precomputed result of sampling._can_sample_distributed for this batch,
+    # set by sampling.with_distributed_sampling_support. None: compute it in
+    # sample().
+    distributed_sampling_supported: Optional[jnp.ndarray] = None
 
     @classmethod
     def from_input_batch(

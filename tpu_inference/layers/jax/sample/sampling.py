@@ -91,6 +91,8 @@ def distributed_sampling_allowed(logprobs: bool, logprobs_mode) -> bool:
 def _can_sample_distributed(
         tpu_sampling_metadata: TPUSupportedSamplingMetadata) -> jax.Array:
     """Whether every row is supported by distributed candidate sampling."""
+    if tpu_sampling_metadata.distributed_sampling_supported is not None:
+        return tpu_sampling_metadata.distributed_sampling_supported
     is_greedy = tpu_sampling_metadata.temperature < _SAMPLING_EPS
     supported = (
         (tpu_sampling_metadata.top_k > 0) &
@@ -180,6 +182,22 @@ def _shard_topk_candidates(values: jax.Array,
     if _topk_prefilter_enabled():
         return _prefiltered_top_k(values, k)
     return lax.top_k(values, k)
+
+
+def with_distributed_sampling_support(
+    tpu_sampling_metadata: TPUSupportedSamplingMetadata
+) -> TPUSupportedSamplingMetadata:
+    """Precomputes the every-row check for a batch that is sampled many times.
+
+    The check reduces over all rows. When the rows are sharded over data
+    parallel ranks, that is a cross-device all-reduce, so a loop that samples
+    the same batch on every step should compute it once, outside the loop.
+    """
+    if not tpu_sampling_metadata.do_sampling:
+        return tpu_sampling_metadata
+    return replace(tpu_sampling_metadata,
+                   distributed_sampling_supported=_can_sample_distributed(
+                       tpu_sampling_metadata))
 
 
 @dataclass
