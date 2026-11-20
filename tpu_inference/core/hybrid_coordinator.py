@@ -775,9 +775,6 @@ def propagate_num_gpu_blocks_override(rpc_owner: Any,
     ]
     if reported:
         vllm_config.cache_config.num_gpu_blocks_override = min(reported)
-        logger.info(
-            "[tpu_inference] num_gpu_blocks_override=%d propagated from %d "
-            "worker(s) to the engine core.", min(reported), len(reported))
     return vllm_config.cache_config.num_gpu_blocks_override
 
 
