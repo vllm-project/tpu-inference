@@ -238,17 +238,29 @@ def _apply_sampling_transforms(
     temperatures = jnp.expand_dims(temperatures, axis=-1)
     logits = logits / temperatures
 
-    # Only apply top-k masking if k > 0 for each token
+    # Only apply top-k masking if any token in the batch has k > 0; guarding
+    # with lax.cond skips the full-vocab binary search when top-k is disabled.
     top_k = tpu_sampling_metadata.top_k
-    should_apply_topk = jnp.expand_dims(top_k > 0, axis=-1)
-    topk_masked = topk_mask(logits, top_k, replace_val=-1e12)
-    logits = jnp.where(should_apply_topk, topk_masked, logits)
+    has_topk = top_k > 0
 
-    # Only apply top-p masking if p < 1.0 for each token
+    def _apply_topk(x: jax.Array) -> jax.Array:
+        should_apply_topk = jnp.expand_dims(has_topk, axis=-1)
+        topk_masked = topk_mask(x, top_k, replace_val=-1e12)
+        return jnp.where(should_apply_topk, topk_masked, x).astype(x.dtype)
+
+    logits = lax.cond(jnp.any(has_topk), _apply_topk, lambda x: x, logits)
+
+    # Only apply top-p masking if any token in the batch has p < 1.0; guarding
+    # with lax.cond skips the full-vocab binary search when top-p is disabled.
     top_p = tpu_sampling_metadata.top_p
-    should_apply_topp = jnp.expand_dims(top_p < 1.0, axis=-1)
-    topp_masked = topp_mask(logits, top_p, replace_val=-1e12)
-    logits = jnp.where(should_apply_topp, topp_masked, logits)
+    has_topp = top_p < 1.0
+
+    def _apply_topp(x: jax.Array) -> jax.Array:
+        should_apply_topp = jnp.expand_dims(has_topp, axis=-1)
+        topp_masked = topp_mask(x, top_p, replace_val=-1e12)
+        return jnp.where(should_apply_topp, topp_masked, x).astype(x.dtype)
+
+    logits = lax.cond(jnp.any(has_topp), _apply_topp, lambda x: x, logits)
 
     return logits
 
