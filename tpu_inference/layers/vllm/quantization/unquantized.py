@@ -115,9 +115,9 @@ def _pathways_device_put(tensor: torch.Tensor,
     """
     np_view = _host_numpy_view(tensor)
     if np_view is None:
-      dtype = to_jax_dtype(tensor.dtype)
-      np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
-      return general_device_put(np_tensor, sharding).astype(dtype)
+        dtype = to_jax_dtype(tensor.dtype)
+        np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
+        return general_device_put(np_tensor, sharding).astype(dtype)
     array = general_device_put(np_view, sharding)
     # np_view aliases the torch storage and callers free that storage as soon
     # as this returns, so the asynchronous copy has to be forced here.
