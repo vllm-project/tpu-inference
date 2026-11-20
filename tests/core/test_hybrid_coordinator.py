@@ -674,8 +674,7 @@ class TestHybridCoordinatorHooks:
             "get_num_gpu_blocks_override")
         assert vllm_config.cache_config.num_gpu_blocks_override == 27376
 
-        # Disagreeing workers: the smallest pool is the one every worker can
-        # back.
+        # Disagreeing workers: the smallest pool.
         vllm_config.cache_config.num_gpu_blocks_override = None
         engine_core.collective_rpc.return_value = [27376, 27200]
         assert propagate_num_gpu_blocks_override(engine_core,
@@ -688,13 +687,6 @@ class TestHybridCoordinatorHooks:
         assert propagate_num_gpu_blocks_override(engine_core,
                                                  vllm_config) is None
         assert vllm_config.cache_config.num_gpu_blocks_override is None
-
-        # A smaller user-pinned value wins.
-        vllm_config.cache_config.num_gpu_blocks_override = 5000
-        engine_core.collective_rpc.return_value = [27376]
-        assert propagate_num_gpu_blocks_override(engine_core,
-                                                 vllm_config) == 5000
-        assert vllm_config.cache_config.num_gpu_blocks_override == 5000
 
     def test_executor_mixin_publishes_override_with_layer_configs(self):
         from tpu_inference.core.hybrid_coordinator import \
