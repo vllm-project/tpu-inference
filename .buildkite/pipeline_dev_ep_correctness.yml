@@ -1,0 +1,93 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Dev pipeline: only "Correctness tests for EP (single-host)" from
+# .buildkite/parallelism/EP.yml, on tpu6e and tpu7x (vllm-project/tpu-inference#4004).
+# Same commands and thresholds as the nightly; no support-matrix recording.
+#
+# Trigger on https://buildkite.com/vllm/tpu-inference-dev -> New Build, with
+#   Branch: <your branch>
+#   Environment Variables: DEV_PIPELINE_FILE=.buildkite/pipeline_dev_ep_correctness.yml
+
+steps:
+  - label: ":docker: Build and Push Base Image (tpu6e)"
+    key: tpu6e_build_docker
+    agents:
+      queue: cpu_64_core
+    env:
+      TPU_VERSION: "tpu6e"
+    commands:
+      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
+
+  - label: ":docker: Build and Push Base Image (tpu7x)"
+    key: tpu7x_build_docker
+    agents:
+      queue: cpu_64_core
+    env:
+      TPU_VERSION: "tpu7x"
+    commands:
+      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
+
+  # One step per (TPU, kernel) so each result is visible on its own.
+  - label: "tpu6e EP correctness - fused MoE EP kernel (USE_MOE_EP_KERNEL=1)"
+    key: tpu6e_ep_correctness_fused
+    depends_on: tpu6e_build_docker
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu6e"
+    agents:
+      queue: tpu_v6e_8_queue
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh --model_name "Qwen/Qwen1.5-MoE-A2.7B" --use_moe_ep_kernel 1 --tensor_parallel_size 4 --max_model_len 1024 --max_num_batched_tokens 128 --max_gen_toks 128 --enable_expert_parallel 1 --flex_threshold 0.37 --strict_threshold 0.06
+
+  - label: "tpu6e EP correctness - GMM EP kernel (USE_MOE_EP_KERNEL=0)"
+    key: tpu6e_ep_correctness_gmm
+    depends_on: tpu6e_build_docker
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu6e"
+    agents:
+      queue: tpu_v6e_8_queue
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh --model_name "Qwen/Qwen1.5-MoE-A2.7B" --use_moe_ep_kernel 0 --tensor_parallel_size 4 --max_model_len 1024 --max_num_batched_tokens 128 --max_gen_toks 128 --enable_expert_parallel 1 --flex_threshold 0.37 --strict_threshold 0.06
+
+  - label: "tpu7x EP correctness - fused MoE EP kernel (USE_MOE_EP_KERNEL=1)"
+    key: tpu7x_ep_correctness_fused
+    depends_on: tpu7x_build_docker
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+    agents:
+      queue: tpu_v7x_8_queue
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh --model_name "Qwen/Qwen1.5-MoE-A2.7B" --use_moe_ep_kernel 1 --tensor_parallel_size 4 --max_model_len 1024 --max_num_batched_tokens 128 --max_gen_toks 128 --enable_expert_parallel 1 --flex_threshold 0.37 --strict_threshold 0.06
+
+  - label: "tpu7x EP correctness - GMM EP kernel (USE_MOE_EP_KERNEL=0)"
+    key: tpu7x_ep_correctness_gmm
+    depends_on: tpu7x_build_docker
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+    agents:
+      queue: tpu_v7x_8_queue
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh --model_name "Qwen/Qwen1.5-MoE-A2.7B" --use_moe_ep_kernel 0 --tensor_parallel_size 4 --max_model_len 1024 --max_num_batched_tokens 128 --max_gen_toks 128 --enable_expert_parallel 1 --flex_threshold 0.37 --strict_threshold 0.06
