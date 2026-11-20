@@ -1870,3 +1870,73 @@ def test_modify_prev_results_skips_request_resent_after_preemption():
     assert new_state.output_token_ids == [7, 8]
     assert runner.input_batch.token_ids_cpu[0].tolist() == [0] * 8
     assert runner.input_batch.num_tokens_no_spec[0] == 4
+
+
+def test_init_phased_profiling_uses_additional_config(monkeypatch, tmp_path):
+    monkeypatch.delenv("PHASED_PROFILING_DIR", raising=False)
+    prof_dir = str(tmp_path / "profiles")
+    runner = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            additional_config={
+                "phased_profiler_options": {
+                    "enable": True,
+                    "dir": prof_dir,
+                    "num_steps_to_profile_for": 5,
+                    "num_decode_steps_to_skip": 2,
+                }
+            }),
+        parallel_config=SimpleNamespace(data_parallel_index=0),
+    )
+    TPUModelRunner._init_phased_profiling(runner)
+    assert runner.phased_profiling_dir == prof_dir
+    assert runner.phase_based_profiler is not None
+    assert runner.phase_based_profiler.num_steps_to_profile_for == 5
+    assert runner.phase_based_profiler.num_decode_steps_to_skip == 2
+
+
+def test_init_phased_profiling_disabled_in_additional_config(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv("PHASED_PROFILING_DIR", str(tmp_path / "env_profiles"))
+    runner = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            additional_config={
+                "phased_profiler_options": {
+                    "enable": False,
+                    "dir": str(tmp_path / "profiles"),
+                }
+            }),
+        parallel_config=SimpleNamespace(data_parallel_index=0),
+    )
+    TPUModelRunner._init_phased_profiling(runner)
+    assert runner.phased_profiling_dir == ""
+    assert runner.phase_based_profiler is None
+
+
+def test_init_phased_profiling_none_options_falls_back_to_env(
+        monkeypatch, tmp_path):
+    env_dir = str(tmp_path / "env_profiles")
+    monkeypatch.setenv("PHASED_PROFILING_DIR", env_dir)
+    runner = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            additional_config={"phased_profiler_options": None}),
+        parallel_config=SimpleNamespace(data_parallel_index=0),
+    )
+    TPUModelRunner._init_phased_profiling(runner)
+    assert runner.phased_profiling_dir == env_dir
+    assert runner.phase_based_profiler is not None
+
+
+def test_init_phased_profiling_enabled_without_dir_warns(monkeypatch, caplog):
+    monkeypatch.delenv("PHASED_PROFILING_DIR", raising=False)
+    runner = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            additional_config={"phased_profiler_options": {
+                "enable": True
+            }}),
+        parallel_config=SimpleNamespace(data_parallel_index=0),
+    )
+    with caplog.at_level("WARNING"):
+        TPUModelRunner._init_phased_profiling(runner)
+    assert runner.phased_profiling_dir == ""
+    assert runner.phase_based_profiler is None
+    assert "no profile directory was specified" in caplog.text
