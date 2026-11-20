@@ -191,8 +191,6 @@ class DeepseekV4MoE(nn.Module):
             hash_indices_table=self.gate.tid2eid,
             swiglu_limit=self.swiglu_limit,
             router_logits_dtype=torch.float32,
-            # The runner multiplies the routed expert output by
-            # routed_scaling_factor (formerly apply_routed_scale_to_output=True).
             routed_scale_mode=RoutedScaleMode.OUTPUT,
         )
 
