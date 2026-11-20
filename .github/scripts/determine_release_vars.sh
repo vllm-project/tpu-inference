@@ -13,10 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set -eu pipefail
+set -euo pipefail
 
 # --- SCHEDULE TRIGGER ---
-if [[ "$GH_EVENT_NAME"  == "schedule" ]]; then
+if [[ "${GH_EVENT_NAME:-}" == "schedule" ]]; then
     echo "Trigger: Schedule - Generating nightly build"
 
     # --- Get Base Version from Tag ---
@@ -35,15 +35,8 @@ if [[ "$GH_EVENT_NAME"  == "schedule" ]]; then
     # --- Generate Nightly Version ---
     DATETIME_STR=$(date -u +%Y%m%d)
     VERSION="${BASE_VERSION}.dev${DATETIME_STR}"
-
-# --- PUSH TAG TRIGGER ---
-elif [[ "$GH_EVENT_NAME" == "push" && "$GH_REF" == refs/tags/* ]]; then
-    echo "Trigger: Push Tag - Generating stable build"
-    TAG_NAME="$GH_REF_NAME"
-    VERSION=${TAG_NAME#v}
-
 else
-    echo "Error: Unknown or unsupported trigger."
+    echo "Error: Unsupported trigger '${GH_EVENT_NAME:-}'. Official releases publish via Buildkite."
     exit 1
 fi
 

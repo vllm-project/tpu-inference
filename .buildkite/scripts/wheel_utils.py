@@ -14,9 +14,9 @@
 # limitations under the License.
 """Helper functions for building and publishing the release wheels.
 
-build_tpu_inference_wheel.sh and build_vllm_tpu_wheel.sh use the build
-checks. publish_wheel.sh uses the publish checks for tpu-inference and the
-combined vllm-tpu (wheel and sdist).
+build_vllm_jax_core_wheel.sh and build_vllm_jax_wheel.sh use the build
+checks. publish_wheel.sh uses the publish checks for vllm-jax-core and the
+combined vllm-jax (wheel and sdist).
 """
 
 import base64
@@ -25,6 +25,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+import zipfile
 
 from packaging.utils import (canonicalize_name, parse_sdist_filename,
                              parse_wheel_filename)
@@ -44,6 +45,33 @@ def verify_built_wheel(wheel_path: str, expected_version: str) -> None:
             file=sys.stderr,
         )
     print(f"Wheel: {name} {version}")
+
+
+def verify_empty_meta_wheel(wheel_path: str, expected_version: str,
+                            expected_dep: str) -> None:
+    """Verify a transitional meta-wheel ships no Python files or entry points
+    and declares the exact target dependency."""
+    verify_built_wheel(wheel_path, expected_version)
+    with zipfile.ZipFile(wheel_path) as zf:
+        names = zf.namelist()
+        bad = [
+            n for n in names
+            if n.endswith(".py") or n.endswith("/entry_points.txt")
+        ]
+        if bad:
+            sys.exit(
+                f"ERROR: meta-wheel {os.path.basename(wheel_path)} must not "
+                f"contain Python files or entry_points.txt, found: {bad}")
+        meta_files = [n for n in names if n.endswith(".dist-info/METADATA")]
+        if len(meta_files) != 1:
+            sys.exit(
+                f"ERROR: expected one METADATA in {wheel_path}, found {meta_files}"
+            )
+        meta_text = zf.read(meta_files[0]).decode("utf-8")
+    req_line = f"Requires-Dist: {expected_dep}"
+    if req_line not in meta_text.splitlines():
+        sys.exit(
+            f"ERROR: {os.path.basename(wheel_path)} missing '{req_line}'.")
 
 
 def verify_publish_dist(dist_path: str, project: str,
@@ -163,6 +191,7 @@ def main() -> None:
 
     commands = {
         "verify_built_wheel": verify_built_wheel,
+        "verify_empty_meta_wheel": verify_empty_meta_wheel,
         "verify_publish_dist": verify_publish_dist,
         "fetch_oidc_audience": fetch_oidc_audience,
         "verify_gcp_oidc_token": verify_gcp_oidc_token,
