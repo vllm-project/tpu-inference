@@ -1060,7 +1060,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                 n = min(max(valid_patches // k**2, 1), self.max_soft_tokens)
             else:
                 n = per_item_out_tokens[global_idx]
-            feat = output[local_idx, :n]
+            feat = output[local_idx][:n]
             if clone and hasattr(feat, 'clone'):
                 feat = feat.clone()
             dest[global_idx] = feat
