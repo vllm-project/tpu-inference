@@ -66,6 +66,7 @@ def create_request(
     req.req_id = request_id  # for NewRequestData
     req.prompt_token_ids = prompt_token_ids
     req.all_token_ids = prompt_token_ids + generated_token_ids
+    req.prefill_token_ids = req.all_token_ids
     req.num_computed_tokens = num_computed_tokens + len(generated_token_ids)
     req.block_size = block_size
     req.block_ids = [[]]
@@ -305,7 +306,6 @@ class TestTPUOffloadConnectorScheduler:
             finished_req_ids=set(),
             scheduled_encoder_inputs={},
             scheduled_spec_decode_tokens={},
-            num_common_prefix_blocks=0,
             free_encoder_mm_hashes=[],
         )
 
@@ -417,7 +417,6 @@ class TestTPUOffloadConnectorScheduler:
             finished_req_ids=set(),
             scheduled_encoder_inputs={},
             scheduled_spec_decode_tokens={},
-            num_common_prefix_blocks=0,
             free_encoder_mm_hashes=[],
         )
 
@@ -491,7 +490,6 @@ class TestTPUOffloadConnectorScheduler:
             finished_req_ids={"req1"},
             scheduled_encoder_inputs={},
             scheduled_spec_decode_tokens={},
-            num_common_prefix_blocks=0,
             free_encoder_mm_hashes=[],
         )
 

@@ -91,14 +91,18 @@ def _traced_collect_arg(mesh,
 
 
 _PLAN = (("attn_dp", ), "model", [(0, 1), (1, 0), (2, 3), (3, 2)])
+# expert_parallel_gmm's out_token_axes under attention DP. The base class's
+# value: the fixture sets ShardingAxisName to it, and the parametrize lists
+# below are built at import time.
+_ATTN_DATA = ShardingAxisNameBase.ATTN_DATA
 
 
 @pytest.mark.parametrize(
     "enabled, kwargs, expected", [
-        (True, dict(scatter_results=True), ("model", _PLAN[2])),
-        (False, dict(scatter_results=True), None),
-        (True, dict(scatter_results=False), None),
-        (True, dict(scatter_results=True, enable_rs_kernel=True), None),
+        (True, dict(out_token_axes=_ATTN_DATA), ("model", _PLAN[2])),
+        (False, dict(out_token_axes=_ATTN_DATA), None),
+        (True, dict(out_token_axes=None), None),
+        (True, dict(out_token_axes=_ATTN_DATA, enable_rs_kernel=True), None),
     ],
     ids=["enabled", "flag_off", "no_scatter", "rs_kernel"])
 def test_collect_applies_only_to_the_scattering_collect(
@@ -122,7 +126,7 @@ def test_collect_fallback_warning_names_the_reason(plan, hidden, reason):
     collect, logger = _traced_collect_arg(mesh,
                                           plan,
                                           hidden=hidden,
-                                          scatter_results=True)
+                                          out_token_axes=_ATTN_DATA)
     assert collect is None
     logger.warning_once.assert_called_once()
     message, *args = logger.warning_once.call_args.args
@@ -256,7 +260,7 @@ def _ep_inputs(mesh,
         activation="silu",
         topk=topk,
         mesh=mesh,
-        scatter_results=True,
+        out_token_axes=_ATTN_DATA,
     )
 
 

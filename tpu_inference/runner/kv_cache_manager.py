@@ -13,6 +13,7 @@
 # limitations under the License.
 import dataclasses
 import os
+from collections import defaultdict
 from typing import TYPE_CHECKING, List
 
 import jax
@@ -31,9 +32,11 @@ from vllm.models.deepseek_v4.compressor import CompressorStateCache
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec, MambaSpec,
-                                        MLAAttentionSpec, SlidingWindowSpec)
+from vllm.v1.core.single_type_kv_cache_manager import (FullAttentionManager,
+                                                       SlidingWindowManager)
+from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
+                                        KVCacheLayerConfig, KVCacheSpec,
+                                        MambaSpec, MLAAttentionSpec)
 
 from tpu_inference import envs as tpu_envs
 from tpu_inference import utils
@@ -41,7 +44,8 @@ from tpu_inference import utils as common_utils
 from tpu_inference.core.hybrid_coordinator import (  # noqa: F401
     DEFAULT_MAMBA_CACHE_MULTIPLIER, is_mamba_group, mamba_blocks_per_request,
     mamba_pool_size, set_mamba_num_blocks)
-from tpu_inference.core.runner_slot_mamba import maybe_runner_slot_mamba_spec
+from tpu_inference.core.runner_slot_mamba import \
+    maybe_runner_slot_mamba_layer_config
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.kv_share import compute_kv_share_map
@@ -94,6 +98,12 @@ class KVCacheManager:
         # on the TPU side (where we duplicate the shared tensor per layer
         # because mamba and attention caches have different shapes).
         self._hybrid_uniform_page_size_bytes: int | None = None
+        # Set by `_maybe_pad_pages_for_mixed_head_dims`: the TPU page size of
+        # each distinct (num_kv_heads, head_dim) attention shape, whose sum is
+        # `_hybrid_uniform_page_size_bytes`. When set, `initialize_kv_cache`
+        # checks that no layer slot allocates more than vLLM reserved for it.
+        self._mixed_head_dim_page_sizes: dict[tuple[int, int],
+                                              int] | None = None
         # Per-mamba-layer leading-dim cap for hybrid models. Mamba state is
         # recurrent (one slot per *active* request), so the `num_blocks`
         # slots vLLM hands out are mostly idle. Set by
@@ -101,17 +111,20 @@ class KVCacheManager:
         # `initialize_kv_cache` allocates this many slots per mamba layer
         # while attention layers keep the full `num_blocks` from the
         # (correspondingly enlarged) attention pool. The GDN op indexes
-        # mamba state with `attn_metadata.mamba_state_indices` (in
+        # mamba state with `attn_metadata.mamba.state_indices` (in
         # `[0, max_num_reqs]`) so it stays in-bounds for the smaller arrays.
         self._mamba_num_blocks: int | None = None
         self.actual_mamba_num_blocks: int | None = None
 
-    def _create_attention_spec(
-            self,
-            block_size: int,
-            num_kv_heads: int,
-            head_size: int,
-            sliding_window: bool | None = None) -> KVCacheSpec:
+    def _create_attention_layer_config(
+        self,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        sliding_window: int | None = None,
+        *,
+        is_draft: bool = False,
+    ) -> KVCacheLayerConfig:
         if self.use_mla:
             page_size_bytes = get_attention_page_size_bytes(
                 self.runner.mesh, block_size, num_kv_heads, head_size,
@@ -120,13 +133,14 @@ class KVCacheManager:
             page_size_padded = (self._hybrid_uniform_page_size_bytes
                                 if self._hybrid_uniform_page_size_bytes
                                 is not None else int(page_size_bytes))
-            return MLAAttentionSpec(block_size=block_size,
-                                    num_kv_heads=1,
-                                    head_size=head_size,
-                                    dtype=self.runner.kv_cache_dtype,
-                                    cache_dtype_str=self.runner.vllm_config.
-                                    cache_config.cache_dtype,
-                                    page_size_padded=page_size_padded)
+            spec: KVCacheSpec = MLAAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=head_size,
+                dtype=self.runner.kv_cache_dtype,
+                cache_dtype_str=self.runner.vllm_config.cache_config.
+                cache_dtype,
+                page_size_padded=page_size_padded)
         else:
             page_size_bytes = get_attention_page_size_bytes(
                 self.runner.mesh, block_size, num_kv_heads, head_size,
@@ -135,19 +149,19 @@ class KVCacheManager:
             page_size_padded = (self._hybrid_uniform_page_size_bytes
                                 if self._hybrid_uniform_page_size_bytes
                                 is not None else int(page_size_bytes))
-            if sliding_window is not None:
-                return SlidingWindowSpec(block_size=block_size,
-                                         num_kv_heads=num_kv_heads,
-                                         head_size=head_size,
-                                         dtype=self.runner.kv_cache_dtype,
-                                         sliding_window=sliding_window,
-                                         page_size_padded=page_size_padded)
-            else:
-                return FullAttentionSpec(block_size=block_size,
-                                         num_kv_heads=num_kv_heads,
-                                         head_size=head_size,
-                                         dtype=self.runner.kv_cache_dtype,
-                                         page_size_padded=page_size_padded)
+            spec = AttentionSpec(block_size=block_size,
+                                 num_kv_heads=num_kv_heads,
+                                 head_size=head_size,
+                                 dtype=self.runner.kv_cache_dtype,
+                                 page_size_padded=page_size_padded)
+        if sliding_window is not None:
+            layer_cfg = SlidingWindowManager.layer_config(
+                spec, sliding_window=sliding_window)
+        else:
+            layer_cfg = FullAttentionManager.layer_config(spec)
+        if is_draft:
+            layer_cfg = dataclasses.replace(layer_cfg, is_draft=True)
+        return layer_cfg
 
     def update_mamba_page_size_padded(
             self, layers: dict[str, AttentionLayerBase]) -> None:
@@ -230,11 +244,12 @@ class KVCacheManager:
 
         # Compute the unpadded mamba page size from an actual mamba module's
         # spec (shapes × dtype-size), ignoring any existing padding.
-        first_mamba_spec = mamba_modules[0].get_kv_cache_spec(
+        first_mamba_cfg = mamba_modules[0].get_kv_cache_config(
             self.runner.vllm_config)
-        assert isinstance(first_mamba_spec, MambaSpec)
+        assert first_mamba_cfg is not None and isinstance(
+            first_mamba_cfg.spec, MambaSpec)
         unpadded_mamba_page_size = dataclasses.replace(
-            first_mamba_spec, page_size_padded=None).page_size_bytes
+            first_mamba_cfg.spec, page_size_padded=None).page_size_bytes
 
         # Derive vLLM's kv-cache group layout. vLLM splits each type into
         # equal-sized groups of `group_size` layers, then allocates
@@ -305,7 +320,7 @@ class KVCacheManager:
             mamba_num_blocks = blocks_per_request * max_num_reqs + 1
             attn_num_blocks  = (HBM left over) / attn_page
 
-        with the `+1` covering the block pool's null block. 
+        with the `+1` covering the block pool's null block.
 
         Both pools have to fit in `gpu_memory_utilization x HBM` together.
         When they don't, the pool that can serve the most concurrent requests
@@ -320,7 +335,7 @@ class KVCacheManager:
                 layer (accounts for dtype packing like fp8).
             unpadded_mamba_page_size_bytes: bytes per slot per mamba layer
                 (`prod(shape) x dtype_size`, no padding).
-            num_attn_layers: total attention layers. 
+            num_attn_layers: total attention layers.
             num_mamba_layers: total mamba layers.
 
         Returns:
@@ -349,7 +364,7 @@ class KVCacheManager:
 
         total_limit = sum(limit for _, limit in hbm_usage)
         total_used = sum(used for used, _ in hbm_usage)
-        gpu_mem_util = cache_config.gpu_memory_utilization
+        gpu_mem_util = cache_config.resolved_gpu_memory_utilization
         avail = int(total_limit * gpu_mem_util - total_used)
         if avail <= 0:
             return
@@ -485,20 +500,113 @@ class KVCacheManager:
             avail / (2**30), self.runner.model_config.max_model_len, attn_reqs,
             attn_blocks_per_req, mamba_reqs, max_num_reqs)
 
-    def get_kv_cache_spec(self):
+    def _maybe_pad_pages_for_mixed_head_dims(
+            self, layers: dict[str, AttentionLayerBase]) -> bool:
+        """Pad attention page sizes so sliding window works with mixed dims.
+
+        Models such as Gemma 4 mix sliding-window layers and full-attention
+        layers with different (padded) KV head counts and head dims. vLLM
+        puts each attention type into its own KV cache groups and lets slot j
+        of every group share the same bytes, sized by one uniform page size.
+        TPU KV caches are typed arrays, so `initialize_kv_cache` dedupes each
+        slot by `(offset, num_kv_heads, head_size, dtype)`: groups with the
+        same shape share one array, and every other shape gets its own array
+        with the same number of blocks.
+
+        To keep what is allocated within vLLM's budget, every attention spec
+        reports the sum of the TPU page sizes of all distinct KV cache shapes
+        as its `page_size_padded`. The HBM held per block is unchanged
+        compared to placing all layers into one full-attention group, but
+        sliding-window groups now only hold their window of tokens, so far
+        more blocks are left for full-attention layers.
+
+        Invariant (checked by `_check_mixed_head_dim_slot_budgets` at
+        allocation time): for every layer slot, i.e. every byte region that
+        vLLM aliases across KV cache groups,
+
+            sum(num_blocks * page_size(shape) for each distinct shape among
+                the layers placed in the slot)
+              <= num_blocks * page_size_padded,
+
+        because each shape appears at most once per slot and
+        `page_size_padded` is the sum over all shapes. It holds with equality
+        when every slot holds every shape (e.g. Gemma 4: 5 sliding groups and
+        1 full group of 10 layers each). When vLLM pads a shorter group, the
+        padded slots hold fewer shapes and leave part of their budget unused.
+
+        Args:
+            layers: A dictionary mapping layer names to their corresponding
+                attention module instances.
+
+        Returns:
+            True if sliding-window specs can be kept, in which case
+            `_hybrid_uniform_page_size_bytes` and
+            `_mixed_head_dim_page_sizes` have been set. False if the caller
+            should disable sliding window instead.
+        """
+        if tpu_envs.USE_FULL_KVCACHE_FOR_SLIDING_WINDOW:
+            return False
+        # MLA and mamba hybrids have their own page size handling, and with
+        # the hybrid KV cache manager disabled vLLM converts sliding-window
+        # specs to full attention anyway, which would only waste the padding.
+        if (self.use_mla or self.runner.vllm_config.scheduler_config.
+                disable_hybrid_kv_cache_manager):
+            return False
+        if any(isinstance(module, MambaBase) for module in layers.values()):
+            return False
+
+        # Only decoder layers that own their KV cache get a spec.
+        attn_modules = [
+            module for module in layers.values()
+            if isinstance(module, Attention) and not is_cache_for_ds_v4(module)
+            and module.attn_type == AttentionType.DECODER
+            and module.kv_sharing_target_layer_name is None
+        ]
+        if not any(module.sliding_window is not None
+                   for module in attn_modules):
+            return False
+
+        block_size = self.runner.cache_config.block_size
+        tp_size = self.runner.mesh.shape["model"]
+        shapes = sorted({
+            (common_utils.get_padded_num_heads(module.num_kv_heads, tp_size),
+             common_utils.get_padded_head_dim(module.head_size))
+            for module in attn_modules
+        })
+        page_sizes = {}
+        for num_kv_heads, head_size in shapes:
+            page_sizes[(num_kv_heads, head_size)] = int(
+                get_attention_page_size_bytes(self.runner.mesh, block_size,
+                                              num_kv_heads, head_size,
+                                              self.runner.kv_cache_dtype,
+                                              False,
+                                              self.runner.attention_backend))
+        self._hybrid_uniform_page_size_bytes = sum(page_sizes.values())
+        self._mixed_head_dim_page_sizes = page_sizes
+        logger.info_once(
+            "Keeping sliding-window KV cache specs for attention layers with "
+            "mixed head dims: padding every attention page to %d bytes, the "
+            "sum of the page sizes of each (num_kv_heads, head_dim) shape: %s. "
+            "Unset USE_FULL_KVCACHE_FOR_SLIDING_WINDOW to disable.",
+            self._hybrid_uniform_page_size_bytes,
+            ", ".join(f"{heads}x{dim}: {size}"
+                      for (heads, dim), size in page_sizes.items()))
+        return True
+
+    def get_kv_cache_layer_configs(self) -> dict[str, KVCacheLayerConfig]:
         # TODO(xiang): this hack tricks engine core to init successfully
 
         # NOTE(weiyu0824): Pass raw block_size (size before any parallelization).
         # vLLM applies dcp_size and pcp_size scaling internally; pre-multiplying block size causes a dcp_size * pcp_size miscalculation.
         block_size = self.runner.cache_config.block_size
-        kv_cache_spec: dict[str, KVCacheSpec] = {}
+        layer_configs: dict[str, KVCacheLayerConfig] = {}
 
         tp_axis_name = ShardingAxisName.ATTN_HEAD
         model_cnt = common_utils.get_mesh_shape_product(
             self.runner.mesh, tp_axis_name)
         # If use pure jax (MODEL_IMPL_TYPE=flax_nnx), we don't register
         # attention into compilation config.
-        # Use FullAttentionSpec for each layer
+        # Use FullAttentionManager + AttentionSpec for each layer
         # TODO(pooyam): Is it possible to merge the logic for vllm and non-vllm models?
         model_config = self.runner.model_config
         text_config = getattr(model_config, "hf_text_config",
@@ -539,8 +647,9 @@ class KVCacheManager:
                     continue
 
                 if self.use_mla:
-                    kv_cache_spec[f"layer.{i}"] = self._create_attention_spec(
-                        block_size, 1, mla_head_size)
+                    layer_configs[
+                        f"layer.{i}"] = self._create_attention_layer_config(
+                            block_size, 1, mla_head_size)
                 else:
                     # TODO(kwang3939): unify the hybrid kv cache of jax path and tochax path.
                     layer_type = "full_attention"
@@ -568,14 +677,16 @@ class KVCacheManager:
                     head_size = common_utils.get_padded_head_dim(head_size)
                     # TODO(kwang3939): Re-enable sliding_window once mixed dims with sliding_window is supported.
                     sliding_window = None
-                    kv_cache_spec[f"layer.{i}"] = self._create_attention_spec(
-                        block_size,
-                        num_kv_heads,
-                        head_size,
-                        sliding_window=sliding_window)
+                    layer_configs[
+                        f"layer.{i}"] = self._create_attention_layer_config(
+                            block_size,
+                            num_kv_heads,
+                            head_size,
+                            sliding_window=sliding_window)
 
             speculative_config = self.runner.speculative_config
-            if speculative_config:
+            if (speculative_config
+                    and speculative_config.draft_model_config is not None):
                 method = speculative_config.method
                 draft_model_config = speculative_config.draft_model_config
                 draft_hf_config = draft_model_config.hf_config
@@ -602,13 +713,19 @@ class KVCacheManager:
                         draft_hf_config.num_attention_heads)
                     for i in range(draft_num_layers):
                         if self.use_mla:
-                            kv_cache_spec[
-                                f"draft_layer.{i}"] = self._create_attention_spec(
-                                    block_size, 1, mla_head_size)
+                            layer_configs[
+                                f"draft_layer.{i}"] = self._create_attention_layer_config(
+                                    block_size,
+                                    1,
+                                    mla_head_size,
+                                    is_draft=True)
                         else:
-                            kv_cache_spec[
-                                f"draft_layer.{i}"] = self._create_attention_spec(
-                                    block_size, num_kv_heads, head_size)
+                            layer_configs[
+                                f"draft_layer.{i}"] = self._create_attention_layer_config(
+                                    block_size,
+                                    num_kv_heads,
+                                    head_size,
+                                    is_draft=True)
         else:
             # Else propagate attention modules from compilation config.
             layers = get_layers_from_vllm_config(
@@ -631,13 +748,15 @@ class KVCacheManager:
                 # be unified.
                 self.update_mamba_page_size_padded(layers)
 
-            # TODO(yuyanpeng): enable sliding windows once mixed dims support
-            # Currently, with sliding windows, there is
-            # shared_kv_cache_layers among each group.
-            # The shared kv_cache_layers do not support mixed dims for
-            # TPU for now. If share kv_cache, the attention kernel would
-            # throw exception for non-matched dimension between kv_cache
-            # and actual dims. Disable sliding window for workaround.
+            # With sliding window, vLLM puts sliding-window and full-attention
+            # layers in separate KV cache groups and lets slot j of every group
+            # share one tensor. TPU KV caches are typed arrays and the
+            # attention kernel rejects a cache whose dims differ from the
+            # layer's, so layers with different padded head dims cannot share
+            # one array. Either pad every attention page so that each slot can
+            # hold one array per distinct shape (see
+            # `_maybe_pad_pages_for_mixed_head_dims`), or disable sliding
+            # window so that all layers fall into a single group.
             head_size_set = {
                 common_utils.get_padded_head_dim(
                     getattr(attn_module, "head_size", 0))
@@ -645,24 +764,35 @@ class KVCacheManager:
                 if not isinstance(attn_module, MambaBase)
             }
             disable_sliding_window = len(head_size_set) > 1
+            if disable_sliding_window:
+                disable_sliding_window = (
+                    not self._maybe_pad_pages_for_mixed_head_dims(layers))
 
             logger.warning(f"Compilation num_layers = {len(layers)}")
 
             for layer_name, attn_module in layers.items():
+                is_draft = (getattr(attn_module, "is_draft_layer", False)
+                            is True)
                 if isinstance(attn_module, MambaBase):
-                    spec = attn_module.get_kv_cache_spec(
+                    layer_cfg = attn_module.get_kv_cache_config(
                         self.runner.vllm_config)
-                    if spec is not None:
-                        kv_cache_spec[
-                            layer_name] = maybe_runner_slot_mamba_spec(
-                                spec, self.runner.vllm_config)
+                    if layer_cfg is not None:
+                        if is_draft:
+                            layer_cfg = dataclasses.replace(layer_cfg,
+                                                            is_draft=True)
+                        layer_configs[
+                            layer_name] = maybe_runner_slot_mamba_layer_config(
+                                layer_cfg, self.runner.vllm_config)
                     continue
 
                 if is_cache_for_ds_v4(attn_module):
-                    spec = attn_module.get_kv_cache_spec(
+                    layer_cfg = attn_module.get_kv_cache_config(
                         self.runner.vllm_config)
-                    if spec is not None:
-                        kv_cache_spec[layer_name] = spec
+                    if layer_cfg is not None:
+                        if is_draft:
+                            layer_cfg = dataclasses.replace(layer_cfg,
+                                                            is_draft=True)
+                        layer_configs[layer_name] = layer_cfg
                     continue
 
                 if disable_sliding_window:
@@ -671,7 +801,7 @@ class KVCacheManager:
                 if (kv_tgt_layer :=
                         attn_module.kv_sharing_target_layer_name) is not None:
                     # The layer doesn't need its own KV cache and will use that of
-                    # the target layer. We skip creating a KVCacheSpec for it, so
+                    # the target layer. We skip creating a KVCacheLayerConfig for it, so
                     # that KV cache management logic will act as this layer does
                     # not exist, and doesn't allocate KV cache for the layer. This
                     # enables the memory saving of cross-layer kv sharing, allowing
@@ -687,20 +817,27 @@ class KVCacheManager:
                         attn_module.head_size)
 
                     if attn_module.sliding_window is not None:
-                        kv_cache_spec[
-                            layer_name] = self._create_attention_spec(
+                        layer_configs[
+                            layer_name] = self._create_attention_layer_config(
                                 block_size,
                                 num_kv_heads,
                                 head_size,
-                                sliding_window=attn_module.sliding_window)
+                                sliding_window=attn_module.sliding_window,
+                                is_draft=is_draft)
                     elif self.use_mla:
-                        kv_cache_spec[
-                            layer_name] = self._create_attention_spec(
-                                block_size, 1, mla_head_size)
+                        layer_configs[
+                            layer_name] = self._create_attention_layer_config(
+                                block_size,
+                                1,
+                                mla_head_size,
+                                is_draft=is_draft)
                     else:
-                        kv_cache_spec[
-                            layer_name] = self._create_attention_spec(
-                                block_size, num_kv_heads, head_size)
+                        layer_configs[
+                            layer_name] = self._create_attention_layer_config(
+                                block_size,
+                                num_kv_heads,
+                                head_size,
+                                is_draft=is_draft)
                 elif attn_module.attn_type in (AttentionType.ENCODER,
                                                AttentionType.ENCODER_ONLY):
                     # encoder-only attention does not need KV cache.
@@ -711,7 +848,7 @@ class KVCacheManager:
                     raise ValueError(
                         f"Unknown attention type: {attn_module.attn_type}")
 
-        return kv_cache_spec
+        return layer_configs
 
     def get_kv_cache_layout(self):
         return DEFAULT_KV_CACHE_LAYOUT
@@ -725,7 +862,7 @@ class KVCacheManager:
         context_cnt = utils.get_mesh_shape_product(self.runner.mesh,
                                                    ShardingAxisName.KV_CONTEXT)
         block_sizes = [
-            kv_cache_group.kv_cache_spec.block_size *
+            kv_cache_group.block_size *
             (1 if is_mamba_group(kv_cache_group) else context_cnt)
             for kv_cache_group in kv_cache_config.kv_cache_groups
         ]
@@ -744,6 +881,8 @@ class KVCacheManager:
                 pin_memory=False,
                 vocab_size=self.runner.model_config.get_vocab_size(),
                 block_sizes=block_sizes,
+                is_spec_decode=bool(
+                    self.runner.vllm_config.speculative_config),
                 num_speculative_tokens=num_speculative_tokens,
                 dp_size=self.runner.dp_size,
             )
@@ -757,16 +896,9 @@ class KVCacheManager:
         if not kv_cache_config.kv_cache_groups:
             return
 
-        layer_name_to_spec = {}
+        layer_name_to_spec: dict[str, KVCacheSpec] = {}
         for group in kv_cache_config.kv_cache_groups:
-            group_spec = group.kv_cache_spec
-            if hasattr(group_spec, 'kv_cache_specs'):
-                for layer_name in group.layer_names:
-                    layer_name_to_spec[layer_name] = group_spec.kv_cache_specs[
-                        layer_name]
-            else:
-                for layer_name in group.layer_names:
-                    layer_name_to_spec[layer_name] = group.kv_cache_spec
+            layer_name_to_spec.update(group.kv_cache_specs)
 
         # set the kv cache layout which is needed by kv connectors
         # NOTE(jcgu): please update the default value when the order changes
@@ -838,6 +970,8 @@ class KVCacheManager:
         # Pass 1: Group layers by their physical byte slot
         slots: dict[tuple, list[str]] = {}
         slot_num_blocks: dict[tuple, int] = {}
+        # Attention slot -> (byte region key, bytes vLLM reserved for it).
+        slot_regions: dict[tuple, tuple[tuple, int]] = {}
 
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
             num_layers = len(kv_cache_tensor.layers)
@@ -862,7 +996,17 @@ class KVCacheManager:
                     tensor_num_blocks = kv_cache_tensor.size // total_group_page_size
                 alloc_per_layer = True
             else:
-                if (num_layers > 1 and kv_cache_config.num_blocks > 0
+                # With mixed-head-dim padding, a group that vLLM shortened to
+                # a single layer must still alias slot 0 of the other groups
+                # rather than get a tensor of its own (vLLM treats the missing
+                # layers as padding). `layer_stride` is only set by the
+                # aliased-group layout.
+                aliased_single_layer = (
+                    num_layers == 1
+                    and self._mixed_head_dim_page_sizes is not None
+                    and getattr(kv_cache_tensor, 'layer_stride', 0) > 0)
+                if ((num_layers > 1 or aliased_single_layer)
+                        and kv_cache_config.num_blocks > 0
                         and kv_cache_tensor.size >= num_layers *
                         page_size_bytes * kv_cache_config.num_blocks):
                     tensor_num_blocks = kv_cache_config.num_blocks
@@ -947,7 +1091,19 @@ class KVCacheManager:
                         )
                         slot_num_blocks[slot_key] = tensor_num_blocks
 
+                    if not isinstance(spec, MambaSpec):
+                        # The byte region this layer occupies in vLLM's plan
+                        # (shared by all KV cache groups) and its budget.
+                        slot_regions[slot_key] = (slot_key[:2],
+                                                  tensor_num_blocks *
+                                                  spec.page_size_bytes)
                     slots.setdefault(slot_key, []).append(layer_name)
+
+        if self._mixed_head_dim_page_sizes is not None:
+            self._check_mixed_head_dim_slot_budgets(slots, slot_num_blocks,
+                                                    slot_regions,
+                                                    layer_name_to_spec,
+                                                    kv_cache_config)
 
         # Pass 2: Allocate one physical cache per unique slot and map layers
         for slot_key, layer_names in slots.items():
@@ -1026,6 +1182,55 @@ class KVCacheManager:
 
         self._log_kv_cache_init(kv_cache_config, kv_caches, num_blocks_list,
                                 metadata, duplicate_shared_layers)
+
+    def _check_mixed_head_dim_slot_budgets(
+        self,
+        slots: dict[tuple, list[str]],
+        slot_num_blocks: dict[tuple, int],
+        slot_regions: dict[tuple, tuple[tuple, int]],
+        layer_name_to_spec: dict[str, KVCacheSpec],
+        kv_cache_config: KVCacheConfig,
+    ) -> None:
+        """Checks the invariant of `_maybe_pad_pages_for_mixed_head_dims`.
+
+        Each attention slot becomes one KV cache array of
+        `num_blocks * page_size(shape)` bytes, using the same page size
+        function that sizes the arrays in `create_kv_caches`. This must stay
+        within what vLLM reserved, both per layer slot (the slots that alias
+        one byte region must fit in its `num_blocks * page_size_padded`
+        bytes) and in total (KV cache groups alias the same tensors, so the
+        total is the largest tensor size). Otherwise the TPU would use more
+        HBM than vLLM budgeted.
+
+        Raises:
+            RuntimeError: If the allocation would exceed either budget.
+        """
+        used: dict[tuple, int] = defaultdict(int)
+        budgets: dict[tuple, int] = {}
+        for slot_key, (region, budget) in slot_regions.items():
+            spec = layer_name_to_spec[slots[slot_key][0]]
+            used[region] += slot_num_blocks[slot_key] * int(
+                get_attention_page_size_bytes(
+                    self.runner.mesh, spec.num_states, spec.num_kv_heads,
+                    spec.head_size, spec.dtype, self.use_mla,
+                    self.runner.attention_backend))
+            budgets[region] = max(budgets.get(region, 0), budget)
+        over = {
+            region: (used[region], budgets[region])
+            for region in used if used[region] > budgets[region]
+        }
+        total_used = sum(used.values())
+        total_reserved = max(
+            (t.size for t in kv_cache_config.kv_cache_tensors), default=0)
+        if over or total_used > total_reserved:
+            raise RuntimeError(
+                "KV cache allocation for attention layers with mixed head "
+                "dims exceeds the bytes vLLM reserved: "
+                f"{total_used} allocated vs {total_reserved} reserved in "
+                f"total; over-budget layer slots (region: (allocated, "
+                f"reserved)): {over}. Per-shape page sizes: "
+                f"{self._mixed_head_dim_page_sizes}. Unset "
+                "USE_FULL_KVCACHE_FOR_SLIDING_WINDOW to disable this path.")
 
     def _log_kv_cache_init(self, kv_cache_config: KVCacheConfig,
                            kv_caches: List[jax.Array],
@@ -1197,12 +1402,12 @@ class KVCacheManager:
             swa_layers_in_group: list[str] = []
             for layer_name in group.layer_names:
                 spec = layer_name_to_spec[layer_name]
-                if isinstance(spec, MLAAttentionSpec):
-                    mla_layer_names.append(layer_name)
-                elif layer_name.endswith(self._DS_V4_STATE_CACHE_SUFFIX):
+                if layer_name.endswith(self._DS_V4_STATE_CACHE_SUFFIX):
                     state_layer_names.append(layer_name)
                 elif "swa_cache" in layer_name:
                     swa_layers_in_group.append(layer_name)
+                elif isinstance(spec, MLAAttentionSpec):
+                    mla_layer_names.append(layer_name)
                 else:
                     raise ValueError(
                         "[kv-cache] DSv4 layer has no known role (expected an "
@@ -1647,6 +1852,7 @@ class KVCacheManager:
             sampling_params=request.sampling_params,
             block_ids=tuple(block_ids),
             num_computed_tokens=request.num_computed_tokens,
+            prefill_token_ids=request.prefill_token_ids,
             lora_request=request.lora_request,
             mm_features=getattr(request, "mm_features", []),
             pooling_params=getattr(request, "pooling_params", None),

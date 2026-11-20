@@ -233,6 +233,11 @@ class TpuPlatform(Platform):
         "RAGGED_GATHER_TRIM_ROWS",
         "MOE_TC_PERMUTE",
         "MOE_TC_PERMUTE_CAPACITY_FACTOR",
+        "USE_FUSED_EP_MOE_V2",
+        "FUSED_EP_MOE_V2_CAPACITY",
+        "FUSED_EP_MOE_V2_SHARDED_PLAN",
+        "USE_ROUTING_MOE",
+        "ROUTING_MOE_REMOTE_SCATTER",
         "TPU_CHIPS_PER_HOST_BOUNDS",
         "TPU_HOST_BOUNDS",
         "TPU_MULTIHOST_BACKEND",
@@ -250,6 +255,7 @@ class TpuPlatform(Platform):
         "USE_GMM_FUSED_RS_KERNEL",
         "MOE_ALL_GATHER_ACTIVATION_DTYPE",
         "SKIP_MAMBA_SCHEDULER_BLOCKS",
+        "USE_FULL_KVCACHE_FOR_SLIDING_WINDOW",
         "TPU_MESH_ATTN_DP_RING",
         "TPU_PAD_GQA_HEADS",
     ]
@@ -668,6 +674,10 @@ class TpuPlatform(Platform):
             if is_pooling_model:
                 raise ValueError(
                     "continue_decode is not supported for pooling models")
+            if vllm_config.speculative_config is not None:
+                raise ValueError(
+                    "continue_decode is not supported with speculative decoding"
+                )
 
             from tpu_inference.core.sched.utils import \
                 patch_vllm_scheduler_for_continue_decode
@@ -753,14 +763,6 @@ class TpuPlatform(Platform):
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         return True
-
-    @classmethod
-    def register_custom_kv_cache_specs(cls, vllm_config: VllmConfig) -> None:
-        # Unconditional: the manager is only used for specs the runner emits
-        # under SKIP_MAMBA_SCHEDULER_BLOCKS.
-        from tpu_inference.core.runner_slot_mamba import \
-            register_runner_slot_mamba_spec
-        register_runner_slot_mamba_spec()
 
     @classmethod
     def current_device(cls) -> torch.device:

@@ -29,8 +29,7 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              model_parallel_is_initialized)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.model_loader import get_model as vllm_get_model
-from vllm.model_executor.models.qwen2_5_vl import \
-    _pad_cumulative_seqlens_buffer
+from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphCaptureInputs, EncoderCudaGraphConfig,
     EncoderCudaGraphReplayBuffers)
@@ -247,21 +246,31 @@ class TestPadToTemplate:
 
     def test_padding_logic_from_config_is_used(self):
         """A key with a registered padding logic must use it instead of the
-        zero-fill default.
+        zero-fill default."""
 
-        Qwen2.5-VL registers `_pad_cumulative_seqlens_buffer` for cu_seqlens /
-        cu_window_seqlens and leaves cu_window_seqlens UNPADDED at replay time.
-        Zero-filling the tail makes `lens = cu[1:] - cu[:-1]` go negative and
-        the ViT attention builds garbage segment ids, so the tail must repeat
-        the last cumulative offset (= empty trailing sequences) instead.
-        """
+        def _custom_pad(dst: torch.Tensor, src: torch.Tensor) -> None:
+            dst.fill_(99)
+            dst[:src.shape[0]].copy_(src)
+
         tmpl = torch.zeros(6, dtype=torch.int32)
         src = torch.tensor([0, 4, 10], dtype=torch.int32)
-        manager = self._manager({"cu_window_seqlens": tmpl},
-                                padding_logics={
-                                    "cu_window_seqlens":
-                                    _pad_cumulative_seqlens_buffer
-                                })
+        manager = self._manager({"custom_buf": tmpl},
+                                padding_logics={"custom_buf": _custom_pad})
+        result = manager._pad_to_template({"custom_buf": src}, 256)
+        torch.testing.assert_close(
+            result["custom_buf"],
+            torch.tensor([0, 4, 10, 99, 99, 99], dtype=torch.int32))
+
+    def test_cumulative_seqlens_default_repeats_last_offset(self):
+        """Cumulative offset keys (`cu_seqlens`, `cu_window_seqlens`) repeat
+        the last offset even without an explicit `padding_logics` entry
+        (matching upstream EncoderCudaGraphManager._get_padding_logic)."""
+        tmpl = torch.zeros(6, dtype=torch.int32)
+        src = torch.tensor([0, 4, 10], dtype=torch.int32)
+        manager = self._manager({"cu_window_seqlens": tmpl})
+        assert EncoderCudaGraphManager._get_padding_logic(
+            manager.config, "cu_window_seqlens"
+        ) is EncoderCudaGraphManager._copy_cumulative_buffer
         result = manager._pad_to_template({"cu_window_seqlens": src}, 256)
         torch.testing.assert_close(
             result["cu_window_seqlens"],
@@ -328,8 +337,10 @@ class TestMMEncoderJITManagerInit:
         """One template entry per budget, shape matches the budget size."""
         manager = _make_manager()
         assert set(manager.budget_templates.keys()) == set(
-            manager.token_budgets)
-        for budget, tmpl in manager.budget_templates.items():
+            manager.token_budgets) | {(b, ())
+                                      for b in manager.token_budgets}
+        for key, tmpl in manager.budget_templates.items():
+            budget = key[0] if isinstance(key, tuple) else key
             assert "pixel_values" in tmpl
             assert tmpl["pixel_values"].shape[0] == budget
 
@@ -337,6 +348,34 @@ class TestMMEncoderJITManagerInit:
         """_jit_forward is a callable built once at init (not per-call)."""
         manager = _make_manager()
         assert callable(manager.model._jit_forward)
+
+    def test_maybe_create_supports_capture_axes(self):
+        """Models with capture_axes (such as Gemma-4) should successfully create MMEncoderJITManager."""
+        from tpu_inference.runner.mm_encoder_jit_manager import \
+            maybe_create_mm_encoder_jit_manager
+
+        class _ModelWithAxes(_DummyModel):
+
+            def get_encoder_cudagraph_config(self):
+                cfg = super().get_encoder_cudagraph_config()
+                cfg.capture_axes = ((70, 140), )
+                return cfg
+
+        vllm_config = _make_vllm_config()
+        vllm_config.compilation_config.cudagraph_mm_encoder = True
+        model = _ModelWithAxes()
+        mgr = maybe_create_mm_encoder_jit_manager(
+            vllm_config=vllm_config,
+            vllm_model=model,
+            vllm_runner=MagicMock(spec=torch.nn.Module),
+            params_and_buffers={},
+        )
+        assert mgr is not None
+        assert isinstance(mgr, MMEncoderJITManager)
+        # Check template keys include (budget, axis_keys)
+        for b in mgr.token_budgets:
+            for ax in (70, 140):
+                assert (b, (ax, )) in mgr.budget_templates
 
 
 def _image_mm_kwargs(t=1, h=4, w=4):

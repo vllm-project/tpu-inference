@@ -249,6 +249,76 @@ class TestRaidenWorkerSyncMetadataDict(unittest.TestCase):
         )
         self.assertEqual(meta["control_plane_rpc_address"], "10.11.0.5:23456")
 
+    def test_metadata_dict_uses_get_local_endpoints_when_available(self):
+        sync = rws.RaidenWorkerSync("rollout", bind_ip="1.2.3.4")
+        sync.names = ["w"]
+        dev0, dev1 = object(), object()
+        mock_sharding = SimpleNamespace(
+            mesh=SimpleNamespace(axis_names=("x", ), shape={"x": 2}),
+            spec=("x", ),
+            shard_shape=lambda shape: (4, ),
+            devices_indices_map=lambda shape: {
+                dev0: (slice(0, 4), ),
+                dev1: (slice(4, 8), ),
+            },
+        )
+        sync.arrays = [
+            SimpleNamespace(
+                shape=(8, ),
+                dtype=SimpleNamespace(itemsize=4),
+                sharding=mock_sharding,
+                ndim=1,
+                addressable_shards=[
+                    SimpleNamespace(device=dev0),
+                    SimpleNamespace(device=dev1),
+                ],
+            )
+        ]
+        sync._sync = SimpleNamespace(
+            num_shards=2,
+            local_port=12345,
+            listener_port=23456,
+            get_local_endpoints=lambda: [
+                {
+                    "endpoint": "10.0.0.1:12345",
+                    "shards": [0]
+                },
+                {
+                    "endpoint": "10.0.0.2:12345",
+                    "shards": [1]
+                },
+            ],
+        )
+        meta = sync.metadata_dict()
+        self.assertEqual(meta["shards"], ["10.0.0.1:12345", "10.0.0.2:12345"])
+
+    def test_metadata_dict_worker_index_zero_is_preserved(self):
+        sync = rws.RaidenWorkerSync("rollout",
+                                    worker_index=0,
+                                    bind_ip="1.2.3.4")
+        sync.names = ["w"]
+        dev0 = object()
+        mock_sharding = SimpleNamespace(
+            mesh=SimpleNamespace(axis_names=("x", ), shape={"x": 1}),
+            spec=("x", ),
+            shard_shape=lambda shape: (4, ),
+            devices_indices_map=lambda shape: {dev0: (slice(0, 4), )},
+        )
+        sync.arrays = [
+            SimpleNamespace(
+                shape=(4, ),
+                dtype=SimpleNamespace(itemsize=4),
+                sharding=mock_sharding,
+                ndim=1,
+                addressable_shards=[SimpleNamespace(device=dev0)],
+            )
+        ]
+        sync._sync = SimpleNamespace(num_shards=1,
+                                     local_port=12345,
+                                     listener_port=23456)
+        meta = sync.metadata_dict()
+        self.assertEqual(meta["unit"]["job_replica_id"], "0")
+
     def test_bound_is_false_until_bind(self):
         sync = rws.RaidenWorkerSync("rollout")
         self.assertFalse(sync.bound)
@@ -525,6 +595,40 @@ class TestRaidenWorkerSyncH2D(unittest.TestCase):
             mock_block.assert_called_once_with(sync.arrays)
             mock_settle.assert_not_called()
 
+    def test_deferred_h2d_waits_for_transfer_completion_and_calls_h2d(self):
+        sync = rws.RaidenWorkerSync("rollout", auto_h2d=False)
+        mock_ws = unittest.mock.MagicMock()
+        sync._sync = mock_ws
+        sync.arrays = [SimpleNamespace()]
+
+        with unittest.mock.patch("jax.block_until_ready"
+                                 ) as mock_block, unittest.mock.patch.object(
+                                     rws.envs, "RAIDEN_H2D_SETTLE",
+                                     False), unittest.mock.patch.object(
+                                         sync,
+                                         "_wait_until_settled") as mock_settle:
+            sync.h2d(uuid=42)
+            mock_ws.wait_for_transfer_completion.assert_called_once_with(42)
+            mock_ws.h2d.assert_called_once()
+            mock_block.assert_called_once_with(sync.arrays)
+            mock_settle.assert_not_called()
+
+    def test_deferred_h2d_rejects_missing_or_non_positive_uuid(self):
+        sync = rws.RaidenWorkerSync("rollout", auto_h2d=False)
+        sync._sync = unittest.mock.MagicMock()
+        sync.arrays = [SimpleNamespace()]
+
+        for bad_uuid in (None, 0, -5):
+            with self.assertRaises(ValueError):
+                sync.h2d(uuid=bad_uuid)
+
+    def test_parallel_h2h_env_defaults_auto_h2d_to_false(self):
+        with unittest.mock.patch.dict("os.environ",
+                                      {"WEIGHT_SYNC_PARALLEL_H2H": "1"}):
+            sync = rws.RaidenWorkerSync("rollout")
+            self.assertFalse(sync._auto_h2d)
+            self.assertFalse(sync._effective_auto_h2d)
+
 
 class TestRaidenWorkerSyncBindIp(unittest.TestCase):
     """bind() hands the native layer an explicit source-bind policy.
@@ -574,6 +678,62 @@ class TestRaidenWorkerSyncBindIp(unittest.TestCase):
                 "TPU_RAIDEN_DATA_NICS": ""
             }, ["10.11.0.5"])
         self.assertIsNone(bind_ip)
+
+
+class TestRaidenWorkerSyncMultihostParallel(unittest.TestCase):
+
+    def test_raiden_parallelism_env_override(self):
+        with unittest.mock.patch.dict("os.environ",
+                                      {"RAIDEN_PARALLELISM": "8"}):
+            sync = rws.RaidenWorkerSync("rollout", parallelism=4)
+            self.assertEqual(sync._parallelism, 8)
+
+    def test_bind_logs_weight_footprint(self):
+        sync = rws.RaidenWorkerSync("rollout")
+        fake_arr = SimpleNamespace(
+            nbytes=1024,
+            addressable_shards=[
+                SimpleNamespace(data=SimpleNamespace(nbytes=512))
+            ],
+        )
+        with unittest.mock.patch.object(
+                rws, "flatten_weights",
+                return_value=(["w"], [fake_arr])), unittest.mock.patch.object(
+                    rws, "_filter_bindable", side_effect=lambda n, a:
+                    (n, a)), unittest.mock.patch.object(
+                        rws,
+                        "_ws_lib",
+                        SimpleNamespace(
+                            WeightSynchronizer=unittest.mock.MagicMock()),
+                    ), unittest.mock.patch.object(rws.logger,
+                                                  "info") as mock_info:
+            sync.bind({"w": fake_arr})
+            mock_info.assert_called_once()
+            log_msg = mock_info.call_args[0][0]
+            self.assertIn("binding %d weight arrays", log_msg)
+
+    def test_bind_logs_weight_footprint_shards_without_data(self):
+        """Addressable shards without a .data attribute (mock namespaces) shouldn't crash."""
+        sync = rws.RaidenWorkerSync("rollout")
+        fake_arr = SimpleNamespace(
+            nbytes=1024,
+            addressable_shards=[SimpleNamespace(device=object())],
+        )
+        with unittest.mock.patch.object(
+                rws, "flatten_weights",
+                return_value=(["w"], [fake_arr])), unittest.mock.patch.object(
+                    rws, "_filter_bindable", side_effect=lambda n, a:
+                    (n, a)), unittest.mock.patch.object(
+                        rws,
+                        "_ws_lib",
+                        SimpleNamespace(
+                            WeightSynchronizer=unittest.mock.MagicMock()),
+                    ), unittest.mock.patch.object(rws.logger,
+                                                  "info") as mock_info:
+            sync.bind({"w": fake_arr})
+            mock_info.assert_called_once()
+            log_msg = mock_info.call_args[0][0]
+            self.assertIn("binding %d weight arrays", log_msg)
 
 
 if __name__ == "__main__":

@@ -21,7 +21,8 @@ import jax.numpy as jnp
 from vllm.v1.outputs import LogprobsTensors
 
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, GroupedAttentionMetadata, SharedAttentionMetadata)
+    AttentionMetadata, GroupedAttentionMetadata, MambaMetadata,
+    SharedAttentionMetadata)
 from tpu_inference.models.common.compiler_options import (
     get_sampling_compiler_options, get_step_fn_compiler_options)
 
@@ -51,6 +52,8 @@ def _build_attn_metadata(
     padded_num_reqs: int,
     layer_names_per_group: tuple[tuple[str, ...], ...] | None,
 ) -> AttentionMetadata | GroupedAttentionMetadata:
+    mamba = (MambaMetadata(state_indices=mamba_state_indices)
+             if mamba_state_indices is not None else None)
     if layer_names_per_group is None:
         return AttentionMetadata(
             input_positions=input_positions,
@@ -58,7 +61,7 @@ def _build_attn_metadata(
             seq_lens=seq_lens,
             query_start_loc=query_start_loc,
             request_distribution=request_distribution,
-            mamba_state_indices=mamba_state_indices,
+            mamba=mamba,
             padded_num_reqs=padded_num_reqs,
         )
     return GroupedAttentionMetadata(
@@ -69,7 +72,7 @@ def _build_attn_metadata(
                 seq_lens=seq_lens,
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
-                mamba_state_indices=mamba_state_indices,
+                mamba=mamba,
                 padded_num_reqs=padded_num_reqs,
             ) for bt in block_tables),
         layer_names_per_group=layer_names_per_group,
@@ -226,7 +229,6 @@ def _decode_core_impl(
                 seq_lens=seq_lens_arg,
                 query_start_loc=query_start_loc_arg,
                 request_distribution=request_distribution_arg,
-                mamba_state_indices=mamba_state_indices_arg,
                 padded_num_reqs=padded_num_reqs,
             )
             _, _, _, experts = model_fn(
@@ -282,7 +284,6 @@ def _decode_core_impl(
             seq_lens=sl,
             query_start_loc=query_start_loc,
             request_distribution=request_distribution,
-            mamba_state_indices=mamba_state_indices,
             padded_num_reqs=padded_num_reqs,
         )
         kvc, hidden_states, _, expert_indices_step = model_fn(
@@ -582,6 +583,8 @@ def continue_decode(
     step_rngs, current_rng = _split_rngs(rng, static_max_decode_steps,
                                          max_decode_steps)
 
+    mamba_state_indices = (first_attn.mamba.state_indices
+                           if first_attn.mamba is not None else None)
     (step_counter, current_tokens, active_mask, positions, seq_lens, kv_caches,
      token_buffer, expert_buffer, lp_ids_buffer, lp_val_buffer,
      lp_ranks_buffer) = _get_decode_core()(
@@ -595,7 +598,7 @@ def continue_decode(
          block_tables=block_tables,
          query_start_loc=first_attn.query_start_loc,
          request_distribution=first_attn.request_distribution,
-         mamba_state_indices=first_attn.mamba_state_indices,
+         mamba_state_indices=mamba_state_indices,
          current_tokens=init_state.current_tokens,
          active_mask=init_state.active_mask,
          input_positions=first_attn.input_positions,
@@ -630,7 +633,7 @@ def continue_decode(
             seq_lens=seq_lens,
             query_start_loc=first_attn.query_start_loc,
             request_distribution=first_attn.request_distribution,
-            mamba_state_indices=first_attn.mamba_state_indices,
+            mamba_state_indices=mamba_state_indices,
             padded_num_reqs=first_attn.padded_num_reqs,
             layer_names_per_group=layer_names_per_group,
         ),

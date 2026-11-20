@@ -61,12 +61,38 @@ class PCPMetadata:
 @functools.partial(
     jax.tree_util.register_dataclass,
     data_fields=[
+        "state_indices",
+        "read_offsets",
+    ],
+    meta_fields=[],
+)
+@dataclass
+class MambaMetadata:
+    """Mamba / GDN linear-attention metadata, passed via AttentionMetadata.mamba."""
+    # (max_num_seqs,) int32 — physical slot id (∈ [0, _mamba_num_blocks))
+    # in the mamba kv-cache for the request currently in each persistent-
+    # batch position. Used by mamba/GDN ops to read/write recurrent state
+    # without going through `block_tables`, since the mamba pool is
+    # smaller than the attention pool under compact-mamba sizing.
+    # None for models without mamba layers; pure-mamba models would also
+    # use this field, only hybrid models exercise it today.
+    state_indices: jax.Array | None = None
+    # (max_num_seqs,) int32 — per-request offset ∈ [0, num_spec_tokens] into the
+    # strided mamba/GDN state slot group indicating which accepted checkpoint
+    # from the previous speculative verification step to read from.
+    # None when speculative decoding or mamba/GDN state is disabled.
+    read_offsets: jax.Array | None = None
+
+
+@functools.partial(
+    jax.tree_util.register_dataclass,
+    data_fields=[
         "input_positions",
         "block_tables",
         "seq_lens",
         "query_start_loc",
         "request_distribution",
-        "mamba_state_indices",
+        "mamba",
         "pcp",
         "backend_metadata",
     ],
@@ -74,6 +100,7 @@ class PCPMetadata:
         "padded_num_reqs",
         "pcp_cache_pages",
         "use_causal_mask",
+        "is_decode",
     ],
 )
 @dataclass
@@ -89,14 +116,9 @@ class AttentionMetadata(object):
     query_start_loc: jax.Array = None
     # (3,)
     request_distribution: jax.Array = None
-    # (max_num_seqs,) int32 — physical slot id (∈ [0, _mamba_num_blocks))
-    # in the mamba kv-cache for the request currently in each persistent-
-    # batch position. Used by mamba/GDN ops to read/write recurrent state
-    # without going through `block_tables`, since the mamba pool is
-    # smaller than the attention pool under compact-mamba sizing.
-    # None for models without mamba layers; pure-mamba models would also
-    # use this field, only hybrid models exercise it today.
-    mamba_state_indices: jax.Array | None = None
+    # Mamba / GDN linear-attention metadata. None for models without mamba
+    # layers or in mamba align mode without speculative decoding.
+    mamba: MambaMetadata | None = None
 
     # PCP-specific metadata. None when not running prefill context parallelism.
     pcp: PCPMetadata | None = None
@@ -113,6 +135,7 @@ class AttentionMetadata(object):
 
     # STATIC: controls JIT specialization without adding a runtime array.
     use_causal_mask: bool = True
+    is_decode: bool = False
 
     # The selected TPU attention backend's own metadata of this step, a pytree
     # of its own type (AttentionBackend.prepare_step); None for RPA.
@@ -126,9 +149,11 @@ class AttentionMetadata(object):
         "seq_lens",
         "query_start_loc",
         "request_distribution",
-        "mamba_state_indices",
     ],
-    meta_fields=["padded_num_reqs"],
+    meta_fields=[
+        "padded_num_reqs",
+        "is_decode",
+    ],
 )
 @dataclass
 class SharedAttentionMetadata(object):
@@ -140,14 +165,6 @@ class SharedAttentionMetadata(object):
     query_start_loc: jax.Array = None
     # (3,)
     request_distribution: jax.Array = None
-    # (max_num_seqs,) int32 — physical slot id (∈ [0, _mamba_num_blocks))
-    # in the mamba kv-cache for the request currently in each persistent-
-    # batch position. Used by mamba/GDN ops to read/write recurrent state
-    # without going through `block_tables`, since the mamba pool is
-    # smaller than the attention pool under compact-mamba sizing.
-    # None for models without mamba layers; pure-mamba models would also
-    # use this field, only hybrid models exercise it today.
-    mamba_state_indices: jax.Array | None = None
 
     # The actual number of requests padded to the compiled buckets. The bucket
     # contains only max_reqs by default to reduce model precompilation time.
@@ -155,6 +172,7 @@ class SharedAttentionMetadata(object):
     # power of 2 between min and max requests.
     # Env var ATTN_CUSTOM_NUM_REQS_BUCKETS can manually override the buckets.
     padded_num_reqs: int = -1
+    is_decode: bool = False
 
 
 class GroupedAttentionMetadata(dict):

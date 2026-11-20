@@ -63,6 +63,7 @@ class UnquantizedLinearMethod:
                 self.linear_config.weight_sharding,
                 mesh=self.linear_config.mesh,
                 defer_all_reduce=self.linear_config.defer_all_reduce,
+                sp_token_axes=self.linear_config.get_sp_token_axes(x_jax),
             )
 
         if bias_jax is not None:

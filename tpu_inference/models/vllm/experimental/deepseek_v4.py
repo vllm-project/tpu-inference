@@ -127,7 +127,12 @@ class DeepseekV4MoE(nn.Module):
 
         self.gate.e_score_correction_bias = None
         self.gate.tid2eid = None
-        is_hash_moe = extract_layer_index(prefix) < config.num_hash_layers
+        # transformers' native DeepseekV4Config folds the legacy
+        # `num_hash_layers` kwarg into `mlp_layer_types`; fall back to it.
+        num_hash_layers = getattr(config, "num_hash_layers", None)
+        if num_hash_layers is None:
+            num_hash_layers = config.mlp_layer_types.count("hash_moe")
+        is_hash_moe = extract_layer_index(prefix) < num_hash_layers
         self.hash_indices_dtype = torch.int32
         if is_hash_moe:
             # hash MoE doesn't use e_score_correction_bias
@@ -189,11 +194,22 @@ class DeepseekV4MoE(nn.Module):
             apply_routed_scale_to_output=True,
         )
 
-        # Upstream vLLM stores the hash routing table on the fused-topk router
-        # (`FusedTopKBiasRouter._hash_indices_table`). The TPU MoE apply path is
-        # only handed the `RoutedExperts` layer, so mirror the table onto it here
-        # so it can be sharded (see cleanup_sharding) and read at forward time.
-        self.experts.routed_experts.hash_indices_table = self.gate.tid2eid
+        # The TPU MoE apply path is only handed the `RoutedExperts` layer and
+        # needs the hash routing table there. Upstream
+        # `FusedMoEFactory(hash_indices_table=...)` already hands the gate's
+        # table to `RoutedExperts.__init__`, which stores it as a plain
+        # attribute (via `object.__setattr__`, so the gate stays the sole owner
+        # of the `tid2eid` Parameter). Do not assign it again here: assigning
+        # an nn.Parameter over an existing plain attribute goes through
+        # `register_parameter` and raises
+        # KeyError: "attribute 'hash_indices_table' already exists".
+        # cleanup_sharding registers the TPU-replicated copy as the
+        # `tpu_hash_indices_table` buffer, which interface/moe.py reads.
+        routed_experts = self.experts.routed_experts
+        assert routed_experts.hash_indices_table is self.gate.tid2eid, (
+            "RoutedExperts.hash_indices_table was not wired to gate.tid2eid by "
+            "FusedMoEFactory; the TPU hash-routing path would read a stale "
+            "table.")
 
     def forward(self,
                 hidden_states: torch.Tensor,

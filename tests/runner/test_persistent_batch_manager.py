@@ -32,20 +32,37 @@ def _create_cached_request(req_id: str) -> CachedRequestState:
         pooling_params=None,
         block_ids=[[1]],
         num_computed_tokens=0,
+        prefill_token_ids=[1, 2, 3],
         lora_request=None,
         output_token_ids=[],
     )
 
 
+def _make_new_request_data(req_id: str, prefill_token_ids, block_ids):
+    """A NewRequestData for a request resumed after preemption: since
+    vllm-project/vllm#63373 it is re-sent in full, with prefill_token_ids
+    holding the prompt ([1, 2, 3]) plus the tokens generated before."""
+    new_req = MagicMock()
+    new_req.req_id = req_id
+    new_req.prompt_token_ids = [1, 2, 3]
+    new_req.prefill_token_ids = list(prefill_token_ids)
+    new_req.mm_features = []
+    new_req.sampling_params = SamplingParams(temperature=0.0)
+    new_req.pooling_params = None
+    new_req.block_ids = block_ids
+    new_req.num_computed_tokens = 0
+    new_req.lora_request = None
+    return new_req
+
+
 def _make_scheduler_output(*,
                            scheduled_req_ids=(),
                            preempted_req_ids=None,
-                           resumed_req_ids=(),
+                           new_reqs=(),
                            new_block_ids=None):
     scheduler_output = MagicMock()
     req_data = MagicMock()
     req_data.req_ids = list(scheduled_req_ids)
-    req_data.resumed_req_ids = set(resumed_req_ids)
     req_data.num_computed_tokens = [0] * len(req_data.req_ids)
     req_data.new_token_ids = [[] for _ in req_data.req_ids]
     if new_block_ids is None:
@@ -54,13 +71,15 @@ def _make_scheduler_output(*,
         req_data.new_block_ids = new_block_ids
     req_data.num_output_tokens = [0] * len(req_data.req_ids)
     scheduler_output.scheduled_cached_reqs = req_data
-    scheduler_output.scheduled_new_reqs = []
+    scheduler_output.scheduled_new_reqs = list(new_reqs)
     scheduler_output.scheduled_spec_decode_tokens = {}
     scheduler_output.num_scheduled_tokens = {
         req_id: 1
-        for req_id in scheduled_req_ids
+        for req_id in list(scheduled_req_ids) +
+        [new_req.req_id for new_req in new_reqs]
     }
-    scheduler_output.total_num_scheduled_tokens = len(scheduled_req_ids)
+    scheduler_output.total_num_scheduled_tokens = len(
+        scheduler_output.num_scheduled_tokens)
     scheduler_output.finished_req_ids = set()
     scheduler_output.free_encoder_mm_hashes = []
     scheduler_output.preempted_req_ids = set(preempted_req_ids or ())
@@ -231,9 +250,13 @@ class TestPersistentBatchManager(unittest.TestCase):
             _make_scheduler_output(preempted_req_ids={req.req_id}), None)
 
         self.assertIsNone(req.mamba_state_slot)
+        self.assertEqual(req.mamba_read_offset, 0)
         self.assertTrue(
             any(slot in pool
                 for pool in input_batch._free_mamba_slots_per_rank))
+        # The worker state of a preempted request is dropped.
+        self.assertNotIn(req.req_id, requests)
+        self.assertEqual(input_batch.num_reqs, 0)
 
     def test_update_states_releases_preserved_mamba_slot_when_preempted(self):
         req = _create_cached_request("req-0")
@@ -268,6 +291,7 @@ class TestPersistentBatchManager(unittest.TestCase):
             _make_scheduler_output(preempted_req_ids={req.req_id}), None)
 
         self.assertIsNone(req.mamba_state_slot)
+        self.assertEqual(req.mamba_read_offset, 0)
         self.assertTrue(
             any(slot in pool
                 for pool in input_batch._free_mamba_slots_per_rank))
@@ -297,20 +321,64 @@ class TestPersistentBatchManager(unittest.TestCase):
         manager.update_states(_make_scheduler_output(), None)
         self.assertEqual(req.mamba_state_slot, slot)
 
+        # A resumed request is re-sent as a new request (vllm#63373).
         with patch.object(input_batch,
                           "release_mamba_slot",
                           wraps=input_batch.release_mamba_slot) as release:
             manager.update_states(
-                _make_scheduler_output(
-                    scheduled_req_ids=[req.req_id],
-                    resumed_req_ids={req.req_id},
-                    new_block_ids=[[[2]]],
-                ), None)
+                _make_scheduler_output(new_reqs=[
+                    _make_new_request_data(req.req_id, [1, 2, 3], [[2]])
+                ]), None)
 
         release.assert_called_with(slot)
         self.assertEqual(input_batch.num_reqs, 1)
-        self.assertEqual(req.mamba_state_slot,
+        resumed = requests[req.req_id]
+        self.assertIsNot(resumed, req)
+        self.assertEqual(resumed.block_ids, [[2]])
+        self.assertEqual(resumed.mamba_state_slot,
                          int(input_batch.mamba_state_indices_cpu[0]))
+
+    def test_update_states_resumed_request_restores_output_tokens(self):
+        """A request preempted after generating tokens is re-sent with
+        prefill_token_ids = prompt + generated tokens; those must come back as
+        output_token_ids so sampling (penalties, stop checks) sees them."""
+        req = _create_cached_request("req-0")
+        req.output_token_ids.extend([7, 8])
+        requests = {req.req_id: req}
+        input_batch = InputBatch(
+            max_num_reqs=4,
+            max_model_len=16,
+            max_num_batched_tokens=16,
+            pin_memory=False,
+            vocab_size=128,
+            block_sizes=[16],
+        )
+        input_batch.add_request(req)
+        manager = PersistentBatchManager(requests,
+                                         input_batch,
+                                         encoder_cache={},
+                                         uses_mrope=False,
+                                         model_config=MagicMock(),
+                                         is_last_rank=True)
+
+        manager.update_states(
+            _make_scheduler_output(preempted_req_ids={req.req_id}), None)
+        self.assertNotIn(req.req_id, requests)
+        self.assertEqual(input_batch.num_reqs, 0)
+
+        manager.update_states(
+            _make_scheduler_output(new_reqs=[
+                _make_new_request_data(req.req_id, [1, 2, 3, 7, 8], [[3]])
+            ]), None)
+
+        resumed = requests[req.req_id]
+        self.assertEqual(resumed.prompt_token_ids, [1, 2, 3])
+        self.assertEqual(resumed.output_token_ids, [7, 8])
+        self.assertEqual(resumed.num_tokens, 5)
+        index = input_batch.req_id_to_index[req.req_id]
+        self.assertEqual(input_batch.token_ids_cpu[index, :5].tolist(),
+                         [1, 2, 3, 7, 8])
+        self.assertEqual(int(input_batch.num_tokens[index]), 5)
 
     def test_update_states_pp_non_last_rank(self):
         """
@@ -419,3 +487,50 @@ class TestPersistentBatchManager(unittest.TestCase):
 
             manager.update_states(scheduler_output_changed, None)
             mock_assert.assert_called_once()
+
+    def test_update_states_restores_spec_decode_tokens_for_readded_request(
+            self):
+        req = _create_cached_request("req-0")
+        req.output_token_ids = [10]
+        req.num_computed_tokens = 3
+        requests = {req.req_id: req}
+        input_batch = InputBatch(
+            max_num_reqs=4,
+            max_model_len=16,
+            max_num_batched_tokens=16,
+            pin_memory=False,
+            vocab_size=128,
+            block_sizes=[16],
+            is_spec_decode=True,
+            num_speculative_tokens=3,
+        )
+        input_batch.add_request(req)
+
+        manager = PersistentBatchManager(requests,
+                                         input_batch,
+                                         encoder_cache={},
+                                         uses_mrope=False,
+                                         model_config=MagicMock(),
+                                         is_last_rank=True)
+
+        # Unschedule req-0 on step t
+        manager.update_states(_make_scheduler_output(), None)
+        self.assertEqual(input_batch.num_reqs, 0)
+
+        # Re-schedule req-0 on step t+1 with 3 draft tokens
+        sched_out = _make_scheduler_output(scheduled_req_ids=[req.req_id])
+        sched_out.scheduled_cached_reqs.num_computed_tokens = [3]
+        sched_out.scheduled_cached_reqs.num_output_tokens = [1]
+        sched_out.scheduled_spec_decode_tokens = {req.req_id: [20, 21, 22]}
+        sched_out.num_scheduled_tokens = {req.req_id: 4}
+        sched_out.total_num_scheduled_tokens = 4
+
+        manager.update_states(sched_out, None)
+
+        self.assertEqual(input_batch.num_reqs, 1)
+        self.assertEqual(input_batch.num_tokens_no_spec[0], 4)
+        self.assertEqual(input_batch.num_tokens[0], 7)
+        np.testing.assert_array_equal(
+            input_batch.token_ids_cpu[0, :7],
+            np.array([1, 2, 3, 10, 20, 21, 22], dtype=np.int32),
+        )
