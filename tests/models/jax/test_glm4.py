@@ -166,7 +166,9 @@ class TestGlm4ForCausalLM:
             query_start_loc=jnp.array([0, seq_len], dtype=jnp.int32),
             request_distribution=jnp.array([0, 0, 1], dtype=jnp.int32),
         )
-        with jax.set_mesh(mesh):
+        # TPU's default fp32 matmul precision uses bf16 passes; request full
+        # fp32 so the comparison against the fp32 HF reference is meaningful.
+        with jax.set_mesh(mesh), jax.default_matmul_precision("highest"):
             _, hidden_states, aux, _ = model(
                 kv_caches, jnp.asarray(token_ids, dtype=jnp.int32),
                 attention_metadata)
