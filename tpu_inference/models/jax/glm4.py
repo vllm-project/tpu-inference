@@ -36,6 +36,7 @@ from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.layers import FlaxUtils
@@ -129,32 +130,44 @@ class Glm4Attention(JaxModule):
                               _get_partial_rotary_factor(config))
         attention_bias = getattr(config, "attention_bias", True)
 
-        sharding_size = mesh.shape["model"]
-        self.num_heads = utils.get_padded_num_heads(self.num_heads,
-                                                    sharding_size)
-        self.num_kv_heads = utils.get_padded_num_heads(self.num_kv_heads,
-                                                       sharding_size)
-
         self.mesh = mesh
 
-        def _proj(name, num_heads):
+        # Keep num_kv_heads unpadded: the iterator weight loader copies the
+        # checkpoint tensor as-is, so padding kv heads up to the TP size
+        # (GLM-4-9B-0414 has 2 KV heads) breaks loading at TP=4/8. When
+        # num_kv_heads is not divisible by the TP size, shard k/v on head_dim
+        # instead, as gemma4.py does; the attention kernel replicates the kv
+        # heads internally for that case.
+        tp_size = utils.get_mesh_shape_product(mesh, ShardingAxisName.MODEL)
+        shard_kv_on_heads = tp_size <= 1 or self.num_kv_heads % tp_size == 0
+        if not shard_kv_on_heads:
+            logger.warning_once(
+                f"num_kv_heads={self.num_kv_heads} is not divisible by TP "
+                f"size {tp_size}, sharding k/v projections on head_dim "
+                "instead of kv-heads. This may cause all-to-all "
+                "communication overhead.")
+        head_spec = (None, "model", None), ("model", None)
+        kv_spec = head_spec if shard_kv_on_heads else ((None, None, "model"),
+                                                       (None, "model"))
+
+        def _proj(name, num_heads, spec):
+            kernel_spec, bias_spec = spec
             return JaxEinsum(
                 "TD,DNH->TNH",
                 (self.hidden_size, num_heads, self.head_dim),
                 bias_shape=(num_heads,
                             self.head_dim) if attention_bias else None,
                 dtype=dtype,
-                kernel_init=nnx.with_partitioning(init_fn,
-                                                  (None, "model", None)),
-                bias_init=nnx.with_partitioning(init_fn, ("model", None)),
+                kernel_init=nnx.with_partitioning(init_fn, kernel_spec),
+                bias_init=nnx.with_partitioning(init_fn, bias_spec),
                 rngs=rng,
                 quant_config=quant_config,
                 prefix=prefix + "." + name,
             )
 
-        self.q_proj = _proj("q_proj", self.num_heads)
-        self.k_proj = _proj("k_proj", self.num_kv_heads)
-        self.v_proj = _proj("v_proj", self.num_kv_heads)
+        self.q_proj = _proj("q_proj", self.num_heads, head_spec)
+        self.k_proj = _proj("k_proj", self.num_kv_heads, kv_spec)
+        self.v_proj = _proj("v_proj", self.num_kv_heads, kv_spec)
         self.o_proj = JaxEinsum(
             "TNH,NHD->TD",
             (self.num_heads, self.head_dim, self.hidden_size),

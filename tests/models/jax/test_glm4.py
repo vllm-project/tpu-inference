@@ -18,6 +18,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
+from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
 from transformers import Glm4Config
 from transformers import Glm4ForCausalLM as HfGlm4ForCausalLM
 from vllm.config import ModelConfig, set_current_vllm_config
@@ -141,6 +143,29 @@ class TestGlm4ForCausalLM:
             hf_layer.post_mlp_layernorm.weight.detach().numpy(),
             rtol=0,
             atol=0)
+
+    def test_load_with_tp_larger_than_kv_heads(self, tiny_glm4_checkpoint,
+                                               rng):
+        # The tiny checkpoint has 2 KV heads, like GLM-4-9B-0414. With TP=4
+        # the k/v projections must load unpadded and shard on head_dim.
+        if len(jax.devices()) < 4:
+            pytest.skip("Needs at least 4 devices.")
+        model_dir, hf_model = tiny_glm4_checkpoint
+        devices = np.array(jax.devices()[:4]).reshape((1, 1, 1, 4))
+        tp_mesh = Mesh(devices,
+                       axis_names=("data", "attn_dp", "expert", "model"))
+        _, model = _load(model_dir, rng, tp_mesh)
+
+        attn = model.model.layers[0].self_attn
+        assert attn.k_proj.weight.shape == (256, 2, 128)
+        assert attn.v_proj.weight.shape == (256, 2, 128)
+        assert attn.k_proj.weight.value.sharding.spec == P(None, None, "model")
+        hf_k = hf_model.model.layers[0].self_attn.k_proj.weight.detach()
+        np.testing.assert_allclose(np.asarray(
+            attn.k_proj.weight.value).reshape(256, 256),
+                                   hf_k.numpy().T,
+                                   rtol=0,
+                                   atol=0)
 
     def test_logits_match_hf(self, tiny_glm4_checkpoint, rng, mesh):
         """Prefill a single sequence and compare logits with HF."""
