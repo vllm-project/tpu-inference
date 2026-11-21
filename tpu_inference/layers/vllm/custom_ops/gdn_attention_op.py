@@ -24,7 +24,8 @@ from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import \
     QwenGatedDeltaNetAttention
 
 from tpu_inference.layers.common.attention_backend import (
-    attention_backend_name, create_linear_attention_backend)
+    GDNLinearAttentionBackend, attention_backend_name,
+    create_linear_attention_backend)
 from tpu_inference.layers.common.gdn_attention import run_jax_gdn_attention
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import (
@@ -41,10 +42,13 @@ def gdn_attention_core_tpu(
     mixed_qkv: torch.Tensor,
     b: torch.Tensor,
     a: torch.Tensor,
-    core_attn_out: torch.Tensor,
+    core_attn_out: torch.Tensor | None,
     layer_name: str,
     mesh: jax.sharding.Mesh,
-) -> None:
+    z: torch.Tensor | None = None,
+    norm_weight: torch.Tensor | None = None,
+    norm_eps: float = 1e-6,
+) -> torch.Tensor | None:
     """
     This acts as main bridge between PyTorch and JAX for the GDN core attention.
     Uses a robust, token-by-token scan to inherently handle any mix of
@@ -187,6 +191,10 @@ def gdn_attention_core_tpu(
     if read_offsets_sliced is not None:
         extra_gdn_kwargs["read_offsets"] = read_offsets_sliced
         extra_gdn_kwargs["num_spec_tokens"] = num_spec_tokens
+    if z is not None and norm_weight is not None:
+        extra_gdn_kwargs["j_z"] = jax_view(z)
+        extra_gdn_kwargs["j_norm_weight"] = jax_view(norm_weight)
+        extra_gdn_kwargs["norm_eps"] = norm_eps
 
     linear_attention_backend = layer_module.linear_attention_backend
     (new_conv_state_extracted,
@@ -223,8 +231,11 @@ def gdn_attention_core_tpu(
 
     vllm_context.kv_caches[layer_idx] = (new_conv_state, new_recurrent_state)
 
+    if core_attn_out is None:
+        return torch_view(j_output)
     j_output_flat = j_output.reshape(core_attn_out.shape)
     core_attn_out.copy_(torch_view(j_output_flat))
+    return None
 
 
 @QwenGatedDeltaNetAttention.register_oot
@@ -254,6 +265,15 @@ class VllmGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
         vllm_model_wrapper_context = get_vllm_model_wrapper_context()
         mesh = vllm_model_wrapper_context.mesh
         num_tokens = hidden_states.size(0)
+        can_fuse_norm = (num_tokens >= 128 and isinstance(
+            getattr(self, "linear_attention_backend", None),
+            GDNLinearAttentionBackend,
+        ) and getattr(self.norm, "group_size", None) is None
+                         and getattr(self.norm, "norm_before_gate", False)
+                         and getattr(self.norm, "activation",
+                                     "silu") in ("silu", "swish")
+                         and getattr(getattr(self.norm, "weight", None),
+                                     "shape", None) == (self.head_v_dim, ))
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
@@ -262,7 +282,8 @@ class VllmGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
             mixed_qkv, _ = self.in_proj_qkv(hidden_states)
             ba, _ = self.in_proj_ba(hidden_states)
             z, _ = self.in_proj_z(hidden_states)
-            z = z.reshape(z.size(0), -1, self.head_v_dim)
+            if not can_fuse_norm:
+                z = z.reshape(z.size(0), -1, self.head_v_dim)
             b, a = ba.chunk(2, dim=-1)
             b = b.contiguous()
             a = a.contiguous()
@@ -278,39 +299,53 @@ class VllmGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
                     lambda x: rearrange(x, "l p d -> l (p d)"),
                     (query, key, value))
                 mixed_qkv = torch.cat((query, key, value), dim=-1)
+                if can_fuse_norm:
+                    z = rearrange(z, "... h d -> ... (h d)")
             else:
                 # Qwen3.5: weights are already in [q, k, v, z] and [b, a] order
                 qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
                 z_size = self.value_dim // self.tp_size
                 mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
-                z = z.reshape(z.size(0), -1, self.head_v_dim)
+                if not can_fuse_norm:
+                    z = z.reshape(z.size(0), -1, self.head_v_dim)
                 b, a = ba.chunk(2, dim=-1)
                 b = b.contiguous()
                 a = a.contiguous()
 
         # ============================================================
-        # Part 2: Core Attention (Custom Op)
+        # Part 2: Core Attention (Custom Op) & Part 3: Output Projection
         # ============================================================
-        # Note: we should not use torch.empty here like other attention backends,
-        # see discussions in https://github.com/vllm-project/vllm/pull/28182
-        core_attn_out = torch.zeros(
-            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
+        if can_fuse_norm:
+            core_attn_out = gdn_attention_core_tpu(
+                mixed_qkv,
+                b,
+                a,
+                None,
+                self.prefix,
+                mesh=mesh,
+                z=z,
+                norm_weight=self.norm.weight,
+                norm_eps=self.norm.eps,
+            )
+        else:
+            # Note: we should not use torch.empty here like other attention backends,
+            # see discussions in https://github.com/vllm-project/vllm/pull/28182
+            core_attn_out = torch.zeros(
+                (num_tokens, self.num_v_heads // self.tp_size,
+                 self.head_v_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
 
-        gdn_attention_core_tpu(mixed_qkv,
-                               b,
-                               a,
-                               core_attn_out,
-                               self.prefix,
-                               mesh=mesh)
+            gdn_attention_core_tpu(mixed_qkv,
+                                   b,
+                                   a,
+                                   core_attn_out,
+                                   self.prefix,
+                                   mesh=mesh)
 
-        # ============================================================
-        # Part 3: Output Projection
-        # ============================================================
-        core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
+            core_attn_out = self.norm(core_attn_out, z)
+            core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         if output is not None:
             output[:num_tokens], _ = self.out_proj(core_attn_out)
             return output
