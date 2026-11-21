@@ -37,9 +37,15 @@ def can_use_fast_decode(
     num_seqs: int,
 ) -> bool:
     """Return True if fast_decode_conv1d_gdn supports the given GDN geometry."""
-    return (num_spec_tokens == 0 and batch_size <= num_seqs and n_kq > 0
-            and n_v > 0 and n_v % n_kq == 0 and n_v <= 128 and d_k == 128
-            and d_v == 128 and dim % 128 == 0 and 2 <= kernel_size <= 8)
+    # vLLM pads decode token buckets to powers of 2 (e.g. max_num_seqs=240
+    # decodes in a T=256 bucket, or max_num_seqs=22 in T=32). Allow any bucket
+    # up to the next power of 2 >= num_seqs while skipping prefill-only buckets.
+    max_decode_bucket = (1 <<
+                         (num_seqs - 1).bit_length() if num_seqs > 0 else 0)
+    return (num_spec_tokens == 0 and batch_size <= max_decode_bucket
+            and n_kq > 0 and n_v > 0 and n_v % n_kq == 0 and n_v <= 128
+            and d_k == 128 and d_v == 128 and dim % 128 == 0
+            and 2 <= kernel_size <= 8)
 
 
 def fast_decode_conv1d_gdn(

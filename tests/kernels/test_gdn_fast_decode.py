@@ -34,6 +34,63 @@ def test_can_use_fast_decode_guards():
         batch_size=128,
         num_seqs=128,
     )
+    # Power-of-2 padded decode buckets (e.g. conc=192/240 -> T=256, conc=22 -> T=32)
+    assert fast_decode.can_use_fast_decode(
+        num_spec_tokens=0,
+        n_kq=4,
+        n_v=12,
+        d_k=128,
+        d_v=128,
+        dim=2560,
+        kernel_size=4,
+        batch_size=256,
+        num_seqs=240,
+    )
+    assert fast_decode.can_use_fast_decode(
+        num_spec_tokens=0,
+        n_kq=2,
+        n_v=6,
+        d_k=128,
+        d_v=128,
+        dim=1280,
+        kernel_size=4,
+        batch_size=32,
+        num_seqs=22,
+    )
+    assert fast_decode.can_use_fast_decode(
+        num_spec_tokens=0,
+        n_kq=2,
+        n_v=6,
+        d_k=128,
+        d_v=128,
+        dim=1280,
+        kernel_size=4,
+        batch_size=16,
+        num_seqs=16,
+    )
+    # Prefill buckets strictly above next_pow2(num_seqs) stay off fast_decode
+    assert not fast_decode.can_use_fast_decode(
+        num_spec_tokens=0,
+        n_kq=2,
+        n_v=6,
+        d_k=128,
+        d_v=128,
+        dim=1280,
+        kernel_size=4,
+        batch_size=256,
+        num_seqs=128,
+    )
+    assert not fast_decode.can_use_fast_decode(
+        num_spec_tokens=0,
+        n_kq=2,
+        n_v=6,
+        d_k=128,
+        d_v=128,
+        dim=1280,
+        kernel_size=4,
+        batch_size=64,
+        num_seqs=22,
+    )
     assert not fast_decode.can_use_fast_decode(
         num_spec_tokens=1,
         n_kq=2,

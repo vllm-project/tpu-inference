@@ -243,22 +243,21 @@ def run_jax_gdn_attention(
                 )
             return out_st, out_a
 
-        # Route pure-decode buckets (T == num_seqs >= 128) through the
-        # head-major Pallas fast_decode kernel with in-register RMSNormGated
-        # when all active sequences are 1-token decodes (dist[-1] == dist[0]).
-        # Smaller buckets (T < 128) stay on base_kernel for exact parity.
-        if (batch_size >= 128 and batch_size == num_seqs
-                and fast_decode.can_use_fast_decode(
-                    num_spec_tokens=num_spec_tokens,
-                    n_kq=n_kq_local,
-                    n_v=n_v_local,
-                    d_k=d_k,
-                    d_v=d_v,
-                    dim=dim,
-                    kernel_size=kernel_size,
-                    batch_size=batch_size,
-                    num_seqs=num_seqs,
-                )):
+        # Route pure-decode buckets (16 <= T <= next_pow2(num_seqs)) through
+        # the head-major Pallas fast_decode kernel (with in-register
+        # RMSNormGated when fuse_norm is active) whenever all active sequences
+        # are 1-token decodes (dist[-1] == dist[0]).
+        if (batch_size >= 16 and fast_decode.can_use_fast_decode(
+                num_spec_tokens=num_spec_tokens,
+                n_kq=n_kq_local,
+                n_v=n_v_local,
+                d_k=d_k,
+                d_v=d_v,
+                dim=dim,
+                kernel_size=kernel_size,
+                batch_size=batch_size,
+                num_seqs=num_seqs,
+        )):
 
             def _pure_decode(st):
                 cs_in, rs_in = st
