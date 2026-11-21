@@ -729,6 +729,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "TPU_MOE_TOPK_WEIGHTS_FLOAT32":
     lambda: (env_bool("TPU_MOE_TOPK_WEIGHTS_FLOAT32", default=False)
              () or env_bool("MOE_TOPK_WEIGHTS_FLOAT32", default=False)()),
+    # Minimum tokens per TP shard required to activate sequence parallelism
+    # (`enable_sp=True`) in VllmQuantLinearConfig. Defaults to 8
+    # (TPU_SECOND_LAST_MINOR). Raising this (e.g. 16 at TP=8 or 32 at TP=4)
+    # activates SP for T>=128 while keeping small buckets (T<=64) un-sharded.
+    "TPU_INFERENCE_SP_MIN_TOKENS_PER_SHARD":
+    lambda: int(os.getenv("TPU_INFERENCE_SP_MIN_TOKENS_PER_SHARD", "8")),
 }
 
 
