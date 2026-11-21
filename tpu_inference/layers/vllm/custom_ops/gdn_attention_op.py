@@ -102,8 +102,9 @@ def gdn_attention_core_tpu(
 
     j_mixed_qkv = reorder_concatenated_tensor_for_sharding(
         j_mixed_qkv, [key_dim, key_dim, value_dim], tp_size, -1)
-    j_conv_weight = reorder_concatenated_tensor_for_sharding(
-        j_conv_weight, [key_dim, key_dim, value_dim], tp_size, 0)
+    if not getattr(layer_module, "_tpu_conv1d_weight_reordered", False):
+        j_conv_weight = reorder_concatenated_tensor_for_sharding(
+            j_conv_weight, [key_dim, key_dim, value_dim], tp_size, 0)
 
     layer_idx = vllm_context.layer_name_to_kvcache_index[layer_name]
     conv_state, recurrent_state = vllm_context.kv_caches[layer_idx]

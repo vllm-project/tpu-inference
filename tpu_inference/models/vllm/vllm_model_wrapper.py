@@ -51,6 +51,8 @@ from tpu_inference.distributed.jax_parallel_state import \
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.utils import \
+    reorder_concatenated_tensor_for_sharding
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
     shard_model_to_tpu
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
@@ -73,6 +75,7 @@ from tpu_inference.models.vllm.vllm_model_wrapper_context import (
 from tpu_inference.runner.lora_utils import replace_lora_metadata
 from tpu_inference.runner.mm_encoder_jit_manager import (
     MMEncoderJITManager, maybe_create_mm_encoder_jit_manager)
+from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
 
@@ -131,6 +134,55 @@ class _VllmRunner(torch.nn.Module):
 
     def compute_logits(self, hidden_state: torch.Tensor) -> torch.Tensor:
         return self.vllm_model.compute_logits(hidden_state)
+
+
+def _prereorder_gdn_conv1d_weights(
+    vllm_model: torch.nn.Module,
+    params_and_buffers: dict,
+    mesh: jax.sharding.Mesh,
+) -> int:
+    """Pre-reorder static GDN conv1d weights for ATTN_HEAD sharding at load time.
+
+    Each GDN layer stores conv1d.weight in concatenated [Q | K | V] channel
+    order, whereas the sharded GDN kernel expects [Q_i | K_i | V_i] per
+    ATTN_HEAD shard. Reordering once at load time eliminates per-step
+    cross-chip collective-permutes inside gdn_attention_core_tpu.
+    """
+    tp_attn_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
+    if tp_attn_size <= 1:
+        return 0
+
+    target_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec(ShardingAxisName.ATTN_HEAD, None,
+                                         None))
+    n_reordered = 0
+    for mod_name, mod in vllm_model.named_modules():
+        if (hasattr(mod, "conv1d") and hasattr(mod, "num_k_heads")
+                and hasattr(mod, "num_v_heads") and hasattr(mod, "head_k_dim")
+                and hasattr(mod, "head_v_dim")):
+            w_key = f"vllm_model.{mod_name}.conv1d.weight"
+            if w_key not in params_and_buffers:
+                continue
+            key_dim = mod.num_k_heads * mod.head_k_dim
+            value_dim = mod.num_v_heads * mod.head_v_dim
+            arr = jax_view(params_and_buffers[w_key])
+            if arr.shape[0] != 2 * key_dim + value_dim:
+                continue
+            reordered = jax.jit(
+                reorder_concatenated_tensor_for_sharding,
+                static_argnums=(1, 2, 3),
+                out_shardings=target_sharding,
+            )(arr, (key_dim, key_dim, value_dim), tp_attn_size, 0)
+            params_and_buffers[w_key] = torch_view(reordered)
+            mod._tpu_conv1d_weight_reordered = True
+            n_reordered += 1
+    if n_reordered > 0:
+        logger.info(
+            "Pre-reordered %d GDN conv1d weights at load time for tp_size=%d.",
+            n_reordered,
+            tp_attn_size,
+        )
+    return n_reordered
 
 
 class VllmModelWrapper:
@@ -291,6 +343,8 @@ class VllmModelWrapper:
 
         self.model = _VllmRunner(vllm_model)
         params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
+        _prereorder_gdn_conv1d_weights(vllm_model, params_and_buffers,
+                                       self.mesh)
 
         # Slice rotary cos_sin_cache buffers to max_model_len to save HBM usage
         # and reduce the per-step overhead of the XLA layout copy. Assumes rope
