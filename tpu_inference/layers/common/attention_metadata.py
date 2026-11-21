@@ -58,6 +58,13 @@ class PCPMetadata:
     num_reqs: int = 1
 
 
+# Sentinel value in `MambaMetadata.read_offsets` indicating that the request has
+# no prior verify-window checkpoint (e.g. before the first verify window, after
+# a prefill chunk, or after a prefix-cache hit): resumes from `block_tables` in
+# align mode, and clamps to `0` (base slot `state_indices + 0`) in none mode.
+MAMBA_READ_OFFSET_FROM_BLOCK_TABLE = -1
+
+
 @functools.partial(
     jax.tree_util.register_dataclass,
     data_fields=[
@@ -71,15 +78,20 @@ class MambaMetadata:
     """Mamba / GDN linear-attention metadata, passed via AttentionMetadata.mamba."""
     # (max_num_seqs,) int32 — physical slot id (∈ [0, _mamba_num_blocks))
     # in the mamba kv-cache for the request currently in each persistent-
-    # batch position. Used by mamba/GDN ops to read/write recurrent state
-    # without going through `block_tables`, since the mamba pool is
-    # smaller than the attention pool under compact-mamba sizing.
-    # None for models without mamba layers; pure-mamba models would also
-    # use this field, only hybrid models exercise it today.
+    # batch position (or the base of its verify-window scratch slot group
+    # when mamba prefix caching is combined with speculative decoding).
+    # Used by mamba/GDN ops to read/write recurrent state without going
+    # through `block_tables`, since the mamba pool is smaller than the
+    # attention pool under compact-mamba sizing.
+    # None for models without mamba layers, or in align mode without
+    # speculative decoding.
     state_indices: jax.Array | None = None
-    # (max_num_seqs,) int32 — per-request offset ∈ [0, num_spec_tokens] into the
-    # strided mamba/GDN state slot group indicating which accepted checkpoint
-    # from the previous speculative verification step to read from.
+    # (max_num_seqs,) int32 — per-request offset ∈ [0, num_spec_tokens] into
+    # the strided mamba/GDN state slot group indicating which accepted
+    # checkpoint from the previous speculative verification step to read from,
+    # or `MAMBA_READ_OFFSET_FROM_BLOCK_TABLE` (-1) when no prior verify-window
+    # checkpoint is active (resumes from `block_tables` in align mode; clamped
+    # to `0` in none mode).
     # None when speculative decoding or mamba/GDN state is disabled.
     read_offsets: jax.Array | None = None
 
