@@ -584,6 +584,10 @@ class PhasedBasedProfiler:
         profile_dir: The directory to save the profiles to.
         worker_rank: The rank of the current worker process.
         flush_interval: The number of steps between continuous logger flushes to storage.
+        num_steps_to_profile_for: Optional override for steps to profile per phase.
+        num_decode_steps_to_skip: Optional override for decode steps to skip before profiling.
+        decode_kv_len_threshold: Optional override for decode-only KV length threshold.
+        track_concurrency: Optional bool override for tracking concurrency.
 
     Attributes:
         profiling_n_steps_left: The number of steps left to profile for the current phase.
@@ -601,22 +605,40 @@ class PhasedBasedProfiler:
     def __init__(self,
                  profile_dir: str,
                  worker_rank: int = 0,
-                 flush_interval: int = 100):
+                 flush_interval: int = 100,
+                 num_steps_to_profile_for: int | None = None,
+                 num_decode_steps_to_skip: int | None = None,
+                 decode_kv_len_threshold: int | None = None,
+                 track_concurrency: bool | None = None):
         self.profiling_n_steps_left: int = 0
         self.profile_dir_with_phase_suffix: str = None
-        self.num_steps_to_profile_for: int = int(
-            os.getenv("PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR",
-                      PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR))
-        self.num_decode_steps_to_skip: int = int(
-            os.getenv("PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP",
-                      PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP))
+        self.num_steps_to_profile_for: int = (
+            int(num_steps_to_profile_for)
+            if num_steps_to_profile_for is not None else int(
+                os.getenv("PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR",
+                          PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR)))
+        self.num_decode_steps_to_skip: int = (
+            int(num_decode_steps_to_skip)
+            if num_decode_steps_to_skip is not None else int(
+                os.getenv("PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP",
+                          PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP)))
         self.decode_steps_skipped: int = 0
-        self.decode_kv_len_threshold: int = int(
-            os.getenv("PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD",
-                      PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD))
-        self.track_concurrency: bool = os.getenv(
-            "PHASED_PROFILER_TRACK_CONCURRENCY",
-            str(PHASED_PROFILER_TRACK_CONCURRENCY)).lower() in ("1", "true")
+        self.decode_kv_len_threshold: int = (
+            int(decode_kv_len_threshold)
+            if decode_kv_len_threshold is not None else int(
+                os.getenv("PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD",
+                          PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD)))
+        if track_concurrency is not None:
+            if not isinstance(track_concurrency, bool):
+                raise TypeError(
+                    f"track_concurrency must be a bool, got {type(track_concurrency).__name__}"
+                )
+            self.track_concurrency: bool = track_concurrency
+        else:
+            self.track_concurrency: bool = os.getenv(
+                "PHASED_PROFILER_TRACK_CONCURRENCY",
+                str(PHASED_PROFILER_TRACK_CONCURRENCY)).lower() in ("1",
+                                                                    "true")
         self.profile_dir: str = profile_dir
         # NOTE: we purposely don't have AMBIGUOUS here
         self.inference_phases_profiled: set = set()
