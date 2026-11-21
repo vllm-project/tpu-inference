@@ -24,15 +24,16 @@ from jax.sharding import Mesh
 from vllm.v1.outputs import LogprobsTensors
 
 from tpu_inference import envs
-from tpu_inference.layers.common.binary_search import topp_mask
+from tpu_inference.layers.common.binary_search import topk_mask, topp_mask
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample import sampling
 from tpu_inference.layers.jax.sample.sampling import (
     PromptLogprobsAsyncData, PromptLogprobsReqSnap, _apply_sampling_transforms,
-    _can_sample_distributed, _merge_topk_candidates, _prefiltered_top_k,
-    _shard_topk_candidates, _topk_prefilter_chunk, _topp_mask_sorted,
-    compute_logprobs, compute_prompt_logprobs, distributed_sampling_allowed,
-    gather_logprobs, sample)
+    _apply_sampling_transforms_microbatched, _can_sample_distributed,
+    _merge_topk_candidates, _prefiltered_top_k, _shard_topk_candidates,
+    _topk_prefilter_chunk, _topp_mask_sorted, compute_logprobs,
+    compute_prompt_logprobs, distributed_sampling_allowed, gather_logprobs,
+    sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 
@@ -497,6 +498,202 @@ class TestProcessedLogprobs:
 
         assert np.array_equal(processed_logits,
                               jnp.concatenate(chunk_results, axis=0))
+
+
+class TestApplySamplingTransformsConditional:
+    """Tests for lax.cond guards skipping unused top-k / top-p binary searches."""
+
+    @staticmethod
+    def _reference_apply_sampling_transforms(
+        logits: jax.Array,
+        metadata: TPUSupportedSamplingMetadata,
+    ) -> jax.Array:
+        """Unconditional reference matching pre-guard numerical semantics."""
+        scaled = logits / metadata.temperature.astype(logits.dtype)[:, None]
+        topk_masked = topk_mask(scaled, metadata.top_k, replace_val=-1e12)
+        scaled = jnp.where(metadata.top_k[:, None] > 0, topk_masked, scaled)
+        topp_masked = topp_mask(scaled, metadata.top_p, replace_val=-1e12)
+        scaled = jnp.where(metadata.top_p[:, None] < 1.0, topp_masked, scaled)
+        return scaled
+
+    @pytest.mark.parametrize(
+        "top_k,top_p",
+        [
+            pytest.param([-1, -1, -1, -1], [1.0, 1.0, 1.0, 1.0],
+                         id="both_skipped_neg_one"),
+            pytest.param([0, -1, 0, -5], [1.0, 1.0, 1.2, 1.0],
+                         id="both_skipped_zero_and_gt_one"),
+            pytest.param([5, 10, 1, 20], [1.0, 1.0, 1.0, 1.0], id="only_topk"),
+            pytest.param([-1, -1, 0, -1], [0.5, 0.8, 0.9, 0.95],
+                         id="only_topp"),
+            pytest.param([8, 16, 4, 32], [0.7, 0.85, 0.9, 0.95],
+                         id="both_active"),
+            pytest.param([-1, 5, 0, 12], [1.0, 1.0, 1.0, 1.0],
+                         id="mixed_topk"),
+            pytest.param([-1, -1, -1, -1], [1.0, 0.6, 1.0, 0.9],
+                         id="mixed_topp"),
+            pytest.param([-1, 6, 0, 10], [0.8, 1.0, 1.0, 0.7],
+                         id="mixed_both"),
+        ],
+    )
+    def test_parity_with_reference(self, top_k, top_p):
+        logits = jax.random.normal(jax.random.key(42), (4, 128),
+                                   dtype=jnp.float32)
+        metadata = TPUSupportedSamplingMetadata(
+            temperature=jnp.array([0.7, 1.0, 1.3, 0.5], dtype=jnp.float32),
+            top_k=jnp.array(top_k, dtype=jnp.int32),
+            top_p=jnp.array(top_p, dtype=jnp.float32),
+            do_sampling=True,
+            logprobs=False,
+        )
+        expected = self._reference_apply_sampling_transforms(logits, metadata)
+        actual = jax.jit(_apply_sampling_transforms)(logits, metadata)
+        assert actual.dtype == logits.dtype
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_microbatched_mixed_skip_and_apply_parity(self):
+        """Microbatches with disabled vs active top-k/top-p match reference."""
+        batch_size = 32
+        logits = jax.random.normal(jax.random.key(99), (batch_size, 128),
+                                   dtype=jnp.float32)
+        # 4 microbatches of 8:
+        #   mb0: both skipped, mb1: top-k only, mb2: top-p only, mb3: mixed.
+        top_k = jnp.array(
+            [-1] * 8 + [5] * 8 + [0] * 8 + [-1, 4, 0, 10, -1, 8, 0, 2],
+            dtype=jnp.int32,
+        )
+        top_p = jnp.array(
+            [1.0] * 8 + [1.0] * 8 + [0.75] * 8 +
+            [1.0, 0.8, 1.0, 1.0, 0.6, 0.9, 1.0, 0.5],
+            dtype=jnp.float32,
+        )
+        metadata = TPUSupportedSamplingMetadata(
+            temperature=jnp.linspace(0.5, 1.5, batch_size, dtype=jnp.float32),
+            top_k=top_k,
+            top_p=top_p,
+            do_sampling=True,
+            logprobs=False,
+        )
+        expected = self._reference_apply_sampling_transforms(logits, metadata)
+        with mock.patch.object(envs, "SAMPLING_MICROBATCH_SIZE", 8):
+            actual = jax.jit(_apply_sampling_transforms_microbatched)(logits,
+                                                                      metadata)
+        assert actual.dtype == logits.dtype
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_lowers_with_conditionals_and_skips_at_runtime(self):
+        """Verify jaxpr/HLO emit conditionals and skip unused masks at runtime."""
+        logits = jax.random.normal(jax.random.key(17), (4, 64),
+                                   dtype=jnp.float32)
+        base_meta = TPUSupportedSamplingMetadata(
+            temperature=jnp.ones((4, ), dtype=jnp.float32),
+            top_k=jnp.full((4, ), -1, dtype=jnp.int32),
+            top_p=jnp.full((4, ), 1.0, dtype=jnp.float32),
+            do_sampling=True,
+            logprobs=False,
+        )
+
+        jaxpr = jax.make_jaxpr(_apply_sampling_transforms)(logits, base_meta)
+        cond_eqns = [e for e in jaxpr.jaxpr.eqns if e.primitive.name == "cond"]
+        assert len(cond_eqns) == 2
+
+        lowered_hlo = jax.jit(_apply_sampling_transforms).lower(
+            logits, base_meta).as_text()
+        assert (lowered_hlo.count("stablehlo.case") +
+                lowered_hlo.count("stablehlo.if")) == 2
+
+        # Verify runtime short-circuiting inside a single compiled function
+        # across all 4 (top_k, top_p) activation combinations.
+        counts = {"topk": 0, "topp": 0}
+
+        def spy_topk(x, k, replace_val):
+            jax.debug.callback(
+                lambda _: counts.__setitem__("topk", counts["topk"] + 1),
+                x[0, 0],
+                ordered=True,
+            )
+            return topk_mask(x, k, replace_val=replace_val)
+
+        def spy_topp(x, p, replace_val):
+            jax.debug.callback(
+                lambda _: counts.__setitem__("topp", counts["topp"] + 1),
+                x[0, 0],
+                ordered=True,
+            )
+            return topp_mask(x, p, replace_val=replace_val)
+
+        with mock.patch.object(sampling, "topk_mask",
+                               spy_topk), mock.patch.object(
+                                   sampling, "topp_mask", spy_topp):
+            # Wrap in a fresh lambda so JAX traces with the patched functions
+            # instead of hitting any cached jit entry for _apply_sampling_transforms.
+            jitted = jax.jit(lambda x, m: _apply_sampling_transforms(x, m))
+
+            cases = [
+                ([-1, -1, -1, -1], [1.0, 1.0, 1.0, 1.0], 0, 0),
+                ([5, -1, 0, -1], [1.0, 1.0, 1.0, 1.0], 1, 0),
+                ([-1, -1, -1, -1], [1.0, 0.8, 1.0, 1.0], 0, 1),
+                ([5, 5, 5, 5], [0.8, 0.8, 0.8, 0.8], 1, 1),
+            ]
+            for top_k, top_p, exp_topk, exp_topp in cases:
+                counts["topk"] = 0
+                counts["topp"] = 0
+                meta = TPUSupportedSamplingMetadata(
+                    temperature=base_meta.temperature,
+                    top_k=jnp.array(top_k, dtype=jnp.int32),
+                    top_p=jnp.array(top_p, dtype=jnp.float32),
+                    do_sampling=True,
+                    logprobs=False,
+                )
+                jax.block_until_ready(jitted(logits, meta))
+                jax.effects_barrier()
+                assert counts["topk"] == exp_topk
+                assert counts["topp"] == exp_topp
+
+    def test_microbatched_skips_inactive_microbatches_at_runtime(self):
+        """Only microbatches with active top-k/top-p execute binary search."""
+        logits = jax.random.normal(jax.random.key(23), (32, 64),
+                                   dtype=jnp.float32)
+        counts = {"topk": 0, "topp": 0}
+
+        def spy_topk(x, k, replace_val):
+            jax.debug.callback(
+                lambda _: counts.__setitem__("topk", counts["topk"] + 1),
+                x[0, 0],
+                ordered=True,
+            )
+            return topk_mask(x, k, replace_val=replace_val)
+
+        def spy_topp(x, p, replace_val):
+            jax.debug.callback(
+                lambda _: counts.__setitem__("topp", counts["topp"] + 1),
+                x[0, 0],
+                ordered=True,
+            )
+            return topp_mask(x, p, replace_val=replace_val)
+
+        # 4 microbatches of 8:
+        #   mb0: skip both, mb1: top-k only, mb2: top-p only, mb3: both.
+        meta = TPUSupportedSamplingMetadata(
+            temperature=jnp.ones((32, ), dtype=jnp.float32),
+            top_k=jnp.array([-1] * 8 + [4] * 8 + [0] * 8 + [8] * 8,
+                            dtype=jnp.int32),
+            top_p=jnp.array([1.0] * 8 + [1.0] * 8 + [0.8] * 8 + [0.9] * 8,
+                            dtype=jnp.float32),
+            do_sampling=True,
+            logprobs=False,
+        )
+        with mock.patch.object(
+                envs, "SAMPLING_MICROBATCH_SIZE", 8), mock.patch.object(
+                    sampling, "topk_mask",
+                    spy_topk), mock.patch.object(sampling, "topp_mask",
+                                                 spy_topp):
+            jax.block_until_ready(
+                jax.jit(lambda x, m: _apply_sampling_transforms_microbatched(
+                    x, m))(logits, meta))
+            jax.effects_barrier()
+        assert counts["topk"] == 2
+        assert counts["topp"] == 2
 
 
 class TestComputePromptLogprobs:
