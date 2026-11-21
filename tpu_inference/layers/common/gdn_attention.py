@@ -15,13 +15,14 @@
 Bridge the torch gdn_attention_core op for gated deltanet attention TPU impl
 
 """
-import functools
 from typing import Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
+from tpu_inference.kernels.gdn.v3 import fast_decode
+from tpu_inference.kernels.gdn.v3.rms_norm_gated import pallas_rms_norm_gated
 from tpu_inference.layers.common.attention_backend import (
     Conv1dGDNKernel, GDNLinearAttentionBackend)
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -52,6 +53,9 @@ def run_jax_gdn_attention(
     conv1d_gdn_kernel: Optional[Conv1dGDNKernel] = None,
     read_offsets: Optional[jnp.ndarray] = None,
     num_spec_tokens: int = 0,
+    j_z: Optional[jnp.ndarray] = None,
+    j_norm_weight: Optional[jnp.ndarray] = None,
+    norm_eps: float = 1e-6,
 ) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
     """Runs the Jax GDN attention mechanism.
 
@@ -108,15 +112,18 @@ def run_jax_gdn_attention(
         assert read_offsets is not None, (
             "read_offsets is required when num_spec_tokens > 0")
 
+    fuse_norm = j_z is not None and j_norm_weight is not None
     in_specs = (
         P(ShardingAxisName.ATTN_DATA,
           ShardingAxisName.ATTN_HEAD),  # j_mixed_qkv
         P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # j_b
         P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # j_a
-        P(ShardingAxisName.ATTN_DATA, None,
-          ShardingAxisName.ATTN_HEAD),  # conv_state
-        P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None,
-          None),  # recurrent_state
+        (
+            P(ShardingAxisName.ATTN_DATA, None,
+              ShardingAxisName.ATTN_HEAD),  # conv_state
+            P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None,
+              None),  # recurrent_state
+        ),
         P(ShardingAxisName.ATTN_HEAD, None, None),  # j_conv_weight
         P(ShardingAxisName.ATTN_HEAD)
         if j_conv_bias is not None else None,  # j_conv_bias
@@ -132,36 +139,170 @@ def run_jax_gdn_attention(
         in_specs = in_specs + (
             P(ShardingAxisName.ATTN_DATA),  # read_offsets
         )
+    if fuse_norm:
+        in_specs = in_specs + (
+            P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # j_z
+            P(None),  # j_norm_weight
+        )
 
     out_specs = (
         (
             P(ShardingAxisName.ATTN_DATA, None,
-              ShardingAxisName.ATTN_HEAD),  # new_conv_state
+              ShardingAxisName.ATTN_HEAD),  # conv_state
             P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None,
-              None),  # new_recurrent_state
+              None),  # recurrent_state
         ),
         P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # output
     )
 
     tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
+    n_kq_local = n_kq // tp_size
+    n_v_local = n_v // tp_size
+    base_kernel = (conv1d_gdn_kernel
+                   or GDNLinearAttentionBackend().conv1d_gdn_kernel())
+    has_read_offsets = read_offsets is not None
 
-    partial_kwargs = dict(
-        n_kq=n_kq // tp_size,
-        n_v=n_v // tp_size,
-        d_k=d_k,
-        d_v=d_v,
-        kernel_size=kernel_size,
-    )
-    if read_offsets is not None:
-        partial_kwargs["num_spec_tokens"] = num_spec_tokens
+    def _run_local(*args):
+        (
+            qkv_l,
+            b_l,
+            a_l,
+            states_l,
+            cw_l,
+            cb_l,
+            alog_l,
+            dtb_l,
+            qsl_l,
+            si_l,
+            dist_l,
+            sl_l,
+            rsi_l,
+        ) = args[:13]
+        idx = 13
+        ro_l = args[idx] if has_read_offsets else None
+        if has_read_offsets:
+            idx += 1
+        z_l = args[idx] if fuse_norm else None
+        nw_l = args[idx + 1] if fuse_norm else None
 
-    p_run_jax_gdn_attention_local = functools.partial(
-        conv1d_gdn_kernel or GDNLinearAttentionBackend().conv1d_gdn_kernel(),
-        **partial_kwargs,
-    )
+        batch_size, dim = qkv_l.shape
+        num_seqs = si_l.size
+        cs_l, rs_l = states_l
+
+        def _call_base(st):
+            kw = dict(
+                n_kq=n_kq_local,
+                n_v=n_v_local,
+                d_k=d_k,
+                d_v=d_v,
+                kernel_size=kernel_size,
+            )
+            if has_read_offsets:
+                kw["num_spec_tokens"] = num_spec_tokens
+                out_st, out_a = base_kernel(
+                    qkv_l,
+                    b_l,
+                    a_l,
+                    st,
+                    cw_l,
+                    cb_l,
+                    alog_l,
+                    dtb_l,
+                    qsl_l,
+                    si_l,
+                    dist_l,
+                    sl_l,
+                    rsi_l,
+                    ro_l,
+                    **kw,
+                )
+            else:
+                out_st, out_a = base_kernel(
+                    qkv_l,
+                    b_l,
+                    a_l,
+                    st,
+                    cw_l,
+                    cb_l,
+                    alog_l,
+                    dtb_l,
+                    qsl_l,
+                    si_l,
+                    dist_l,
+                    sl_l,
+                    rsi_l,
+                    **kw,
+                )
+            if fuse_norm:
+                out_a = pallas_rms_norm_gated(
+                    out_a,
+                    z_l,
+                    nw_l,
+                    eps=norm_eps,
+                    head_dim=d_v,
+                )
+            return out_st, out_a
+
+        # Route pure-decode buckets (T == num_seqs >= 128) through the
+        # head-major Pallas fast_decode kernel with in-register RMSNormGated
+        # when all active sequences are 1-token decodes (dist[-1] == dist[0]).
+        # Smaller buckets (T < 128) stay on base_kernel for exact parity.
+        if (batch_size >= 128 and batch_size == num_seqs
+                and fast_decode.can_use_fast_decode(
+                    num_spec_tokens=num_spec_tokens,
+                    n_kq=n_kq_local,
+                    n_v=n_v_local,
+                    d_k=d_k,
+                    d_v=d_v,
+                    dim=dim,
+                    kernel_size=kernel_size,
+                    batch_size=batch_size,
+                    num_seqs=num_seqs,
+                )):
+
+            def _pure_decode(st):
+                cs_in, rs_in = st
+                out_a, out_cs, out_rs = fast_decode.fast_decode_conv1d_gdn(
+                    qkv_l,
+                    b_l,
+                    a_l,
+                    cs_in,
+                    rs_in,
+                    cw_l,
+                    cb_l,
+                    alog_l,
+                    dtb_l,
+                    si_l,
+                    rsi_l.astype(si_l.dtype),
+                    dist_l,
+                    sl_l,
+                    n_kq=n_kq_local,
+                    n_v=n_v_local,
+                    d_k=d_k,
+                    d_v=d_v,
+                    kernel_size=kernel_size,
+                    tile_s=8,
+                    zero_initialize_out=True,
+                    act_out_dtype=qkv_l.dtype,
+                    conv_weight_swapped=False,
+                    z=z_l,
+                    norm_weight=nw_l,
+                    norm_eps=norm_eps,
+                    norm_bf16_roundtrip=True,
+                )
+                return (out_cs, out_rs), out_a
+
+            return jax.lax.cond(
+                dist_l[-1] == dist_l[0],
+                _pure_decode,
+                _call_base,
+                (cs_l, rs_l),
+            )
+
+        return _call_base((cs_l, rs_l))
 
     mapped_fn = jax.shard_map(
-        p_run_jax_gdn_attention_local,
+        _run_local,
         mesh=mesh,
         in_specs=in_specs,
         out_specs=out_specs,
@@ -172,8 +313,7 @@ def run_jax_gdn_attention(
         j_mixed_qkv,
         j_b,
         j_a,
-        conv_state,
-        recurrent_state,
+        (conv_state, recurrent_state),
         j_conv_weight,
         j_conv_bias,
         j_A_log,
@@ -186,6 +326,8 @@ def run_jax_gdn_attention(
     )
     if read_offsets is not None:
         mapped_args = mapped_args + (read_offsets, )
+    if fuse_norm:
+        mapped_args = mapped_args + (j_z, j_norm_weight)
 
     (new_conv_state, new_recurrent_state), output = mapped_fn(*mapped_args)
 
