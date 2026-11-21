@@ -778,3 +778,105 @@ class TestTPUKVCacheManager:
                                                  num_new_tokens=16)
         assert blocks_no_mamba is None
         coord.mamba_block_pool.free_blocks(allocated_mamba)
+
+    def test_allocate_slots_with_computed_blocks_and_retention_interval(self):
+        install_hybrid_coordinator_hooks()
+        set_mamba_num_blocks(50)
+        cfg = _make_mock_hybrid_kv_cache_config(num_attn_blocks=500,
+                                                mamba_num_blocks=50)
+        cfg.prefix_cache_retention_interval = 0
+        manager = TPUKVCacheManager(
+            kv_cache_config=cfg,
+            max_model_len=1024,
+            scheduler_block_size=16,
+            hash_block_size=16,
+            enable_caching=True,
+        )
+        mamba_mgr = manager.coordinator.single_type_managers[1]
+        assert mamba_mgr.retention_interval == 0
+        assert mamba_mgr.keep_decode_resume_state is True
+
+        from vllm.sampling_params import SamplingParams
+
+        # Populate prefix cache via two 16-token chunks so Mamba exports a
+        # boundary state at replay_boundary=16, then free req1.
+        req1 = Request(
+            request_id="req-hit-1",
+            prompt_token_ids=list(range(32)),
+            sampling_params=SamplingParams(max_tokens=4),
+            pooling_params=None,
+        )
+        req1.block_hashes = [BlockHash(f"hh_{i}".encode()) for i in range(2)]
+        req1.status = RequestStatus.RUNNING
+        manager.coordinator.new_step_starts()
+        assert manager.allocate_slots(request=req1,
+                                      num_new_tokens=16) is not None
+        req1.num_computed_tokens = 16
+        manager.coordinator.new_step_starts()
+        assert manager.allocate_slots(request=req1,
+                                      num_new_tokens=16) is not None
+        req1.num_computed_tokens = 32
+        manager.free(req1)
+
+        # Advance step so MambaManager.cached_blocks_this_step is cleared, then
+        # verify follow-up request hits the cached prefix block and allocates
+        # the tail.
+        manager.coordinator.new_step_starts()
+        req2 = Request(
+            request_id="req-hit-2",
+            prompt_token_ids=list(range(32)),
+            sampling_params=SamplingParams(max_tokens=4),
+            pooling_params=None,
+        )
+        req2.block_hashes = [BlockHash(f"hh_{i}".encode()) for i in range(2)]
+        req2.status = RequestStatus.WAITING
+        computed_blocks, num_computed, _ = manager.get_computed_blocks(req2)
+        assert num_computed == 16
+        allocated_2 = manager.allocate_slots(
+            request=req2,
+            num_new_tokens=16,
+            num_new_computed_tokens=num_computed,
+            new_computed_blocks=computed_blocks,
+        )
+        assert allocated_2 is not None
+        assert len(allocated_2.blocks[0]) == 1
+
+    def test_admission_cap_uses_manager_reservation_when_present(self):
+        set_mamba_num_blocks(10)
+        cfg = _make_mock_hybrid_kv_cache_config(num_attn_blocks=20,
+                                                mamba_num_blocks=10)
+        coord = TPUHybridKVCacheCoordinator(kv_cache_config=cfg,
+                                            **_COORD_KWARGS)
+        attn_mgr = coord.single_type_managers[0]
+        attn_mgr.get_num_blocks_to_reserve = MagicMock(return_value=3)
+        attn_mgr.get_num_blocks_to_allocate = MagicMock(return_value=99)
+
+        req = Request(
+            request_id="req-res",
+            prompt_token_ids=list(range(128)),
+            sampling_params=MagicMock(),
+            pooling_params=None,
+        )
+        req.status = RequestStatus.WAITING
+        assert coord.get_num_blocks_to_allocate(
+            request_id=req.request_id,
+            num_tokens=128,
+            new_computed_blocks=([], []),
+            num_encoder_tokens=0,
+            total_computed_tokens=0,
+            num_local_computed_tokens=0,
+            num_tokens_main_model=128,
+            apply_admission_cap=True,
+        ) == 3
+        attn_mgr.get_num_blocks_to_allocate.assert_not_called()
+        assert coord.can_allocate_tokens(
+            request=req,
+            num_tokens=128,
+            new_computed_blocks=([], []),
+            num_encoder_tokens=0,
+            total_computed_tokens=0,
+            num_local_computed_tokens=0,
+            num_tokens_main_model=128,
+            apply_admission_cap=True,
+        ) is True
+        attn_mgr.get_num_blocks_to_allocate.assert_not_called()

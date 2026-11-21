@@ -28,7 +28,8 @@ from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
+from vllm.v1.metrics.stats import (PrefixCacheStats, SchedulerIterationDetails,
+                                   SchedulerStats)
 from vllm.v1.outputs import LogprobsLists, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
@@ -1162,6 +1163,8 @@ class TestDPScheduler:
         stats_0 = SchedulerStats(
             num_running_reqs=3,
             num_waiting_reqs=2,
+            num_skipped_waiting_reqs=1,
+            num_preempted_reqs=2,
             kv_cache_usage=0.5,
             prefix_cache_stats=PrefixCacheStats(reset=False,
                                                 requests=10,
@@ -1178,6 +1181,8 @@ class TestDPScheduler:
         stats_1 = SchedulerStats(
             num_running_reqs=4,
             num_waiting_reqs=1,
+            num_skipped_waiting_reqs=3,
+            num_preempted_reqs=1,
             kv_cache_usage=0.7,
             prefix_cache_stats=PrefixCacheStats(reset=False,
                                                 requests=15,
@@ -1204,7 +1209,61 @@ class TestDPScheduler:
 
         assert combined_stats.num_running_reqs == 7
         assert combined_stats.num_waiting_reqs == 3
+        assert combined_stats.num_skipped_waiting_reqs == 4
+        assert combined_stats.num_preempted_reqs == 3
         assert combined_stats.kv_cache_usage == 0.6
+
+    def test_combine_scheduler_stats_preemptions_and_iteration_records(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
+        """Test _combine_scheduler_stats sums preemptions and iteration_records."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager,
+                                           log_stats=True)
+        rec_0 = SchedulerIterationDetails(
+            iteration_index=1,
+            num_ctx_requests=1,
+            num_ctx_tokens=16,
+            num_generation_requests=0,
+            num_generation_tokens=0,
+        )
+        stats_0 = SchedulerStats(
+            num_running_reqs=1,
+            num_waiting_reqs=0,
+            num_skipped_waiting_reqs=2,
+            num_preempted_reqs=3,
+            kv_cache_usage=0.2,
+            iteration_records=[rec_0],
+        )
+        stats_1 = SchedulerStats(
+            num_running_reqs=2,
+            num_waiting_reqs=1,
+            num_skipped_waiting_reqs=1,
+            num_preempted_reqs=4,
+            kv_cache_usage=0.4,
+            iteration_records=[],
+        )
+
+        combined = scheduler._combine_scheduler_stats([stats_0, stats_1])
+        assert combined.num_skipped_waiting_reqs == 3
+        assert combined.num_preempted_reqs == 7
+        assert combined.iteration_records == [rec_0]
+
+        sched_out = MagicMock(spec=DPSchedulerOutput)
+        sched_out.req_ids_per_rank = {0: ["r0"], 1: ["r1"]}
+        global_out = ModelRunnerOutput(
+            req_ids=["r0", "r1"],
+            sampled_token_ids=[[10], [20]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=None,
+            iteration_records=[rec_0],
+        )
+        rank_outs = scheduler._split_model_output_by_rank(
+            sched_out, global_out)
+        assert rank_outs[0].iteration_records == [rec_0]
+        assert rank_outs[1].iteration_records == []
 
     def test_combine_scheduler_stats_spec_decoding_verified_tokens(
             self, mock_vllm_config, mock_kv_cache_config,
