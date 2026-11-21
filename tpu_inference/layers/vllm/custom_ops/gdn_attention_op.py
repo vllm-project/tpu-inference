@@ -18,6 +18,7 @@ import torch
 # NOTE: we don't specify this in our requirements.txt but it should be coming
 # from upstream vLLM
 from einops import rearrange
+from jax.sharding import PartitionSpec as P
 from torchax.interop import jax_view, torch_view
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import \
@@ -44,6 +45,7 @@ def gdn_attention_core_tpu(
     core_attn_out: torch.Tensor,
     layer_name: str,
     mesh: jax.sharding.Mesh,
+    qkv_already_reordered: bool = False,
 ) -> None:
     """
     This acts as main bridge between PyTorch and JAX for the GDN core attention.
@@ -100,8 +102,9 @@ def gdn_attention_core_tpu(
     tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
     dp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA)
 
-    j_mixed_qkv = reorder_concatenated_tensor_for_sharding(
-        j_mixed_qkv, [key_dim, key_dim, value_dim], tp_size, -1)
+    if not qkv_already_reordered:
+        j_mixed_qkv = reorder_concatenated_tensor_for_sharding(
+            j_mixed_qkv, [key_dim, key_dim, value_dim], tp_size, -1)
     j_conv_weight = reorder_concatenated_tensor_for_sharding(
         j_conv_weight, [key_dim, key_dim, value_dim], tp_size, 0)
 
@@ -254,6 +257,7 @@ class VllmGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
         vllm_model_wrapper_context = get_vllm_model_wrapper_context()
         mesh = vllm_model_wrapper_context.mesh
         num_tokens = hidden_states.size(0)
+        qkv_already_reordered = False
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
@@ -267,26 +271,106 @@ class VllmGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
             b = b.contiguous()
             a = a.contiguous()
         else:
-            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-            ba, _ = self.in_proj_ba(hidden_states)
+            qkvz_qm = getattr(self.in_proj_qkvz, "quant_method", None)
+            ba_qm = getattr(self.in_proj_ba, "quant_method", None)
+            qkvz_cfg = getattr(qkvz_qm, "linear_config", None)
+            ba_cfg = getattr(ba_qm, "linear_config", None)
+            can_share_sp_proj = (
+                not self.gqa_interleaved_layout and qkvz_cfg is not None
+                and ba_cfg is not None and qkvz_cfg.fuse_matmuls
+                and ba_cfg.fuse_matmuls
+                and getattr(self.in_proj_qkvz, "bias", None) is None
+                and getattr(self.in_proj_ba, "bias", None) is None
+                and getattr(self.in_proj_qkvz, "weight_scale", None) is None
+                and getattr(self.in_proj_ba, "weight_scale", None) is None
+                and qkvz_cfg.weight_sharding == ba_cfg.weight_sharding
+                and qkvz_cfg.weight_sharding[0] is None
+                and qkvz_cfg.weight_sharding[1] is not None)
+            if can_share_sp_proj:
+                # Run in_proj_qkvz and in_proj_ba in one shard_map so they share
+                # a single SP all-gather of hidden_states (avoiding in_proj_ba's
+                # extra weight all-gather + all_to_all) and slice per-shard
+                # [Q_i, K_i, V_i, Z_i] / [B_i, A_i] directly without the global
+                # concat/split/reorder round-trip.
+                w_spec = qkvz_cfg.weight_sharding
+                out_axis = w_spec[1]
+                n_shards = get_mesh_shape_product(mesh, out_axis)
+                qkv_loc = ((self.key_dim * 2 + self.value_dim) //
+                           self.tp_size) // n_shards
+                z_loc = (self.value_dim // self.tp_size) // n_shards
+                qkvz_loc = qkv_loc + z_loc
+                b_loc = (self.num_v_heads // self.tp_size) // n_shards
+                ba_loc = 2 * b_loc
 
-            if self.gqa_interleaved_layout:
-                # Qwen3-Next: unpack the interleaved GQA layout
-                query, key, value, z, b, a = self.fix_query_key_value_ordering(
-                    mixed_qkvz, ba)
-                query, key, value = map(
-                    lambda x: rearrange(x, "l p d -> l (p d)"),
-                    (query, key, value))
-                mixed_qkv = torch.cat((query, key, value), dim=-1)
+                jx = jax_view(hidden_states)
+                in_sp = qkvz_cfg.get_input_sharding(hidden_states)
+                sp_axes = qkvz_cfg.get_sp_token_axes(jx)
+                if sp_axes is not None:
+                    x_spec = P(sp_axes, None)
+                    need_ag = True
+                elif in_sp is not None:
+                    x_spec = in_sp
+                    need_ag = True
+                else:
+                    x_spec = P(ShardingAxisName.ATTN_DATA, None)
+                    need_ag = False
+                out_spec = P(ShardingAxisName.ATTN_DATA, out_axis)
+
+                jw1 = jax_view(self.in_proj_qkvz.weight)
+                jw2 = jax_view(self.in_proj_ba.weight)
+
+                def _shared_in_proj(x_loc, w1_loc, w2_loc):
+                    if need_ag:
+                        x_loc = jax.lax.all_gather(
+                            x_loc,
+                            axis_name=out_axis,
+                            axis=0,
+                            tiled=True,
+                        )
+                    o1 = x_loc @ w1_loc
+                    o2 = x_loc @ w2_loc
+                    return (
+                        o1[:, :qkv_loc],
+                        o1[:, qkv_loc:qkvz_loc],
+                        o2[:, :b_loc],
+                        o2[:, b_loc:ba_loc],
+                    )
+
+                j_qkv, j_z, j_b, j_a = jax.shard_map(
+                    _shared_in_proj,
+                    mesh=mesh,
+                    in_specs=(x_spec, w_spec, w_spec),
+                    out_specs=(out_spec, out_spec, out_spec, out_spec),
+                    check_vma=False,
+                )(jx, jw1, jw2)
+
+                mixed_qkv = torch_view(j_qkv)
+                z = torch_view(j_z).reshape(num_tokens, -1, self.head_v_dim)
+                b = torch_view(j_b)
+                a = torch_view(j_a)
+                qkv_already_reordered = True
             else:
-                # Qwen3.5: weights are already in [q, k, v, z] and [b, a] order
-                qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
-                z_size = self.value_dim // self.tp_size
-                mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
-                z = z.reshape(z.size(0), -1, self.head_v_dim)
-                b, a = ba.chunk(2, dim=-1)
-                b = b.contiguous()
-                a = a.contiguous()
+                mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+                ba, _ = self.in_proj_ba(hidden_states)
+
+                if self.gqa_interleaved_layout:
+                    # Qwen3-Next: unpack the interleaved GQA layout
+                    query, key, value, z, b, a = self.fix_query_key_value_ordering(
+                        mixed_qkvz, ba)
+                    query, key, value = map(
+                        lambda x: rearrange(x, "l p d -> l (p d)"),
+                        (query, key, value))
+                    mixed_qkv = torch.cat((query, key, value), dim=-1)
+                else:
+                    # Qwen3.5: weights are already in [q, k, v, z] and [b, a] order
+                    qkv_size = (self.key_dim * 2 +
+                                self.value_dim) // self.tp_size
+                    z_size = self.value_dim // self.tp_size
+                    mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
+                    z = z.reshape(z.size(0), -1, self.head_v_dim)
+                    b, a = ba.chunk(2, dim=-1)
+                    b = b.contiguous()
+                    a = a.contiguous()
 
         # ============================================================
         # Part 2: Core Attention (Custom Op)
@@ -299,12 +383,15 @@ class VllmGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
             device=hidden_states.device,
         )
 
-        gdn_attention_core_tpu(mixed_qkv,
-                               b,
-                               a,
-                               core_attn_out,
-                               self.prefix,
-                               mesh=mesh)
+        gdn_attention_core_tpu(
+            mixed_qkv,
+            b,
+            a,
+            core_attn_out,
+            self.prefix,
+            mesh=mesh,
+            qkv_already_reordered=qkv_already_reordered,
+        )
 
         # ============================================================
         # Part 3: Output Projection
