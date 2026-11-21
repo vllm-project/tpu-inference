@@ -218,7 +218,7 @@ class KVCacheManager:
         num_kv_heads = common_utils.get_padded_num_heads(
             first_attn_module.num_kv_heads,
             common_utils.get_mesh_shape_product(self.runner.mesh,
-                                                ShardingAxisName.ATTN_HEAD))
+                                                ShardingAxisName.KV_HEAD))
         head_size = common_utils.get_padded_head_dim(
             first_attn_module.head_size)
         attn_page_size_bytes = get_attention_page_size_bytes(
@@ -393,10 +393,14 @@ class KVCacheManager:
         max_num_reqs = self.runner.max_num_reqs
         min_blocks_per_req, mamba_blocks_per_req = mamba_blocks_per_request(
             self.runner.vllm_config, is_align_mode)
+        context_cnt = max(
+            1,
+            common_utils.get_mesh_shape_product(self.runner.mesh,
+                                                ShardingAxisName.KV_CONTEXT))
         attn_blocks_per_req = max(
             1,
             cdiv(self.runner.model_config.max_model_len,
-                 cache_config.block_size))
+                 cache_config.block_size * context_cnt))
 
         mamba_bytes_per_block = (num_mamba_layers *
                                  unpadded_mamba_page_size_bytes)
