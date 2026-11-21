@@ -896,7 +896,6 @@ def _run_tpu(
 
     profile_options = jax.profiler.ProfileOptions()
     profile_options.python_tracer_level = 0
-    profile_options.device_tracer_level = 2
     jax.profiler.start_trace(str(measured_trace_dir),
                              profiler_options=profile_options)
 
