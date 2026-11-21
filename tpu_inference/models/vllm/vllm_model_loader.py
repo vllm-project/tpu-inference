@@ -34,10 +34,24 @@ from tpu_inference.models.common.layer_filter import (
 
 
 def _patch_tied_embedding_mapper(model: torch.nn.Module) -> None:
-    """Ensure checkpoint weights targeting lm_head are skipped when word embeddings are tied but self.lm_head is not defined."""
-    if hasattr(model, "hf_to_vllm_mapper") and not hasattr(model, "lm_head"):
-        model.hf_to_vllm_mapper = model.hf_to_vllm_mapper | WeightsMapper(
-            orig_to_new_prefix={"lm_head.": None})
+    """Skip checkpoint `lm_head.*` weights when the model has no `lm_head`.
+
+    Models that tie word embeddings may define no `lm_head` module, so
+    checkpoint `lm_head.*` weights have nowhere to load and must be skipped.
+    Multimodal wrappers (e.g. `Qwen3_5MoeForConditionalGeneration`) instead
+    keep `lm_head` on the inner language model and map `lm_head.` to it.
+    Skipping there leaves an untied `lm_head` uninitialized, so look for an
+    `lm_head` module anywhere in the module tree, not just on the top-level
+    model.
+    """
+    if not hasattr(model, "hf_to_vllm_mapper"):
+        return
+    if any(
+            name.rsplit(".", 1)[-1] == "lm_head"
+            for name, _ in model.named_modules()):
+        return
+    model.hf_to_vllm_mapper = model.hf_to_vllm_mapper | WeightsMapper(
+        orig_to_new_prefix={"lm_head.": None})
 
 
 def attach_incremental_weight_loader(model: torch.nn.Module) -> None:
