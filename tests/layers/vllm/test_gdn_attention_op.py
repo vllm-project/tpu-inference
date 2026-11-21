@@ -553,3 +553,89 @@ class TestVllmGatedDeltaNetAttention:
         np.testing.assert_array_equal(np.array(call_kwargs["read_offsets"]),
                                       [2, 1])
         assert call_kwargs["num_spec_tokens"] == 3
+
+
+class TestPrereorderGDNConv1dWeight:
+
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.run_jax_gdn_attention"
+    )
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.get_forward_context"
+    )
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.reorder_concatenated_tensor_for_sharding"
+    )
+    def test_skips_runtime_conv_weight_reorder_when_prereordered(
+            self, mock_reorder, mock_get_fc, mock_run_jax, mesh):
+        import jax.numpy as jnp
+        from torchax.interop import torch_view
+
+        from tpu_inference.layers.vllm.custom_ops.gdn_attention_op import \
+            gdn_attention_core_tpu
+
+        mock_reorder.side_effect = lambda x, *args, **kwargs: x
+        n_kq, n_v, d_k, d_v, kernel_size = 2, 4, 8, 8, 4
+        conv_dim = 2 * n_kq * d_k + n_v * d_v
+        num_tokens = 2
+        layer_name = "layer_0"
+
+        layer_module = MagicMock()
+        layer_module.num_k_heads = n_kq
+        layer_module.num_v_heads = n_v
+        layer_module.head_k_dim = d_k
+        layer_module.head_v_dim = d_v
+        layer_module.conv_kernel_size = kernel_size
+        layer_module.conv1d.weight = torch_view(
+            jnp.ones((conv_dim, 1, kernel_size), dtype=jnp.bfloat16))
+        layer_module.conv1d.bias = None
+        layer_module.A_log = torch_view(jnp.zeros((n_v, ), dtype=jnp.float32))
+        layer_module.dt_bias = torch_view(jnp.zeros((n_v, ),
+                                                    dtype=jnp.float32))
+        layer_module._tpu_conv1d_weight_reordered = True
+
+        attn_meta = MagicMock()
+        attn_meta.padded_num_reqs = 2
+        attn_meta.request_distribution = jnp.array([2, 2, 2], dtype=jnp.int32)
+        attn_meta.query_start_loc = jnp.array([0, 1, 2], dtype=jnp.int32)
+        attn_meta.seq_lens = jnp.array([4, 4], dtype=jnp.int32)
+        attn_meta.block_tables = jnp.zeros((2, 1), dtype=jnp.int32)
+        attn_meta.mamba.state_indices = jnp.array([0, 1], dtype=jnp.int32)
+        attn_meta.mamba.read_offsets = None
+
+        fc = MagicMock()
+        fc.attn_metadata = attn_meta
+        fc.no_compile_layers = {layer_name: layer_module}
+        mock_get_fc.return_value = fc
+
+        conv_state = jnp.zeros((4, kernel_size - 1, conv_dim),
+                               dtype=jnp.bfloat16)
+        recurrent_state = jnp.zeros((4, n_v, d_k, d_v), dtype=jnp.float32)
+        mock_run_jax.return_value = (
+            (conv_state, recurrent_state),
+            jnp.zeros((num_tokens, n_v * d_v), dtype=jnp.bfloat16),
+        )
+
+        vllm_config = MagicMock()
+        vllm_config.cache_config.mamba_cache_mode = "none"
+        vllm_config.speculative_config = None
+
+        mixed_qkv = torch_view(
+            jnp.zeros((num_tokens, conv_dim), dtype=jnp.bfloat16))
+        b = torch_view(jnp.zeros((num_tokens, n_v), dtype=jnp.bfloat16))
+        a = torch_view(jnp.zeros((num_tokens, n_v), dtype=jnp.bfloat16))
+        core_attn_out = MagicMock()
+        core_attn_out.shape = (num_tokens, n_v, d_v)
+
+        with set_vllm_model_wrapper_context(
+                kv_caches=[(conv_state, recurrent_state)],
+                mesh=mesh,
+                layer_name_to_kvcache_index={layer_name: 0},
+                vllm_config=vllm_config,
+        ):
+            gdn_attention_core_tpu(mixed_qkv, b, a, core_attn_out, layer_name,
+                                   mesh)
+
+        # Only mixed_qkv (axis=-1) should be reordered; conv1d.weight (axis=0) is skipped.
+        assert mock_reorder.call_count == 1
+        assert mock_reorder.call_args[0][3] == -1
