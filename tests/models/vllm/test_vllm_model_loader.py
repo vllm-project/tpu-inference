@@ -70,14 +70,50 @@ class _TiedWithoutLmHead(torch.nn.Module):
 
 
 class _MultimodalTiedWithoutLmHead(torch.nn.Module):
-    """Multimodal wrapper around a tied model that has no `lm_head`."""
+    """Multimodal wrapper around a tied model that has no `lm_head`.
+
+    Its mapper still sends `lm_head.` to the inner model, which has no head.
+    """
 
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={"model.language_model.": "language_model.model."})
+        orig_to_new_prefix={
+            "lm_head.": "language_model.lm_head.",
+            "model.language_model.": "language_model.model.",
+        })
 
     def __init__(self):
         super().__init__()
         self.language_model = _TiedWithoutLmHead()
+
+
+class _TiedLmHeadAlias(torch.nn.Module):
+    """Ties word embeddings by reusing the embedding module as `lm_head`."""
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"model.language_model.": "model."})
+
+    def __init__(self):
+        super().__init__()
+        self.model = torch.nn.Module()
+        self.model.embed_tokens = torch.nn.Embedding(8, 4)
+        self.lm_head = self.model.embed_tokens
+
+
+class _NestedNonHeadLmHead(torch.nn.Module):
+    """Has an `lm_head` only inside a draft submodule, not as the output head.
+
+    Its mapper leaves checkpoint `lm_head.*` names unmapped.
+    """
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"model.language_model.": "model."})
+
+    def __init__(self):
+        super().__init__()
+        self.model = torch.nn.Module()
+        self.model.embed_tokens = torch.nn.Embedding(8, 4)
+        self.mtp = torch.nn.Module()
+        self.mtp.lm_head = torch.nn.Linear(4, 8, bias=False)
 
 
 def test_keeps_nested_lm_head_weights():
@@ -110,6 +146,22 @@ def test_skips_lm_head_weights_without_lm_head():
 
 def test_skips_lm_head_weights_without_nested_lm_head():
     model = _MultimodalTiedWithoutLmHead()
+
+    vllm_model_loader._patch_tied_embedding_mapper(model)
+
+    assert model.hf_to_vllm_mapper.map_name(_LM_HEAD) is None
+
+
+def test_keeps_lm_head_weights_with_tied_lm_head_alias():
+    model = _TiedLmHeadAlias()
+
+    vllm_model_loader._patch_tied_embedding_mapper(model)
+
+    assert model.hf_to_vllm_mapper.map_name(_LM_HEAD) == _LM_HEAD
+
+
+def test_skips_lm_head_weights_without_target_module():
+    model = _NestedNonHeadLmHead()
 
     vllm_model_loader._patch_tied_embedding_mapper(model)
 

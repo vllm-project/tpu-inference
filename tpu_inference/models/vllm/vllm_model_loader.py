@@ -33,22 +33,31 @@ from tpu_inference.models.common.layer_filter import (
     should_skip_layer_weight)
 
 
+def _has_submodule(model: torch.nn.Module, path: str) -> bool:
+    """Returns whether `model` has a submodule at the dotted `path`."""
+    if not path:
+        return False
+    try:
+        model.get_submodule(path)
+    except AttributeError:
+        return False
+    return True
+
+
 def _patch_tied_embedding_mapper(model: torch.nn.Module) -> None:
-    """Skip checkpoint `lm_head.*` weights when the model has no `lm_head`.
+    """Skip checkpoint `lm_head.*` weights that have no module to load into.
 
     Models that tie word embeddings may define no `lm_head` module, so
-    checkpoint `lm_head.*` weights have nowhere to load and must be skipped.
-    Multimodal wrappers (e.g. `Qwen3_5MoeForConditionalGeneration`) instead
-    keep `lm_head` on the inner language model and map `lm_head.` to it.
-    Skipping there leaves an untied `lm_head` uninitialized, so look for an
-    `lm_head` module anywhere in the module tree, not just on the top-level
-    model.
+    checkpoint `lm_head.*` weights must be skipped. A model with a top-level
+    `lm_head` is left unchanged. Otherwise `lm_head.*` is kept only if
+    `hf_to_vllm_mapper` sends it to a module that exists, as multimodal
+    wrappers (e.g. `Qwen3_5MoeForConditionalGeneration`) do for the `lm_head`
+    of their inner language model.
     """
-    if not hasattr(model, "hf_to_vllm_mapper"):
+    if not hasattr(model, "hf_to_vllm_mapper") or hasattr(model, "lm_head"):
         return
-    if any(
-            name.rsplit(".", 1)[-1] == "lm_head"
-            for name, _ in model.named_modules()):
+    mapped = model.hf_to_vllm_mapper.apply_list(["lm_head.weight"])
+    if mapped and _has_submodule(model, mapped[0].rpartition(".")[0]):
         return
     model.hf_to_vllm_mapper = model.hf_to_vllm_mapper | WeightsMapper(
         orig_to_new_prefix={"lm_head.": None})
