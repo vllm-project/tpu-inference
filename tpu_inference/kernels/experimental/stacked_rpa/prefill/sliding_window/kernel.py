@@ -295,7 +295,7 @@ def create_allocs(kv_cache_hbm_ref, q_hbm_ref, cfgs):
         block_shape=cfgs.q_vmem_shape,
         memory_space=pltpu.VMEM,
         index_map=lambda i: (i, ),
-        pipeline_mode=pl.Buffered(buffer_count=2, use_lookahead=True),
+        pipeline_mode=pl.Buffered(buffer_count=2, use_lookahead=False),
     )
     kv_alloc = bref.SlidingWindowKVRef.input_output(
         spec=kv_spec,
@@ -315,7 +315,7 @@ def create_allocs(kv_cache_hbm_ref, q_hbm_ref, cfgs):
         spec=o_spec,
         dtype_or_type=q_hbm_ref,
         buffer_count=2,
-        use_lookahead=True,
+        use_lookahead=False,
         cfgs=cfgs,
     )
     return q_alloc, kv_alloc, o_alloc
