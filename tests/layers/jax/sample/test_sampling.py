@@ -20,16 +20,20 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from jax.experimental import mesh_utils
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 from vllm.v1.outputs import LogprobsTensors
 
 from tpu_inference import envs
 from tpu_inference.layers.common.binary_search import topp_mask
-from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
+                                                  ShardingAxisName,
+                                                  ShardingAxisNameBase)
 from tpu_inference.layers.jax.sample import sampling
 from tpu_inference.layers.jax.sample.sampling import (
     PromptLogprobsAsyncData, PromptLogprobsReqSnap, _apply_sampling_transforms,
-    _can_sample_distributed, _merge_topk_candidates, _prefiltered_top_k,
+    _can_sample_distributed, _distributed_sampling_fits,
+    _distributed_topk_sample, _merge_topk_candidates, _prefiltered_top_k,
     _shard_topk_candidates, _topk_prefilter_chunk, _topp_mask_sorted,
     compute_logprobs, compute_prompt_logprobs, distributed_sampling_allowed,
     gather_logprobs, sample)
@@ -135,6 +139,158 @@ class TestSampling:
             jnp.array([0.95], dtype=jnp.float32),
         )
         assert bool(incomplete[0])
+
+    def test_distributed_sampling_fits(self):
+        devices = np.array(jax.devices())
+        num_devices = len(devices)
+        assert not _distributed_sampling_fits(Mesh(devices, ("data", )), 4096)
+        assert _distributed_sampling_fits(
+            Mesh(devices.reshape(num_devices, 1), ("data", "model")), 256)
+        assert not _distributed_sampling_fits(
+            Mesh(devices.reshape(num_devices, 1), ("data", "model")), 64)
+        if num_devices >= 2 and num_devices % 2 == 0:
+            mesh_tp2 = Mesh(devices.reshape(num_devices // 2, 2),
+                            ("data", "model"))
+            assert _distributed_sampling_fits(mesh_tp2, 512)
+            assert not _distributed_sampling_fits(mesh_tp2, 513)
+
+    def test_distributed_sample_across_dp_tp_and_overlapping_base_meshes(self):
+        devices = np.array(jax.devices())
+        num_devices = len(devices)
+        if num_devices < 8 or num_devices % 8 != 0:
+            pytest.skip("Requires at least 8 devices")
+
+        batch_size = 16
+        vocab_size = 4096
+        raw_logits = jax.random.normal(jax.random.key(19),
+                                       (batch_size, vocab_size),
+                                       dtype=jnp.float32)
+        temperature = jnp.linspace(0.5, 1.5, batch_size, dtype=jnp.float32)
+        temperature = temperature.at[0].set(0.0)
+        top_k = (jnp.arange(batch_size, dtype=jnp.int32) % 64) + 1
+        top_k = top_k.at[1].set(1)
+        top_p = jnp.linspace(0.75, 1.0, batch_size, dtype=jnp.float32)
+        ref_meta = TPUSupportedSamplingMetadata(
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            do_sampling=True,
+            logprobs=False,
+        )
+        ref_filtered = np.asarray(
+            _apply_sampling_transforms(raw_logits, ref_meta))
+        greedy_argmax = int(np.argmax(np.asarray(raw_logits[0])))
+        top1_argmax = int(np.argmax(np.asarray(raw_logits[1])))
+
+        def _check_mesh(mesh, logits_spec, param_spec):
+            sharded_logits = jax.device_put(raw_logits,
+                                            NamedSharding(mesh, logits_spec))
+            sharded_meta = TPUSupportedSamplingMetadata(
+                temperature=jax.device_put(temperature,
+                                           NamedSharding(mesh, param_spec)),
+                top_k=jax.device_put(top_k, NamedSharding(mesh, param_spec)),
+                top_p=jax.device_put(top_p, NamedSharding(mesh, param_spec)),
+                do_sampling=True,
+                logprobs=False,
+            )
+            tokens = np.asarray(
+                sample(
+                    jax.random.PRNGKey(42),
+                    mesh,
+                    sharded_logits,
+                    sharded_meta,
+                    allow_distributed_sampling=True,
+                )[0])
+            assert int(tokens[0]) == greedy_argmax
+            assert int(tokens[1]) == top1_argmax
+            chosen = ref_filtered[np.arange(1, batch_size), tokens[1:]]
+            assert np.all(chosen > -1e11)
+            return tokens
+
+        # 1. Bit-exact DP invariance at fixed TP=2: (4, 2) vs (1, 2).
+        mesh_dp4_tp2 = Mesh(devices[:8].reshape(4, 2), ("data", "model"))
+        mesh_dp1_tp2 = Mesh(devices[:2].reshape(1, 2), ("data", "model"))
+        tokens_dp4_tp2 = _check_mesh(mesh_dp4_tp2, P("data", "model"),
+                                     P("data"))
+        tokens_dp1_tp2 = _check_mesh(mesh_dp1_tp2, P("data", "model"),
+                                     P("data"))
+        np.testing.assert_array_equal(tokens_dp4_tp2, tokens_dp1_tp2)
+
+        # 2. Pure DP with single vocab shard: (8, 1) skips vocab all_gather.
+        mesh_dp8_tp1 = Mesh(devices[:8].reshape(8, 1), ("data", "model"))
+        _check_mesh(mesh_dp8_tp1, P("data", "model"), P("data"))
+
+        # 3. Unaligned batch size (B=1 % DP=4 != 0) falls back cleanly.
+        single_meta = TPUSupportedSamplingMetadata(
+            temperature=temperature[1:2],
+            top_k=top_k[1:2],
+            top_p=top_p[1:2],
+            do_sampling=True,
+            logprobs=False,
+        )
+        unaligned_tokens, _ = sample(
+            jax.random.PRNGKey(7),
+            mesh_dp4_tp2,
+            raw_logits[1:2],
+            single_meta,
+            allow_distributed_sampling=True,
+        )
+        assert int(np.asarray(unaligned_tokens)[0]) == top1_argmax
+
+        # 4. 7D ShardingAxisNameBase mesh with overlapping `attn_dp` active in
+        # both ATTN_DATA and MLP_TENSOR: vocab shards across (attn_dp, model)
+        # while batch shards across (data,).
+        mesh_7d = Mesh(devices[:8].reshape(2, 2, 1, 1, 2, 1, 1),
+                       MESH_AXIS_NAMES)
+        with mock.patch.object(ShardingAxisName, "_cls", ShardingAxisNameBase):
+            _check_mesh(mesh_7d, P("data", ("attn_dp", "model")), P("data"))
+
+    def test_distributed_topk_sample_keeps_batch_sharded_across_dp(self):
+        devices = jax.devices()
+        num_devices = len(devices)
+        if num_devices < 2 or num_devices % 2 != 0:
+            pytest.skip("Requires an even multi-device mesh for DP > 1")
+
+        dp_size = num_devices // 2
+        tp_size = 2
+        mesh = Mesh(
+            np.array(devices).reshape(dp_size, tp_size), ("data", "model"))
+        batch_size = dp_size * 4
+        vocab_size = 4096
+        logits = jax.device_put(
+            jnp.zeros((batch_size, vocab_size), dtype=jnp.float32),
+            NamedSharding(mesh, P("data", "model")),
+        )
+        temperature = jax.device_put(
+            jnp.ones((batch_size, ), dtype=jnp.float32),
+            NamedSharding(mesh, P("data")),
+        )
+        top_k = jax.device_put(
+            jnp.full((batch_size, ), 32, dtype=jnp.int32),
+            NamedSharding(mesh, P("data")),
+        )
+        top_p = jax.device_put(
+            jnp.full((batch_size, ), 0.95, dtype=jnp.float32),
+            NamedSharding(mesh, P("data")),
+        )
+
+        @jax.jit
+        def run_fn(logits_in, temp_in, top_k_in, top_p_in):
+            return _distributed_topk_sample(jax.random.key(0), mesh, logits_in,
+                                            temp_in, top_k_in, top_p_in)
+
+        hlo = run_fn.lower(logits, temperature, top_k,
+                           top_p).compile().as_text()
+        local_vocab_size = vocab_size // tp_size
+        all_gather_lines = [
+            line for line in hlo.splitlines() if "all-gather(" in line
+        ]
+        assert len(all_gather_lines) >= 1
+        for line in all_gather_lines:
+            # Only gathered per-shard candidates (`2 * max_top_k` per TP shard)
+            # may be all-gathered, never the `[batch_size, local_vocab_size]`
+            # logits shard.
+            assert f",{local_vocab_size}]" not in line, line
 
     @staticmethod
     def _check_prefiltered_top_k(values):
