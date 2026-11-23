@@ -555,6 +555,7 @@ class TestTpuPlatform:
             self, vllm_config):
         vllm_config.cache_config.block_size = 16
         vllm_config.cache_config.mamba_block_size = 16
+        vllm_config.model_config.is_hybrid = True
         set_mamba_prefix_caching(vllm_config.cache_config, True)
         vllm_config.cache_config.prefix_match_unit = 8
 

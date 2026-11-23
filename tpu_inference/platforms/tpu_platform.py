@@ -584,7 +584,7 @@ class TpuPlatform(Platform):
             if cache_config.mamba_block_size != cache_config.block_size:
                 logger.info(
                     "Setting mamba_block_size to %d to match the attention "
-                    "block size (was %d) for mamba prefix caching.",
+                    "block size (was %s) for mamba prefix caching.",
                     cache_config.block_size, cache_config.mamba_block_size)
                 cache_config.mamba_block_size = cache_config.block_size
             if (cache_config.prefix_match_unit is not None and
