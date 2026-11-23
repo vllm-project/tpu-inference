@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import inspect
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import (BlockHash,
                                          make_block_hash_with_group_id)
 from vllm.v1.core.single_type_kv_cache_manager import (FullAttentionManager,
@@ -65,10 +67,16 @@ def _make_mock_vllm_config(dp_size: int, max_num_seqs: int) -> MagicMock:
     return vllm_config
 
 
+# vllm-project/vllm#66234 removed the coordinators' `use_eagle` argument.
+_EAGLE_KWARGS = ({
+    "use_eagle": False
+} if "use_eagle" in inspect.signature(
+    HybridKVCacheCoordinator.__init__).parameters else {})
+
 _COORD_KWARGS = dict(
     max_model_len=1024,
     max_in_flight_tokens=128,
-    use_eagle=False,
+    **_EAGLE_KWARGS,
     enable_caching=True,
     enable_kv_cache_events=False,
     dcp_world_size=1,
@@ -331,7 +339,7 @@ class TestTPUHybridKVCacheCoordinator:
             kv_cache_config=cfg,
             max_model_len=1024,
             max_in_flight_tokens=128,
-            use_eagle=False,
+            **_EAGLE_KWARGS,
             enable_caching=True,
             enable_kv_cache_events=False,
             dcp_world_size=1,
@@ -391,7 +399,7 @@ class TestTPUHybridKVCacheCoordinator:
             kv_cache_config=cfg,
             max_model_len=1024,
             max_in_flight_tokens=128,
-            use_eagle=False,
+            **_EAGLE_KWARGS,
             enable_caching=True,
             enable_kv_cache_events=False,
             dcp_world_size=1,
@@ -417,7 +425,7 @@ class TestTPUHybridKVCacheCoordinator:
             kv_cache_config=cfg,
             max_model_len=1024,
             max_in_flight_tokens=128,
-            use_eagle=False,
+            **_EAGLE_KWARGS,
             enable_caching=True,
             enable_kv_cache_events=False,
             dcp_world_size=1,
@@ -488,7 +496,7 @@ class TestTPUHybridKVCacheCoordinator:
             kv_cache_config=cfg,
             max_model_len=1024,
             max_in_flight_tokens=128,
-            use_eagle=False,
+            **_EAGLE_KWARGS,
             enable_caching=True,
             enable_kv_cache_events=False,
             dcp_world_size=1,
@@ -561,7 +569,7 @@ class TestHybridCoordinatorHooks:
         coord_kwargs = dict(
             max_model_len=1024,
             max_in_flight_tokens=128,
-            use_eagle=False,
+            **_EAGLE_KWARGS,
             enable_caching=True,
             enable_kv_cache_events=False,
             dcp_world_size=1,
@@ -734,7 +742,7 @@ class TestHybridCoordinatorHooks:
         coord_kwargs = dict(
             max_model_len=1024,
             max_in_flight_tokens=128,
-            use_eagle=False,
+            **_EAGLE_KWARGS,
             enable_caching=True,
             enable_kv_cache_events=False,
             dcp_world_size=1,

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import inspect
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -10,7 +11,6 @@ from vllm.v1.core.kv_cache_coordinator import (HybridKVCacheCoordinator,
 from vllm.v1.core.kv_cache_coordinator import \
     get_kv_cache_coordinator as orig_get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
-from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager, MambaManager, create_single_type_manager)
@@ -311,37 +311,22 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
     def __init__(
         self,
         kv_cache_config: KVCacheConfig,
-        max_model_len: int,
-        max_in_flight_tokens: int,
-        use_eagle: bool,
-        enable_caching: bool,
-        enable_kv_cache_events: bool,
-        dcp_world_size: int,
-        pcp_world_size: int,
-        scheduler_block_size: int,
-        hash_block_size: int,
-        metrics_collector: KVCacheMetricsCollector | None = None,
-        num_prefill_lookahead: int = 0,
         *args,
         mamba_num_blocks: int | None = None,
         **kwargs,
     ):
-        super().__init__(
-            kv_cache_config,
-            max_model_len,
-            max_in_flight_tokens,
-            use_eagle,
-            enable_caching,
-            enable_kv_cache_events,
-            dcp_world_size=dcp_world_size,
-            pcp_world_size=pcp_world_size,
-            scheduler_block_size=scheduler_block_size,
-            hash_block_size=hash_block_size,
-            metrics_collector=metrics_collector,
-            num_prefill_lookahead=num_prefill_lookahead,
-            *args,
-            **kwargs,
-        )
+        # Forward the arguments untouched: the parent signature changes across
+        # vLLM versions (vllm-project/vllm#66234 dropped `use_eagle` and renamed
+        # `num_prefill_lookahead` to `num_hash_lookahead_tokens`).
+        super().__init__(kv_cache_config, *args, **kwargs)
+        bound = inspect.signature(HybridKVCacheCoordinator.__init__).bind(
+            self, kv_cache_config, *args, **kwargs)
+        bound.apply_defaults()
+        max_model_len = bound.arguments["max_model_len"]
+        max_in_flight_tokens = bound.arguments["max_in_flight_tokens"]
+        enable_caching = bound.arguments["enable_caching"]
+        dcp_world_size = bound.arguments["dcp_world_size"]
+        pcp_world_size = bound.arguments["pcp_world_size"]
 
         # Base __init__ initialized self.block_pool with kv_cache_config.num_blocks (Attention pool)
         self.attention_block_pool = self.block_pool
