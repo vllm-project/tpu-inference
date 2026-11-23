@@ -25,14 +25,14 @@ from tpu_inference.core.mamba_prefix_caching import (
 
 @dataclasses.dataclass
 class _LegacyCacheConfig:
-    """`CacheConfig` before vllm-project/vllm#63830."""
+    """`CacheConfig` with `mamba_cache_mode`."""
     enable_prefix_caching: bool = False
     mamba_cache_mode: str = "none"
 
 
 @dataclasses.dataclass
 class _CacheConfig:
-    """`CacheConfig` after vllm-project/vllm#63830."""
+    """`CacheConfig` without `mamba_cache_mode`."""
     enable_prefix_caching: bool = False
 
 
