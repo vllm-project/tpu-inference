@@ -64,7 +64,14 @@ def _get_partial_rotary_factor(config: PretrainedConfig) -> float:
     rope_parameters = getattr(config, "rope_parameters", None) or {}
     if "partial_rotary_factor" in rope_parameters:
         return float(rope_parameters["partial_rotary_factor"])
+    # 0.5 matches the HF ``Glm4Config`` default; GLM-4 rotates half of each
+    # head.
     return float(getattr(config, "partial_rotary_factor", 0.5))
+
+
+# RoPE variants that ``apply_rope`` implements. Anything else (for example
+# YaRN added for long context) would run with the wrong frequencies.
+_SUPPORTED_ROPE_TYPES = ("default", "llama3")
 
 
 class Glm4MLP(JaxModule):
@@ -385,6 +392,30 @@ class Glm4ForCausalLM(JaxModule, LoadableWithIterator):
         ],
     }
     WeightLoader = StandardWeightLoader
+
+    @classmethod
+    def supports_vllm_config(cls, vllm_config: VllmConfig) -> bool:
+        """Send configs this port does not handle to the vLLM path.
+
+        Pre-quantized checkpoints (AWQ, GPTQ, FP8, ...) and RoPE scaling
+        types other than Llama3 are untested or unimplemented here.
+        """
+        hf_config = vllm_config.model_config.hf_config
+        if getattr(hf_config, "quantization_config", None):
+            logger.warning_once(
+                "Glm4ForCausalLM: pre-quantized checkpoint, using the vLLM "
+                "implementation.")
+            return False
+        rope_scaling = get_rope_scaling(hf_config)
+        rope_scaling = rope_scaling or {}
+        rope_type = rope_scaling.get("rope_type",
+                                     rope_scaling.get("type", "default"))
+        if rope_type not in _SUPPORTED_ROPE_TYPES:
+            logger.warning_once(
+                f"Glm4ForCausalLM: rope_type={rope_type!r} is not supported "
+                "natively, using the vLLM implementation.")
+            return False
+        return True
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
                  mesh: Mesh) -> None:

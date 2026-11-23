@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import jax
 import jax.numpy as jnp
@@ -45,15 +45,14 @@ class MockVllmConfig:
         self.speculative_config = None
 
 
-@pytest.fixture(scope="module")
-def tiny_glm4_checkpoint(tmp_path_factory):
+def _make_tiny_checkpoint(tmp_path_factory, num_attention_heads):
     """A tiny random-init GLM-4 dense checkpoint saved by HF transformers."""
     config = Glm4Config(
         vocab_size=512,
         hidden_size=256,
         intermediate_size=512,
         num_hidden_layers=2,
-        num_attention_heads=4,
+        num_attention_heads=num_attention_heads,
         num_key_value_heads=2,
         head_dim=128,
         partial_rotary_factor=0.5,
@@ -76,14 +75,15 @@ def tiny_glm4_checkpoint(tmp_path_factory):
     return str(path), hf_model
 
 
-@pytest.fixture(autouse=True)
-def mock_get_pp_group():
-    with patch("tpu_inference.models.jax.glm4.get_pp_group",
-               return_value=MagicMock(is_first_rank=True,
-                                      is_last_rank=True,
-                                      rank_in_group=0,
-                                      world_size=1)):
-        yield
+@pytest.fixture(scope="module")
+def tiny_glm4_checkpoint(tmp_path_factory):
+    return _make_tiny_checkpoint(tmp_path_factory, num_attention_heads=4)
+
+
+@pytest.fixture(scope="module")
+def tiny_glm4_checkpoint_8q(tmp_path_factory):
+    # 8 query heads so q still shards on heads at TP=8; 2 KV heads as before.
+    return _make_tiny_checkpoint(tmp_path_factory, num_attention_heads=8)
 
 
 @pytest.fixture(autouse=True)
@@ -144,28 +144,67 @@ class TestGlm4ForCausalLM:
             rtol=0,
             atol=0)
 
-    def test_load_with_tp_larger_than_kv_heads(self, tiny_glm4_checkpoint,
-                                               rng):
-        # The tiny checkpoint has 2 KV heads, like GLM-4-9B-0414. With TP=4
-        # the k/v projections must load unpadded and shard on head_dim.
-        if len(jax.devices()) < 4:
-            pytest.skip("Needs at least 4 devices.")
-        model_dir, hf_model = tiny_glm4_checkpoint
-        devices = np.array(jax.devices()[:4]).reshape((1, 1, 1, 4))
+    @pytest.mark.parametrize("tp_size,checkpoint", [
+        (4, "tiny_glm4_checkpoint"),
+        (8, "tiny_glm4_checkpoint_8q"),
+    ])
+    def test_load_with_tp_larger_than_kv_heads(self, request, rng, tp_size,
+                                               checkpoint):
+        # The tiny checkpoint has 2 KV heads, like GLM-4-9B-0414. With TP
+        # larger than that, k/v must load unpadded and shard on head_dim.
+        # On CPU, run with XLA_FLAGS=--xla_force_host_platform_device_count=8.
+        if len(jax.devices()) < tp_size:
+            pytest.skip(f"Needs at least {tp_size} devices.")
+        model_dir, hf_model = request.getfixturevalue(checkpoint)
+        devices = np.array(jax.devices()[:tp_size]).reshape((1, 1, 1, tp_size))
         tp_mesh = Mesh(devices,
                        axis_names=("data", "attn_dp", "expert", "model"))
         _, model = _load(model_dir, rng, tp_mesh)
 
         attn = model.model.layers[0].self_attn
-        assert attn.k_proj.weight.shape == (256, 2, 128)
-        assert attn.v_proj.weight.shape == (256, 2, 128)
-        assert attn.k_proj.weight.value.sharding.spec == P(None, None, "model")
-        hf_k = hf_model.model.layers[0].self_attn.k_proj.weight.detach()
+        hf_attn = hf_model.model.layers[0].self_attn
+        for name in ("k_proj", "v_proj"):
+            proj = getattr(attn, name)
+            hf_proj = getattr(hf_attn, name)
+            assert proj.weight.shape == (256, 2, 128)
+            assert proj.bias.shape == (2, 128)
+            assert proj.weight.value.sharding.spec == P(None, None, "model")
+            assert proj.bias.value.sharding.spec == P(None, "model")
+            np.testing.assert_allclose(np.asarray(proj.weight.value).reshape(
+                256, 256),
+                                       hf_proj.weight.detach().numpy().T,
+                                       rtol=0,
+                                       atol=0)
+            np.testing.assert_allclose(np.asarray(
+                proj.bias.value).reshape(256),
+                                       hf_proj.bias.detach().numpy(),
+                                       rtol=0,
+                                       atol=0)
+        # q heads divide the TP size and stay sharded on heads.
+        assert attn.q_proj.weight.value.sharding.spec == P(None, "model", None)
         np.testing.assert_allclose(np.asarray(
-            attn.k_proj.weight.value).reshape(256, 256),
-                                   hf_k.numpy().T,
+            attn.q_proj.weight.value).reshape(256, -1),
+                                   hf_attn.q_proj.weight.detach().numpy().T,
                                    rtol=0,
                                    atol=0)
+
+    def test_supports_vllm_config(self, tiny_glm4_checkpoint):
+        model_dir, _ = tiny_glm4_checkpoint
+        vllm_config = MockVllmConfig(model_dir)
+        hf_config = vllm_config.model_config.hf_config
+        assert Glm4ForCausalLM.supports_vllm_config(vllm_config)
+
+        hf_config.quantization_config = {"quant_method": "fp8"}
+        assert not Glm4ForCausalLM.supports_vllm_config(vllm_config)
+        hf_config.quantization_config = None
+
+        hf_config.rope_parameters = {
+            "rope_type": "yarn",
+            "factor": 4.0,
+            "rope_theta": 10000.0,
+            "original_max_position_embeddings": 32768,
+        }
+        assert not Glm4ForCausalLM.supports_vllm_config(vllm_config)
 
     def test_logits_match_hf(self, tiny_glm4_checkpoint, rng, mesh):
         """Prefill a single sequence and compare logits with HF."""
