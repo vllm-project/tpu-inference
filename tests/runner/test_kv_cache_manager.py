@@ -1535,6 +1535,10 @@ class TestKVCacheManager:
         self.runner.vllm_config.compilation_config.static_forward_context = {
             'layer.0': mock_gdn_module
         }
+        # Runner slots need Mamba prefix caching off. Since
+        # vllm-project/vllm#63830 that is `enable_prefix_caching`, which
+        # `CacheConfig` turns on by default.
+        set_mamba_prefix_caching(self.runner.vllm_config.cache_config, False)
 
         with patch(
                 'tpu_inference.runner.kv_cache_manager.get_layers_from_vllm_config',

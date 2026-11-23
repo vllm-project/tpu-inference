@@ -44,6 +44,8 @@ from tpu_inference import utils as common_utils
 from tpu_inference.core.hybrid_coordinator import (  # noqa: F401
     DEFAULT_MAMBA_CACHE_MULTIPLIER, is_mamba_group, mamba_blocks_per_request,
     mamba_pool_size, set_mamba_num_blocks)
+from tpu_inference.core.mamba_prefix_caching import \
+    mamba_prefix_caching_enabled
 from tpu_inference.core.runner_slot_mamba import \
     maybe_runner_slot_mamba_layer_config
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -349,8 +351,7 @@ class KVCacheManager:
                 leaves too little HBM for even the minimum mamba pool.
         """
         cache_config = self.runner.cache_config
-        is_align_mode = (getattr(cache_config, "mamba_cache_mode",
-                                 "none") == "align")
+        is_align_mode = mamba_prefix_caching_enabled(cache_config)
         pinned_attn_blocks = cache_config.num_gpu_blocks_override
 
         devices = self.runner.mesh.devices.flatten()
@@ -1027,11 +1028,9 @@ class KVCacheManager:
                     tensor_num_blocks,
                     self.runner.cache_config.num_gpu_blocks_override)
 
-            mamba_cache_mode = getattr(self.runner.cache_config,
-                                       "mamba_cache_mode", "none")
             if self._mamba_num_blocks is not None:
                 mamba_num_blocks = self._mamba_num_blocks
-            elif mamba_cache_mode == "align":
+            elif mamba_prefix_caching_enabled(self.runner.cache_config):
                 mamba_num_blocks = tensor_num_blocks
             else:
                 # Mamba state is recurrent: one slot per *active* request,
