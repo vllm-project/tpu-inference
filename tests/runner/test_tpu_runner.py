@@ -25,6 +25,7 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed.aux_output_connector.connector import \
     AuxOutputConnectorMetadata
 
+from tpu_inference.core.mamba_prefix_caching import set_mamba_prefix_caching
 from tpu_inference.models.common.interface import (ModelInterface,
                                                    MultiModalInterface)
 from tpu_inference.runner import utils as runner_utils
@@ -1721,7 +1722,7 @@ class TestTPUJaxRunnerDisableMM:
         runner.max_model_len = 1024
         runner.block_size = 16
         runner.kv_cache_config.has_mamba_layers = True
-        runner.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(runner.cache_config, True)
         runner.cache_config.mamba_block_size = 16
         runner.input_batch.num_reqs = 2
 
@@ -1736,7 +1737,7 @@ class TestTPUJaxRunnerDisableMM:
         assert TPUModelRunner._get_min_remaining_slots(runner) == 1
 
         # 3. Non-align mode ("none"): only capped by max_model_len
-        runner.cache_config.mamba_cache_mode = "none"
+        set_mamba_prefix_caching(runner.cache_config, False)
         runner.input_batch.num_tokens = np.array([16, 20], dtype=np.int32)
         assert TPUModelRunner._get_min_remaining_slots(runner) == 1004
 

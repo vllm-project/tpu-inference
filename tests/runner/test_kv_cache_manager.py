@@ -38,6 +38,7 @@ from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
 from vllm.v1.request import Request
 
 from tpu_inference import utils as common_utils
+from tpu_inference.core.mamba_prefix_caching import set_mamba_prefix_caching
 from tpu_inference.core.runner_slot_mamba import RunnerSlotMambaManager
 from tpu_inference.runner.input_batch import CachedRequestState
 from tpu_inference.runner.kv_cache import (_get_mamba_cache_allocator,
@@ -1985,7 +1986,7 @@ class TestKVCacheManager:
 
         self.runner.cache_config.gpu_memory_utilization = 1.0
         self.runner.cache_config.num_gpu_blocks_override = None
-        self.runner.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(self.runner.cache_config, True)
         self.runner.model_config.max_model_len = 2048
         self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
         self.runner.max_num_reqs = max_num_reqs
@@ -2022,7 +2023,7 @@ class TestKVCacheManager:
 
         self.runner.cache_config.gpu_memory_utilization = 1.0
         self.runner.cache_config.num_gpu_blocks_override = None
-        self.runner.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(self.runner.cache_config, True)
         self.runner.model_config.max_model_len = 2048
         self.runner.vllm_config.additional_config[
             "custom_mamba_cache_multiplier"] = multiplier
@@ -2060,7 +2061,7 @@ class TestKVCacheManager:
 
         self.runner.cache_config.gpu_memory_utilization = 1.0
         self.runner.cache_config.num_gpu_blocks_override = None
-        self.runner.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(self.runner.cache_config, True)
         self.runner.model_config.max_model_len = max_model_len
         self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
         self.runner.max_num_reqs = max_num_reqs
@@ -2114,7 +2115,7 @@ class TestKVCacheManager:
 
         self.runner.cache_config.gpu_memory_utilization = 1.0
         self.runner.cache_config.num_gpu_blocks_override = None
-        self.runner.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(self.runner.cache_config, True)
         self.runner.model_config.max_model_len = 2048
         self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
         self.runner.max_num_reqs = max_num_reqs
@@ -2145,7 +2146,7 @@ class TestKVCacheManager:
 
         self.runner.cache_config.gpu_memory_utilization = 1.0
         self.runner.cache_config.num_gpu_blocks_override = None
-        self.runner.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(self.runner.cache_config, True)
         self.runner.model_config.max_model_len = 2048
         self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
         self.runner.max_num_reqs = max_num_reqs
@@ -2180,7 +2181,7 @@ class TestKVCacheManager:
 
         self.runner.cache_config.gpu_memory_utilization = 1.0
         self.runner.cache_config.num_gpu_blocks_override = pinned_attn
-        self.runner.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(self.runner.cache_config, True)
         self.runner.model_config.max_model_len = 2048
         self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
         self.runner.max_num_reqs = max_num_reqs
@@ -2214,7 +2215,7 @@ class TestKVCacheManager:
 
         self.runner.cache_config.gpu_memory_utilization = 1.0
         self.runner.cache_config.num_gpu_blocks_override = 100_000  # huge
-        self.runner.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(self.runner.cache_config, True)
         self.runner.model_config.max_model_len = 2048
         self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
         self.runner.max_num_reqs = max_num_reqs
@@ -2402,7 +2403,7 @@ class TestKVCacheManager:
             kv_cache_groups=kv_cache_groups,
         )
 
-        self.runner.vllm_config.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(self.runner.vllm_config.cache_config, True)
         self.runner.initialize_kv_cache(kv_cache_config)
 
         # 10 tensors × 4 duplicated layers = 40 caches, one per layer.

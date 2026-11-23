@@ -50,6 +50,8 @@ from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 
 from tpu_inference import envs
+from tpu_inference.core.mamba_prefix_caching import \
+    mamba_prefix_caching_enabled
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import time_function
 
@@ -265,7 +267,9 @@ def _scheduler_worker_process(
     atexit._clear()
     gc.enable()
     cache_config = getattr(vllm_config, "cache_config", None)
-    if getattr(cache_config, "mamba_cache_mode", "none") == "align":
+    if mamba_prefix_caching_enabled(cache_config,
+                                    getattr(vllm_config, "model_config",
+                                            None)):
         from tpu_inference.core.hybrid_coordinator import (
             install_hybrid_coordinator_hooks, set_mamba_num_blocks)
         install_hybrid_coordinator_hooks(vllm_config)
