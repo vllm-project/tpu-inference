@@ -29,6 +29,7 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import (get_model,
                                                       resolve_model_impl_type)
 from tpu_inference.spec_decode.jax.utils import get_draft_block_tables
+from tpu_inference.spec_decode.methods import uses_gemma4_mtp
 from tpu_inference.utils import device_array
 
 logger = init_logger(__name__)
@@ -66,8 +67,8 @@ class Eagle3Proposer:
         self.rng_key = jax.random.key(self.vllm_config.model_config.seed)
         self.max_num_tokens = runner.max_num_tokens
         self.token_arange = jnp.arange(self.max_num_tokens)
-        self.constant_draft_positions = self.speculative_config.use_gemma4_mtp(
-        )
+        self.constant_draft_positions = uses_gemma4_mtp(
+            self.speculative_config)
 
     def load_model(self, target_model: Any) -> None:
         """Loads the draft model."""
@@ -146,7 +147,7 @@ class Eagle3Proposer:
                         "Draft model does not have embedding. Setting draft model's embed_tokens to target model's embed"
                     )
                     draft_embed_param.value = target_embed_param.value
-                elif self.speculative_config.use_gemma4_mtp():
+                elif uses_gemma4_mtp(self.speculative_config):
                     logger.info(
                         "Setting draft model's embed_tokens to target model's embed unconditionally (Gemma4-MTP/KV-sharing layout)"
                     )

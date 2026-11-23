@@ -57,6 +57,7 @@ from tpu_inference.runner.kv_cache import (KVCacheMetadata,
                                            create_kv_caches,
                                            create_mamba_cache,
                                            get_attention_page_size_bytes)
+from tpu_inference.spec_decode.methods import uses_gemma4_mtp
 
 if TYPE_CHECKING:
     from vllm.v1.request import Request
@@ -691,7 +692,7 @@ class KVCacheManager:
                 draft_model_config = speculative_config.draft_model_config
                 draft_hf_config = draft_model_config.hf_config
 
-                if speculative_config.use_gemma4_mtp():
+                if uses_gemma4_mtp(speculative_config):
                     from tpu_inference.models.common.kv_share import \
                         compute_mtp_kv_share_map
 

@@ -1241,7 +1241,6 @@ class TestKVCacheManager:
         self.runner.vllm_config.compilation_config.static_forward_context = {}
         mock_speculative_config = MagicMock()
         mock_speculative_config.method = "eagle3"
-        mock_speculative_config.use_gemma4_mtp = MagicMock(return_value=False)
         mock_draft_model_config = MagicMock()
         mock_hf_config = MagicMock()
         mock_hf_config.num_key_value_heads = 4
@@ -1272,7 +1271,6 @@ class TestKVCacheManager:
         self.runner.vllm_config.compilation_config.static_forward_context = {}
         mock_speculative_config = MagicMock()
         mock_speculative_config.method = "eagle3"
-        mock_speculative_config.use_gemma4_mtp = MagicMock(return_value=False)
         mock_draft_model_config = MagicMock()
         mock_hf_config = MagicMock()
         mock_hf_config.num_key_value_heads = 4
@@ -1317,9 +1315,9 @@ class TestKVCacheManager:
 
         mock_speculative_config = MagicMock()
         mock_speculative_config.method = "mtp"
-        mock_speculative_config.use_gemma4_mtp = MagicMock(return_value=True)
         mock_draft_model_config = MagicMock()
         mock_hf_config = MagicMock()
+        mock_hf_config.model_type = "gemma4_mtp"
         mock_draft_model_config.hf_config = mock_hf_config
         mock_speculative_config.draft_model_config = mock_draft_model_config
         self.runner.speculative_config = mock_speculative_config

@@ -95,6 +95,7 @@ from tpu_inference.spec_decode.jax.utils import (
     concat_last_sampled_tokens_and_draft_tokens, extend_logits_simple,
     extract_last_sampled_tokens, filter_speculative_logprobs,
     process_and_extend_logits)
+from tpu_inference.spec_decode.methods import uses_eagle
 from tpu_inference.spec_decode.ngram_proposer import NgramProposer
 from tpu_inference.utils import (device_array, make_optimized_mesh,
                                  time_function, to_jax_dtype, to_torch_dtype)
@@ -1077,7 +1078,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                         (self.max_num_reqs, ), dtype=np.int32)
             elif self.speculative_config.method == "dflash":
                 self.drafter = DFlashProposer(self.vllm_config, self)
-            elif self.speculative_config.use_eagle():
+            elif uses_eagle(self.speculative_config):
                 self.drafter = Eagle3Proposer(self.vllm_config, self)
             else:
                 raise NotImplementedError(
