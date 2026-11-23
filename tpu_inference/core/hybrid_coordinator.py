@@ -763,10 +763,30 @@ def propagate_mamba_num_blocks(rpc_owner: Any, kv_cache_config: Any,
     return mamba_num_blocks
 
 
+def propagate_num_gpu_blocks_override(rpc_owner: Any,
+                                      vllm_config: Any) -> int | None:
+    """Publish the attention pool size the workers' compact-mamba sizing set
+    (`cache_config.num_gpu_blocks_override`) in the engine-core process, which
+    does not share the workers' `cache_config` under multi-process executors.
+    Must run before `get_kv_cache_configs`."""
+    reported = [
+        v for v in rpc_owner.collective_rpc("get_num_gpu_blocks_override")
+        if v is not None
+    ]
+    if reported:
+        vllm_config.cache_config.num_gpu_blocks_override = min(reported)
+    return vllm_config.cache_config.num_gpu_blocks_override
+
+
 class MambaPoolSyncExecutorMixin:
     """Publish the workers' allocated mamba pool size in the engine-core
     process as soon as the caches exist: `initialize_from_config` runs there
     after every worker has allocated and before the scheduler is built."""
+
+    def get_kv_cache_layer_configs(self) -> Any:
+        layer_configs = super().get_kv_cache_layer_configs()
+        propagate_num_gpu_blocks_override(self, self.vllm_config)
+        return layer_configs
 
     def initialize_from_config(self, kv_cache_configs: Any) -> None:
         super().initialize_from_config(kv_cache_configs)
