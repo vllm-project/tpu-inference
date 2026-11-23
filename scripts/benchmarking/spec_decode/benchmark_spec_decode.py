@@ -205,9 +205,12 @@ def build_engine_kwargs(args: argparse.Namespace, max_num_seqs: int,
         kwargs["kv_cache_dtype"] = args.kv_cache_dtype
     if args.max_num_batched_tokens:
         kwargs["max_num_batched_tokens"] = args.max_num_batched_tokens
-    kwargs.update(json.loads(args.extra_engine_args))
+    extra_args = json.loads(args.extra_engine_args)
+    extra_spec = extra_args.pop("speculative_config", None) or {}
+    kwargs.update(extra_args)
     if num_speculative_tokens > 0:
         spec_config: dict[str, Any] = {
+            **extra_spec,
             "method": args.method,
             "num_speculative_tokens": num_speculative_tokens,
         }
@@ -363,15 +366,16 @@ def create_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter)
     arg_group = parser.add_argument_group("Model and engine")
     arg_group.add_argument("--model", default="Qwen/Qwen3.5-4B")
-    arg_group.add_argument("--method",
-                   default="mtp",
-                   help="Speculative method, e.g. mtp, eagle3, ngram, dflash.")
-    arg_group.add_argument("--draft-model",
-                   help="Draft model path; not needed for mtp or ngram.")
+    arg_group.add_argument(
+        "--method",
+        default="mtp",
+        help="Speculative method, e.g. mtp, eagle3, ngram, dflash.")
+    arg_group.add_argument(
+        "--draft-model", help="Draft model path; not needed for mtp or ngram.")
     arg_group.add_argument("--num-speculative-tokens",
-                   type=int,
-                   nargs="+",
-                   default=[3])
+                           type=int,
+                           nargs="+",
+                           default=[3])
     arg_group.add_argument("--max-num-seqs", type=int, nargs="+", default=[64])
     arg_group.add_argument("--tensor-parallel-size", type=int, default=1)
     arg_group.add_argument("--max-model-len", type=int, default=8192)
@@ -382,14 +386,15 @@ def create_parser() -> argparse.ArgumentParser:
     arg_group.add_argument("--async-scheduling", action="store_true")
     arg_group.add_argument("--seed", type=int, default=0)
     arg_group.add_argument("--extra-engine-args",
-                   default="{}",
-                   help="JSON dict merged into the LLM(...) kwargs.")
+                           default="{}",
+                           help="JSON dict merged into the LLM(...) kwargs.")
     arg_group.add_argument("--skip-baseline", action="store_true")
 
     dataset_group = parser.add_argument_group("Prompts")
-    dataset_group.add_argument("--prompts-jsonl",
-                   help="JSONL with 'messages' or a prompt field per line. "
-                   "Overrides --dataset.")
+    dataset_group.add_argument(
+        "--prompts-jsonl",
+        help="JSONL with 'messages' or a prompt field per line. "
+        "Overrides --dataset.")
     dataset_group.add_argument("--dataset", default="openai/gsm8k")
     dataset_group.add_argument("--dataset-subset", default="main")
     dataset_group.add_argument("--dataset-split", default="test")
@@ -398,7 +403,10 @@ def create_parser() -> argparse.ArgumentParser:
     dataset_group.add_argument("--num-warmup-prompts", type=int, default=4)
 
     sample_group = parser.add_argument_group("Sampling (RL rollout defaults)")
-    sample_group.add_argument("--n", type=int, default=8, help="Samples per prompt.")
+    sample_group.add_argument("--n",
+                              type=int,
+                              default=8,
+                              help="Samples per prompt.")
     sample_group.add_argument("--temperature", type=float, default=1.0)
     sample_group.add_argument("--top-p", type=float, default=1.0)
     sample_group.add_argument("--max-tokens", type=int, default=4096)
@@ -421,6 +429,9 @@ def validate_args(args: argparse.Namespace) -> None:
     extra = json.loads(args.extra_engine_args)
     if not isinstance(extra, dict):
         raise ValueError("--extra-engine-args must be a JSON object")
+    if extra.get("speculative_config") is not None and not isinstance(
+            extra["speculative_config"], dict):
+        raise ValueError("speculative_config must be a JSON object")
 
 
 def main(argv: Optional[list[str]] = None) -> int:

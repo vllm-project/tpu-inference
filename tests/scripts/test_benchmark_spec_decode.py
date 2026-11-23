@@ -232,6 +232,70 @@ def test_spec_engine_kwargs():
     assert kwargs["enforce_eager"] is True
 
 
+_EXTRA_WITH_SPEC_CONFIG = json.dumps({
+    "enforce_eager": True,
+    "speculative_config": {
+        "prompt_lookup_max": 5,
+        "method": "ignored",
+        "num_speculative_tokens": 99,
+    },
+})
+
+
+def test_baseline_ignores_extra_speculative_config():
+    args = _parse("--extra-engine-args", _EXTRA_WITH_SPEC_CONFIG)
+
+    kwargs = bench.build_engine_kwargs(args,
+                                       max_num_seqs=8,
+                                       num_speculative_tokens=0)
+
+    # The baseline must stay non-speculative; other extra args still apply.
+    assert "speculative_config" not in kwargs
+    assert kwargs["enforce_eager"] is True
+
+
+def test_spec_run_merges_extra_speculative_config():
+    args = _parse("--method", "ngram", "--extra-engine-args",
+                  _EXTRA_WITH_SPEC_CONFIG)
+
+    kwargs = bench.build_engine_kwargs(args,
+                                       max_num_seqs=8,
+                                       num_speculative_tokens=3)
+
+    # Extra keys are kept; --method and the swept k take precedence.
+    assert kwargs["speculative_config"] == {
+        "prompt_lookup_max": 5,
+        "method": "ngram",
+        "num_speculative_tokens": 3,
+    }
+    assert kwargs["enforce_eager"] is True
+
+
+def test_draft_model_flag_overrides_extra_model():
+    args = _parse("--draft-model", "flag/draft", "--extra-engine-args",
+                  '{"speculative_config": {"model": "extra/draft"}}')
+
+    kwargs = bench.build_engine_kwargs(args,
+                                       max_num_seqs=8,
+                                       num_speculative_tokens=2)
+
+    assert kwargs["speculative_config"]["model"] == "flag/draft"
+
+
+def test_extra_speculative_config_survives_across_sweep_runs():
+    # A sweep reuses one args object for baseline and spec runs; building a
+    # baseline must not strip the speculative config from later runs.
+    args = _parse("--method", "ngram", "--extra-engine-args",
+                  _EXTRA_WITH_SPEC_CONFIG)
+
+    first = bench.build_engine_kwargs(args, 8, num_speculative_tokens=3)
+    bench.build_engine_kwargs(args, 8, num_speculative_tokens=0)
+    second = bench.build_engine_kwargs(args, 8, num_speculative_tokens=3)
+
+    assert first == second
+    assert second["speculative_config"]["prompt_lookup_max"] == 5
+
+
 @pytest.mark.parametrize("argv", [
     ["--num-speculative-tokens", "0"],
     ["--max-num-seqs", "0"],
@@ -239,6 +303,9 @@ def test_spec_engine_kwargs():
     ["--num-prompts", "2", "--num-warmup-prompts", "3"],
     ["--extra-engine-args", "[1, 2]"],
     ["--extra-engine-args", "{not json"],
+    ["--extra-engine-args", '{"speculative_config": [1]}'],
+    ["--extra-engine-args", '{"speculative_config": "ngram"}'],
+    ["--extra-engine-args", '{"speculative_config": false}'],
 ])
 def test_validate_args_rejects(argv):
     with pytest.raises(ValueError):
