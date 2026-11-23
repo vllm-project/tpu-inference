@@ -1550,6 +1550,8 @@ class TestKVCacheManager:
         assert layer_configs['layer.0'].spec == gdn_spec
 
     def test_initialize_kv_cache_mamba(self):
+        # Mamba prefix caching off (vLLM HEAD keys it on enable_prefix_caching).
+        set_mamba_prefix_caching(self.runner.cache_config, False)
         num_blocks = 100
         page_size_bytes = 16 * 1024
         layer_names = ['layer.0', 'layer.1']
@@ -1889,6 +1891,8 @@ class TestKVCacheManager:
         """Without prefix caching a request needs exactly one mamba slot, so
         the pool is `max_num_reqs + 1` (the +1 is the null block) and the
         attention pool takes every byte that is left."""
+        # Mamba prefix caching off (vLLM HEAD keys it on enable_prefix_caching).
+        set_mamba_prefix_caching(self.runner.cache_config, False)
         from tpu_inference.runner.kv_cache_manager import KVCacheManager
         manager = KVCacheManager(self.runner)
         manager.use_mla = False  # divisor is computed from ATTN_DATA.
@@ -1953,6 +1957,8 @@ class TestKVCacheManager:
         size, full stop. Mamba is still sized compactly around it — its slots
         are per-request, so handing it the pinned attention count instead
         would burn HBM on slots no request can reach."""
+        # Mamba prefix caching off (vLLM HEAD keys it on enable_prefix_caching).
+        set_mamba_prefix_caching(self.runner.cache_config, False)
         from tpu_inference.runner.kv_cache_manager import KVCacheManager
         manager = KVCacheManager(self.runner)
         manager.use_mla = False
@@ -2242,6 +2248,8 @@ class TestKVCacheManager:
             mock_update.assert_not_called()
 
     def test_hybrid_mamba_num_blocks(self):
+        # Mamba prefix caching off (vLLM HEAD keys it on enable_prefix_caching).
+        set_mamba_prefix_caching(self.runner.cache_config, False)
         num_blocks = 100
         # The duplicate-path num_blocks calc now uses the TPU-actual
         # attention per-block size (`get_attention_page_size_bytes`) on
