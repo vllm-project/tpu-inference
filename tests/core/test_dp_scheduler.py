@@ -34,6 +34,7 @@ from vllm.v1.outputs import LogprobsLists, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
+from tpu_inference.core.mamba_prefix_caching import set_mamba_prefix_caching
 from tpu_inference.core.sched import dp_scheduler as dp_scheduler_module
 from tpu_inference.core.sched.dp_scheduler import (
     DPScheduler, DPSchedulerOutput, SchedulerCommand, SchedulerWorkerError,
@@ -738,7 +739,7 @@ class TestDPScheduler:
 
         vllm_config = MagicMock()
         vllm_config.additional_config = {}
-        vllm_config.cache_config.mamba_cache_mode = "none"
+        set_mamba_prefix_caching(vllm_config.cache_config, False)
         input_conn = MagicMock()
         batch = (SchedulerCommand.ADD_REQUESTS, ["a", "b", "c"])
         input_conn.recv_bytes.side_effect = [

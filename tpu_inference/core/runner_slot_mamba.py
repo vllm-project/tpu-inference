@@ -40,6 +40,8 @@ from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import KVCacheLayerConfig, MambaSpec
 
 from tpu_inference import envs
+from tpu_inference.core.mamba_prefix_caching import \
+    mamba_prefix_caching_enabled
 from tpu_inference.logger import init_logger
 
 if TYPE_CHECKING:
@@ -80,9 +82,8 @@ def _ineligible_reason(layer_config: KVCacheLayerConfig,
         return f"its spec is {type(spec).__name__}, not MambaSpec"
     if spec.mamba_type != MambaAttentionBackendEnum.GDN_ATTN:
         return f"it applies to GDN layers only, not {spec.mamba_type.name}"
-    mode = vllm_config.cache_config.mamba_cache_mode
-    if mode != "none":
-        return f"mamba cache mode is {mode!r}, not 'none' (prefix caching)"
+    if mamba_prefix_caching_enabled(vllm_config.cache_config):
+        return "mamba prefix caching is on (mamba cache mode 'align')"
     if vllm_config.speculative_config is not None:
         return "speculative decoding is on"
     if vllm_config.kv_transfer_config is not None:

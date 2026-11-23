@@ -17,6 +17,8 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.request import Request, RequestStatus
 
+from tpu_inference.core.mamba_prefix_caching import \
+    mamba_prefix_caching_enabled
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
@@ -780,8 +782,8 @@ def maybe_install_hybrid_coordinator_hooks(vllm_config: Any) -> None:
     from the executors' `_init_executor`, which runs in the engine-core
     process; the platform config hook does not."""
     cache_config = vllm_config.cache_config
-    if (cache_config.enable_prefix_caching
-            and getattr(cache_config, "mamba_cache_mode", "none") == "align"):
+    if (cache_config.enable_prefix_caching and mamba_prefix_caching_enabled(
+            cache_config, vllm_config.model_config)):
         install_hybrid_coordinator_hooks(vllm_config)
 
 

@@ -23,6 +23,8 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import \
     QwenGatedDeltaNetAttention
 
+from tpu_inference.core.mamba_prefix_caching import \
+    mamba_prefix_caching_enabled
 from tpu_inference.layers.common.attention_backend import (
     attention_backend_name, create_linear_attention_backend)
 from tpu_inference.layers.common.gdn_attention import run_jax_gdn_attention
@@ -126,7 +128,7 @@ def gdn_attention_core_tpu(
     num_spec_tokens = (int(raw_spec) if isinstance(raw_spec, int)
                        and not isinstance(raw_spec, bool) else 0)
     read_offsets_sliced = None
-    if cache_config.mamba_cache_mode == "align":
+    if mamba_prefix_caching_enabled(cache_config):
         # Mamba prefix caching ("align" mode): derive read/write state slots
         # from the mamba block table directly on TPU.
         block_tables = block_tables.reshape(seq_lens.shape[0], -1)
