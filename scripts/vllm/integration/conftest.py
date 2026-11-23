@@ -12,6 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pytest
+
+
+@pytest.fixture(scope="session", autouse=True)
+def release_dynamo_tracked_fakes():
+    """No-op override of vLLM's `tests/conftest.py` fixture of the same name.
+
+    vllm-project/vllm#68790 added it as a session-wide autouse fixture that
+    patches `torch._dynamo.convert_frame.clear_compile_context_weakrefs`, which
+    the torch in the TPU images does not have, so every test here would error
+    at setup. The leak it works around only matters for suites that compile
+    once per test.
+    """
+    yield
+
 
 def pytest_addoption(parser):
     """Adds custom command-line options to pytest."""
