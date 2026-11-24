@@ -248,8 +248,8 @@ class TestSampling:
     def test_distributed_topk_sample_keeps_batch_sharded_across_dp(self):
         devices = jax.devices()
         num_devices = len(devices)
-        if num_devices < 2 or num_devices % 2 != 0:
-            pytest.skip("Requires an even multi-device mesh for DP > 1")
+        if num_devices < 4 or num_devices % 2 != 0:
+            pytest.skip("Requires >= 4 devices (even) for DP > 1 with TP = 2")
 
         dp_size = num_devices // 2
         tp_size = 2
