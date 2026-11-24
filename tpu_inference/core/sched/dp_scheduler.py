@@ -558,6 +558,7 @@ class DPScheduler(SchedulerInterface):
         self._create_per_rank_configs(kv_cache_config)
         self._schedule_step_count = 0
         self._prev_schedule_start = 0.0
+        self._pause_state: PauseState = PauseState.UNPAUSED
 
         # Hold incoming requests until `dp_size` of them accumulate,
         # then dispatch all together, or when elapsed time since the
@@ -1658,13 +1659,19 @@ class DPScheduler(SchedulerInterface):
         """Get total number of unfinished requests across all DP ranks.
 
         Also including any pending requests that haven't been dispatched
-        to a per-rank scheduler yet.
+        to a per-rank scheduler yet. Returns 0 when PAUSED_ALL and excludes
+        undispatched pending requests when PAUSED_NEW to match vLLM's
+        Scheduler.get_num_unfinished_requests().
         """
+        pause_state = getattr(self, "_pause_state", PauseState.UNPAUSED)
+        if pause_state == PauseState.PAUSED_ALL:
+            return 0
         for rank in range(self.dp_size):
             self._send_command(rank,
                                SchedulerCommand.GET_NUM_UNFINISHED_REQUESTS)
 
-        total = len(self._pending_new_requests)
+        total = (0 if pause_state == PauseState.PAUSED_NEW else len(
+            self._pending_new_requests))
         for rank in range(self.dp_size):
             count = self._get_result(
                 rank, SchedulerCommand.GET_NUM_UNFINISHED_REQUESTS)
@@ -1738,6 +1745,7 @@ class DPScheduler(SchedulerInterface):
 
         for rank in range(self.dp_size):
             self._get_result(rank, SchedulerCommand.SET_PAUSE_STATE)
+        self._pause_state = pause_state
 
     def make_stats(self,
                    spec_decoding_stats=None,

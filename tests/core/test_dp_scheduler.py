@@ -1150,6 +1150,45 @@ class TestDPScheduler:
         scheduler._send_command.assert_any_call(
             1, SchedulerCommand.SET_PAUSE_STATE, PauseState.PAUSED_NEW)
 
+    def test_get_num_unfinished_requests_respects_pause_state(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
+        """PAUSED_ALL returns 0; PAUSED_NEW excludes undispatched pending reqs."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+        scheduler._pending_new_requests = [
+            SimpleNamespace(request_id="p0"),
+            SimpleNamespace(request_id="p1"),
+        ]
+        scheduler._send_command = MagicMock()
+        scheduler._get_result = MagicMock()
+
+        # UNPAUSED: queries all ranks and includes pending requests.
+        scheduler._get_result.side_effect = [3, 4]
+        assert scheduler.get_num_unfinished_requests() == 9
+
+        # PAUSED_ALL: returns 0 without querying workers or counting pending.
+        scheduler._get_result.side_effect = [None, None]
+        scheduler.set_pause_state(PauseState.PAUSED_ALL)
+        scheduler._send_command.reset_mock()
+        assert scheduler.get_num_unfinished_requests() == 0
+        scheduler._send_command.assert_not_called()
+
+        # PAUSED_NEW: queries ranks for draining reqs but excludes pending.
+        scheduler._get_result.side_effect = [None, None]
+        scheduler.set_pause_state(PauseState.PAUSED_NEW)
+        scheduler._send_command.reset_mock()
+        scheduler._get_result.side_effect = [2, 1]
+        assert scheduler.get_num_unfinished_requests() == 3
+
+        # UNPAUSED: restores full count including pending requests.
+        scheduler._get_result.side_effect = [None, None]
+        scheduler.set_pause_state(PauseState.UNPAUSED)
+        scheduler._send_command.reset_mock()
+        scheduler._get_result.side_effect = [2, 1]
+        assert scheduler.get_num_unfinished_requests() == 5
+
     def test_make_stats_aggregates_from_workers(
             self, mock_vllm_config, mock_kv_cache_config,
             mock_structured_output_manager):

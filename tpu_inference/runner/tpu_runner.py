@@ -1583,20 +1583,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             if not sampled_ids:
                 continue
 
-            # If request not active in the *current* batch (e.g. finished or evicted), skip it.
             req_id = pre_req_ids[pre_req_idx]
-            if req_id not in self.input_batch.req_id_to_index:
-                continue
-
-            # A request preempted and re-sent as a new request in this step
-            # (vllm-project/vllm#63373) is back in the batch, but update_states
-            # replaced its state, which is being re-prefilled from
-            # prefill_token_ids. The previous step's sampled tokens belong to
-            # the dropped state, so don't write them into the new one.
+            # Skip finished, preempted, or re-sent requests whose previous
+            # CachedRequestState was dropped or replaced by update_states
+            # (vllm-project/vllm#63373).
             if self.requests.get(req_id) is not req_state:
                 continue
-
-            req_idx = self.input_batch.req_id_to_index[req_id]
 
             # Updated on previous execute
             pre_num_placeholder_tokens = 1
@@ -1604,6 +1596,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             pre_num_placeholder_tokens += len(
                 pre_scheduler_output.scheduled_spec_decode_tokens.get(
                     req_id, []))
+
+            if req_id not in self.input_batch.req_id_to_index:
+                # Reconcile live requests temporarily evicted from the
+                # persistent batch (e.g. unscheduled or paused) so re-adding
+                # them never exposes unresolved placeholder 0 tokens.
+                num_pop = min(pre_num_placeholder_tokens,
+                              len(req_state.output_token_ids))
+                for _ in range(num_pop):
+                    req_state.output_token_ids.pop()
+                req_state.output_token_ids.extend(sampled_ids)
+                continue
+
+            req_idx = self.input_batch.req_id_to_index[req_id]
 
             end_idx = self.input_batch.num_tokens_no_spec[req_idx]
             num_sampled_tokens = min(len(sampled_ids),
@@ -1623,9 +1628,77 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.input_batch.num_tokens[
                 req_idx] = start_idx + num_sampled_tokens
             # Replace previous placeholder
-            for j in range(pre_num_placeholder_tokens):
+            num_pop = min(pre_num_placeholder_tokens,
+                          len(req_state.output_token_ids))
+            for _ in range(num_pop):
                 req_state.output_token_ids.pop()
             req_state.output_token_ids.extend(sampled_ids)
+
+    def _should_reconcile_prev_results_before_update(
+        self,
+        scheduler_output: "VllmSchedulerOutput",
+    ) -> bool:
+        """Returns True when step T-1 async results must reconcile before update_states().
+
+        In steady-state decode every kept request that appended a placeholder
+        stays scheduled in the persistent batch with its full output length, so
+        reconciliation stays deferred to sample_tokens() to preserve TPU/host
+        overlap. Early reconciliation runs only when update_states() would
+        evict a live unscheduled request from input_batch (0-token/paused steps
+        or partial batch eviction) or trim output_token_ids below its current
+        length (drop_stale_output rollback).
+        """
+        if not scheduler_output.total_num_scheduled_tokens:
+            return True
+
+        pre = self._pre_async_results
+        assert pre is not None
+        pre_req_state_by_id = {
+            pre.req_ids[idx]: req_state
+            for idx, req_state, _ in pre.request_seq_lens
+        }
+        pre_placeholder_ids = set(pre.placeholder_req_id_to_index.keys())
+        if not pre_placeholder_ids:
+            discard_set = set(pre.discard_sampled_tokens_req_indices)
+            pre_placeholder_ids = {
+                pre.req_ids[idx]
+                for idx, _, _ in pre.request_seq_lens if idx not in discard_set
+            }
+        pre_alive_ids = {
+            rid
+            for rid in pre_placeholder_ids
+            if self.requests.get(rid) is pre_req_state_by_id.get(rid)
+        }
+        if not pre_alive_ids:
+            return False
+
+        finished_req_ids = set(scheduler_output.finished_req_ids)
+        preempted_req_ids = set(
+            getattr(scheduler_output, "preempted_req_ids", ()) or ())
+        new_req_ids = {
+            req.req_id
+            for req in scheduler_output.scheduled_new_reqs
+        }
+        # Requests being finished, preempted, or re-sent as new have their old
+        # CachedRequestState dropped/replaced by update_states() and do not
+        # need early reconciliation.
+        kept_prev_ids = (pre_alive_ids - finished_req_ids - preempted_req_ids -
+                         new_req_ids)
+        if not kept_prev_ids:
+            return False
+
+        sched_req_ids = set(scheduler_output.num_scheduled_tokens.keys())
+        if kept_prev_ids - sched_req_ids:
+            return True
+
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        if cached_reqs is not None:
+            for i, rid in enumerate(cached_reqs.req_ids):
+                if (rid in kept_prev_ids and cached_reqs.num_output_tokens[i]
+                        < len(self.requests[rid].output_token_ids)):
+                    return True
+
+        return False
 
     def _update_placeholder(
             self,
@@ -1751,22 +1824,26 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # 2. scheduled_cached_reqs carries the true post-burst token counts into
         #    update_states() and downstream routed_experts slot reconstruction.
         if (self.scheduler_config.async_scheduling
-                and self._pre_async_results is not None and getattr(
-                    self._pre_async_results, "is_continue_decode", False)):
-            pre_req_ids = set(self._pre_async_results.req_ids)
-            self._modify_prev_results()
-            self._pre_async_results = None
-            cached_reqs = getattr(scheduler_output, "scheduled_cached_reqs",
-                                  None)
-            if cached_reqs is not None:
-                for i, req_id in enumerate(cached_reqs.req_ids):
-                    if req_id in pre_req_ids:
-                        req_state = self.requests.get(req_id)
-                        if req_state is not None:
-                            cached_reqs.num_computed_tokens[
-                                i] = req_state.num_computed_tokens
-                            cached_reqs.num_output_tokens[i] = len(
-                                req_state.output_token_ids)
+                and self._pre_async_results is not None):
+            if getattr(self._pre_async_results, "is_continue_decode", False):
+                pre_req_ids = set(self._pre_async_results.req_ids)
+                self._modify_prev_results()
+                self._pre_async_results = None
+                cached_reqs = getattr(scheduler_output,
+                                      "scheduled_cached_reqs", None)
+                if cached_reqs is not None:
+                    for i, req_id in enumerate(cached_reqs.req_ids):
+                        if req_id in pre_req_ids:
+                            req_state = self.requests.get(req_id)
+                            if req_state is not None:
+                                cached_reqs.num_computed_tokens[
+                                    i] = req_state.num_computed_tokens
+                                cached_reqs.num_output_tokens[i] = len(
+                                    req_state.output_token_ids)
+            elif self._should_reconcile_prev_results_before_update(
+                    scheduler_output):
+                self._modify_prev_results()
+                self._pre_async_results = None
 
         self.persistent_batch_manager.update_states(
             scheduler_output, self.get_mrope_input_positions_fn)
