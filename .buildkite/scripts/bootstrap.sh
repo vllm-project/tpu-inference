@@ -30,10 +30,16 @@ determine_job_priority() {
   local workload_priority=""
   echo "--- Determining job priority" >&2
   if [[ "${NIGHTLY:-0}" == "1" ]]; then
-    # Nightly build (Lowest priority). Unclassed on kube, level with the
-    # vllm-torchtpu nightlies it shares the TPU queues with, which record no
-    # class either.
+    # Nightly build (lowest Buildkite priority). On kube, the nightly that owns
+    # main's results (KUBE_OWNS_NIGHTLY=1) uses the fleet's `nightly` class, as
+    # the vllm-torchtpu nightly does: it ties with pre-merge, so Kueue admits it
+    # in order of age rather than behind every pull request until the
+    # launcher's queue limit fails it. A shadow of the bare-metal nightly, and
+    # a nightly off main, are unclassed. Bare metal ignores the class.
     priority="$PRIORITY_NIGHTLY"
+    if [[ "${BUILDKITE_BRANCH:-}" == "main" && "${KUBE_OWNS_NIGHTLY:-0}" == "1" ]]; then
+      workload_priority="nightly"
+    fi
     echo "Build type: Nightly - Priority: $priority" >&2
   elif [[ "$BUILDKITE_PIPELINE_SLUG" == "tpu-vllm-integration" ]]; then
     # Integration pipeline
