@@ -332,7 +332,7 @@ steps:
         <<: *tpu_step
         commands:
           - |
-            .buildkite/kubernetes/run.sh bash -c 'MOE_HIERARCHICAL_DISPATCH_REQUIRE_DUAL_CORE=1 python3 -m pytest -s -v -rs /workspace/tpu_inference/tests/layers/common/test_moe_hierarchical_dispatch.py'
+            .buildkite/kubernetes/run.sh bash -c 'MOE_HIERARCHICAL_DISPATCH_REQUIRE_DUAL_CORE=1 python3 -m pytest -s -v -rs /workspace/tpu_inference/tests/layers/common/test_moe_hierarchical_dispatch.py /workspace/tpu_inference/tests/layers/common/test_moe_quantize_lhs.py'
 
       - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E MLPerf tests for JAX + vLLM models on multiple chips"
         key: "${TPU_VERSION:-tpu6e}_test_11"
