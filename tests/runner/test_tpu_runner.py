@@ -1835,6 +1835,7 @@ def _modify_prev_results_runner(req_state_in_prev_step, current_req_state):
         spec_decode_metadata=None,
         scheduler_output=SimpleNamespace(scheduled_spec_decode_tokens={}),
         is_continue_decode=False,
+        dropped_req_ids=set(),
     )
     return SimpleNamespace(_pre_async_results=pre,
                            input_batch=input_batch,
@@ -1870,3 +1871,153 @@ def test_modify_prev_results_skips_request_resent_after_preemption():
     assert new_state.output_token_ids == [7, 8]
     assert runner.input_batch.token_ids_cpu[0].tolist() == [0] * 8
     assert runner.input_batch.num_tokens_no_spec[0] == 4
+
+
+def test_modify_prev_results_fixes_running_request_removed_from_batch():
+    """A running request that is not scheduled in the current step (e.g. a
+    paused or 0-token step) is removed from the persistent batch by
+    update_states before the previous step's results are written back. Its
+    placeholder must still be replaced, or re-adding it to the batch later
+    feeds placeholder token 0 to the model."""
+    req_state = SimpleNamespace(output_token_ids=[7, 0])  # 0 = placeholder
+    runner = _modify_prev_results_runner(req_state, req_state)
+    runner.input_batch.req_id_to_index = {}
+    with patch.object(runner_utils,
+                      "host_extract_sampled_tokens",
+                      return_value=[[42]]):
+        TPUModelRunner._modify_prev_results(runner)
+    assert req_state.output_token_ids == [7, 42]
+    assert runner.input_batch.token_ids_cpu[0].tolist() == [0] * 8
+
+
+def test_modify_prev_results_skips_finished_request():
+    req_state = SimpleNamespace(output_token_ids=[7, 0])
+    runner = _modify_prev_results_runner(req_state, req_state)
+    runner.input_batch.req_id_to_index = {}
+    runner.requests = {}
+    with patch.object(runner_utils,
+                      "host_extract_sampled_tokens",
+                      return_value=[[42]]):
+        TPUModelRunner._modify_prev_results(runner)
+    assert req_state.output_token_ids == [7, 0]
+
+
+def test_modify_prev_results_discards_rolled_back_output():
+    """update_states already trimmed the placeholder of a rolled-back request
+    (drop_stale_output); the late write-back must not pop a real token."""
+    req_state = SimpleNamespace(output_token_ids=[7])  # trimmed [7, 0]
+    runner = _modify_prev_results_runner(req_state, req_state)
+    runner.input_batch.token_ids_cpu[0, :3] = [1, 2, 7]
+    runner.input_batch.num_tokens_no_spec[0] = 3
+    runner.input_batch.num_tokens[0] = 3
+    runner._pre_async_results.dropped_req_ids.add("req")
+    with patch.object(runner_utils,
+                      "host_extract_sampled_tokens",
+                      return_value=[[42]]):
+        TPUModelRunner._modify_prev_results(runner)
+    assert req_state.output_token_ids == [7]
+    assert runner.input_batch.token_ids_cpu[0, :4].tolist() == [1, 2, 7, 0]
+    assert runner.input_batch.num_tokens_no_spec[0] == 3
+    assert runner.input_batch.num_tokens[0] == 3
+
+
+def _drop_rolled_back_runner(req_state_in_prev_step,
+                             current_req_state,
+                             spec_tokens=None,
+                             discard_indices=()):
+    """A minimal runner for TPUModelRunner._drop_rolled_back_async_results:
+    request "req" appended placeholders in the previous async step."""
+    pre = SimpleNamespace(
+        req_ids=["req"],
+        request_seq_lens=[(0, req_state_in_prev_step, 3)],
+        discard_sampled_tokens_req_indices=list(discard_indices),
+        placeholder_req_id_to_index={"req": 0},
+        scheduler_output=SimpleNamespace(
+            scheduled_spec_decode_tokens={"req": spec_tokens}
+            if spec_tokens else {}),
+        dropped_req_ids=set(),
+    )
+    return SimpleNamespace(_pre_async_results=pre,
+                           requests={"req": current_req_state})
+
+
+def _cached_reqs_output(num_output_tokens):
+    return SimpleNamespace(scheduled_cached_reqs=SimpleNamespace(
+        req_ids=["req"], num_output_tokens=[num_output_tokens]))
+
+
+def test_drop_rolled_back_async_results_steady_state_is_noop():
+    """In steady-state decode the scheduler's num_output_tokens counts the
+    in-flight placeholder, so nothing is dropped."""
+    req_state = SimpleNamespace(output_token_ids=[7, 8, 0])
+    runner = _drop_rolled_back_runner(req_state, req_state)
+    TPUModelRunner._drop_rolled_back_async_results(runner,
+                                                   _cached_reqs_output(3))
+    assert runner._pre_async_results.dropped_req_ids == set()
+    assert runner._pre_async_results.placeholder_req_id_to_index == {"req": 0}
+
+
+def test_drop_rolled_back_async_results_marks_rolled_back_request():
+    """A rollback (num_output_tokens below the runner's output length) drops
+    the in-flight output: no write-back, and the next input token must come
+    from the CPU token ids rather than the previous step's TPU output."""
+    req_state = SimpleNamespace(output_token_ids=[7, 8, 0])
+    runner = _drop_rolled_back_runner(req_state, req_state)
+    TPUModelRunner._drop_rolled_back_async_results(runner,
+                                                   _cached_reqs_output(2))
+    assert runner._pre_async_results.dropped_req_ids == {"req"}
+    assert runner._pre_async_results.placeholder_req_id_to_index == {}
+
+
+def test_drop_rolled_back_async_results_with_spec_tokens():
+    req_state = SimpleNamespace(output_token_ids=[7, 0, 0, 0])
+    runner = _drop_rolled_back_runner(req_state,
+                                      req_state,
+                                      spec_tokens=[11, 12])
+    TPUModelRunner._drop_rolled_back_async_results(runner,
+                                                   _cached_reqs_output(1))
+    assert runner._pre_async_results.dropped_req_ids == {"req"}
+
+
+def test_drop_rolled_back_async_results_rejects_partial_rollback():
+    req_state = SimpleNamespace(output_token_ids=[7, 0, 0, 0])
+    runner = _drop_rolled_back_runner(req_state,
+                                      req_state,
+                                      spec_tokens=[11, 12])
+    with pytest.raises(AssertionError):
+        TPUModelRunner._drop_rolled_back_async_results(runner,
+                                                       _cached_reqs_output(2))
+
+
+@pytest.mark.parametrize("case",
+                         ["replaced_state", "discarded", "unscheduled"])
+def test_drop_rolled_back_async_results_skips(case):
+    old_state = SimpleNamespace(output_token_ids=[7, 8, 0])
+    current_state = (SimpleNamespace(
+        output_token_ids=[7]) if case == "replaced_state" else old_state)
+    runner = _drop_rolled_back_runner(
+        old_state,
+        current_state,
+        discard_indices=[0] if case == "discarded" else ())
+    scheduler_output = _cached_reqs_output(0)
+    if case == "unscheduled":
+        scheduler_output.scheduled_cached_reqs = SimpleNamespace(
+            req_ids=[], num_output_tokens=[])
+    TPUModelRunner._drop_rolled_back_async_results(runner, scheduler_output)
+    assert runner._pre_async_results.dropped_req_ids == set()
+
+
+def test_async_rollback_keeps_last_real_token():
+    """End to end over the three host-side steps of a rollback: drop marking,
+    update_states trimming, and the late write-back."""
+    req_state = SimpleNamespace(output_token_ids=[7, 8, 0])
+    runner = _modify_prev_results_runner(req_state, req_state)
+    runner._pre_async_results.placeholder_req_id_to_index = {"req": 0}
+    TPUModelRunner._drop_rolled_back_async_results(runner,
+                                                   _cached_reqs_output(2))
+    del req_state.output_token_ids[2:]  # What update_states does.
+    with patch.object(runner_utils,
+                      "host_extract_sampled_tokens",
+                      return_value=[[42]]):
+        TPUModelRunner._modify_prev_results(runner)
+    assert req_state.output_token_ids == [7, 8]
