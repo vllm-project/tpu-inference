@@ -38,6 +38,7 @@ from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
 from vllm.v1.request import Request
 
 from tpu_inference import utils as common_utils
+from tpu_inference.core.mamba_prefix_caching import set_mamba_prefix_caching
 from tpu_inference.core.runner_slot_mamba import RunnerSlotMambaManager
 from tpu_inference.runner.input_batch import CachedRequestState
 from tpu_inference.runner.kv_cache import (_get_mamba_cache_allocator,
@@ -1241,7 +1242,6 @@ class TestKVCacheManager:
         self.runner.vllm_config.compilation_config.static_forward_context = {}
         mock_speculative_config = MagicMock()
         mock_speculative_config.method = "eagle3"
-        mock_speculative_config.use_gemma4_mtp = MagicMock(return_value=False)
         mock_draft_model_config = MagicMock()
         mock_hf_config = MagicMock()
         mock_hf_config.num_key_value_heads = 4
@@ -1272,7 +1272,6 @@ class TestKVCacheManager:
         self.runner.vllm_config.compilation_config.static_forward_context = {}
         mock_speculative_config = MagicMock()
         mock_speculative_config.method = "eagle3"
-        mock_speculative_config.use_gemma4_mtp = MagicMock(return_value=False)
         mock_draft_model_config = MagicMock()
         mock_hf_config = MagicMock()
         mock_hf_config.num_key_value_heads = 4
@@ -1317,9 +1316,9 @@ class TestKVCacheManager:
 
         mock_speculative_config = MagicMock()
         mock_speculative_config.method = "mtp"
-        mock_speculative_config.use_gemma4_mtp = MagicMock(return_value=True)
         mock_draft_model_config = MagicMock()
         mock_hf_config = MagicMock()
+        mock_hf_config.model_type = "gemma4_mtp"
         mock_draft_model_config.hf_config = mock_hf_config
         mock_speculative_config.draft_model_config = mock_draft_model_config
         self.runner.speculative_config = mock_speculative_config
@@ -1536,6 +1535,10 @@ class TestKVCacheManager:
         self.runner.vllm_config.compilation_config.static_forward_context = {
             'layer.0': mock_gdn_module
         }
+        # Runner slots need Mamba prefix caching off. Since
+        # vllm-project/vllm#63830 that is `enable_prefix_caching`, which
+        # `CacheConfig` turns on by default.
+        set_mamba_prefix_caching(self.runner.vllm_config.cache_config, False)
 
         with patch(
                 'tpu_inference.runner.kv_cache_manager.get_layers_from_vllm_config',
@@ -1547,6 +1550,8 @@ class TestKVCacheManager:
         assert layer_configs['layer.0'].spec == gdn_spec
 
     def test_initialize_kv_cache_mamba(self):
+        # Mamba prefix caching off (vLLM HEAD keys it on enable_prefix_caching).
+        set_mamba_prefix_caching(self.runner.cache_config, False)
         num_blocks = 100
         page_size_bytes = 16 * 1024
         layer_names = ['layer.0', 'layer.1']
@@ -1886,6 +1891,8 @@ class TestKVCacheManager:
         """Without prefix caching a request needs exactly one mamba slot, so
         the pool is `max_num_reqs + 1` (the +1 is the null block) and the
         attention pool takes every byte that is left."""
+        # Mamba prefix caching off (vLLM HEAD keys it on enable_prefix_caching).
+        set_mamba_prefix_caching(self.runner.cache_config, False)
         from tpu_inference.runner.kv_cache_manager import KVCacheManager
         manager = KVCacheManager(self.runner)
         manager.use_mla = False  # divisor is computed from ATTN_DATA.
@@ -1950,6 +1957,8 @@ class TestKVCacheManager:
         size, full stop. Mamba is still sized compactly around it — its slots
         are per-request, so handing it the pinned attention count instead
         would burn HBM on slots no request can reach."""
+        # Mamba prefix caching off (vLLM HEAD keys it on enable_prefix_caching).
+        set_mamba_prefix_caching(self.runner.cache_config, False)
         from tpu_inference.runner.kv_cache_manager import KVCacheManager
         manager = KVCacheManager(self.runner)
         manager.use_mla = False
@@ -1987,7 +1996,7 @@ class TestKVCacheManager:
 
         self.runner.cache_config.gpu_memory_utilization = 1.0
         self.runner.cache_config.num_gpu_blocks_override = None
-        self.runner.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(self.runner.cache_config, True)
         self.runner.model_config.max_model_len = 2048
         self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
         self.runner.max_num_reqs = max_num_reqs
@@ -2024,7 +2033,7 @@ class TestKVCacheManager:
 
         self.runner.cache_config.gpu_memory_utilization = 1.0
         self.runner.cache_config.num_gpu_blocks_override = None
-        self.runner.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(self.runner.cache_config, True)
         self.runner.model_config.max_model_len = 2048
         self.runner.vllm_config.additional_config[
             "custom_mamba_cache_multiplier"] = multiplier
@@ -2062,7 +2071,7 @@ class TestKVCacheManager:
 
         self.runner.cache_config.gpu_memory_utilization = 1.0
         self.runner.cache_config.num_gpu_blocks_override = None
-        self.runner.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(self.runner.cache_config, True)
         self.runner.model_config.max_model_len = max_model_len
         self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
         self.runner.max_num_reqs = max_num_reqs
@@ -2116,7 +2125,7 @@ class TestKVCacheManager:
 
         self.runner.cache_config.gpu_memory_utilization = 1.0
         self.runner.cache_config.num_gpu_blocks_override = None
-        self.runner.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(self.runner.cache_config, True)
         self.runner.model_config.max_model_len = 2048
         self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
         self.runner.max_num_reqs = max_num_reqs
@@ -2147,7 +2156,7 @@ class TestKVCacheManager:
 
         self.runner.cache_config.gpu_memory_utilization = 1.0
         self.runner.cache_config.num_gpu_blocks_override = None
-        self.runner.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(self.runner.cache_config, True)
         self.runner.model_config.max_model_len = 2048
         self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
         self.runner.max_num_reqs = max_num_reqs
@@ -2182,7 +2191,7 @@ class TestKVCacheManager:
 
         self.runner.cache_config.gpu_memory_utilization = 1.0
         self.runner.cache_config.num_gpu_blocks_override = pinned_attn
-        self.runner.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(self.runner.cache_config, True)
         self.runner.model_config.max_model_len = 2048
         self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
         self.runner.max_num_reqs = max_num_reqs
@@ -2216,7 +2225,7 @@ class TestKVCacheManager:
 
         self.runner.cache_config.gpu_memory_utilization = 1.0
         self.runner.cache_config.num_gpu_blocks_override = 100_000  # huge
-        self.runner.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(self.runner.cache_config, True)
         self.runner.model_config.max_model_len = 2048
         self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
         self.runner.max_num_reqs = max_num_reqs
@@ -2239,6 +2248,8 @@ class TestKVCacheManager:
             mock_update.assert_not_called()
 
     def test_hybrid_mamba_num_blocks(self):
+        # Mamba prefix caching off (vLLM HEAD keys it on enable_prefix_caching).
+        set_mamba_prefix_caching(self.runner.cache_config, False)
         num_blocks = 100
         # The duplicate-path num_blocks calc now uses the TPU-actual
         # attention per-block size (`get_attention_page_size_bytes`) on
@@ -2404,7 +2415,7 @@ class TestKVCacheManager:
             kv_cache_groups=kv_cache_groups,
         )
 
-        self.runner.vllm_config.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(self.runner.vllm_config.cache_config, True)
         self.runner.initialize_kv_cache(kv_cache_config)
 
         # 10 tensors × 4 duplicated layers = 40 caches, one per layer.

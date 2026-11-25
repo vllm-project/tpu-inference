@@ -28,6 +28,8 @@ from vllm.utils.math_utils import round_down
 
 import tpu_inference.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
+from tpu_inference.core.mamba_prefix_caching import \
+    mamba_prefix_caching_enabled
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, GroupedAttentionMetadata, MambaMetadata,
@@ -487,9 +489,8 @@ class CompilationManager:
         # populate for hybrid attn+mamba models without align mode — for pure-attention models
         # and mamba align mode we pass None at runtime (see `_prepare_inputs`), and the precompile
         # primer must match that shape so the cached HLO is reused.
-        if (self.runner.kv_cache_config.has_mamba_layers
-                and getattr(self.runner.cache_config, "mamba_cache_mode",
-                            "none") != "align"):
+        if (self.runner.kv_cache_config.has_mamba_layers and
+                not mamba_prefix_caching_enabled(self.runner.cache_config)):
             mamba_state_indices = device_array(self.runner.mesh,
                                                np.zeros(
                                                    self.runner.max_num_reqs,
@@ -2165,8 +2166,8 @@ class CompilationManager:
                                                 sharding=dp_sharding)
 
             if (self.runner.kv_cache_config.has_mamba_layers
-                    and getattr(self.runner.cache_config, "mamba_cache_mode",
-                                "none") != "align"):
+                    and not mamba_prefix_caching_enabled(
+                        self.runner.cache_config)):
                 mamba_state_indices = device_array(
                     self.runner.mesh,
                     np.zeros(self.runner.max_num_reqs, dtype=np.int32),

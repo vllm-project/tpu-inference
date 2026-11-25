@@ -21,6 +21,8 @@ import torch
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 
 from tpu_inference import envs
+from tpu_inference.core.mamba_prefix_caching import (
+    mamba_prefix_caching_enabled, set_mamba_prefix_caching)
 from tpu_inference.platforms.tpu_platform import TpuPlatform
 
 
@@ -331,7 +333,7 @@ class TestTpuPlatform:
         # Simulate vLLM's hybrid config-verify having derived the mamba cache
         # fields from the prefix-caching-enabled state (post-init assignment
         # keeps user_specified_mamba_block_size False).
-        vllm_config.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(vllm_config.cache_config, True)
         vllm_config.cache_config.mamba_block_size = 256
 
         # check_and_update_config replaces sharding_config with the manager's
@@ -352,7 +354,7 @@ class TestTpuPlatform:
             # Derived mamba fields must be reset to their prefix-caching-off
             # defaults or vLLM's "--mamba-block-size can only be set with
             # --enable-prefix-caching" validator rejects the config.
-            assert vllm_config.cache_config.mamba_cache_mode == "none"
+            assert not mamba_prefix_caching_enabled(vllm_config.cache_config)
             assert vllm_config.cache_config.mamba_block_size == 4096
 
     @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
@@ -396,7 +398,7 @@ class TestTpuPlatform:
         vllm_config.compilation_config.backend = ""
         vllm_config.model_config.is_hybrid = True
         vllm_config.cache_config.enable_prefix_caching = True
-        vllm_config.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(vllm_config.cache_config, True)
         vllm_config.cache_config.block_size = 16
         vllm_config.cache_config.prefix_match_unit = 8
         vllm_config.speculative_config = None
@@ -553,7 +555,8 @@ class TestTpuPlatform:
             self, vllm_config):
         vllm_config.cache_config.block_size = 16
         vllm_config.cache_config.mamba_block_size = 16
-        vllm_config.cache_config.mamba_cache_mode = "align"
+        vllm_config.model_config.is_hybrid = True
+        set_mamba_prefix_caching(vllm_config.cache_config, True)
         vllm_config.cache_config.prefix_match_unit = 8
 
         with pytest.raises(

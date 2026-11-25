@@ -47,6 +47,8 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 import tpu_inference.envs as envs
 from tpu_inference import utils as common_utils
+from tpu_inference.core.mamba_prefix_caching import \
+    mamba_prefix_caching_enabled
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_backend import (
     HostStepInputs, attention_backend_name, create_attention_backend)
@@ -95,6 +97,7 @@ from tpu_inference.spec_decode.jax.utils import (
     concat_last_sampled_tokens_and_draft_tokens, extend_logits_simple,
     extract_last_sampled_tokens, filter_speculative_logprobs,
     process_and_extend_logits)
+from tpu_inference.spec_decode.methods import uses_eagle
 from tpu_inference.spec_decode.ngram_proposer import NgramProposer
 from tpu_inference.utils import (device_array, make_optimized_mesh,
                                  time_function, to_jax_dtype, to_torch_dtype)
@@ -1077,7 +1080,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                         (self.max_num_reqs, ), dtype=np.int32)
             elif self.speculative_config.method == "dflash":
                 self.drafter = DFlashProposer(self.vllm_config, self)
-            elif self.speculative_config.use_eagle():
+            elif uses_eagle(self.speculative_config):
                 self.drafter = Eagle3Proposer(self.vllm_config, self)
             else:
                 raise NotImplementedError(
@@ -1935,8 +1938,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if len(remaining_slots) == 0:
             return 0
         min_remaining = int(np.min(remaining_slots))
-        if (self.kv_cache_config.has_mamba_layers and getattr(
-                self.cache_config, "mamba_cache_mode", "none") == "align"):
+        if (self.kv_cache_config.has_mamba_layers
+                and mamba_prefix_caching_enabled(self.cache_config)):
             # In mamba align mode (prefix caching), MambaManager does not
             # pre-allocate lookahead blocks and TPUMambaManager only caches
             # state checkpoints at block boundaries (seq_len % mamba_block_size == 0).
@@ -3232,8 +3235,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # signature on those models is unchanged).
         # In align mode (prefix caching), mamba state indices are derived on-device
         # from the block tables, so mamba_state_indices is None.
-        if (self.kv_cache_config.has_mamba_layers and getattr(
-                self.cache_config, "mamba_cache_mode", "none") != "align"):
+        if (self.kv_cache_config.has_mamba_layers
+                and not mamba_prefix_caching_enabled(self.cache_config)):
             # Reorder mamba_state_indices per DP rank (like block_tables)
             # and convert global slot ids to rank-local indices so they
             # index correctly into the per-rank shard of the mamba state.

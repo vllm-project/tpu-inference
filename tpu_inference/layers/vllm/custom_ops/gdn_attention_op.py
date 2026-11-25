@@ -23,6 +23,8 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import \
     QwenGatedDeltaNetAttention
 
+from tpu_inference.core.mamba_prefix_caching import \
+    mamba_prefix_caching_enabled
 from tpu_inference.layers.common.attention_backend import (
     attention_backend_name, create_linear_attention_backend)
 from tpu_inference.layers.common.gdn_attention import (resolve_gdn_state_slots,
@@ -124,7 +126,7 @@ def gdn_attention_core_tpu(
     spec_config = vllm_context.vllm_config.speculative_config
     num_spec_tokens = spec_config.num_speculative_tokens if spec_config else 0
     mamba_block_size = (cache_config.mamba_block_size
-                        if cache_config.mamba_cache_mode == "align" else 0)
+                        if mamba_prefix_caching_enabled(cache_config) else 0)
     slots = resolve_gdn_state_slots(
         attn_metadata,
         seq_lens=seq_lens_sliced,

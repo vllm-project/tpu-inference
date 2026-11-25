@@ -26,6 +26,7 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.utils import SpecDecodeMetadata
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
+from tpu_inference.spec_decode.methods import uses_eagle
 from tpu_inference.spec_decode.ngram_proposer import NgramProposer
 from tpu_inference.utils import device_array
 
@@ -83,8 +84,8 @@ class SpeculativeDecodingManager:
         hidden_states: Optional[jnp.ndarray] = None,
     ) -> None:
         if async_scheduling:
-            assert self.runner.speculative_config.use_eagle(
-            ), "async scheduling is only supported with eagle3 spec decoding"
+            assert uses_eagle(self.runner.speculative_config), (
+                "async scheduling is only supported with eagle3 spec decoding")
         if self.runner.speculative_config.method == "ngram":
             assert isinstance(self.runner.drafter, NgramProposer)
             # For n-gram based proposer, the drafter run on host
@@ -101,8 +102,7 @@ class SpeculativeDecodingManager:
                 self.runner.input_batch.num_tokens_no_spec,
                 self.runner.input_batch.token_ids_cpu)
             self._draft_token_ids = [tokens[:num_spec] for tokens in proposed]
-        elif self.runner.speculative_config.use_eagle(
-        ) or self.runner.speculative_config.method == "dflash":
+        elif uses_eagle(self.runner.speculative_config):
             assert input_ids is not None
             if self.runner.speculative_config.method == "dflash":
                 self._draft_token_ids = self.propose_dflash_draft_token_ids(

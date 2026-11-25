@@ -20,6 +20,7 @@ import pytest
 import torch
 from jax.sharding import Mesh
 
+from tpu_inference.core.mamba_prefix_caching import set_mamba_prefix_caching
 from tpu_inference.layers.vllm.custom_ops.gdn_attention_op import \
     VllmGatedDeltaNetAttention
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
@@ -279,7 +280,7 @@ class TestVllmGatedDeltaNetAttention:
         layer_module.conv1d.bias = None
         layer_module.A_log = torch.randn(n_v)
         layer_module.dt_bias = torch.randn(n_v)
-        layer_module.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(layer_module.cache_config, True)
         layer_module.cache_config.mamba_block_size = mamba_block_size
 
         # AttentionMetadata: 2 requests
@@ -322,7 +323,7 @@ class TestVllmGatedDeltaNetAttention:
         core_attn_out = torch.zeros(num_tokens, n_v, d_v)
 
         vllm_config = MagicMock()
-        vllm_config.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(vllm_config.cache_config, True)
         vllm_config.cache_config.block_size = mamba_block_size
         vllm_config.cache_config.mamba_block_size = mamba_block_size
         vllm_config.speculative_config = None
@@ -392,7 +393,7 @@ class TestVllmGatedDeltaNetAttention:
         layer_module.conv1d.bias = None
         layer_module.A_log = torch.randn(n_v)
         layer_module.dt_bias = torch.randn(n_v)
-        layer_module.cache_config.mamba_cache_mode = "none"
+        set_mamba_prefix_caching(layer_module.cache_config, False)
 
         # AttentionMetadata: compact slot pool indices
         mamba_state_indices = jax.numpy.array([3, 7], dtype=jax.numpy.int32)
@@ -432,7 +433,7 @@ class TestVllmGatedDeltaNetAttention:
         core_attn_out = torch.zeros(num_tokens, n_v, d_v)
 
         vllm_config = MagicMock()
-        vllm_config.cache_config.mamba_cache_mode = "none"
+        set_mamba_prefix_caching(vllm_config.cache_config, False)
         vllm_config.speculative_config = None
 
         with set_vllm_model_wrapper_context(
@@ -499,7 +500,7 @@ class TestVllmGatedDeltaNetAttention:
         layer_module.conv1d.bias = None
         layer_module.A_log = torch.randn(n_v)
         layer_module.dt_bias = torch.randn(n_v)
-        layer_module.cache_config.mamba_cache_mode = "none"
+        set_mamba_prefix_caching(layer_module.cache_config, False)
 
         mamba_state_indices = jax.numpy.array([4, 8], dtype=jax.numpy.int32)
         read_offsets = jax.numpy.array([2, 1], dtype=jax.numpy.int32)
@@ -538,7 +539,7 @@ class TestVllmGatedDeltaNetAttention:
         core_attn_out = torch.zeros(num_tokens, n_v, d_v)
 
         vllm_config = MagicMock()
-        vllm_config.cache_config.mamba_cache_mode = "none"
+        set_mamba_prefix_caching(vllm_config.cache_config, False)
         vllm_config.speculative_config.num_speculative_tokens = 3
 
         with set_vllm_model_wrapper_context(
@@ -641,7 +642,7 @@ class TestVllmGatedDeltaNetAttention:
         )
 
         vllm_config = MagicMock()
-        vllm_config.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(vllm_config.cache_config, True)
         vllm_config.cache_config.mamba_block_size = 16
         vllm_config.speculative_config.num_speculative_tokens = 3
 
@@ -746,7 +747,7 @@ class TestVllmGatedDeltaNetAttention:
         )
 
         vllm_config = MagicMock()
-        vllm_config.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(vllm_config.cache_config, True)
         vllm_config.cache_config.mamba_block_size = 16
         vllm_config.speculative_config.num_speculative_tokens = 3
 

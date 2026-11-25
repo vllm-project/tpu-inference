@@ -29,6 +29,8 @@ from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
 from vllm.v1.request import Request
 
 from tpu_inference.core import runner_slot_mamba
+from tpu_inference.core.mamba_prefix_caching import (mamba_manager_params,
+                                                     set_mamba_prefix_caching)
 from tpu_inference.core.runner_slot_mamba import (
     RunnerSlotMambaManager, maybe_runner_slot_mamba_layer_config)
 from tpu_inference.platforms.tpu_platform import TpuPlatform
@@ -61,14 +63,16 @@ def _gdn_layer_config(
                     block_size=MAX_MODEL_LEN,
                     page_size_padded=ATTN_PAGE_BYTES,
                     mamba_type=mamba_type)
-    return manager_cls.layer_config(spec, mamba_cache_mode=mamba_cache_mode)
+    return manager_cls.layer_config(
+        spec, **mamba_manager_params(manager_cls, mamba_cache_mode == "align"))
 
 
 def _vllm_config(mamba_cache_mode: str = "none",
                  speculative: bool = False,
                  kv_connector: bool = False) -> MagicMock:
     vllm_config = MagicMock()
-    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    set_mamba_prefix_caching(vllm_config.cache_config,
+                             mamba_cache_mode == "align")
     vllm_config.speculative_config = MagicMock() if speculative else None
     vllm_config.kv_transfer_config = MagicMock() if kv_connector else None
     return vllm_config

@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import inspect
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import (BlockHash,
                                          make_block_hash_with_group_id)
 from vllm.v1.core.single_type_kv_cache_manager import (FullAttentionManager,
@@ -17,6 +19,8 @@ from tpu_inference.core.hybrid_coordinator import (
     MambaBlockPool, MirrorMambaBlockPool, TPUDualBlockPool,
     TPUHybridKVCacheCoordinator, TPUKVCacheManager,
     install_hybrid_coordinator_hooks, set_mamba_num_blocks)
+from tpu_inference.core.mamba_prefix_caching import (mamba_manager_params,
+                                                     set_mamba_prefix_caching)
 
 
 def _make_mock_hybrid_kv_cache_config(
@@ -40,7 +44,8 @@ def _make_mock_hybrid_kv_cache_config(
             {"attn_0": FullAttentionManager.layer_config(attn_spec)}),
         KVCacheGroup.from_layers({
             "mamba_0":
-            MambaManager.layer_config(mamba_spec, mamba_cache_mode="align")
+            MambaManager.layer_config(
+                mamba_spec, **mamba_manager_params(MambaManager, True))
         }),
     ]
     cfg = KVCacheConfig(
@@ -62,10 +67,16 @@ def _make_mock_vllm_config(dp_size: int, max_num_seqs: int) -> MagicMock:
     return vllm_config
 
 
+# vllm-project/vllm#66234 removed the coordinators' `use_eagle` argument.
+_EAGLE_KWARGS = ({
+    "use_eagle": False
+} if "use_eagle" in inspect.signature(
+    HybridKVCacheCoordinator.__init__).parameters else {})
+
 _COORD_KWARGS = dict(
     max_model_len=1024,
     max_in_flight_tokens=128,
-    use_eagle=False,
+    **_EAGLE_KWARGS,
     enable_caching=True,
     enable_kv_cache_events=False,
     dcp_world_size=1,
@@ -314,7 +325,8 @@ class TestTPUHybridKVCacheCoordinator:
         groups += [
             KVCacheGroup.from_layers({
                 f"mamba_{i}":
-                MambaManager.layer_config(mamba_spec, mamba_cache_mode="align")
+                MambaManager.layer_config(
+                    mamba_spec, **mamba_manager_params(MambaManager, True))
             }) for i in range(num_mamba_groups)
         ]
         set_mamba_num_blocks(50)
@@ -327,7 +339,7 @@ class TestTPUHybridKVCacheCoordinator:
             kv_cache_config=cfg,
             max_model_len=1024,
             max_in_flight_tokens=128,
-            use_eagle=False,
+            **_EAGLE_KWARGS,
             enable_caching=True,
             enable_kv_cache_events=False,
             dcp_world_size=1,
@@ -387,7 +399,7 @@ class TestTPUHybridKVCacheCoordinator:
             kv_cache_config=cfg,
             max_model_len=1024,
             max_in_flight_tokens=128,
-            use_eagle=False,
+            **_EAGLE_KWARGS,
             enable_caching=True,
             enable_kv_cache_events=False,
             dcp_world_size=1,
@@ -413,7 +425,7 @@ class TestTPUHybridKVCacheCoordinator:
             kv_cache_config=cfg,
             max_model_len=1024,
             max_in_flight_tokens=128,
-            use_eagle=False,
+            **_EAGLE_KWARGS,
             enable_caching=True,
             enable_kv_cache_events=False,
             dcp_world_size=1,
@@ -484,7 +496,7 @@ class TestTPUHybridKVCacheCoordinator:
             kv_cache_config=cfg,
             max_model_len=1024,
             max_in_flight_tokens=128,
-            use_eagle=False,
+            **_EAGLE_KWARGS,
             enable_caching=True,
             enable_kv_cache_events=False,
             dcp_world_size=1,
@@ -557,7 +569,7 @@ class TestHybridCoordinatorHooks:
         coord_kwargs = dict(
             max_model_len=1024,
             max_in_flight_tokens=128,
-            use_eagle=False,
+            **_EAGLE_KWARGS,
             enable_caching=True,
             enable_kv_cache_events=False,
             dcp_world_size=1,
@@ -705,12 +717,12 @@ class TestHybridCoordinatorHooks:
 
         vllm_config = _make_mock_vllm_config(dp_size=1, max_num_seqs=8)
         vllm_config.cache_config.enable_prefix_caching = True
-        vllm_config.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(vllm_config.cache_config, True)
         with patch.object(hc_mod, "install_hybrid_coordinator_hooks") as inst:
             hc_mod.maybe_install_hybrid_coordinator_hooks(vllm_config)
             inst.assert_called_once_with(vllm_config)
 
-        vllm_config.cache_config.mamba_cache_mode = "none"
+        set_mamba_prefix_caching(vllm_config.cache_config, False)
         with patch.object(hc_mod, "install_hybrid_coordinator_hooks") as inst:
             hc_mod.maybe_install_hybrid_coordinator_hooks(vllm_config)
             inst.assert_not_called()
@@ -730,7 +742,7 @@ class TestHybridCoordinatorHooks:
         coord_kwargs = dict(
             max_model_len=1024,
             max_in_flight_tokens=128,
-            use_eagle=False,
+            **_EAGLE_KWARGS,
             enable_caching=True,
             enable_kv_cache_events=False,
             dcp_world_size=1,
