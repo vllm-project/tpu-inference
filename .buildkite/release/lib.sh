@@ -168,9 +168,10 @@ RELEASE_IMAGE="${RELEASE_GAR}/vllm-jax"
 RELEASE_TAG_PREFIX="release-"
 RELEASE_DOCKERHUB_REPO="${RELEASE_DOCKERHUB_REPO:-vllm/vllm-jax}"
 # Transitional legacy Docker Hub repo dual-published alongside vllm/vllm-jax;
-# set empty once legacy pulls are retired.
+# set empty once legacy pulls are retired. `-`, not `:-`, so an empty value
+# turns it off here as it does in plan_publish.py.
 # shellcheck disable=SC2034 # Read by preflight.sh, publish_images.sh, verify_published.sh.
-RELEASE_LEGACY_DOCKERHUB_REPO="${RELEASE_LEGACY_DOCKERHUB_REPO:-vllm/vllm-tpu}"
+RELEASE_LEGACY_DOCKERHUB_REPO="${RELEASE_LEGACY_DOCKERHUB_REPO-vllm/vllm-tpu}"
 RELEASE_DOCKERHUB_USERNAME="${RELEASE_DOCKERHUB_USERNAME:-tpuinference}"
 
 # The digest part of <repo>@sha256:<hex>.
