@@ -1889,6 +1889,22 @@ def test_modify_prev_results_fixes_running_request_removed_from_batch():
     assert runner.input_batch.token_ids_cpu[0].tolist() == [0] * 8
 
 
+def test_modify_prev_results_fixes_removed_request_with_spec_tokens():
+    """With spec decoding the previous step appended 1 + num_draft
+    placeholders; a removed request gets all of them replaced by the accepted
+    tokens (here 2 of 3)."""
+    req_state = SimpleNamespace(output_token_ids=[7, 0, 0, 0])
+    runner = _modify_prev_results_runner(req_state, req_state)
+    runner.input_batch.req_id_to_index = {}
+    runner._pre_async_results.scheduler_output = SimpleNamespace(
+        scheduled_spec_decode_tokens={"req": [11, 12]})
+    with patch.object(runner_utils,
+                      "host_extract_sampled_tokens",
+                      return_value=[[42, 43]]):
+        TPUModelRunner._modify_prev_results(runner)
+    assert req_state.output_token_ids == [7, 42, 43]
+
+
 def test_modify_prev_results_skips_finished_request():
     req_state = SimpleNamespace(output_token_ids=[7, 0])
     runner = _modify_prev_results_runner(req_state, req_state)
