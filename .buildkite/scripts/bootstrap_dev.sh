@@ -53,7 +53,8 @@ JOB_PRIORITY="${DEV_JOB_PRIORITY:-$PRIORITY_DEFAULT}"
 export JOB_PRIORITY
 buildkite-agent meta-data set "JOB_PRIORITY" "$JOB_PRIORITY"
 # No WORKLOAD_PRIORITY either: on kube an unclassed workload is ordered at 0,
-# behind every kind of build that records a class, the nightly on main included.
+# behind every kind of build that records a class, the owning nightly on main
+# included.
 echo "--- Dev build priority: ${JOB_PRIORITY}"
 
 # Which pipeline to upload.  Defaults to the demo pipeline_dev.yml; set
