@@ -31,13 +31,17 @@ TAG="v${VERSION}"
 REPOS=("${RELEASE_DOCKERHUB_REPO}")
 [[ -n "${RELEASE_LEGACY_DOCKERHUB_REPO:-}" ]] && REPOS+=("${RELEASE_LEGACY_DOCKERHUB_REPO}")
 
-# Keep released tags unless the approver chose to overwrite. Assigned, not
+STAGED_DIGEST="$(digest_of "${STAGED}")"
+
+# Keep released tags unless the approver chose to overwrite. A tag that already
+# holds the staged digest is this build's own copy (a retry after one repo was
+# pushed and the other failed), so it does not stop the step. Assigned, not
 # tested inline, so a failed Docker Hub lookup stops the step (set -e).
 if [[ "${OVERWRITE}" != "yes" ]]; then
   for repo in "${REPOS[@]}"; do
     EXISTING="$(dockerhub_digest "${TAG}" "${repo}")"
-    [[ -z "${EXISTING}" ]] \
-      || die "docker.io/${repo}:${TAG} is already on Docker Hub (${EXISTING}); approve with overwrite to replace it."
+    [[ -z "${EXISTING}" || "${EXISTING}" == "${STAGED_DIGEST}" ]] \
+      || die "docker.io/${repo}:${TAG} is already on Docker Hub (${EXISTING}), not the staged ${STAGED_DIGEST}; approve with overwrite to replace it."
   done
 fi
 
@@ -52,7 +56,6 @@ trap 'exit 143' TERM
 [[ -f "${HOME}/.docker/config.json" ]] && cp "${HOME}/.docker/config.json" "${DOCKER_CONFIG}/"
 dockerhub_login "${DOCKER_CONFIG}" "${RELEASE_DOCKERHUB_USERNAME}"
 
-STAGED_DIGEST="$(digest_of "${STAGED}")"
 # Set outside the array assignment below: an assignment holding $(...) takes
 # its exit status, which would stop this script under set -e.
 LATEST_NOTE=""
