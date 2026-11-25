@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import jax
@@ -38,7 +39,8 @@ from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
 from vllm.v1.request import Request
 
 from tpu_inference import utils as common_utils
-from tpu_inference.core.mamba_prefix_caching import set_mamba_prefix_caching
+from tpu_inference.core.mamba_prefix_caching import (mamba_manager_params,
+                                                     set_mamba_prefix_caching)
 from tpu_inference.core.runner_slot_mamba import RunnerSlotMambaManager
 from tpu_inference.runner.input_batch import CachedRequestState
 from tpu_inference.runner.kv_cache import (_get_mamba_cache_allocator,
@@ -1549,6 +1551,69 @@ class TestKVCacheManager:
         assert layer_configs['layer.0'].manager_cls is expected_cls
         assert layer_configs['layer.0'].spec == gdn_spec
 
+    def test_get_kv_cache_layer_configs_align_spec_decode_zeroes_num_speculative_blocks(
+            self):
+        """Align mode + spec decode forces MambaManager num_speculative_blocks=0."""
+        gdn_spec = MambaSpec(shapes=((3, 64), (8, 64, 16)),
+                             dtypes=(torch.bfloat16, torch.float32),
+                             block_size=16,
+                             mamba_type=MambaAttentionBackendEnum.GDN_ATTN)
+        mock_gdn = MagicMock(spec=MambaBase)
+        mock_gdn.get_kv_cache_config.side_effect = lambda _: MambaManager.layer_config(
+            gdn_spec,
+            **mamba_manager_params(MambaManager, True),
+            num_speculative_blocks=3)
+        self.runner.vllm_config.compilation_config.static_forward_context = {
+            'layer.0': mock_gdn
+        }
+        set_mamba_prefix_caching(self.runner.vllm_config.cache_config, True)
+        self.runner.vllm_config.speculative_config = SimpleNamespace(
+            method="ngram", num_speculative_tokens=3)
+
+        with patch(
+                'tpu_inference.runner.kv_cache_manager.get_layers_from_vllm_config',
+                side_effect=lambda _, cls: {'layer.0': mock_gdn}
+                if MambaBase in cls else {}):
+            cfg = self.runner.get_kv_cache_layer_configs()['layer.0']
+            assert cfg.manager_config.params.num_speculative_blocks == 0
+            self.runner.vllm_config.speculative_config = None
+            cfg_no_spec = self.runner.get_kv_cache_layer_configs()['layer.0']
+            assert cfg_no_spec.manager_config.params.num_speculative_blocks == 3
+
+    def test_initialize_kv_cache_align_spec_decode_publishes_scheduler_mamba_blocks(
+            self):
+        """initialize_kv_cache allocates physical rows while publishing
+        physical - scratch to scheduler targets and wiring InputBatch scratch."""
+        from tpu_inference.core.hybrid_coordinator import get_mamba_num_blocks
+        num_blocks, page_size_bytes = 120, 16 * 1024
+        kv_cache_config = self._create_mamba_kv_cache_config(
+            num_blocks, page_size_bytes, ['layer.0', 'layer.1'])
+        self.runner.vllm_config.sharding_config = MagicMock(total_dp_size=1)
+        set_mamba_prefix_caching(self.runner.cache_config, True)
+        self.runner.cache_config.mamba_block_size = 16
+        self.runner.speculative_config = SimpleNamespace(
+            method="ngram", num_speculative_tokens=3)
+        self.runner.vllm_config.speculative_config = (
+            self.runner.speculative_config)
+        self.runner.input_batch.is_spec_decode = True
+        self.runner.input_batch.num_speculative_tokens = 3
+
+        with patch(
+                'dataclasses.replace',
+                return_value=MagicMock(page_size_bytes=page_size_bytes)
+        ), patch(
+                'tpu_inference.runner.input_batch.envs.USE_BATCHED_RPA_KERNEL',
+                True):
+            self.runner.initialize_kv_cache(kv_cache_config)
+
+        expected_sched = num_blocks - self.runner.max_num_reqs * 4  # 56
+        assert self.runner.kv_caches[0][0].shape[0] == num_blocks
+        assert self.runner.kv_cache_manager.actual_mamba_num_blocks == num_blocks
+        assert kv_cache_config.mamba_num_blocks == expected_sched
+        assert self.runner.cache_config.mamba_num_blocks == expected_sched
+        assert get_mamba_num_blocks() == expected_sched
+        assert self.runner.input_batch._mamba_first_group_local == expected_sched
+
     def test_initialize_kv_cache_mamba(self):
         # Mamba prefix caching off (vLLM HEAD keys it on enable_prefix_caching).
         set_mamba_prefix_caching(self.runner.cache_config, False)
@@ -1707,6 +1772,7 @@ class TestKVCacheManager:
         # Ensure all layer indices map to the same underlying KV cache (0)
         for i in range(4):
             assert self.runner.layer_name_to_kvcache_index[f'layer.{i}'] == 0
+        assert self.runner.kv_cache_manager.actual_mamba_num_blocks is None
 
     def test_initialize_kv_cache_mamba_duplicate_fallback(self):
         num_blocks = 100
@@ -2102,6 +2168,65 @@ class TestKVCacheManager:
         # Both pools now back roughly the same number of concurrent requests.
         assert abs(expected_attn // attn_blocks_per_req -
                    expected_mamba // DEFAULT_MAMBA_CACHE_MULTIPLIER) <= 1
+
+    def test_compact_mamba_override_align_spec_decode_deducts_fixed_scratch(
+            self):
+        """In align mode with speculative decoding, runner-owned scratch rows
+        (`max_num_reqs_per_rank * (num_spec + 1) * dp_size`) are fixed overhead
+        for the active batch, so tight-HBM re-splitting deducts scratch bytes
+        first and balances attention against scheduler-usable mamba blocks."""
+        from types import SimpleNamespace
+
+        from tpu_inference.runner.kv_cache_manager import (
+            DEFAULT_MAMBA_CACHE_MULTIPLIER, KVCacheManager)
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = False
+
+        total_hbm = 304 * (2**30)
+        attn_page = 2**20
+        unpadded_mamba = 2 * (2**20)
+        max_num_reqs = 256
+        max_model_len = 2048
+        num_spec = 3
+        scratch_per_req = num_spec + 1  # 4
+        block_size = self.runner.cache_config.block_size  # 16
+
+        self.runner.cache_config.gpu_memory_utilization = 1.0
+        self.runner.cache_config.num_gpu_blocks_override = None
+        set_mamba_prefix_caching(self.runner.cache_config, True)
+        self.runner.model_config.max_model_len = max_model_len
+        self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
+        self.runner.max_num_reqs = max_num_reqs
+        self.runner.vllm_config.speculative_config = SimpleNamespace(
+            method="ngram", num_speculative_tokens=num_spec)
+
+        with patch(
+                "tpu_inference.runner.kv_cache_manager.utils.hbm_usage_bytes",
+                return_value=[(0, total_hbm // 4)] * 4):
+            self._run_compact_mamba_override(manager,
+                                             attn_page=attn_page,
+                                             unpadded_mamba=unpadded_mamba)
+
+        avail_per_tensor = total_hbm // 15
+        attn_blocks_per_req = max_model_len // block_size
+        scratch_num_blocks = max_num_reqs * scratch_per_req
+        scratch_bytes_per_tensor = scratch_num_blocks * 3 * unpadded_mamba
+        servable_reqs = (avail_per_tensor - scratch_bytes_per_tensor) // (
+            attn_blocks_per_req * attn_page +
+            DEFAULT_MAMBA_CACHE_MULTIPLIER * 3 * unpadded_mamba)
+        expected_sched_mamba = (
+            servable_reqs * DEFAULT_MAMBA_CACHE_MULTIPLIER + 1)
+        expected_physical_mamba = expected_sched_mamba + scratch_num_blocks
+        expected_attn = (avail_per_tensor - 3 * expected_physical_mamba *
+                         unpadded_mamba) // attn_page
+
+        assert servable_reqs < max_num_reqs
+        assert manager._mamba_num_blocks == expected_physical_mamba
+        assert self.runner.cache_config.mamba_num_blocks == expected_sched_mamba
+        assert (
+            self.runner.cache_config.num_gpu_blocks_override == expected_attn)
+        assert abs(expected_attn // attn_blocks_per_req -
+                   expected_sched_mamba // DEFAULT_MAMBA_CACHE_MULTIPLIER) <= 1
 
     def test_compact_mamba_override_raises_when_mamba_floor_eats_the_budget(
             self):

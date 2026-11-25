@@ -26,6 +26,8 @@ from vllm.distributed.aux_output_connector.connector import \
     AuxOutputConnectorMetadata
 
 from tpu_inference.core.mamba_prefix_caching import set_mamba_prefix_caching
+from tpu_inference.layers.common.attention_metadata import \
+    MAMBA_READ_OFFSET_FROM_BLOCK_TABLE
 from tpu_inference.models.common.interface import (ModelInterface,
                                                    MultiModalInterface)
 from tpu_inference.runner import utils as runner_utils
@@ -976,6 +978,7 @@ class TestTPUJaxRunner:
         )
         self.runner.requests = {"req1": req_state}
         self.runner.input_batch = MagicMock()
+        self.runner.input_batch.max_decode_tokens = 4
         self.runner.input_batch.num_reqs = 1
         self.runner.input_batch.req_ids = ["req1"]
         self.runner.input_batch.req_id_to_index = {"req1": 0}
@@ -1125,6 +1128,7 @@ class TestTPUJaxRunner:
         )
         self.runner.requests = {"req1": req_state}
         self.runner.input_batch = MagicMock()
+        self.runner.input_batch.max_decode_tokens = 4
         self.runner.input_batch.num_reqs = 1
         self.runner.input_batch.req_ids = ["req1"]
         self.runner.input_batch.req_id_to_index = {"req1": 0}
@@ -1289,6 +1293,324 @@ class TestTPUJaxRunner:
         )
         assert len(drafts) == max_num_reqs
         assert drafts[-1] == [30, 40, 10]
+
+    @patch('tpu_inference.runner.tpu_runner.TPUSupportedSamplingMetadata')
+    def test_prepare_inputs_align_spec_decode_scratch_metadata(
+            self, mock_sampling_metadata):
+        """Align mode + spec decode passes the scratch group bases as
+        mamba.state_indices and marks requests that resume from the block
+        table (previous step was not a verify window) with
+        MAMBA_READ_OFFSET_FROM_BLOCK_TABLE (-1)."""
+        self._create_mock_hybrid_kv_cache_config()
+        self.runner.kv_cache_config.has_mamba_layers = True
+        self.runner.speculative_config = SimpleNamespace(
+            num_speculative_tokens=3)
+        self.runner.vllm_config.speculative_config = (
+            self.runner.speculative_config)
+        set_mamba_prefix_caching(self.runner.cache_config, True)
+
+        window_req = MagicMock()
+        window_req.mamba_read_offset = 2
+        prefill_req = MagicMock()
+        prefill_req.mamba_read_offset = MAMBA_READ_OFFSET_FROM_BLOCK_TABLE
+        self.runner.requests = {'req1': window_req, 'req2': prefill_req}
+
+        scheduler_output = MagicMock()
+        scheduler_output.total_num_scheduled_tokens = 8
+        scheduler_output.num_scheduled_tokens = {'req1': 4, 'req2': 4}
+        scheduler_output.scheduled_spec_decode_tokens = {
+            'req1': [10, 11, 12],
+            'req2': [13, 14, 15]
+        }
+        scheduler_output.grammar_bitmask = None
+
+        self.runner.input_batch = MagicMock()
+        self.runner.input_batch.max_decode_tokens = 4
+        self.runner.input_batch.num_reqs = 2
+        self.runner.input_batch.req_ids = ['req1', 'req2']
+        self.runner.input_batch.req_id_to_index = {'req1': 0, 'req2': 1}
+        self.runner.input_batch.num_computed_tokens_cpu = np.array([10, 20])
+        self.runner.input_batch.token_ids_cpu = np.random.randint(
+            0, 1000, (8, 64), dtype=np.int32)
+        self.runner.input_batch.mamba_state_indices_cpu = np.zeros(
+            self.runner.max_num_reqs, dtype=np.int32)
+        # Use a global slot id in the second shard (64 + 13 = 77) for req2 so
+        # the global-to-local `% _mamba_local_slots` conversion is exercised.
+        self.runner.input_batch.mamba_state_indices_cpu[:2] = [9, 77]
+        self.runner.input_batch._mamba_local_slots = 64
+
+        mock_block_table = MagicMock()
+        mock_block_table.max_num_blocks_per_req = 8
+        mock_block_table.get_cpu_tensor.return_value = np.zeros((2, 8),
+                                                                dtype=np.int32)
+        self.runner.input_batch.block_table = [
+            mock_block_table, mock_block_table
+        ]
+        mock_sampling_metadata.from_input_batch.return_value = MagicMock()
+
+        with patch('jax.device_put', side_effect=lambda x, *a, **kw: x):
+            output = self.runner._prepare_inputs(scheduler_output)
+        attention_metadata = output[2]
+
+        for layer_md in attention_metadata.values():
+            assert layer_md.mamba is not None
+            assert layer_md.mamba.state_indices is not None
+            np.testing.assert_array_equal(
+                np.asarray(layer_md.mamba.state_indices)[:2], [9, 13])
+            np.testing.assert_array_equal(
+                np.asarray(layer_md.mamba.read_offsets)[:2],
+                [2, MAMBA_READ_OFFSET_FROM_BLOCK_TABLE])
+
+    def test_update_mamba_read_state_sync_and_async(self):
+        """Verify windows resume from the checkpoint of their last accepted
+        token; under async scheduling (no host-side acceptance counts) the
+        offset assumes all drafts were accepted. Prefill chunks reset it to
+        MAMBA_READ_OFFSET_FROM_BLOCK_TABLE."""
+        self.runner.speculative_config = SimpleNamespace(
+            num_speculative_tokens=3)
+        self.runner.kv_cache_config = SimpleNamespace(has_mamba_layers=True)
+        self.runner.input_batch = MagicMock()
+        self.runner.input_batch.max_decode_tokens = 4
+        window = SimpleNamespace(
+            mamba_read_offset=MAMBA_READ_OFFSET_FROM_BLOCK_TABLE)
+        prefill = SimpleNamespace(mamba_read_offset=3)
+        self.runner.requests = {'win': window, 'pre': prefill}
+        scheduler_output = SimpleNamespace(
+            num_scheduled_tokens={
+                'win': 4,
+                'pre': 100
+            },
+            scheduled_spec_decode_tokens={'win': [1, 2, 3]})
+
+        # Sync: 1 draft + bonus sampled -> 2 drafts rejected.
+        self.runner._update_mamba_read_state(['win', 'pre'], scheduler_output,
+                                             [], [[7, 8], [9]])
+        assert window.mamba_read_offset == 1
+        assert prefill.mamba_read_offset == MAMBA_READ_OFFSET_FROM_BLOCK_TABLE
+
+        # Async: acceptance unknown on the host, corrected on TPU later.
+        self.runner._update_mamba_read_state(['win', 'pre'], scheduler_output,
+                                             [], None)
+        assert window.mamba_read_offset == 3
+
+    @patch(
+        "tpu_inference.runner.tpu_runner.runner_utils.host_extract_sampled_tokens"
+    )
+    def test_modify_prev_results_corrects_mamba_offset_for_unscheduled_request(
+            self, mock_host_extract):
+        """When an async verify-window request is paused (unscheduled in the
+        next step), _modify_prev_results subtracts rejected drafts from its
+        preserved mamba_read_offset, while leaving preempted requests
+        (MAMBA_READ_OFFSET_FROM_BLOCK_TABLE) untouched."""
+        self.runner.speculative_config = SimpleNamespace(
+            num_speculative_tokens=3)
+        paused = SimpleNamespace(mamba_read_offset=3,
+                                 output_token_ids=[0, 0, 0, 0])
+        preempted = SimpleNamespace(
+            mamba_read_offset=MAMBA_READ_OFFSET_FROM_BLOCK_TABLE,
+            output_token_ids=[0, 0, 0, 0])
+        self.runner.requests = {'paused': paused, 'preempted': preempted}
+        self.runner.input_batch = MagicMock()
+        self.runner.input_batch.req_id_to_index = {}
+
+        pre_scheduler_output = SimpleNamespace(scheduled_spec_decode_tokens={
+            'paused': [10, 11, 12],
+            'preempted': [20, 21, 22],
+        })
+        self.runner._pre_async_results = SimpleNamespace(
+            req_ids=['paused', 'preempted'],
+            next_tokens=MagicMock(),
+            request_seq_lens=[(0, paused, 4), (1, preempted, 4)],
+            discard_sampled_tokens_req_indices=[],
+            logits_indices_selector=None,
+            spec_decode_metadata=MagicMock(),
+            scheduler_output=pre_scheduler_output,
+            is_continue_decode=False,
+        )
+        # 'paused' had 1 draft + 1 bonus accepted (2 rejected out of 3 drafts):
+        # mamba_read_offset should be corrected from 3 to 3 - (3 + 1 - 2) = 1.
+        mock_host_extract.return_value = [[10, 99], [20]]
+
+        self.runner._modify_prev_results()
+
+        assert paused.mamba_read_offset == 1
+        assert (
+            preempted.mamba_read_offset == MAMBA_READ_OFFSET_FROM_BLOCK_TABLE)
+
+    def test_subtract_mamba_read_offsets_fn(self):
+        from tpu_inference.runner.tpu_runner import \
+            _subtract_mamba_read_offsets_fn
+        offsets = jnp.array([5, MAMBA_READ_OFFSET_FROM_BLOCK_TABLE, 2, 3],
+                            dtype=jnp.int32)
+        num_rejected = jnp.array([1, 4, 3, 0], dtype=jnp.int32)
+        # Non-identity mapping: request 0 gathers rejection slot 2 (3), request
+        # 1 resumes from the block table (-1 offset), request 2 did not run spec
+        # decode last step (-1 index), and request 3 gathers rejection slot 0 (1).
+        indices = jnp.array([2, 1, -1, 0], dtype=jnp.int32)
+        out = _subtract_mamba_read_offsets_fn(offsets, num_rejected, indices)
+        np.testing.assert_array_equal(
+            np.asarray(out), [2, MAMBA_READ_OFFSET_FROM_BLOCK_TABLE, 2, 2])
+
+    def test_wire_mamba_state_requires_batched_decode_with_spec(self):
+        """GDN prefix caching (align mode) + spec decode reserves per-rank
+        verify-window scratch slots when valid, fails loudly when
+        USE_BATCHED_RPA_KERNEL is unset, ignores pure-attention models, and
+        reserves 0 scratch slots when mamba prefix caching is off."""
+        self.runner.dp_size = 2
+        self.runner.max_num_reqs = 16
+        self.runner.speculative_config = SimpleNamespace(
+            method="ngram", num_speculative_tokens=3)
+        self.runner.vllm_config.speculative_config = (
+            self.runner.speculative_config)
+        self.runner.input_batch = MagicMock()
+        self.runner.input_batch.max_decode_tokens = 1
+        self.runner.kv_cache_manager.actual_mamba_num_blocks = 128
+        kv_cache_config = MagicMock(has_mamba_layers=True)
+
+        set_mamba_prefix_caching(self.runner.cache_config, True)
+        with pytest.raises(ValueError, match="USE_BATCHED_RPA_KERNEL"):
+            self.runner._wire_input_batch_mamba_state(kv_cache_config)
+
+        # Pure-attention models (has_mamba_layers=False) must not trigger the
+        # GDN scratch guard even when prefix caching and spec decode are on.
+        self.runner.kv_cache_manager.actual_mamba_num_blocks = None
+        self.runner._wire_input_batch_mamba_state(
+            MagicMock(has_mamba_layers=False))
+        self.runner.input_batch.init_mamba_pools.assert_not_called()
+        self.runner.kv_cache_manager.actual_mamba_num_blocks = 128
+
+        # Happy path: align mode + spec decode (3 drafts) + max_decode_tokens=4
+        # reserves ceil(16 / 2) * (3 + 1) = 32 scratch slots per DP rank.
+        self.runner.input_batch.max_decode_tokens = 4
+        self.runner._wire_input_batch_mamba_state(kv_cache_config)
+        self.runner.input_batch.init_mamba_pools.assert_called_once_with(
+            128, scratch_slots_per_rank=32)
+
+        self.runner.input_batch.init_mamba_pools.reset_mock()
+        self.runner.input_batch.max_decode_tokens = 1
+        set_mamba_prefix_caching(self.runner.cache_config, False)
+        self.runner._wire_input_batch_mamba_state(kv_cache_config)
+        self.runner.input_batch.init_mamba_pools.assert_called_once_with(
+            128, scratch_slots_per_rank=0)
+
+    @patch('tpu_inference.runner.tpu_runner.TPUSupportedSamplingMetadata')
+    def test_pad_spec_decode_preserves_negative_drafts_for_token_zero(
+            self, mock_sampling_metadata):
+        """`Scheduler` `pad_spec_decode` (`[-1] * K` on `(k * block_size + 1)`
+        prefix-cache hits) preserves `-1` through `_prepare_inputs` and
+        `_extract_draft_token_ids` so token ID `0` is neither falsely accepted
+        as a phantom draft (greedy) nor zeroed out during recovery (random)."""
+        from jax.sharding import NamedSharding, PartitionSpec
+
+        from tpu_inference.layers.common.sharding import ShardingAxisName
+        from tpu_inference.layers.jax.sample.rejection_sampler import \
+            RejectionSampler
+        from tpu_inference.layers.jax.sample.sampling_metadata import \
+            TPUSupportedSamplingMetadata
+        from tpu_inference.utils import device_array
+
+        self._create_mock_hybrid_kv_cache_config()
+        self.runner.speculative_config = SimpleNamespace(
+            method="ngram", num_speculative_tokens=3)
+        self.runner.vllm_config.speculative_config = (
+            self.runner.speculative_config)
+
+        # Simulate a 17-token prompt hitting 16 cached prefix tokens (`pad_spec_decode`):
+        # position 16 holds real prompt token 9, positions 17..19 hold [-1, -1, -1].
+        token_ids = np.zeros((8, 64), dtype=np.int32)
+        token_ids[0, :17] = np.arange(1, 18, dtype=np.int32)
+        token_ids[0, 17:20] = -1
+
+        self.runner.input_batch = MagicMock()
+        self.runner.input_batch.max_decode_tokens = 4
+        self.runner.input_batch.num_reqs = 1
+        self.runner.input_batch.req_ids = ['req1']
+        self.runner.input_batch.req_id_to_index = {'req1': 0}
+        self.runner.input_batch.num_computed_tokens_cpu = np.array(
+            [16], dtype=np.int32)
+        self.runner.input_batch.token_ids_cpu = token_ids
+        mock_bt = MagicMock(max_num_blocks_per_req=8)
+        mock_bt.get_cpu_tensor.return_value = np.zeros((1, 8), dtype=np.int32)
+        self.runner.input_batch.block_table = [mock_bt, mock_bt]
+        mock_sampling_metadata.from_input_batch.return_value = MagicMock()
+
+        scheduler_output = MagicMock()
+        scheduler_output.total_num_scheduled_tokens = 4
+        scheduler_output.num_scheduled_tokens = {'req1': 4}
+        scheduler_output.scheduled_spec_decode_tokens = {'req1': [-1, -1, -1]}
+        scheduler_output.grammar_bitmask = None
+
+        (input_ids, _, _, _, _, spec_meta,
+         *_) = self.runner._prepare_inputs(scheduler_output)
+        draft_token_ids = self.runner._extract_draft_token_ids(
+            input_ids, spec_meta.final_logits_indices,
+            spec_meta.target_logits_indices)
+        np.testing.assert_array_equal(
+            np.asarray(draft_token_ids)[:3], [-1, -1, -1])
+
+        vocab_size = 16
+        sampler = RejectionSampler(self.runner.mesh)
+        sharding = NamedSharding(self.runner.mesh,
+                                 PartitionSpec(ShardingAxisName.ATTN_DATA))
+        # Target model predicts token ID `0` at position 0 and token `5` at position 1.
+        n = int(draft_token_ids.shape[0])
+        num_reqs_padded = int(spec_meta.draft_lengths.shape[0])
+        target_logits = np.full((n, vocab_size), -50.0, dtype=np.float32)
+        target_logits[0, 0] = 50.0
+        target_logits[1, 5] = 50.0
+        target_logits, bonus = device_array(
+            self.runner.mesh,
+            (target_logits, np.zeros((num_reqs_padded, ), dtype=np.int32)),
+            sharding=sharding,
+        )
+
+        greedy_meta = TPUSupportedSamplingMetadata(do_sampling=False)
+        out_greedy = sampler(
+            draft_token_ids=draft_token_ids,
+            num_draft_tokens=spec_meta.draft_lengths,
+            draft_probs=None,
+            target_logits=target_logits,
+            bonus_token_ids=bonus,
+            sampling_metadata=greedy_meta,
+            key=None,
+        )
+        parsed_greedy = sampler.parse_output(
+            np.asarray(out_greedy), vocab_size, spec_meta.draft_lengths_cpu, 1,
+            spec_meta.final_logits_indices.shape[0], self.runner.dp_size,
+            spec_meta.req_indices_dp)
+        assert parsed_greedy == [[0]]
+
+        # Under random sampling, token 0 is still sampled when target_logits puts
+        # all probability mass on token 0 (not zeroed out by recovery mask).
+        temp, top_k, top_p = device_array(
+            self.runner.mesh,
+            (
+                np.ones((num_reqs_padded, ), dtype=np.float32),
+                np.full((num_reqs_padded, ), -1, dtype=np.int32),
+                np.ones((num_reqs_padded, ), dtype=np.float32),
+            ),
+            sharding=sharding,
+        )
+        rand_meta = TPUSupportedSamplingMetadata(
+            do_sampling=True,
+            temperature=temp,
+            top_k=top_k,
+            top_p=top_p,
+        )
+        out_rand = sampler(
+            draft_token_ids=draft_token_ids,
+            num_draft_tokens=spec_meta.draft_lengths,
+            draft_probs=None,
+            target_logits=target_logits,
+            bonus_token_ids=bonus,
+            sampling_metadata=rand_meta,
+            key=jax.random.PRNGKey(0),
+        )
+        parsed_rand = sampler.parse_output(
+            np.asarray(out_rand), vocab_size, spec_meta.draft_lengths_cpu, 1,
+            spec_meta.final_logits_indices.shape[0], self.runner.dp_size,
+            spec_meta.req_indices_dp)
+        assert parsed_rand == [[0]]
 
 
 class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:

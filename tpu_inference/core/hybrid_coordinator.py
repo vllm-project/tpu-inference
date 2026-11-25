@@ -63,6 +63,12 @@ _GLOBAL_MAMBA_NUM_BLOCKS: int | None = None
 # leaves behind for later requests to resume from. Override per-run with
 # `--additional-config '{"custom_mamba_cache_multiplier": N}'`.
 DEFAULT_MAMBA_CACHE_MULTIPLIER = 8
+# Minimum variable scheduler blocks per request in align mode: the state a
+# request reads from plus the next block it writes into.
+MIN_ALIGN_MAMBA_BLOCKS_PER_REQ = 2
+# Minimum scheduler mamba blocks per DP rank: 1 null block + 2 blocks for one
+# active request.
+MIN_ALIGN_MAMBA_SCHED_BLOCKS_PER_RANK = 1 + MIN_ALIGN_MAMBA_BLOCKS_PER_REQ
 
 
 def set_mamba_num_blocks(num_blocks: int) -> None:
@@ -76,26 +82,78 @@ def get_mamba_num_blocks() -> int | None:
     return _GLOBAL_MAMBA_NUM_BLOCKS
 
 
+def uses_gdn_spec_scratch(vllm_config: Any) -> bool:
+    """True when mamba prefix caching (align mode) runs with speculative
+    decoding: verify windows checkpoint into runner-owned scratch slots at the
+    top of each DP shard rather than into scheduler-allocated mamba blocks.
+
+    Callers must already know the model has mamba/GDN layers (e.g. via
+    `kv_cache_config.has_mamba_layers` or `isinstance(layer, MambaBase)`),
+    matching `mamba_prefix_caching_enabled(cache_config)`.
+    """
+    cache_config = vllm_config.cache_config
+    spec_config = vllm_config.speculative_config
+    return (mamba_prefix_caching_enabled(cache_config)
+            and spec_config is not None
+            and spec_config.num_speculative_tokens > 0)
+
+
+def passes_mamba_state_indices(vllm_config: Any, kv_cache_config: Any) -> bool:
+    """True when the runner populates `attn_metadata.mamba.state_indices`
+    (non-align recurrent slots, or align mode with speculative verify-window
+    scratch groups). Shared between precompilation and `_prepare_inputs` so
+    their HLO input signatures stay identical."""
+    if not kv_cache_config.has_mamba_layers:
+        return False
+    return (not mamba_prefix_caching_enabled(vllm_config.cache_config)
+            or uses_gdn_spec_scratch(vllm_config))
+
+
+def gdn_spec_scratch_slots_per_rank(vllm_config: Any, max_num_reqs: int,
+                                    dp_size: int) -> int:
+    """Runner-owned scratch rows per DP rank for verify-window GDN checkpoints
+    (`num_spec + 1` consecutive slots per request slot). Zero when not in align
+    mode with speculative decoding."""
+    if not uses_gdn_spec_scratch(vllm_config):
+        return 0
+    num_spec = vllm_config.speculative_config.num_speculative_tokens
+    dp_size = max(dp_size, 1)
+    max_num_reqs_per_rank = (max_num_reqs + dp_size - 1) // dp_size
+    return max_num_reqs_per_rank * (num_spec + 1)
+
+
+def gdn_spec_scratch_num_blocks(vllm_config: Any, max_num_reqs: int,
+                                dp_size: int) -> int:
+    """Total physical mamba blocks reserved across all DP ranks for
+    runner-owned verify-window GDN checkpoints."""
+    dp_size = max(dp_size, 1)
+    return gdn_spec_scratch_slots_per_rank(vllm_config, max_num_reqs,
+                                           dp_size) * dp_size
+
+
 def mamba_blocks_per_request(vllm_config: Any,
                              is_align_mode: bool) -> tuple[int, int]:
-    """Return `(min_blocks_per_req, blocks_per_req)` for the compact mamba pool.
+    """Return `(min_blocks_per_req, blocks_per_req)` of variable per-request
+    blocks for the compact mamba pool (excluding fixed runner-owned speculative
+    scratch slots in align mode; see `gdn_spec_scratch_num_blocks`).
 
-    Every request keeps one resident slot per speculative position
-    (`num_spec + 1`), plus one more in align mode for the state it generates
-    from. Align mode also reserves `custom_mamba_cache_multiplier` (default
-    `DEFAULT_MAMBA_CACHE_MULTIPLIER`) slots per request for prefix
-    checkpoints, never fewer than the resident minimum.
+    Outside align mode, every request keeps one resident slot per speculative
+    position (`num_spec + 1`). In align mode the scheduler needs at least
+    `MIN_ALIGN_MAMBA_BLOCKS_PER_REQ` (2) blocks per request (the state it reads
+    from and the next block it writes into) and reserves
+    `custom_mamba_cache_multiplier` (default `DEFAULT_MAMBA_CACHE_MULTIPLIER`)
+    for prefix checkpoints.
     """
-    num_spec = 0
-    if vllm_config.speculative_config is not None:
-        num_spec = vllm_config.speculative_config.num_speculative_tokens
-    min_blocks_per_req = num_spec + 1 + (1 if is_align_mode else 0)
     if not is_align_mode:
-        return min_blocks_per_req, min_blocks_per_req
+        num_spec = (vllm_config.speculative_config.num_speculative_tokens
+                    if vllm_config.speculative_config is not None else 0)
+        stride = num_spec + 1
+        return stride, stride
     multiplier = int(
         vllm_config.additional_config.get("custom_mamba_cache_multiplier",
                                           DEFAULT_MAMBA_CACHE_MULTIPLIER))
-    return min_blocks_per_req, max(multiplier, min_blocks_per_req)
+    return (MIN_ALIGN_MAMBA_BLOCKS_PER_REQ,
+            max(multiplier, MIN_ALIGN_MAMBA_BLOCKS_PER_REQ))
 
 
 def mamba_pool_size(max_num_reqs: int, blocks_per_req: int,
@@ -653,6 +711,20 @@ class TPUKVCacheManager(KVCacheManager):
         num_tokens_main_model = total_computed_tokens + num_new_tokens
         num_tokens_need_slot = min(
             num_tokens_main_model + num_lookahead_tokens, self.max_model_len)
+
+        # Speculative decoding allocates unhashed draft slots (`num_lookahead_tokens`)
+        # ahead of `request.num_tokens`, and only advances `request.num_tokens`
+        # (plus `request.num_computed_tokens`) once drafts are accepted. Hash any
+        # block completed by accepted drafts before `remove_skipped_blocks`
+        # evicts blocks prior to `num_processed_tokens`.
+        if (self.enable_caching and not delay_cache_blocks
+                and num_new_computed_tokens == 0
+                and num_external_computed_tokens == 0):
+            processed = max(
+                0, request.num_computed_tokens - request.num_in_flight_tokens)
+            if processed > 0:
+                self.coordinator.cache_blocks(
+                    request, min(processed, request.num_tokens))
 
         self.coordinator.remove_skipped_blocks(
             request.request_id,

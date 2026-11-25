@@ -28,6 +28,7 @@ from vllm.utils.math_utils import round_down
 
 import tpu_inference.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
+from tpu_inference.core.hybrid_coordinator import passes_mamba_state_indices
 from tpu_inference.core.mamba_prefix_caching import \
     mamba_prefix_caching_enabled
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
@@ -485,12 +486,12 @@ class CompilationManager:
                 has_cached_kv=pcp_has_cached_kv,
                 num_reqs=pcp_num_reqs,
             )
-        # Dummy mamba_state_indices for compile-cache pre-tracing. Only
-        # populate for hybrid attn+mamba models without align mode — for pure-attention models
-        # and mamba align mode we pass None at runtime (see `_prepare_inputs`), and the precompile
-        # primer must match that shape so the cached HLO is reused.
-        if (self.runner.kv_cache_config.has_mamba_layers and
-                not mamba_prefix_caching_enabled(self.runner.cache_config)):
+        # Dummy mamba_state_indices for compile-cache pre-tracing. Populate
+        # whenever the runner passes state_indices at runtime (non-align mamba
+        # mode, or align mode with spec decode scratch groups; see
+        # `_prepare_inputs`) so the cached HLO signature matches.
+        if passes_mamba_state_indices(self.runner.vllm_config,
+                                      self.runner.kv_cache_config):
             mamba_state_indices = device_array(self.runner.mesh,
                                                np.zeros(
                                                    self.runner.max_num_reqs,
@@ -726,6 +727,22 @@ class CompilationManager:
                 seq_lens_subtract_indices,
                 positions_subtract_indices,
                 num_tokens=num_tokens,
+            )
+
+        if self.runner.kv_cache_config.has_mamba_layers:
+            from tpu_inference.runner.tpu_runner import \
+                _subtract_mamba_read_offsets_fn
+            metadata_sharding = NamedSharding(
+                self.runner.mesh, PartitionSpec(ShardingAxisName.BATCH))
+            self._run_compilation(
+                "_subtract_mamba_read_offsets_fn",
+                _subtract_mamba_read_offsets_fn,
+                self._create_dummy_tensor((self.runner.max_num_reqs, ),
+                                          jnp.int32, metadata_sharding),
+                self._create_dummy_tensor((self.runner.max_num_reqs, ),
+                                          jnp.int32, dp_sharding),
+                self._create_dummy_tensor((self.runner.max_num_reqs, ),
+                                          jnp.int32, replicated_sharding),
             )
 
     def _precompile_concat_last_sampled_tokens_and_draft_tokens(self) -> None:
