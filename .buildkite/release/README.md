@@ -56,8 +56,9 @@ branch.
      installs from PyPI;
    - checks, without credentials, that anonymous requests for both Docker Hub
      repos return the staged digest.
-6. In the GitHub release notes, remind users upgrading an existing `<=0.32.0`
-   standard `pip` environment to uninstall the legacy package first
+6. In the GitHub release notes, remind users upgrading a standard `pip`
+   environment from any `tpu-inference` / `vllm-tpu` release before the rename
+   to uninstall the legacy package first
    (`pip uninstall -y vllm-tpu tpu-inference && pip install -U vllm-jax`), or
    use `uv pip install -U`, so `pip` does not remove overlapping files when
    uninstalling the legacy release.
