@@ -38,7 +38,9 @@ docker build --build-arg VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH}" --no-cache \
   -t "${LEGACY_REPO}:nightly" -t "${LEGACY_REPO}:${TAG}" .
 
 echo "--- Pushing"
-for repo in "${REPO}" "${LEGACY_REPO}"; do
+# The former name first: CI still pulls it, so it keeps updating even if the
+# push to the new repo fails.
+for repo in "${LEGACY_REPO}" "${REPO}"; do
   docker push "${repo}:nightly"
   docker push "${repo}:${TAG}"
 done
