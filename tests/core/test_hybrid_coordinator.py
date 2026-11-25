@@ -940,9 +940,10 @@ class TestTPUKVCacheManager:
         attn_mgr.get_num_blocks_to_allocate.assert_not_called()
 
     def test_spec_decode_caches_mamba_block_completed_by_accepted_drafts(self):
-        """A mamba block filled by accepted speculative drafts must be hashed
-        into the prefix cache before `remove_skipped_blocks` can drop it.
-        """
+        """A mamba block filled by accepted speculative drafts and published via
+        `Scheduler.update_from_output` (`manager.cache_blocks`) stays cached in
+        the decoupled mamba pool across the next step's `remove_skipped_blocks`
+        and is immediately reusable in that step."""
         from vllm.sampling_params import SamplingParams
 
         install_hybrid_coordinator_hooks()
@@ -983,20 +984,28 @@ class TestTPUKVCacheManager:
                                       num_new_tokens=14) is not None
         req.num_computed_tokens = 14
         req.append_output_token_ids([100])  # num_tokens = 15
+        manager.cache_blocks(req, req.num_computed_tokens)
 
+        # Verify window: 1 target token + 3 n-gram drafts (`num_new_tokens=4`).
+        manager.new_step_starts()
         assert manager.allocate_slots(request=req,
-                                      num_new_tokens=1,
-                                      num_lookahead_tokens=3) is not None
+                                      num_new_tokens=4) is not None
         coord = manager.coordinator
         assert len(coord.mamba_block_pool.cached_block_hash_to_block) == 0
 
+        # Drafts accepted; `Scheduler.update_from_output` publishes finalized
+        # blocks before the next step starts.
         req.append_output_token_ids([101, 102, 103, 104])
         req.num_computed_tokens = 18
         assert len(req.block_hashes) == 1
+        manager.cache_blocks(req, req.num_computed_tokens)
+        assert len(coord.mamba_block_pool.cached_block_hash_to_block) == 1
 
+        # Next step: `remove_skipped_blocks` retires block 0 on `req`, while
+        # a waiting probe hits the cached block in the same step.
+        manager.new_step_starts()
         assert manager.allocate_slots(request=req,
-                                      num_new_tokens=1,
-                                      num_lookahead_tokens=3) is not None
+                                      num_new_tokens=4) is not None
         assert len(coord.mamba_block_pool.cached_block_hash_to_block) == 1
 
         probe = Request(
@@ -1007,7 +1016,6 @@ class TestTPUKVCacheManager:
             block_hasher=block_hasher,
         )
         assert probe.block_hashes[:1] == req.block_hashes[:1]
-        manager.new_step_starts()
         computed_blocks, num_hit_tokens, *_ = manager.get_computed_blocks(
             probe)
         assert num_hit_tokens == 16

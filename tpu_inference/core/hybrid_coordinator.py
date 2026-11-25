@@ -712,20 +712,6 @@ class TPUKVCacheManager(KVCacheManager):
         num_tokens_need_slot = min(
             num_tokens_main_model + num_lookahead_tokens, self.max_model_len)
 
-        # Speculative decoding allocates unhashed draft slots (`num_lookahead_tokens`)
-        # ahead of `request.num_tokens`, and only advances `request.num_tokens`
-        # (plus `request.num_computed_tokens`) once drafts are accepted. Hash any
-        # block completed by accepted drafts before `remove_skipped_blocks`
-        # evicts blocks prior to `num_processed_tokens`.
-        if (self.enable_caching and not delay_cache_blocks
-                and num_new_computed_tokens == 0
-                and num_external_computed_tokens == 0):
-            processed = max(
-                0, request.num_computed_tokens - request.num_in_flight_tokens)
-            if processed > 0:
-                self.coordinator.cache_blocks(
-                    request, min(processed, request.num_tokens))
-
         self.coordinator.remove_skipped_blocks(
             request.request_id,
             max(0, total_computed_tokens - request.num_in_flight_tokens),
