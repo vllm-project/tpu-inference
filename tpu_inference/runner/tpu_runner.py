@@ -17,7 +17,7 @@ import logging
 import random
 import sys
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 import jax
@@ -547,11 +547,6 @@ class AsyncPreResults:
     continue_decode_actual_steps: Optional[jax.Array] = None
     continue_decode_max_steps: int = 0
     next_tokens_in_tpu: Optional[jax.Array] = None
-
-    # Requests whose in-flight output from this step was rolled back by the
-    # scheduler (e.g. drop_stale_output). Their sampled tokens are discarded
-    # instead of replacing the placeholders, which update_states() trimmed.
-    dropped_req_ids: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -1598,11 +1593,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             if self.requests.get(req_id) is not req_state:
                 continue
 
-            # The scheduler rolled back this step's output and update_states()
-            # already trimmed its placeholders; discard the sampled tokens.
-            if req_id in self._pre_async_results.dropped_req_ids:
-                continue
-
             # Updated on previous execute
             pre_num_placeholder_tokens = 1
             assert pre_scheduler_output is not None
@@ -1644,49 +1634,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             for j in range(pre_num_placeholder_tokens):
                 req_state.output_token_ids.pop()
             req_state.output_token_ids.extend(sampled_ids)
-
-    def _drop_rolled_back_async_results(
-            self, scheduler_output: "VllmSchedulerOutput") -> None:
-        """Discards the previous step's in-flight output for rolled-back requests.
-
-        Under async scheduling the previous step appended placeholder tokens
-        that are replaced with the sampled tokens one step later. If the
-        scheduler drops that in-flight output (drop_stale_output, e.g. on a
-        streaming turn rollback), it sends num_output_tokens below the
-        runner's output length and update_states() trims the placeholders.
-        Such requests must neither take their input token from the previous
-        step's TPU output nor have the sampled tokens written back later.
-        Must be called before update_states().
-        """
-        pre = self._pre_async_results
-        cached_reqs = scheduler_output.scheduled_cached_reqs
-        if pre is None or not cached_reqs.req_ids:
-            return
-        num_output_tokens_by_id = dict(
-            zip(cached_reqs.req_ids, cached_reqs.num_output_tokens))
-        discard_set = set(pre.discard_sampled_tokens_req_indices)
-        for pre_req_idx, req_state, _ in pre.request_seq_lens:
-            if pre_req_idx in discard_set:
-                continue  # No placeholder was appended.
-            req_id = pre.req_ids[pre_req_idx]
-            num_output_tokens = num_output_tokens_by_id.get(req_id)
-            if (num_output_tokens is None
-                    or self.requests.get(req_id) is not req_state):
-                continue
-            num_cur_output_tokens = len(req_state.output_token_ids)
-            if num_output_tokens >= num_cur_output_tokens:
-                continue
-            num_placeholder_tokens = 1 + len(
-                pre.scheduler_output.scheduled_spec_decode_tokens.get(
-                    req_id, ()))
-            assert num_output_tokens <= (
-                num_cur_output_tokens - num_placeholder_tokens
-            ), (f"Request {req_id} rolled back to {num_output_tokens} output "
-                f"tokens, which keeps some of the "
-                f"{num_placeholder_tokens} in-flight placeholder tokens of "
-                f"its {num_cur_output_tokens} output tokens.")
-            pre.dropped_req_ids.add(req_id)
-            pre.placeholder_req_id_to_index.pop(req_id, None)
 
     def _update_placeholder(
             self,
@@ -1828,10 +1775,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                 i] = req_state.num_computed_tokens
                             cached_reqs.num_output_tokens[i] = len(
                                 req_state.output_token_ids)
-
-        if (self.scheduler_config.async_scheduling
-                and self._pre_async_results is not None):
-            self._drop_rolled_back_async_results(scheduler_output)
 
         self.persistent_batch_manager.update_states(
             scheduler_output, self.get_mrope_input_positions_fn)
