@@ -35,6 +35,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.ir import enable_torch_wrap
 from vllm.lora.layers import BaseLayerWithLoRA
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.model_executor.models import supports_lora, supports_multimodal
@@ -61,6 +62,7 @@ from tpu_inference.models.common.compiler_options import \
 from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
+from tpu_inference.models.vllm import transformers_backend
 from tpu_inference.models.vllm.experimental.model_patcher import (
     apply_model_specific_patches, patch_mm_model)
 from tpu_inference.models.vllm.experimental.vision_tower_jit import (
@@ -238,8 +240,11 @@ class VllmModelWrapper:
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.
 
+        # global_view(): vLLM's Transformers modeling backend otherwise sizes
+        # its attention and fused-QKV splits per TP shard, which does not match
+        # the global arrays tpu-inference runs on (see transformers_backend).
         with load_context, jax_context, set_current_vllm_config(
-                self.vllm_config):
+                self.vllm_config), transformers_backend.global_view():
             model_config_for_load = vllm_config_for_load.speculative_config.draft_model_config if self.is_draft_model else vllm_config_for_load.model_config
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load,
                                         model_config=model_config_for_load)
@@ -254,6 +259,10 @@ class VllmModelWrapper:
             replace_set_lora(vllm_model)
 
         static_forward_context = vllm_config_for_load.compilation_config.static_forward_context
+        if self.is_draft_model:
+            for layer in static_forward_context.values():
+                if isinstance(layer, AttentionLayerBase):
+                    layer.is_draft_layer = True
         self.vllm_config.compilation_config.static_forward_context.update(
             static_forward_context)
         self.vllm_config.compilation_config.static_all_moe_layers.extend(
@@ -448,7 +457,8 @@ class VllmModelWrapper:
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=kv_caches,
                     mesh=self.mesh,
-                    layer_name_to_kvcache_index=layer_name_to_kvcache_index
+                    layer_name_to_kvcache_index=layer_name_to_kvcache_index,
+                    vllm_config=self.vllm_config,
             ), set_forward_context(attn_metadata=attn_metadata,
                                    vllm_config=self.vllm_config,
                                    num_tokens=num_tokens):

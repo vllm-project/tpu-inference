@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Dict, List, Optional
 
@@ -63,18 +64,23 @@ def _distributed_sampling_candidates_per_shard() -> int:
     return 2 * _distributed_sampling_max_top_k()
 
 
+def _mesh_axes(
+    mesh: Mesh,
+    axes: str | tuple[str | None, ...] | list[str | None] | None,
+) -> tuple[str, ...]:
+    """Axes from `axes` that are present in `mesh`."""
+    axes = axes if isinstance(axes, (tuple, list)) else (axes, )
+    return tuple(axis for axis in axes if axis in mesh.axis_names)
+
+
 def _distributed_sampling_fits(mesh: Mesh, vocab_size: int) -> bool:
     """Whether each vocab shard can provide the static candidate capacity."""
-    tensor_axes = ShardingAxisName.MLP_TENSOR
-    tensor_axes = tensor_axes if isinstance(tensor_axes,
-                                            (tuple, list)) else (tensor_axes, )
-    tensor_axes = tuple(axis for axis in tensor_axes
-                        if axis is not None and axis in mesh.axis_names)
+    tensor_axes = _mesh_axes(mesh, ShardingAxisName.MLP_TENSOR)
     if not tensor_axes:
         return False
-    num_vocab_shards = 1
-    for axis in tensor_axes:
-        num_vocab_shards *= mesh.shape[axis]
+    num_vocab_shards = math.prod(mesh.shape[axis] for axis in tensor_axes)
+    if vocab_size % num_vocab_shards != 0:
+        return False
     local_vocab_size = vocab_size // num_vocab_shards
     return local_vocab_size >= _distributed_sampling_candidates_per_shard()
 
@@ -91,6 +97,8 @@ def distributed_sampling_allowed(logprobs: bool, logprobs_mode) -> bool:
 def _can_sample_distributed(
         tpu_sampling_metadata: TPUSupportedSamplingMetadata) -> jax.Array:
     """Whether every row is supported by distributed candidate sampling."""
+    if tpu_sampling_metadata.distributed_sampling_supported is not None:
+        return tpu_sampling_metadata.distributed_sampling_supported
     is_greedy = tpu_sampling_metadata.temperature < _SAMPLING_EPS
     supported = (
         (tpu_sampling_metadata.top_k > 0) &
@@ -180,6 +188,22 @@ def _shard_topk_candidates(values: jax.Array,
     if _topk_prefilter_enabled():
         return _prefiltered_top_k(values, k)
     return lax.top_k(values, k)
+
+
+def with_distributed_sampling_support(
+    tpu_sampling_metadata: TPUSupportedSamplingMetadata
+) -> TPUSupportedSamplingMetadata:
+    """Precomputes the every-row check for a batch that is sampled many times.
+
+    The check reduces over all rows. When the rows are sharded over data
+    parallel ranks, that is a cross-device all-reduce, so a loop that samples
+    the same batch on every step should compute it once, outside the loop.
+    """
+    if not tpu_sampling_metadata.do_sampling:
+        return tpu_sampling_metadata
+    return replace(tpu_sampling_metadata,
+                   distributed_sampling_supported=_can_sample_distributed(
+                       tpu_sampling_metadata))
 
 
 @dataclass
@@ -355,8 +379,15 @@ def _distributed_topk_sample(
     Returns sampled global token IDs and a replicated scalar indicating that
     the gathered candidates may not contain the complete top-k tie group.
     """
-    logits_spec = P(None, ShardingAxisName.MLP_TENSOR)
-    replicated = P()
+    vocab_axes = tuple(
+        axis for axis in _mesh_axes(mesh, ShardingAxisName.MLP_TENSOR)
+        if mesh.shape[axis] > 1)
+    batch_axes = tuple(axis
+                       for axis in _mesh_axes(mesh, ShardingAxisName.ATTN_DATA)
+                       if mesh.shape[axis] > 1 and axis not in vocab_axes)
+    batch_shards = math.prod(mesh.shape[axis] for axis in batch_axes)
+    if logits.shape[0] % batch_shards != 0:
+        batch_axes = ()
 
     def local_sample(local_logits, local_temperature):
         candidates_per_shard = _distributed_sampling_candidates_per_shard()
@@ -366,7 +397,7 @@ def _distributed_topk_sample(
                 "Distributed top-k sampling requires at least "
                 f"{candidates_per_shard} logits per vocabulary shard")
 
-        shard_index = lax.axis_index(ShardingAxisName.MLP_TENSOR)
+        shard_index = lax.axis_index(vocab_axes)
 
         # Greedy rows do not consume the categorical result. A safe positive
         # temperature avoids reversing their candidate ordering.
@@ -379,21 +410,25 @@ def _distributed_topk_sample(
         # and the batch dimension is minor across TPU vector lanes for top_k.
         local_logits = with_layout_constraint(local_logits,
                                               Layout(major_to_minor=(1, 0)))
-        scaled_logits = local_logits / safe_temperature[:, None]
-        local_values, local_ids = _shard_topk_candidates(
-            scaled_logits, candidates_per_shard)
+        # Division by a positive float32 is monotone non-decreasing, so scaling
+        # only the selected per-shard candidates preserves the top-k value
+        # multiset (ties introduced by rounding are handled on scaled values in
+        # `_merge_topk_candidates`).
+        raw_values, local_ids = _shard_topk_candidates(local_logits,
+                                                       candidates_per_shard)
+        local_values = raw_values / safe_temperature[:, None]
         local_ids = (local_ids + shard_index * local_vocab_size).astype(
             jnp.int32)
 
         candidate_values = lax.all_gather(
             local_values,
-            ShardingAxisName.MLP_TENSOR,
+            vocab_axes,
             axis=-1,
             tiled=True,
         )
         candidate_ids = lax.all_gather(
             local_ids,
-            ShardingAxisName.MLP_TENSOR,
+            vocab_axes,
             axis=-1,
             tiled=True,
         )
@@ -402,17 +437,10 @@ def _distributed_topk_sample(
     candidate_values, candidate_ids = jax.shard_map(
         local_sample,
         mesh=mesh,
-        in_specs=(logits_spec, replicated),
-        out_specs=(replicated, replicated),
+        in_specs=(P(batch_axes, vocab_axes), P(batch_axes)),
+        out_specs=(P(batch_axes, None), P(batch_axes, None)),
         check_vma=False,
     )(logits, temperature)
-
-    candidate_values = jax.lax.with_sharding_constraint(
-        candidate_values,
-        NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
-    candidate_ids = jax.lax.with_sharding_constraint(
-        candidate_ids, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA,
-                                             None)))
 
     safe_top_k = jnp.clip(top_k, 1, _distributed_sampling_max_top_k())
     filtered_values, candidate_ids, incomplete = _merge_topk_candidates(
@@ -445,10 +473,11 @@ def sample(
     use_distributed_candidates = (allow_distributed_sampling
                                   and _distributed_sampling_fits(
                                       mesh, logits.shape[-1]))
+    batch_data_axes = _mesh_axes(mesh, ShardingAxisName.ATTN_DATA)
     if not use_distributed_candidates and tpu_sampling_metadata.do_sampling:
         # Unshard the logits explicitly to avoid latency increase.
         logits = jax.lax.with_sharding_constraint(
-            logits, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
+            logits, NamedSharding(mesh, P(batch_data_axes, None)))
 
     greedy_tokens = jnp.argmax(logits, axis=-1)
     logits = logits.astype(jnp.float32)
@@ -460,8 +489,7 @@ def sample(
 
         def sample_full_vocab(_):
             full_logits = jax.lax.with_sharding_constraint(
-                logits, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA,
-                                              None)))
+                logits, NamedSharding(mesh, P(batch_data_axes, None)))
             processed_logits = _apply_sampling_transforms_microbatched(
                 full_logits, tpu_sampling_metadata)
             sampled_tokens = jax.random.categorical(rng, processed_logits)

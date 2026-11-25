@@ -1,21 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import inspect
 from collections.abc import Iterable, Sequence
 from typing import Any
 
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (HybridKVCacheCoordinator,
                                                KVCacheCoordinator)
 from vllm.v1.core.kv_cache_coordinator import \
     get_kv_cache_coordinator as orig_get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
-from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import (
-    CrossAttentionManager, get_manager_for_kv_cache_spec)
+    CrossAttentionManager, MambaManager, create_single_type_manager)
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.request import Request, RequestStatus
 
+from tpu_inference.core.mamba_prefix_caching import \
+    mamba_prefix_caching_enabled
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
@@ -115,6 +118,12 @@ def is_mamba_spec(spec: Any) -> bool:
 
 def is_mamba_group(group: Any) -> bool:
     """Check if a KV cache group contains Mamba layers."""
+    manager_cls = getattr(group, "manager_cls", None)
+    if isinstance(manager_cls, type) and issubclass(manager_cls, MambaManager):
+        return True
+    if hasattr(group, "kv_cache_specs"):
+        return any(
+            isinstance(s, MambaSpec) for s in group.kv_cache_specs.values())
     spec = getattr(group, "kv_cache_spec", group)
     return is_mamba_spec(spec)
 
@@ -217,6 +226,8 @@ class TPUDualBlockPool(BlockPool):
         self.cached_block_hash_to_block = attention_pool.cached_block_hash_to_block
         self.cached_block_hashes_by_block = attention_pool.cached_block_hashes_by_block
         self.kv_event_queue = attention_pool.kv_event_queue
+        # Read by vLLM's KV cache coordinator (replay_boundaries).
+        self.num_hash_lookahead_tokens = attention_pool.num_hash_lookahead_tokens
 
     def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
         attn_blocks: list[KVCacheBlock] = []
@@ -300,37 +311,22 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
     def __init__(
         self,
         kv_cache_config: KVCacheConfig,
-        max_model_len: int,
-        max_in_flight_tokens: int,
-        use_eagle: bool,
-        enable_caching: bool,
-        enable_kv_cache_events: bool,
-        dcp_world_size: int,
-        pcp_world_size: int,
-        scheduler_block_size: int,
-        hash_block_size: int,
-        metrics_collector: KVCacheMetricsCollector | None = None,
-        num_prefill_lookahead: int = 0,
         *args,
         mamba_num_blocks: int | None = None,
         **kwargs,
     ):
-        super().__init__(
-            kv_cache_config,
-            max_model_len,
-            max_in_flight_tokens,
-            use_eagle,
-            enable_caching,
-            enable_kv_cache_events,
-            dcp_world_size=dcp_world_size,
-            pcp_world_size=pcp_world_size,
-            scheduler_block_size=scheduler_block_size,
-            hash_block_size=hash_block_size,
-            metrics_collector=metrics_collector,
-            num_prefill_lookahead=num_prefill_lookahead,
-            *args,
-            **kwargs,
-        )
+        # Forward the arguments untouched: the parent signature changes across
+        # vLLM versions (vllm-project/vllm#66234 dropped `use_eagle` and renamed
+        # `num_prefill_lookahead` to `num_hash_lookahead_tokens`).
+        super().__init__(kv_cache_config, *args, **kwargs)
+        bound = inspect.signature(HybridKVCacheCoordinator.__init__).bind(
+            self, kv_cache_config, *args, **kwargs)
+        bound.apply_defaults()
+        max_model_len = bound.arguments["max_model_len"]
+        max_in_flight_tokens = bound.arguments["max_in_flight_tokens"]
+        enable_caching = bound.arguments["enable_caching"]
+        dcp_world_size = bound.arguments["dcp_world_size"]
+        pcp_world_size = bound.arguments["pcp_world_size"]
 
         # Base __init__ initialized self.block_pool with kv_cache_config.num_blocks (Attention pool)
         self.attention_block_pool = self.block_pool
@@ -407,8 +403,8 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             pool = self.mamba_block_pool
             if self.mirror_mamba_groups and i != self.primary_mamba_group_id:
                 pool = self._mirror_pool
-            new_managers[i] = get_manager_for_kv_cache_spec(
-                kv_cache_spec=kv_cache_config.kv_cache_groups[i].kv_cache_spec,
+            new_managers[i] = create_single_type_manager(
+                kv_cache_config.kv_cache_groups[i],
                 max_in_flight_tokens=max_in_flight_tokens,
                 max_model_len=max_model_len,
                 block_pool=pool,
@@ -419,6 +415,8 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 scheduler_block_size=self.scheduler_block_size,
                 needs_kv_cache_zeroing=self.kv_cache_config.
                 needs_kv_cache_zeroing,
+                retention_interval=kv_cache_config.
+                prefix_cache_retention_interval,
             )
         self.single_type_managers = tuple(new_managers)
 
@@ -477,16 +475,22 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     apply_admission_cap=apply_admission_cap,
                 )
             else:
-                needed = manager.get_num_blocks_to_allocate(
-                    request.request_id,
-                    num_tokens,
-                    new_computed_blocks[i],
-                    total_computed_tokens,
-                    num_local_computed_tokens,
-                    num_tokens_main_model,
-                    apply_admission_cap=apply_admission_cap,
-                    prefill_end=prefill_end,
-                )
+                reservation = (manager.get_num_blocks_to_reserve(
+                    request.request_id, num_tokens)
+                               if apply_admission_cap else None)
+                if reservation is not None:
+                    needed = reservation
+                else:
+                    needed = manager.get_num_blocks_to_allocate(
+                        request.request_id,
+                        num_tokens,
+                        new_computed_blocks[i],
+                        total_computed_tokens,
+                        num_local_computed_tokens,
+                        num_tokens_main_model,
+                        apply_admission_cap=apply_admission_cap,
+                        prefill_end=prefill_end,
+                    )
 
             if is_mamba:
                 # Mirrored groups reuse the primary's ids
@@ -538,6 +542,12 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     apply_admission_cap=apply_admission_cap,
                 )
             else:
+                if apply_admission_cap:
+                    reservation = manager.get_num_blocks_to_reserve(
+                        request_id, num_tokens)
+                    if reservation is not None:
+                        num_blocks_to_allocate += reservation
+                        continue
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
                     request_id,
                     num_tokens,
@@ -585,13 +595,22 @@ class TPUKVCacheManager(KVCacheManager):
                 skip_zeroing_group_ids=skip_zeroing_group_ids,
             )
 
-        if num_new_tokens == 0 and num_external_computed_tokens == 0:
+        if (num_new_tokens == 0 and num_external_computed_tokens == 0
+                and num_new_computed_tokens == 0):
             raise ValueError(
                 "num_new_tokens must be greater than 0 when there are no "
-                "external computed tokens")
+                "computed tokens to adopt")
 
         if new_computed_blocks is not None:
             new_computed_block_list = new_computed_blocks.blocks
+            if self.retained_hit_group_ids:
+                reused = num_new_computed_tokens + num_external_computed_tokens
+                groups = list(new_computed_block_list)
+                for group_id in self.retained_hit_group_ids:
+                    manager = self.coordinator.single_type_managers[group_id]
+                    groups[group_id] = groups[
+                        group_id][:cdiv(reused, manager.block_size)]
+                new_computed_block_list = tuple(groups)
         else:
             new_computed_block_list = self.empty_kv_cache_blocks.blocks
 
@@ -665,6 +684,7 @@ class TPUKVCacheManager(KVCacheManager):
                 new_computed_blocks=new_computed_block_list,
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,
+                num_tokens_main_model=num_tokens_main_model,
                 skip_zeroing_group_ids=skip_zeroing_group_ids,
             )
 
@@ -730,10 +750,30 @@ def propagate_mamba_num_blocks(rpc_owner: Any, kv_cache_config: Any,
     return mamba_num_blocks
 
 
+def propagate_num_gpu_blocks_override(rpc_owner: Any,
+                                      vllm_config: Any) -> int | None:
+    """Publish the attention pool size the workers' compact-mamba sizing set
+    (`cache_config.num_gpu_blocks_override`) in the engine-core process, which
+    does not share the workers' `cache_config` under multi-process executors.
+    Must run before `get_kv_cache_configs`."""
+    reported = [
+        v for v in rpc_owner.collective_rpc("get_num_gpu_blocks_override")
+        if v is not None
+    ]
+    if reported:
+        vllm_config.cache_config.num_gpu_blocks_override = min(reported)
+    return vllm_config.cache_config.num_gpu_blocks_override
+
+
 class MambaPoolSyncExecutorMixin:
     """Publish the workers' allocated mamba pool size in the engine-core
     process as soon as the caches exist: `initialize_from_config` runs there
     after every worker has allocated and before the scheduler is built."""
+
+    def get_kv_cache_layer_configs(self) -> Any:
+        layer_configs = super().get_kv_cache_layer_configs()
+        propagate_num_gpu_blocks_override(self, self.vllm_config)
+        return layer_configs
 
     def initialize_from_config(self, kv_cache_configs: Any) -> None:
         super().initialize_from_config(kv_cache_configs)
@@ -747,8 +787,8 @@ def maybe_install_hybrid_coordinator_hooks(vllm_config: Any) -> None:
     from the executors' `_init_executor`, which runs in the engine-core
     process; the platform config hook does not."""
     cache_config = vllm_config.cache_config
-    if (cache_config.enable_prefix_caching
-            and getattr(cache_config, "mamba_cache_mode", "none") == "align"):
+    if (cache_config.enable_prefix_caching and mamba_prefix_caching_enabled(
+            cache_config, vllm_config.model_config)):
         install_hybrid_coordinator_hooks(vllm_config)
 
 

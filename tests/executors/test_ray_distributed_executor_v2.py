@@ -15,6 +15,8 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
+from vllm.config import LoadConfig
+
 
 class MockVllmConfig:
 
@@ -33,7 +35,7 @@ class MockVllmConfig:
         self.model_config = MagicMock()
         self.cache_config = MagicMock()
         self.lora_config = MagicMock()
-        self.load_config = MagicMock()
+        self.load_config = LoadConfig()
         self.scheduler_config = MagicMock()
         self.speculative_config = MagicMock()
         self.prompt_adapter_config = MagicMock()

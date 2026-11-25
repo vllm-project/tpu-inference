@@ -21,6 +21,8 @@ import torch
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 
 from tpu_inference import envs
+from tpu_inference.core.mamba_prefix_caching import (
+    mamba_prefix_caching_enabled, set_mamba_prefix_caching)
 from tpu_inference.platforms.tpu_platform import TpuPlatform
 
 
@@ -54,6 +56,7 @@ class TestTpuPlatform:
         vllm_config.sharding_config = MagicMock()
         vllm_config.compilation_config = MagicMock(backend="eager")
         vllm_config.kv_transfer_config = None
+        vllm_config.speculative_config = None
         vllm_config.additional_config = {}
         vllm_config.scheduler_config.async_scheduling = False
         return vllm_config
@@ -119,6 +122,12 @@ class TestTpuPlatform:
         assert ("MOE_FOLD_ROUTING_INTO_DISPATCH"
                 in TpuPlatform.additional_env_vars)
         assert "MOE_FOLD_ROUTING_INTO_DISPATCH" in envs.environment_variables
+
+    def test_additional_env_vars_covers_full_kvcache_for_sliding_window(self):
+        """The workers build the KV cache specs, so they must see the flag."""
+        assert ("USE_FULL_KVCACHE_FOR_SLIDING_WINDOW"
+                in TpuPlatform.additional_env_vars)
+        assert "USE_FULL_KVCACHE_FOR_SLIDING_WINDOW" in envs.environment_variables
 
     @pytest.mark.parametrize(
         "name", ["MOE_TC_PERMUTE", "MOE_TC_PERMUTE_CAPACITY_FACTOR"])
@@ -324,7 +333,7 @@ class TestTpuPlatform:
         # Simulate vLLM's hybrid config-verify having derived the mamba cache
         # fields from the prefix-caching-enabled state (post-init assignment
         # keeps user_specified_mamba_block_size False).
-        vllm_config.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(vllm_config.cache_config, True)
         vllm_config.cache_config.mamba_block_size = 256
 
         # check_and_update_config replaces sharding_config with the manager's
@@ -345,7 +354,7 @@ class TestTpuPlatform:
             # Derived mamba fields must be reset to their prefix-caching-off
             # defaults or vLLM's "--mamba-block-size can only be set with
             # --enable-prefix-caching" validator rejects the config.
-            assert vllm_config.cache_config.mamba_cache_mode == "none"
+            assert not mamba_prefix_caching_enabled(vllm_config.cache_config)
             assert vllm_config.cache_config.mamba_block_size == 4096
 
     @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
@@ -389,7 +398,7 @@ class TestTpuPlatform:
         vllm_config.compilation_config.backend = ""
         vllm_config.model_config.is_hybrid = True
         vllm_config.cache_config.enable_prefix_caching = True
-        vllm_config.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(vllm_config.cache_config, True)
         vllm_config.cache_config.block_size = 16
         vllm_config.cache_config.prefix_match_unit = 8
         vllm_config.speculative_config = None
@@ -546,7 +555,8 @@ class TestTpuPlatform:
             self, vllm_config):
         vllm_config.cache_config.block_size = 16
         vllm_config.cache_config.mamba_block_size = 16
-        vllm_config.cache_config.mamba_cache_mode = "align"
+        vllm_config.model_config.is_hybrid = True
+        set_mamba_prefix_caching(vllm_config.cache_config, True)
         vllm_config.cache_config.prefix_match_unit = 8
 
         with pytest.raises(
@@ -773,12 +783,14 @@ class TestTpuPlatform:
         mock_patch.assert_called_once()
 
     @pytest.mark.parametrize(
-        "pp_size, runner_type, async_sched, expected_error",
+        "pp_size, runner_type, async_sched, spec_config, expected_error",
         [
-            (2, "generate", False,
+            (2, "generate", False, None,
              "continue_decode is not supported with pipeline parallelism"),
-            (1, "pooling", False,
+            (1, "pooling", False, None,
              "continue_decode is not supported for pooling models"),
+            (1, "generate", False, object(),
+             "continue_decode is not supported with speculative decoding"),
         ],
     )
     @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
@@ -797,12 +809,14 @@ class TestTpuPlatform:
         pp_size,
         runner_type,
         async_sched,
+        spec_config,
         expected_error,
     ):
         vllm_config.additional_config = {"enable_continue_decode": True}
         vllm_config.parallel_config.pipeline_parallel_size = pp_size
         vllm_config.model_config.runner_type = runner_type
         vllm_config.scheduler_config.async_scheduling = async_sched
+        vllm_config.speculative_config = spec_config
         vllm_config.cache_config = None
 
         with pytest.raises(ValueError, match=expected_error):

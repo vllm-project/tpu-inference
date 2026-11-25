@@ -19,6 +19,7 @@
 _TPU_VLLM_MODELS = {
     "DeepseekV4ForCausalLM":
     "tpu_inference.models.vllm.experimental.deepseek_v4:DeepseekV4ForCausalLM",
+    "LlamaForCausalLM": "vllm.model_executor.models.llama:LlamaForCausalLM",
 }
 
 

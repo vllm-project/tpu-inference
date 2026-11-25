@@ -17,7 +17,7 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
 from vllm.tasks import SupportedTask
 from vllm.v1 import utils as vllm_utils
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheLayerConfig
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
@@ -34,6 +34,22 @@ from tpu_inference.offload.metrics import TPUKVCacheStatsLogger
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
+
+
+def _chips_per_process_bounds(num_chips: int) -> str:
+    # A 4-chip TPU tray / sub-slice has a 2x2x1 2D ICI topology rather than 1x4x1.
+    if num_chips == 4:
+        return "2,2,1"
+    return f"1,{num_chips},1"
+
+
+def _enable_multiple_libtpu_load() -> None:
+    # XLA's TryAcquireTpuLock() treats TPU_CHIPS_PER_PROCESS_BOUNDS="2,2,1"
+    # as full-host usage and contends on /tmp/libtpu_lockfile when multiple
+    # 4-chip worker processes share an 8-chip host unless
+    # ALLOW_MULTIPLE_LIBTPU_LOAD is enabled.
+    if not os.environ.get("ALLOW_MULTIPLE_LIBTPU_LOAD"):
+        os.environ["ALLOW_MULTIPLE_LIBTPU_LOAD"] = "true"
 
 
 @dataclass
@@ -80,13 +96,19 @@ class PPConfig:
                 multihost_backend = envs.TPU_MULTIHOST_BACKEND
                 # For multi-host PP, each host is an independent JAX cluster,
                 # so chips always start from index 0 on each host.
-                start_chip = 0 if multihost_backend == "ray" else self.rank * chips_per_stage
+                start_chip = (0 if multihost_backend == "ray" else self.rank *
+                              chips_per_stage)
+                end_chip = start_chip + chips_per_stage
+                ordered_chips = tpu_info.get_ordered_chip_ids()
+                stage_chips = (ordered_chips[start_chip:end_chip]
+                               if len(ordered_chips) >= end_chip else range(
+                                   start_chip, end_chip))
                 self.default_tpu_visible_chips = ",".join(
-                    str(i)
-                    for i in range(start_chip, start_chip + chips_per_stage))
+                    str(i) for i in stage_chips)
 
-                # Set bounds to match the visible chips exactly.
-                self.default_tpu_chips_per_process_bounds = f"1,{chips_per_stage},1"
+                # Set bounds to match the visible chips topology.
+                self.default_tpu_chips_per_process_bounds = (
+                    _chips_per_process_bounds(chips_per_stage))
 
 
 _STANDARD_KEYS = frozenset({
@@ -293,20 +315,25 @@ class TPUWorker(WorkerBase):
                 f"{total_chips} chips. Reduce --data-parallel-size or "
                 f"--tensor-parallel-size.")
 
-        visible_chips = ",".join(str(c) for c in range(start_chip, end_chip))
+        ordered_chips = tpu_info.get_ordered_chip_ids()
+        rank_chips = (ordered_chips[start_chip:end_chip] if len(ordered_chips)
+                      >= end_chip else range(start_chip, end_chip))
+        visible_chips = ",".join(str(c) for c in rank_chips)
+        chips_bounds = _chips_per_process_bounds(chips_per_rank)
         # Unique libtpu port per rank so the runtimes can coexist on a host.
         tpu_port = jax_parallel_state.BASE_TPU_PROCESS_PORT + dp_rank
 
         os.environ["TPU_VISIBLE_CHIPS"] = visible_chips
-        os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] = f"1,{chips_per_rank},1"
+        os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] = chips_bounds
         os.environ["TPU_PROCESS_BOUNDS"] = "1,1,1"
         os.environ["TPU_PROCESS_PORT"] = str(tpu_port)
         os.environ["TPU_PROCESS_ADDRESSES"] = f"localhost:{tpu_port}"
         os.environ["CLOUD_TPU_TASK_ID"] = "0"
+        _enable_multiple_libtpu_load()
         logger.info(
             "Multi-process DP | rank=%d | TPU_VISIBLE_CHIPS=%s | "
-            "TPU_CHIPS_PER_PROCESS_BOUNDS=1,%d,1 | TPU_PROCESS_PORT=%d",
-            dp_rank, visible_chips, chips_per_rank, tpu_port)
+            "TPU_CHIPS_PER_PROCESS_BOUNDS=%s | TPU_PROCESS_PORT=%d", dp_rank,
+            visible_chips, chips_bounds, tpu_port)
 
     def init_device(self,
                     tpu_process_bounds="",
@@ -328,6 +355,7 @@ class TPUWorker(WorkerBase):
                 "TPU_PROCESS_BOUNDS",
                 "TPU_CHIPS_PER_PROCESS_BOUNDS",
                 "TPU_VISIBLE_CHIPS",
+                "ALLOW_MULTIPLE_LIBTPU_LOAD",
             ]
             env_dump = {v: os.environ.get(v) for v in tpu_env_vars}
             logger.debug(
@@ -351,6 +379,7 @@ class TPUWorker(WorkerBase):
                     [f"localhost:{port}" for port in tpu_ports])
                 os.environ["TPU_PROCESS_PORT"] = f"{tpu_ports[self.rank]}"
                 os.environ["CLOUD_TPU_TASK_ID"] = f"{self.rank}"
+                _enable_multiple_libtpu_load()
 
             os.environ[
                 "TPU_PROCESS_BOUNDS"] = tpu_process_bounds \
@@ -538,12 +567,12 @@ class TPUWorker(WorkerBase):
                 staging_buffer_pages = envs.TPU_OFFLOAD_NUM_STAGING_BLOCKS
 
                 # TODO(jcgu): verify page_size_bytes
-                kv_cache_specs = self.get_kv_cache_spec()
-                num_layers = len(kv_cache_specs)
-                assert len(kv_cache_specs) >= 1
+                layer_configs = self.get_kv_cache_layer_configs()
+                num_layers = len(layer_configs)
+                assert len(layer_configs) >= 1
                 # TODO(jcgu): hybrid-kv is not supported yet.
-                _layer_name, _layer_spec = next(iter(kv_cache_specs.items()))
-                vllm_page_size_bytes = _layer_spec.page_size_bytes
+                _layer_name, _layer_cfg = next(iter(layer_configs.items()))
+                vllm_page_size_bytes = _layer_cfg.spec.page_size_bytes
                 # rpa_page_size_bytes = get_rpa_page_size_bytes(self.model_runner.mesh,
                 #                                             kv_cache_specs)
                 stage_buffer_size_bytes = staging_buffer_pages * num_layers * vllm_page_size_bytes
@@ -576,7 +605,7 @@ class TPUWorker(WorkerBase):
         # NOTE: This method intentionally returns a concrete vLLM type, which
         # violates the pure abstract contract of the base class. This is a
         # deliberate, temporary compromise for the same reasons outlined in
-        # the `get_kv_cache_spec` method.
+        # the `get_kv_cache_layer_configs` method.
         if self.parallel_config.pipeline_parallel_size == 1 or self.rank == 0:
             intermediate_tensors = None
         else:
@@ -683,25 +712,22 @@ class TPUWorker(WorkerBase):
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()
 
-    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+    def get_kv_cache_layer_configs(self) -> dict[str, KVCacheLayerConfig]:
         # NOTE: This method intentionally returns a concrete vLLM type, which
         # violates the pure abstract contract of the base class. This is a
         # deliberate, temporary compromise.
         #
         # The vLLM executor that calls this method expects the concrete
-        # `vllm.KVCacheSpec` object to perform its own internal logic. If we
-        # returned an abstract adapter, the vLLM code would break.
-        #
-        # The ideal long-term solution is for the vLLM DI container to be
-        # responsible for this translation. When vLLM can be modified, this
-        # method should be changed to return `dict[str, AbstractKVCacheSpec]`,
-        # and the vLLM side should be updated to handle the translation.
-        return self.model_runner.get_kv_cache_spec()
+        # `vllm.KVCacheLayerConfig` object to perform its own internal logic.
+        return self.model_runner.get_kv_cache_layer_configs()
 
     def get_mamba_num_blocks(self) -> int | None:
         """Rows in the mamba state pool this worker allocated (None without
         mamba layers). Read by the engine core over `collective_rpc`."""
         return self.model_runner.kv_cache_manager.actual_mamba_num_blocks
+
+    def get_num_gpu_blocks_override(self) -> int | None:
+        return self.model_runner.cache_config.num_gpu_blocks_override
 
     def get_kv_connector_handshake_metadata(self) -> dict | None:
         """Get KV connector metadata from this worker if available."""

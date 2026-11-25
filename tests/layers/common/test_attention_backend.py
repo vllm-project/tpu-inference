@@ -30,13 +30,16 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
+from tpu_inference import envs
 from tpu_inference.kernels.gdn.v3 import wrapper as v3_gdn
 from tpu_inference.layers.common import (attention_backend,
                                          attention_interface, gdn_attention)
 from tpu_inference.layers.common.attention_backend import (
     GDNLinearAttentionBackend, RPAAttentionBackend)
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.attention_metadata import (
+    AttentionMetadata, MambaMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import MESH_AXIS_NAMES
+from tpu_inference.layers.vllm.backends import flash_attn
 from tpu_inference.layers.vllm.backends.flash_attn import (
     PallasAttentionBackend, PallasAttentionBackendImpl)
 from tpu_inference.layers.vllm.custom_ops.gdn_attention_op import \
@@ -232,6 +235,149 @@ def test_default_impl_runs_rpa():
     assert PallasAttentionBackendImpl.attention_backend == "rpa"
 
 
+@pytest.mark.parametrize(
+    ("use_batched_rpa", "num_spec_tokens", "expected_decode_query_size"),
+    [
+        (True, 3, 4),
+        (False, 3, 1),
+        (True, 0, 1),
+        (True, None, 1),
+    ],
+)
+def test_pallas_backend_passes_decode_query_size(mesh, monkeypatch,
+                                                 use_batched_rpa,
+                                                 num_spec_tokens,
+                                                 expected_decode_query_size):
+    import torch
+    import torchax
+    from torchax.interop import torch_view
+
+    from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+        set_vllm_model_wrapper_context
+
+    class CapturingAttentionBackend(FakeAttentionBackend):
+
+        def attention(self, kv_cache, q, k, v, md, shared_md, mesh, **kwargs):
+            return kv_cache, jnp.full(q.shape, kwargs["decode_query_size"],
+                                      q.dtype)
+
+    monkeypatch.setattr(flash_attn, "create_attention_backend",
+                        lambda _: CapturingAttentionBackend())
+    monkeypatch.setattr(envs, "USE_BATCHED_RPA_KERNEL", use_batched_rpa)
+
+    impl = PallasAttentionBackendImpl(
+        num_heads=NUM_HEADS,
+        head_size=HEAD_DIM,
+        scale=1.0,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="auto",
+    )
+    layer = SimpleNamespace(layer_name="0")
+    positions = jnp.arange(NUM_TOKENS)
+    kv_cache = jnp.zeros((2, 16, 2, HEAD_DIM), jnp.bfloat16)
+    vllm_config = (None if num_spec_tokens is None else SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=num_spec_tokens)))
+
+    flash_attn._jax_attn_func.clear_cache()
+    try:
+        with torchax.default_env(), set_vllm_model_wrapper_context(
+                kv_caches=[kv_cache],
+                mesh=mesh,
+                layer_name_to_kvcache_index={"0": 0},
+                vllm_config=vllm_config,
+                shared_attn_metadata=SharedAttentionMetadata(
+                    input_positions=positions),
+        ):
+            q = torch_view(
+                jnp.ones((NUM_TOKENS, NUM_HEADS * HEAD_DIM), jnp.bfloat16))
+            k = torch_view(jnp.ones((NUM_TOKENS, HEAD_DIM), jnp.bfloat16))
+            v = torch_view(jnp.ones((NUM_TOKENS, HEAD_DIM), jnp.bfloat16))
+            out = impl.forward(
+                layer,
+                q,
+                k,
+                v,
+                torch.tensor([]),
+                AttentionMetadata(input_positions=positions),
+            )
+            out_np = np.asarray(jax.device_get(out._elem), dtype=np.float32)
+    finally:
+        flash_attn._jax_attn_func.clear_cache()
+
+    np.testing.assert_array_equal(out_np, expected_decode_query_size)
+
+
+def test_draft_step_fun_populates_vllm_config_in_wrapper_context(
+        mesh, monkeypatch):
+    from contextlib import nullcontext
+
+    import torch
+
+    from tpu_inference.models.vllm import vllm_model_wrapper
+    from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
+    from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+        get_vllm_model_wrapper_context
+
+    monkeypatch.setattr(vllm_model_wrapper, "get_tpu_quantization_config",
+                        lambda vllm_config, mesh: None)
+    monkeypatch.setattr(vllm_model_wrapper, "set_forward_context",
+                        lambda **kwargs: nullcontext())
+
+    vllm_config = SimpleNamespace(
+        quant_config=None,
+        speculative_config=SimpleNamespace(method="mtp",
+                                           num_speculative_tokens=3),
+    )
+    wrapper = VllmModelWrapper(
+        vllm_config=vllm_config,
+        rng=jax.random.key(0),
+        mesh=mesh,
+        is_draft_model=True,
+    )
+    wrapper.model = SimpleNamespace()
+
+    captured = {}
+
+    def fake_functional_call(model, params, kwargs, tie_weights=False):
+        ctx = get_vllm_model_wrapper_context()
+        captured["vllm_config"] = ctx.vllm_config
+        captured["shared_attn_metadata"] = ctx.shared_attn_metadata
+        captured["layer_name_to_kvcache_index"] = (
+            ctx.layer_name_to_kvcache_index)
+        captured["spec_step_idx"] = kwargs.get("spec_step_idx")
+        return kwargs["hidden_states"]
+
+    monkeypatch.setattr(torch.func, "functional_call", fake_functional_call)
+
+    draft_step_fn = wrapper.jit_step_func()
+    kv_cache = jnp.zeros((2, 16, 2, HEAD_DIM), jnp.bfloat16)
+    input_ids = jnp.zeros((NUM_TOKENS, ), dtype=jnp.int32)
+    hidden = jnp.ones((NUM_TOKENS, HEAD_DIM), dtype=jnp.bfloat16)
+    positions = jnp.arange(NUM_TOKENS)
+
+    with jax.disable_jit():
+        new_kv_caches, out_hidden, aux_hidden, _ = draft_step_fn(
+            {},
+            [kv_cache],
+            input_ids,
+            hidden,
+            AttentionMetadata(input_positions=positions),
+            (("0", 0), ),
+            spec_step_idx=1,
+        )
+
+    assert captured["vllm_config"] is vllm_config
+    assert captured["shared_attn_metadata"] is None
+    assert captured["layer_name_to_kvcache_index"] == {"0": 0}
+    assert captured["spec_step_idx"] == 1
+    assert len(new_kv_caches) == 1
+    assert out_hidden.shape == (NUM_TOKENS, HEAD_DIM)
+    assert len(aux_hidden) == 1
+
+
 def test_default_backend_skips_the_process_check(monkeypatch):
     monkeypatch.setenv("TPU_MULTIHOST_BACKEND", "ray")
 
@@ -279,3 +425,71 @@ def test_gdn_forwards_read_offsets_and_num_spec_tokens(mesh):
     assert captured["num_extra_args"] == 1
     assert captured["options"]["num_spec_tokens"] == 3
     np.testing.assert_array_equal(output.astype(jnp.float32), 2.0)
+
+
+def test_resolve_gdn_state_slots_align_spec_forwards_to_gdn_kernel(mesh):
+    captured = {}
+
+    def capturing_kernel(qkv, b, a, conv_state, recurrent_state, conv_weight,
+                         conv_bias, a_log, dt_bias, query_start_loc,
+                         state_indices, distribution, seq_lens,
+                         read_state_indices, *extra_args, **options):
+        captured["num_spec_tokens"] = options["num_spec_tokens"]
+        new_conv = conv_state.at[state_indices[0] + 1].set(conv_state[0] + 5.0)
+        new_rec = recurrent_state.at[state_indices[0] +
+                                     1].set(recurrent_state[0] + 9.0)
+        output = jnp.zeros((qkv.shape[0], options["n_v"] * options["d_v"]),
+                           qkv.dtype)
+        trace_vals = jnp.stack([
+            state_indices[0],
+            read_state_indices[0],
+            extra_args[0][0],
+        ]).astype(qkv.dtype)
+        output = output.at[0, :3].set(trace_vals)
+        return (new_conv, new_rec), output
+
+    md = AttentionMetadata(
+        input_positions=jnp.arange(4, dtype=jnp.int32),
+        block_tables=jnp.array([[1, 2]], dtype=jnp.int32),
+        seq_lens=jnp.array([18], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 4], dtype=jnp.int32),
+        request_distribution=jnp.array([1, 1, 1], dtype=jnp.int32),
+        mamba=MambaMetadata(
+            state_indices=jnp.array([4], dtype=jnp.int32),
+            read_offsets=jnp.array([2], dtype=jnp.int32),
+        ),
+        padded_num_reqs=1,
+    )
+    slots = gdn_attention.resolve_gdn_state_slots(
+        md,
+        seq_lens=md.seq_lens,
+        query_start_loc=md.query_start_loc,
+        padded_num_reqs_per_dp=1,
+        dp_size=1,
+        num_local_rows=8,
+        mamba_block_size=16,
+        num_spec_tokens=3,
+    )
+    inputs = make_gdn_inputs(mesh)
+    inputs["conv_state"] = jnp.zeros((8, KERNEL_SIZE - 1, QKV_DIM),
+                                     jnp.bfloat16)
+    inputs["recurrent_state"] = jnp.zeros((8, NUM_HEADS, HEAD_DIM, HEAD_DIM),
+                                          jnp.float32)
+    inputs["state_indices"] = slots.state_indices
+    inputs["query_start_loc"] = md.query_start_loc
+    inputs["distribution"] = md.request_distribution
+    inputs["seq_lens"] = md.seq_lens
+    inputs.pop("read_state_indices")
+
+    (new_conv, new_rec), output = gdn_attention.run_jax_gdn_attention(
+        **inputs,
+        conv1d_gdn_kernel=capturing_kernel,
+        **slots.kernel_kwargs(),
+    )
+    new_conv, new_rec = slots.apply_boundary_copies(new_conv, new_rec, mesh)
+
+    np.testing.assert_array_equal(np.asarray(output[0, :3], np.float32),
+                                  [4.0, 6.0, 0.0])
+    assert captured["num_spec_tokens"] == 3
+    np.testing.assert_array_equal(np.asarray(new_conv[1], np.float32), 5.0)
+    np.testing.assert_array_equal(np.asarray(new_rec[1], np.float32), 9.0)

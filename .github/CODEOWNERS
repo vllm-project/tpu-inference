@@ -50,14 +50,14 @@
 /tpu_inference/runner/tpu_runner.py @jrplatin @kyuyeunk @wenxindongwork @sixiang-google
 /tpu_inference/runner/persistent_batch_manager.py @jrplatin @wenxindongwork
 /tpu_inference/executors/ @sixiang-google @mrjunwan-lang @Lumosis
-/tpu_inference/core/ @sixiang-google @mrjunwan-lang @wenxindongwork
+/tpu_inference/core/ @sixiang-google @mrjunwan-lang @wenxindongwork @pv97
 /tpu_inference/layers/common/sharding.py @kyuyeunk @jrplatin @wenxindongwork @sixiang-google  @mrjunwan-lang
 
 # Worker Management
 /tpu_inference/worker/ @sixiang-google @mrjunwan-lang @jrplatin @vanbasten23 @wenxindongwork @Lumosis
 
 # RL Rollout / Weight Sync
-/tpu_inference/rl/ @wenxindongwork @pv97
+/tpu_inference/rl/ @wenxindongwork @pv97 @yixinshi
 
 # Speculative Decoding
 /tpu_inference/spec_decode/ @Lumosis @gxd3
@@ -68,8 +68,8 @@
 /tpu_inference/platforms/ @sixiang-google @mrjunwan-lang @Lumosis
 
 # LoRA and Adapters
-/tpu_inference/lora/ @vanbasten23 @kyuyeunk
-/tpu_inference/runner/lora_utils.py @vanbasten23 @kyuyeunk
+/tpu_inference/lora/ @aman2930 @kyuyeunk
+/tpu_inference/runner/lora_utils.py @aman2930 @kyuyeunk
 
 # Docker Configuration
 /docker/ @jrplatin @QiliangCui @yiw-wang QiliangCui
@@ -85,7 +85,7 @@
 /support_matrices/
 
 # Tests mirror production-code ownership (CODEOWNERS rules per subtree)
-/tests/core/ @sixiang-google @mrjunwan-lang @wenxindongwork
+/tests/core/ @sixiang-google @mrjunwan-lang @wenxindongwork @pv97
 /tests/distributed/ @mrjunwan-lang @sixiang-google @wenxindongwork @QiliangCui
 /tests/executors/ @sixiang-google @mrjunwan-lang @wenxindongwork @QiliangCui
 /tests/kernels/ @kyuyeunk @bythew3i @a1yssan13
@@ -93,7 +93,7 @@
 /tests/kernels/rpa_v3_cp/ @kyuyeunk @wenxindongwork @weiyu0824 
 /tests/layers/ @kyuyeunk @lk-chen @jrplatin
 /tests/layers/jax/ @kyuyeunk @lk-chen @jrplatin
-/tests/lora/ @vanbasten23 @kyuyeunk
+/tests/lora/ @aman2930 @kyuyeunk
 /tests/models/ @kyuyeunk @lk-chen @jrplatin
 /tests/models/jax/ @kyuyeunk @lk-chen @jrplatin
 /tests/layers/jax/sample/test_rejection_sampler.py @Lumosis @gxd3

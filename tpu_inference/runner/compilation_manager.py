@@ -28,6 +28,8 @@ from vllm.utils.math_utils import round_down
 
 import tpu_inference.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
+from tpu_inference.core.mamba_prefix_caching import \
+    mamba_prefix_caching_enabled
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, GroupedAttentionMetadata, MambaMetadata,
@@ -199,9 +201,14 @@ class CompilationManager:
                 # AOT lower not supported here (e.g. a jit whose body contains a
                 # nested jit with compiler_options). Fall back to warmup-only — the
                 # warmup pass will trigger inline compile.
+                # exc_info keeps the traceback: without it a lowering failure
+                # that also breaks warmup only shows up as a bare message
+                # (e.g. through RayDistributedExecutor workers).
                 logger.info(
                     "AOT lower skipped for %s (%r); will compile in warmup.",
-                    name, e)
+                    name,
+                    e,
+                    exc_info=True)
                 return
 
         # Compilation is thread-safe
@@ -482,9 +489,8 @@ class CompilationManager:
         # populate for hybrid attn+mamba models without align mode — for pure-attention models
         # and mamba align mode we pass None at runtime (see `_prepare_inputs`), and the precompile
         # primer must match that shape so the cached HLO is reused.
-        if (self.runner.kv_cache_config.has_mamba_layers
-                and getattr(self.runner.cache_config, "mamba_cache_mode",
-                            "none") != "align"):
+        if (self.runner.kv_cache_config.has_mamba_layers and
+                not mamba_prefix_caching_enabled(self.runner.cache_config)):
             mamba_state_indices = device_array(self.runner.mesh,
                                                np.zeros(
                                                    self.runner.max_num_reqs,
@@ -1313,7 +1319,8 @@ class CompilationManager:
                 dp_sharding = NamedSharding(self.runner.mesh, PartitionSpec())
 
                 target_logits = self._create_dummy_tensor(
-                    (num_logits, vocab_size), jnp.float32, logits_sharding)
+                    (num_logits, vocab_size), self.runner.model_config.dtype,
+                    logits_sharding)
 
                 processed_bonus_logits = self._create_dummy_tensor(
                     (num_reqs, vocab_size), jnp.float32, logits_sharding)
@@ -1385,9 +1392,11 @@ class CompilationManager:
                 logits_sharding = NamedSharding(self.runner.mesh, logits_spec)
 
                 target_logits = self._create_dummy_tensor(
-                    (num_logits, vocab_size), jnp.bfloat16, logits_sharding)
+                    (num_logits, vocab_size), self.runner.model_config.dtype,
+                    logits_sharding)
                 bonus_logits = self._create_dummy_tensor(
-                    (num_reqs, vocab_size), jnp.bfloat16, logits_sharding)
+                    (num_reqs, vocab_size), self.runner.model_config.dtype,
+                    logits_sharding)
 
                 self._run_compilation(
                     f"worker{self.runner.rank} _extend_logits_simple",
@@ -2157,8 +2166,8 @@ class CompilationManager:
                                                 sharding=dp_sharding)
 
             if (self.runner.kv_cache_config.has_mamba_layers
-                    and getattr(self.runner.cache_config, "mamba_cache_mode",
-                                "none") != "align"):
+                    and not mamba_prefix_caching_enabled(
+                        self.runner.cache_config)):
                 mamba_state_indices = device_array(
                     self.runner.mesh,
                     np.zeros(self.runner.max_num_reqs, dtype=np.int32),

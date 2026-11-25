@@ -82,6 +82,8 @@ if hasattr(torch, "accelerator") and hasattr(torch.accelerator, "synchronize"):
 from vllm.platforms.interface import Platform, PlatformEnum
 
 from tpu_inference import envs
+from tpu_inference.core.mamba_prefix_caching import (
+    mamba_prefix_caching_enabled, set_mamba_prefix_caching)
 from tpu_inference.layers.common.attention_backend import (
     check_attention_backend_config, is_registered_attention_backend)
 from tpu_inference.layers.common.sharding import ShardingConfigManager
@@ -234,6 +236,7 @@ class TpuPlatform(Platform):
         "USE_GMM_FUSED_RS_KERNEL",
         "MOE_ALL_GATHER_ACTIVATION_DTYPE",
         "SKIP_MAMBA_SCHEDULER_BLOCKS",
+        "USE_FULL_KVCACHE_FOR_SLIDING_WINDOW",
         "TPU_MESH_ATTN_DP_RING",
     ]
 
@@ -403,15 +406,14 @@ class TpuPlatform(Platform):
 
         # Hybrid (mamba/linear-attention) models cannot use prefix caching with
         # speculative decoding because verify windows need consecutive state slots.
-        if (cache_config and getattr(cache_config, "mamba_cache_mode", "none")
-                == "align"):
+        if mamba_prefix_caching_enabled(cache_config,
+                                        vllm_config.model_config):
             if vllm_config.speculative_config is not None:
                 logger.warning(
                     "[tpu_platform] Disabling prefix caching: hybrid "
                     "(mamba/linear-attention) models do not support cached "
                     "prefixes with speculative decoding on TPU.")
-                cache_config.enable_prefix_caching = False
-                cache_config.mamba_cache_mode = "none"
+                set_mamba_prefix_caching(cache_config, False)
                 if (getattr(cache_config, "mamba_block_size", None) is not None
                         and
                         not getattr(cache_config,
@@ -550,6 +552,10 @@ class TpuPlatform(Platform):
             if is_pooling_model:
                 raise ValueError(
                     "continue_decode is not supported for pooling models")
+            if vllm_config.speculative_config is not None:
+                raise ValueError(
+                    "continue_decode is not supported with speculative decoding"
+                )
 
             from tpu_inference.core.sched.utils import \
                 patch_vllm_scheduler_for_continue_decode
@@ -574,11 +580,12 @@ class TpuPlatform(Platform):
         # block size divides the attention one drives `hash_block_size` below
         # the block size, which turns on partial prefix-cache hits and their
         # copy-on-write state copies (unimplemented on TPU).
-        if getattr(cache_config, "mamba_cache_mode", "none") == "align":
+        if mamba_prefix_caching_enabled(cache_config,
+                                        vllm_config.model_config):
             if cache_config.mamba_block_size != cache_config.block_size:
                 logger.info(
                     "Setting mamba_block_size to %d to match the attention "
-                    "block size (was %d) for mamba prefix caching.",
+                    "block size (was %s) for mamba prefix caching.",
                     cache_config.block_size, cache_config.mamba_block_size)
                 cache_config.mamba_block_size = cache_config.block_size
             if (cache_config.prefix_match_unit is not None and
@@ -635,14 +642,6 @@ class TpuPlatform(Platform):
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         return True
-
-    @classmethod
-    def register_custom_kv_cache_specs(cls, vllm_config: VllmConfig) -> None:
-        # Unconditional: the manager is only used for specs the runner emits
-        # under SKIP_MAMBA_SCHEDULER_BLOCKS.
-        from tpu_inference.core.runner_slot_mamba import \
-            register_runner_slot_mamba_spec
-        register_runner_slot_mamba_spec()
 
     @classmethod
     def current_device(cls) -> torch.device:

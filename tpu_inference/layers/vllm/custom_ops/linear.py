@@ -36,10 +36,34 @@ class VllmRowParallelLinear(RowParallelLinear):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._sync_defer_all_reduce()
 
-        linear_config = getattr(self.quant_method, "linear_config", None)
-        if linear_config is not None:
-            linear_config.defer_all_reduce = not self.reduce_results
+    # `reduce_results` may be flipped after construction: vLLM's Transformers
+    # modeling backend sets `down_proj.reduce_results = False` on fused shared
+    # experts once the model is built, so the MoE runner can reduce shared and
+    # routed outputs together. Keep `defer_all_reduce` in sync, otherwise the
+    # shared-expert output is all-reduced here *and* again by the MoE runner.
+    @property
+    def reduce_results(self) -> bool:
+        return self._reduce_results
+
+    @reduce_results.setter
+    def reduce_results(self, value: bool) -> None:
+        # vLLM rejects reduce_results=False with an in-layer bias only in
+        # __init__; enforce the same once constructed, otherwise the bias
+        # would be summed TP times by the deferred all-reduce.
+        if (not value and getattr(self, "bias", None) is not None
+                and not getattr(self, "skip_bias_add", False)):
+            raise ValueError("When not reduce the results, adding bias to the "
+                             "results can lead to incorrect results")
+        self._reduce_results = value
+        self._sync_defer_all_reduce()
+
+    def _sync_defer_all_reduce(self) -> None:
+        linear_config = getattr(getattr(self, "quant_method", None),
+                                "linear_config", None)
+        if linear_config is not None and hasattr(self, "_reduce_results"):
+            linear_config.defer_all_reduce = not self._reduce_results
 
     def forward(
         self,
@@ -129,6 +153,21 @@ class VllmQKVParallelLinear(QKVParallelLinear):
         self.num_kv_head_replicas = replicas
         self.mesh_tp_size = tp
 
+    @property
+    def tpu_split_sizes(self) -> list[int]:
+        """Global (q, k, v) widths of what `forward` returns.
+
+        `output_sizes` stays inflated by the KV-head replicas (weight loading
+        and the sharding helpers need that), but `forward` merges the replicas
+        back into one copy, so a caller that splits the fused output must use
+        these widths instead. Read by the vLLM Transformers-backend split that
+        `transformers_backend.global_view` installs.
+        """
+        q = self.total_num_heads * self.head_size
+        k = self.total_num_kv_heads * self.head_size
+        v = self.total_num_kv_heads * self.v_head_size
+        return [q, k, v]
+
     def weight_loader(self,
                       param: Parameter,
                       loaded_weight: torch.Tensor,
@@ -170,8 +209,19 @@ class VllmQKVParallelLinear(QKVParallelLinear):
         if self.num_kv_head_replicas == 1:
             return super().forward(x)
 
-        out, bias = super().forward(x)
+        # With return_bias=False (as vLLM's Transformers backend builds its
+        # linear layers) the parent returns only the output tensor.
+        if self.return_bias:
+            out, bias = super().forward(x)
+        else:
+            out, bias = super().forward(x), None
         out_jax = jax_view(out)
+        # The shard_map below is written for 2-D (num_tokens, features)
+        # activations, which vLLM's native models pass. vLLM's Transformers
+        # backend passes (batch, seq, features); flatten the leading dims so
+        # the sharding specs line up, and restore them at the end.
+        lead_shape = out_jax.shape[:-1]
+        out_jax = out_jax.reshape(-1, out_jax.shape[-1])
 
         out_jax = reorder_concatenated_tensor_for_sharding(
             out_jax,
@@ -238,4 +288,7 @@ class VllmQKVParallelLinear(QKVParallelLinear):
             v_jax = _mark_kv_head_replicated(v_jax)
 
         out_jax = jnp.concatenate([q_jax, k_jax, v_jax], axis=-1)
+        out_jax = out_jax.reshape(*lead_shape, out_jax.shape[-1])
+        if not self.return_bias:
+            return torch_view(out_jax)
         return torch_view(out_jax), bias

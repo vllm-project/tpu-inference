@@ -27,16 +27,19 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.sampling_params import SamplingType
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheGroupSpec, KVCacheTensor,
-                                        MambaSpec, MLAAttentionSpec,
-                                        SlidingWindowMLASpec,
-                                        SlidingWindowSpec,
-                                        UniformTypeKVCacheSpecs)
+from vllm.v1.core.kv_cache_planning import (get_kv_cache_config_from_groups,
+                                            get_kv_cache_groups)
+from vllm.v1.core.single_type_kv_cache_manager import (FullAttentionManager,
+                                                       MambaManager,
+                                                       SlidingWindowManager)
+from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
+                                        KVCacheGroup, KVCacheTensor, MambaSpec,
+                                        MLAAttentionSpec)
 from vllm.v1.request import Request
 
 from tpu_inference import utils as common_utils
-from tpu_inference.core.runner_slot_mamba import RunnerSlotMambaSpec
+from tpu_inference.core.mamba_prefix_caching import set_mamba_prefix_caching
+from tpu_inference.core.runner_slot_mamba import RunnerSlotMambaManager
 from tpu_inference.runner.input_batch import CachedRequestState
 from tpu_inference.runner.kv_cache import (_get_mamba_cache_allocator,
                                            get_attention_page_size_bytes)
@@ -92,6 +95,21 @@ class TestKVCacheManager:
                                          devices=self.mock_devices)
             self.runner.mesh = self.mock_mesh
 
+    @staticmethod
+    def _make_group(layer_names, spec, manager_config=None):
+        if manager_config is None:
+            if isinstance(spec, MambaSpec):
+                manager_config = MambaManager.config()
+            else:
+                manager_config = FullAttentionManager.config()
+        return KVCacheGroup(
+            kv_cache_specs={name: spec
+                            for name in layer_names},
+            manager_config=manager_config,
+            block_size=spec.block_size,
+            dcp_sharded=not isinstance(spec, MambaSpec),
+        )
+
     def _create_mamba_kv_cache_config(self, num_blocks, page_size_bytes,
                                       layer_names):
         mamba_spec = MagicMock(spec=MambaSpec)
@@ -101,8 +119,7 @@ class TestKVCacheManager:
         mamba_spec.dtypes = [torch.bfloat16, torch.float32]
 
         kv_cache_groups = [
-            KVCacheGroupSpec(layer_names=layer_names,
-                             kv_cache_spec=mamba_spec),
+            self._make_group(layer_names, mamba_spec),
         ]
         kv_cache_tensors = [
             KVCacheTensor(
@@ -173,6 +190,7 @@ class TestKVCacheManager:
         prefill_request_state = CachedRequestState(
             req_id="test_req_1",
             prompt_token_ids=list(range(prompt_len)),
+            prefill_token_ids=list(range(prompt_len)),
             output_token_ids=[],
             sampling_params=mock_sampling_params,
             block_ids=tuple([prefill_block_ids]),
@@ -299,14 +317,14 @@ class TestKVCacheManager:
         self.runner.vllm_config.compilation_config.static_forward_context = \
             static_forward_context
 
-        kv_cache_spec = self.runner.get_kv_cache_spec()
+        layer_configs = self.runner.get_kv_cache_layer_configs()
 
         block_size = self.runner.vllm_config.cache_config.block_size
         num_kv_heads = common_utils.get_padded_num_heads(
             num_kv_heads, self.runner.mesh.shape["model"])
         head_size = common_utils.get_padded_head_dim(head_size)
 
-        expected_full_attn_spec = FullAttentionSpec(
+        expected_attn_spec = AttentionSpec(
             block_size=block_size,
             num_kv_heads=num_kv_heads,
             head_size=head_size,
@@ -314,24 +332,50 @@ class TestKVCacheManager:
             page_size_padded=get_attention_page_size_bytes(
                 self.runner.mesh, block_size, num_kv_heads, head_size,
                 self.runner.kv_cache_dtype, False))
-        expected_sliding_window_spec = SlidingWindowSpec(
-            block_size=block_size,
-            num_kv_heads=num_kv_heads,
-            head_size=head_size,
-            dtype=torch.bfloat16,
-            sliding_window=sliding_window,
-            page_size_padded=get_attention_page_size_bytes(
-                self.runner.mesh, block_size, num_kv_heads, head_size,
-                self.runner.kv_cache_dtype, False))
-        assert len(kv_cache_spec) == 20
+        expected_full_attn_cfg = FullAttentionManager.layer_config(
+            expected_attn_spec)
+        expected_sliding_window_cfg = SlidingWindowManager.layer_config(
+            expected_attn_spec, sliding_window=sliding_window)
+        assert len(layer_configs) == 20
         for i in range(10):
-            assert kv_cache_spec[f'layer.{i}'] == expected_full_attn_spec
+            assert layer_configs[f'layer.{i}'] == expected_full_attn_cfg
         for i in range(10, 20):
-            assert kv_cache_spec[f'layer.{i}'] == expected_sliding_window_spec
-        assert 'layer.20' not in kv_cache_spec
+            assert layer_configs[f'layer.{i}'] == expected_sliding_window_cfg
+        assert 'layer.20' not in layer_configs
         assert self.runner.kv_cache_manager.shared_kv_cache_layers == {
             'layer.20': 'layer.0'
         }
+        # Uniform head dims: no extra page padding.
+        assert self.runner.kv_cache_manager._hybrid_uniform_page_size_bytes \
+            is None
+
+    def test_get_kv_cache_spec_with_compilation_cfg_propagates_is_draft(self):
+        target_attn = MagicMock(
+            spec=Attention,
+            num_kv_heads=8,
+            head_size=128,
+            attn_type=AttentionType.DECODER,
+            sliding_window=None,
+            kv_sharing_target_layer_name=None,
+            is_draft_layer=False,
+        )
+        draft_attn = MagicMock(
+            spec=Attention,
+            num_kv_heads=8,
+            head_size=128,
+            attn_type=AttentionType.DECODER,
+            sliding_window=None,
+            kv_sharing_target_layer_name=None,
+            is_draft_layer=True,
+        )
+        self.runner.vllm_config.compilation_config.static_forward_context = {
+            "layer.0": target_attn,
+            "draft.0": draft_attn,
+        }
+
+        layer_configs = self.runner.get_kv_cache_layer_configs()
+        assert layer_configs["layer.0"].is_draft is False
+        assert layer_configs["draft.0"].is_draft is True
 
     def test_get_kv_cache_spec_with_compilation_cfg_mla(self):
         # tests we create kv cache spec from compilation config with mla
@@ -367,13 +411,426 @@ class TestKVCacheManager:
         self.runner.vllm_config.compilation_config.static_forward_context = \
             static_forward_context
 
-        kv_cache_spec = self.runner.get_kv_cache_spec()
+        layer_configs = self.runner.get_kv_cache_layer_configs()
 
-        assert len(kv_cache_spec) == 1
-        spec = kv_cache_spec['layer.0']
+        assert len(layer_configs) == 1
+        layer_cfg = layer_configs['layer.0']
+        assert layer_cfg.manager_cls is FullAttentionManager
+        spec = layer_cfg.spec
         assert isinstance(spec, MLAAttentionSpec)
         assert spec.num_kv_heads == 1
         assert spec.head_size == expected_head_size
+
+    # Gemma 4 style layout, scaled down: sliding-window layers with many small
+    # KV heads, full-attention layers with few large KV heads.
+    _SLIDING_KV_HEADS, _SLIDING_HEAD_SIZE = 16, 256
+    _FULL_KV_HEADS, _FULL_HEAD_SIZE = 4, 512
+    _SLIDING_WINDOW = 64
+
+    def _make_mixed_head_dim_layers(self, sliding_window=_SLIDING_WINDOW):
+        """Builds 4 sliding + 2 full-attention layers with different head
+        dims, plus one KV-sharing sliding layer."""
+        layers = {}
+        for i in range(6):
+            is_sliding = i < 4
+            layers[f'layer.{i}'] = MagicMock(
+                spec=Attention,
+                num_kv_heads=(self._SLIDING_KV_HEADS
+                              if is_sliding else self._FULL_KV_HEADS),
+                head_size=(self._SLIDING_HEAD_SIZE
+                           if is_sliding else self._FULL_HEAD_SIZE),
+                attn_type=AttentionType.DECODER,
+                sliding_window=sliding_window if is_sliding else None,
+                kv_sharing_target_layer_name=None,
+            )
+        layers['layer.shared'] = MagicMock(
+            spec=Attention,
+            num_kv_heads=self._SLIDING_KV_HEADS,
+            head_size=self._SLIDING_HEAD_SIZE,
+            attn_type=AttentionType.DECODER,
+            sliding_window=sliding_window,
+            kv_sharing_target_layer_name='layer.0',
+        )
+        return layers
+
+    def _attn_page_size(self, num_kv_heads: int, head_size: int) -> int:
+        return get_attention_page_size_bytes(
+            self.runner.mesh, self.runner.vllm_config.cache_config.block_size,
+            common_utils.get_padded_num_heads(num_kv_heads,
+                                              self.runner.mesh.shape["model"]),
+            common_utils.get_padded_head_dim(head_size),
+            self.runner.kv_cache_dtype, False)
+
+    @pytest.fixture
+    def mixed_head_dims_enabled(self, monkeypatch):
+        """Opts in to keeping sliding window with mixed head dims."""
+        monkeypatch.setenv("USE_FULL_KVCACHE_FOR_SLIDING_WINDOW", "0")
+
+    @pytest.mark.usefixtures("mixed_head_dims_enabled")
+    def test_get_kv_cache_spec_mixed_head_dims_keeps_sliding_window(self):
+        layers = self._make_mixed_head_dim_layers()
+        self.runner.vllm_config.compilation_config.static_forward_context = \
+            layers
+
+        layer_configs = self.runner.get_kv_cache_layer_configs()
+
+        sliding_page = self._attn_page_size(self._SLIDING_KV_HEADS,
+                                            self._SLIDING_HEAD_SIZE)
+        full_page = self._attn_page_size(self._FULL_KV_HEADS,
+                                         self._FULL_HEAD_SIZE)
+        assert sliding_page != full_page
+        expected_page = sliding_page + full_page
+        manager = self.runner.kv_cache_manager
+        assert manager._hybrid_uniform_page_size_bytes == expected_page
+
+        assert len(layer_configs) == 6
+        for i in range(4):
+            layer_cfg = layer_configs[f'layer.{i}']
+            assert layer_cfg.manager_cls is SlidingWindowManager
+            assert layer_cfg.manager_config.params.sliding_window == \
+                self._SLIDING_WINDOW
+            spec = layer_cfg.spec
+            assert type(spec) is AttentionSpec
+            assert spec.num_kv_heads == self._SLIDING_KV_HEADS
+            assert spec.head_size == self._SLIDING_HEAD_SIZE
+            assert spec.page_size_padded == expected_page
+        for i in range(4, 6):
+            layer_cfg = layer_configs[f'layer.{i}']
+            assert layer_cfg.manager_cls is FullAttentionManager
+            spec = layer_cfg.spec
+            assert type(spec) is AttentionSpec
+            assert spec.num_kv_heads == self._FULL_KV_HEADS
+            assert spec.head_size == self._FULL_HEAD_SIZE
+            assert spec.page_size_padded == expected_page
+        # vLLM requires one page size across groups.
+        assert {cfg.spec.page_size_bytes
+                for cfg in layer_configs.values()} == {expected_page}
+        assert 'layer.shared' not in layer_configs
+        assert self.runner.kv_cache_manager.shared_kv_cache_layers == {
+            'layer.shared': 'layer.0'
+        }
+
+    @pytest.mark.parametrize("reason",
+                             ["default_off", "hybrid_manager_disabled"])
+    def test_get_kv_cache_spec_mixed_head_dims_fallback(
+            self, monkeypatch, reason):
+        # By default (full KV cache for sliding-window layers), and with a
+        # disabled hybrid KV cache manager even when opted in, sliding window
+        # is off and all layers are full attention with their own page size.
+        if reason == "default_off":
+            monkeypatch.delenv("USE_FULL_KVCACHE_FOR_SLIDING_WINDOW",
+                               raising=False)
+        else:
+            monkeypatch.setenv("USE_FULL_KVCACHE_FOR_SLIDING_WINDOW", "0")
+            monkeypatch.setattr(self.runner.vllm_config.scheduler_config,
+                                "disable_hybrid_kv_cache_manager", True)
+        layers = self._make_mixed_head_dim_layers()
+        self.runner.vllm_config.compilation_config.static_forward_context = \
+            layers
+
+        layer_configs = self.runner.get_kv_cache_layer_configs()
+
+        assert self.runner.kv_cache_manager._hybrid_uniform_page_size_bytes \
+            is None
+        assert len(layer_configs) == 6
+        for i in range(6):
+            layer_cfg = layer_configs[f'layer.{i}']
+            assert layer_cfg.manager_cls is FullAttentionManager
+            spec = layer_cfg.spec
+            assert type(spec) is AttentionSpec
+            assert spec.page_size_padded == self._attn_page_size(
+                layers[f'layer.{i}'].num_kv_heads,
+                layers[f'layer.{i}'].head_size)
+            assert layers[f'layer.{i}'].sliding_window is None
+
+    @pytest.mark.usefixtures("mixed_head_dims_enabled")
+    def test_get_kv_cache_spec_mixed_head_dims_without_sliding_window(self):
+        # Mixed head dims but no sliding-window layer: nothing to keep, so the
+        # page sizes are left alone.
+        layers = self._make_mixed_head_dim_layers(sliding_window=None)
+        self.runner.vllm_config.compilation_config.static_forward_context = \
+            layers
+
+        layer_configs = self.runner.get_kv_cache_layer_configs()
+
+        assert self.runner.kv_cache_manager._hybrid_uniform_page_size_bytes \
+            is None
+        for i in range(6):
+            layer_cfg = layer_configs[f'layer.{i}']
+            assert layer_cfg.manager_cls is FullAttentionManager
+            spec = layer_cfg.spec
+            assert type(spec) is AttentionSpec
+            assert spec.page_size_padded == self._attn_page_size(
+                layers[f'layer.{i}'].num_kv_heads,
+                layers[f'layer.{i}'].head_size)
+
+    @pytest.mark.usefixtures("mixed_head_dims_enabled")
+    def test_get_kv_cache_spec_mixed_head_dims_mla_unaffected(self):
+        self.runner.kv_cache_manager.use_mla = True
+        mock_hf_text_config = MagicMock()
+        mock_hf_text_config.kv_lora_rank = 512
+        mock_hf_text_config.qk_rope_head_dim = 64
+        mock_hf_text_config.num_kv_shared_layers = 0
+        mock_hf_text_config.layer_types = []
+        self.runner.model_config.hf_text_config = mock_hf_text_config
+        layers = self._make_mixed_head_dim_layers()
+        self.runner.vllm_config.compilation_config.static_forward_context = \
+            layers
+
+        layer_configs = self.runner.get_kv_cache_layer_configs()
+
+        assert self.runner.kv_cache_manager._hybrid_uniform_page_size_bytes \
+            is None
+        assert len(layer_configs) == 6
+        assert all(
+            isinstance(cfg.spec, MLAAttentionSpec)
+            for cfg in layer_configs.values())
+
+    @pytest.mark.usefixtures("mixed_head_dims_enabled")
+    def test_pad_pages_for_mixed_head_dims_skips_mamba(self):
+        layers = self._make_mixed_head_dim_layers()
+        layers['linear_attn'] = MagicMock(spec=MambaBase)
+
+        manager = self.runner.kv_cache_manager
+        assert not manager._maybe_pad_pages_for_mixed_head_dims(layers)
+        assert manager._hybrid_uniform_page_size_bytes is None
+
+    @pytest.mark.usefixtures("mixed_head_dims_enabled")
+    def test_initialize_kv_cache_mixed_head_dims_matches_num_blocks(self):
+        # The TPU allocation for the padded specs must cover exactly the
+        # blocks vLLM budgets for.
+        layers = self._make_mixed_head_dim_layers()
+        self.runner.vllm_config.compilation_config.static_forward_context = \
+            layers
+        layer_configs = self.runner.get_kv_cache_layer_configs()
+        page_size = self.runner.kv_cache_manager._hybrid_uniform_page_size_bytes
+        sliding_page = self._attn_page_size(self._SLIDING_KV_HEADS,
+                                            self._SLIDING_HEAD_SIZE)
+        full_page = self._attn_page_size(self._FULL_KV_HEADS,
+                                         self._FULL_HEAD_SIZE)
+
+        # vLLM groups 4 sliding + 2 full layers into 2 sliding groups and 1
+        # full group of 2 layers each; every group aliases the same bytes,
+        # sized with the uniform page size.
+        num_blocks = 100
+        layers_per_group = 2
+        group_layers = [['layer.0', 'layer.1'], ['layer.2', 'layer.3'],
+                        ['layer.4', 'layer.5']]
+        kv_cache_groups = [
+            KVCacheGroup.from_layers({n: layer_configs[n]
+                                      for n in names})
+            for names in group_layers
+        ]
+        tensor_size = layers_per_group * num_blocks * page_size
+        kv_cache_tensors = [
+            KVCacheTensor(
+                size=tensor_size,
+                layers=names,
+                layer_stride=num_blocks * page_size,
+                block_stride=page_size,
+                offset=0,
+            ) for names in group_layers
+        ]
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+        )
+
+        self.runner.initialize_kv_cache(kv_cache_config)
+
+        # One array per (layer slot, shape): 2 slots x 2 shapes, each with
+        # num_blocks blocks, filling exactly the bytes vLLM reserved.
+        kv_caches = self.runner.kv_caches
+        assert len(kv_caches) == 2 * layers_per_group
+        assert all(cache.shape[0] == num_blocks for cache in kv_caches)
+        total_bytes = sum(cache.nbytes for cache in kv_caches)
+        assert total_bytes == (num_blocks * layers_per_group *
+                               (sliding_page + full_page))
+        assert total_bytes == tensor_size
+
+        # Same-shape sliding layers in different groups share an array; the
+        # full-attention layers get their own.
+        index = self.runner.layer_name_to_kvcache_index
+        for j in range(layers_per_group):
+            sliding_idx = index[group_layers[0][j]]
+            full_idx = index[group_layers[2][j]]
+            assert index[group_layers[1][j]] == sliding_idx
+            assert full_idx != sliding_idx
+            assert kv_caches[sliding_idx].nbytes == num_blocks * sliding_page
+            assert kv_caches[full_idx].nbytes == num_blocks * full_page
+        assert len({index[name] for name in group_layers[2]}) == 2
+        assert index['layer.shared'] == index['layer.0']
+
+    # Attention layouts as (num_layers, num_kv_heads, head_size, sliding)
+    # per attention type (`sliding` is bool or an explicit window size), and
+    # whether every layer slot holds every shape (then the allocation fills
+    # vLLM's budget exactly; otherwise it stays below it).
+    _MIXED_KV_LAYOUTS = {
+        # Gemma 4 ratio: 5 sliding layers per full-attention layer.
+        "gemma4_ratio": ([(10, 16, 256, True), (2, 4, 512, False)], True),
+        # Head dims and head counts that the TPU pads.
+        "padded_dims": ([(4, 3, 80, True), (2, 1, 192, False)], True),
+        # Three distinct shapes: two sliding-window shapes sharing one window
+        # size (vLLM buckets them together so each slot holds only one of the
+        # two sliding shapes plus the full shape) and one with distinct
+        # windows (separate buckets so every slot holds all three shapes).
+        "three_shapes": ([(4, 8, 128, True), (4, 2, 256, True),
+                          (2, 4, 512, False)], False),
+        "three_shapes_distinct_windows": ([(4, 8, 128, 64), (4, 2, 256, 128),
+                                           (2, 4, 512, False)], True),
+        # Full-attention layers are the majority and have the smaller pages.
+        "full_majority": ([(2, 4, 512, True), (6, 2, 128, False)], True),
+        # 5 sliding + 2 full: vLLM forms sliding groups of 2, 2 and 1 layers.
+        "single_layer_group": ([(5, 16, 256, True), (2, 4, 512, False)], True),
+        # 4 sliding + 3 full: vLLM pads the full group to 4 layers, so the
+        # last slot holds only the sliding shape.
+        "padded_group": ([(4, 16, 256, True), (3, 4, 512, False)], False),
+    }
+
+    def _make_layers_from_layout(self, layout, sliding_window=64):
+        """Builds attention layers per `layout`, plus a KV-sharing layer."""
+
+        def _win(sliding):
+            if isinstance(sliding, bool):
+                return sliding_window if sliding else None
+            return sliding
+
+        layers = {}
+        for num_layers, num_kv_heads, head_size, sliding in layout:
+            for _ in range(num_layers):
+                layers[f'layer.{len(layers)}'] = MagicMock(
+                    spec=Attention,
+                    num_kv_heads=num_kv_heads,
+                    head_size=head_size,
+                    attn_type=AttentionType.DECODER,
+                    sliding_window=_win(sliding),
+                    kv_sharing_target_layer_name=None,
+                )
+        num_kv_heads, head_size, sliding = layout[0][1:]
+        layers['layer.shared'] = MagicMock(
+            spec=Attention,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            attn_type=AttentionType.DECODER,
+            sliding_window=_win(sliding),
+            kv_sharing_target_layer_name='layer.0',
+        )
+        return layers
+
+    @pytest.mark.usefixtures("mixed_head_dims_enabled")
+    @pytest.mark.parametrize("block_size", [16, 64])
+    @pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+    @pytest.mark.parametrize("layout_name", list(_MIXED_KV_LAYOUTS))
+    def test_mixed_head_dims_allocation_within_vllm_budget(
+            self, layout_name, kv_dtype, block_size):
+        """The TPU allocation stays within the bytes vLLM plans for.
+
+        Runs the padded specs through vLLM's own grouping and KV cache
+        planning, then checks the invariant documented in
+        `_maybe_pad_pages_for_mixed_head_dims` on the arrays that
+        `initialize_kv_cache` actually allocates.
+        """
+        layout, every_slot_full = self._MIXED_KV_LAYOUTS[layout_name]
+        vllm_config = self.runner.vllm_config
+        vllm_config.cache_config.block_size = block_size
+        # What vLLM resolves for specs of mixed shapes when the backend does
+        # not declare a layout.
+        vllm_config.cache_config.kv_cache_layout = "LBNHC"
+        self.runner.kv_cache_dtype = kv_dtype
+        layers = self._make_layers_from_layout(layout)
+        vllm_config.compilation_config.static_forward_context = layers
+
+        layer_configs = self.runner.get_kv_cache_layer_configs()
+        manager = self.runner.kv_cache_manager
+        # Specs carry the padded shapes; key the TPU page sizes by them.
+        tp_size = self.runner.mesh.shape["model"]
+        page_size_of = {
+            (common_utils.get_padded_num_heads(heads, tp_size),
+             common_utils.get_padded_head_dim(size)):
+            self._attn_page_size(heads, size)
+            for _, heads, size, _ in layout
+        }
+        padded_page = sum(page_size_of.values())
+        assert manager._hybrid_uniform_page_size_bytes == padded_page
+        assert all(cfg.spec.page_size_bytes == padded_page
+                   for cfg in layer_configs.values())
+
+        groups = get_kv_cache_groups(vllm_config, layer_configs)
+        max_group_len = max(len(g.layer_names) for g in groups)
+        num_blocks = 8
+        kv_cache_config = get_kv_cache_config_from_groups(
+            vllm_config, groups, num_blocks * max_group_len * padded_page)
+        assert kv_cache_config.num_blocks == num_blocks
+        reserved = max(t.size for t in kv_cache_config.kv_cache_tensors)
+
+        self.runner.initialize_kv_cache(kv_cache_config)
+
+        kv_caches = self.runner.kv_caches
+        index = self.runner.layer_name_to_kvcache_index
+        # Every layer gets an array of its own shape with num_blocks blocks.
+        for name, cfg in layer_configs.items():
+            spec = cfg.spec
+            cache = kv_caches[index[name]]
+            assert cache.shape[0] == num_blocks
+            assert cache.nbytes == num_blocks * page_size_of[
+                (spec.num_kv_heads, spec.head_size)]
+        assert index['layer.shared'] == index['layer.0']
+
+        # Group the arrays by the byte region (layer slot) vLLM placed their
+        # layers in; all KV cache groups alias these regions.
+        arrays_per_region = {}
+        for tensor in kv_cache_config.kv_cache_tensors:
+            for j, name in enumerate(tensor.layers):
+                region = tensor.offset + j * tensor.layer_stride
+                arrays_per_region.setdefault(region, set()).add(index[name])
+        assert len(arrays_per_region) == max_group_len
+        region_budget = num_blocks * padded_page
+        all_full = True
+        for region, arrays in arrays_per_region.items():
+            used = sum(kv_caches[i].nbytes for i in arrays)
+            assert used <= region_budget, region
+            all_full &= used == region_budget
+        # Layers in different slots never share an array.
+        assert sum(len(a) for a in arrays_per_region.values()) == len(
+            {index[name]
+             for name in layer_configs})
+        assert all_full == every_slot_full
+
+        total = sum(cache.nbytes for cache in kv_caches)
+        assert total <= reserved
+        assert (total == reserved) == every_slot_full
+
+    @pytest.mark.usefixtures("mixed_head_dims_enabled")
+    def test_mixed_head_dims_budget_check_raises_before_allocating(self):
+        """Any allocation larger than vLLM's plan is rejected up front."""
+        layout = self._MIXED_KV_LAYOUTS["gemma4_ratio"][0]
+        vllm_config = self.runner.vllm_config
+        vllm_config.cache_config.kv_cache_layout = "LBNHC"
+        vllm_config.compilation_config.static_forward_context = \
+            self._make_layers_from_layout(layout)
+        layer_configs = self.runner.get_kv_cache_layer_configs()
+        groups = get_kv_cache_groups(vllm_config, layer_configs)
+        padded_page = \
+            self.runner.kv_cache_manager._hybrid_uniform_page_size_bytes
+        num_blocks = 8
+        kv_cache_config = get_kv_cache_config_from_groups(
+            vllm_config, groups,
+            num_blocks * max(len(g.layer_names) for g in groups) * padded_page)
+
+        # Simulate the allocator using one byte more per page than the specs
+        # report.
+        def larger_page(*args, **kwargs):
+            return get_attention_page_size_bytes(*args, **kwargs) + 1
+
+        with patch('tpu_inference.runner.kv_cache_manager.'
+                   'get_attention_page_size_bytes',
+                   side_effect=larger_page), \
+             patch('tpu_inference.runner.kv_cache_manager.'
+                   'create_kv_caches') as mock_create, \
+             pytest.raises(RuntimeError, match="exceeds the bytes vLLM"):
+            self.runner.initialize_kv_cache(kv_cache_config)
+        mock_create.assert_not_called()
 
     def test_get_kv_cache_spec_without_compilation_cfg(self):
         # tests if there's no compilation config, we use full attention kv
@@ -385,23 +842,44 @@ class TestKVCacheManager:
         num_layers = model_config.get_num_layers(parallel_config)
 
         self.runner.vllm_config.compilation_config.static_forward_context = {}
-        kv_cache_spec = self.runner.get_kv_cache_spec()
+        layer_configs = self.runner.get_kv_cache_layer_configs()
 
-        assert len(kv_cache_spec) == num_layers
+        assert len(layer_configs) == num_layers
         block_size = self.runner.vllm_config.cache_config.block_size
         num_kv_heads = common_utils.get_padded_num_heads(
             num_kv_heads, self.runner.mesh.shape["model"])
         head_size = common_utils.get_padded_head_dim(head_size)
-        expected_full_attn_spec = FullAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=num_kv_heads,
-            head_size=head_size,
-            dtype=torch.bfloat16,
-            page_size_padded=get_attention_page_size_bytes(
-                self.runner.mesh, block_size, num_kv_heads, head_size,
-                self.runner.kv_cache_dtype, False))
+        expected_full_attn_cfg = FullAttentionManager.layer_config(
+            AttentionSpec(block_size=block_size,
+                          num_kv_heads=num_kv_heads,
+                          head_size=head_size,
+                          dtype=torch.bfloat16,
+                          page_size_padded=get_attention_page_size_bytes(
+                              self.runner.mesh, block_size, num_kv_heads,
+                              head_size, self.runner.kv_cache_dtype, False)))
         for i in range(num_layers):
-            assert kv_cache_spec[f'layer.{i}'] == expected_full_attn_spec
+            assert layer_configs[f'layer.{i}'] == expected_full_attn_cfg
+        assert len(self.runner.kv_cache_manager.shared_kv_cache_layers) == 0
+
+    def test_get_kv_cache_spec_without_compilation_cfg_ngram_spec_decode(self):
+        # Model-free speculative decoding (e.g. ngram) sets speculative_config
+        # with draft_model_config=None; get_kv_cache_layer_configs must skip
+        # draft layer registration instead of dereferencing
+        # draft_model_config.hf_config.
+        model_config = self.runner.vllm_config.model_config
+        parallel_config = self.runner.vllm_config.parallel_config
+        num_layers = model_config.get_num_layers(parallel_config)
+
+        self.runner.vllm_config.compilation_config.static_forward_context = {}
+        self.runner.speculative_config = MagicMock(
+            method="ngram",
+            draft_model_config=None,
+        )
+        layer_configs = self.runner.get_kv_cache_layer_configs()
+
+        assert len(layer_configs) == num_layers
+        for i in range(num_layers):
+            assert f"layer.{i}" in layer_configs
         assert len(self.runner.kv_cache_manager.shared_kv_cache_layers) == 0
 
     def test_get_kv_cache_spec_without_compilation_cfg_none_text_config_attrs(
@@ -430,7 +908,7 @@ class TestKVCacheManager:
         self.runner.model_config.hf_text_config = mock_hf_text_config
 
         self.runner.vllm_config.compilation_config.static_forward_context = {}
-        kv_cache_spec = self.runner.get_kv_cache_spec()
+        layer_configs = self.runner.get_kv_cache_layer_configs()
 
         model_config = self.runner.vllm_config.model_config
         parallel_config = self.runner.vllm_config.parallel_config
@@ -441,9 +919,9 @@ class TestKVCacheManager:
         expected_head_size = common_utils.get_padded_head_dim(
             model_config.get_head_size())
 
-        assert len(kv_cache_spec) == num_layers
+        assert len(layer_configs) == num_layers
         for i in range(num_layers):
-            spec = kv_cache_spec[f"layer.{i}"]
+            spec = layer_configs[f"layer.{i}"].spec
             assert spec.num_kv_heads == expected_num_kv_heads, (
                 f"layer.{i}: num_kv_heads={spec.num_kv_heads} "
                 f"(expected base fallback {expected_num_kv_heads})")
@@ -490,15 +968,15 @@ class TestKVCacheManager:
         self.runner.model_config.hf_text_config = mock_hf_text_config
 
         self.runner.vllm_config.compilation_config.static_forward_context = {}
-        kv_cache_spec = self.runner.get_kv_cache_spec()
+        layer_configs = self.runner.get_kv_cache_layer_configs()
 
         # Non-shared layers have specs; shared layers do not.
         first_shared = num_layers - num_shared
-        assert len(kv_cache_spec) == first_shared
+        assert len(layer_configs) == first_shared
         for i in range(first_shared):
-            assert f"layer.{i}" in kv_cache_spec
+            assert f"layer.{i}" in layer_configs
         for i in range(first_shared, num_layers):
-            assert f"layer.{i}" not in kv_cache_spec
+            assert f"layer.{i}" not in layer_configs
 
         # Each shared layer redirects to the last preceding same-type layer.
         shared = self.runner.kv_cache_manager.shared_kv_cache_layers
@@ -530,11 +1008,11 @@ class TestKVCacheManager:
         self.runner.vllm_config.compilation_config.static_forward_context = {}
         with patch('vllm.config.ModelConfig.get_num_layers',
                    return_value=num_layers):
-            kv_cache_spec = self.runner.get_kv_cache_spec()
+            layer_configs = self.runner.get_kv_cache_layer_configs()
 
-        assert len(kv_cache_spec) == num_layers
+        assert len(layer_configs) == num_layers
         for i in range(num_layers):
-            spec = kv_cache_spec[f"layer.{i}"]
+            spec = layer_configs[f"layer.{i}"].spec
             assert isinstance(spec, MLAAttentionSpec)
             assert spec.num_kv_heads == 1
             assert spec.head_size == expected_head_size
@@ -548,27 +1026,20 @@ class TestKVCacheManager:
         sliding_window = 100
         num_blocks = 100
         kv_packing = 2  #bf16
-        sliding_window_spec = SlidingWindowSpec(
-            block_size=block_size,
-            num_kv_heads=num_kv_heads,
-            head_size=head_size,
-            dtype=torch.bfloat16,
-            sliding_window=sliding_window,
-        )
-        full_attn_spec = FullAttentionSpec(
+        attn_spec = AttentionSpec(
             block_size=block_size,
             num_kv_heads=num_kv_heads,
             head_size=head_size,
             dtype=torch.bfloat16,
         )
         kv_cache_groups = [
-            KVCacheGroupSpec(layer_names=[f'layer.{i}' for i in range(10)],
-                             kv_cache_spec=full_attn_spec),
-            KVCacheGroupSpec(layer_names=[f'layer.{i}' for i in range(10, 20)],
-                             kv_cache_spec=sliding_window_spec),
+            self._make_group([f'layer.{i}' for i in range(10)], attn_spec),
+            self._make_group(
+                [f'layer.{i}' for i in range(10, 20)], attn_spec,
+                SlidingWindowManager.config(sliding_window=sliding_window)),
         ]
         kv_cache_tensors = []
-        page_size_bytes = full_attn_spec.page_size_bytes
+        page_size_bytes = attn_spec.page_size_bytes
         for i in range(10):
             kv_cache_tensors.append(
                 KVCacheTensor(
@@ -608,14 +1079,7 @@ class TestKVCacheManager:
         sliding_window = 100
         num_blocks = 100
         kv_packing = 2  # bf16
-        sliding_window_spec = SlidingWindowSpec(
-            block_size=block_size,
-            num_kv_heads=num_kv_heads,
-            head_size=head_size,
-            dtype=torch.bfloat16,
-            sliding_window=sliding_window,
-        )
-        full_attn_spec = FullAttentionSpec(
+        attn_spec = AttentionSpec(
             block_size=block_size,
             num_kv_heads=num_kv_heads,
             head_size=head_size,
@@ -628,12 +1092,12 @@ class TestKVCacheManager:
             for i in range(num_layers_per_group)
         ]
         kv_cache_groups = [
-            KVCacheGroupSpec(layer_names=group_0_layers,
-                             kv_cache_spec=full_attn_spec),
-            KVCacheGroupSpec(layer_names=group_1_layers,
-                             kv_cache_spec=sliding_window_spec),
+            self._make_group(group_0_layers, attn_spec),
+            self._make_group(
+                group_1_layers, attn_spec,
+                SlidingWindowManager.config(sliding_window=sliding_window)),
         ]
-        page_size_bytes = full_attn_spec.page_size_bytes
+        page_size_bytes = attn_spec.page_size_bytes
         tensor_size = num_layers_per_group * num_blocks * page_size_bytes
         layer_stride = num_blocks * page_size_bytes
         kv_cache_tensors = [
@@ -680,14 +1144,7 @@ class TestKVCacheManager:
         head_size = 128
         sliding_window = 100
         num_blocks = 100
-        sliding_window_spec = SlidingWindowSpec(
-            block_size=block_size,
-            num_kv_heads=num_kv_heads,
-            head_size=head_size,
-            dtype=torch.bfloat16,
-            sliding_window=sliding_window,
-        )
-        full_attn_spec = FullAttentionSpec(
+        attn_spec = AttentionSpec(
             block_size=block_size,
             num_kv_heads=num_kv_heads,
             head_size=head_size,
@@ -696,12 +1153,12 @@ class TestKVCacheManager:
         group_0_layers = [f'layer.{i}' for i in range(9)]
         group_1_layers = [f'layer.{i}' for i in range(9, 19)]  # 10 layers
         kv_cache_groups = [
-            KVCacheGroupSpec(layer_names=group_0_layers,
-                             kv_cache_spec=sliding_window_spec),
-            KVCacheGroupSpec(layer_names=group_1_layers,
-                             kv_cache_spec=full_attn_spec),
+            self._make_group(
+                group_0_layers, attn_spec,
+                SlidingWindowManager.config(sliding_window=sliding_window)),
+            self._make_group(group_1_layers, attn_spec),
         ]
-        page_size_bytes = full_attn_spec.page_size_bytes
+        page_size_bytes = attn_spec.page_size_bytes
         layer_stride = num_blocks * page_size_bytes
         kv_cache_tensors = [
             KVCacheTensor(
@@ -743,15 +1200,14 @@ class TestKVCacheManager:
         head_size = 128
         num_blocks = 100
         kv_packing = 2  #bf16
-        full_attn_spec = FullAttentionSpec(
+        full_attn_spec = AttentionSpec(
             block_size=block_size,
             num_kv_heads=num_kv_heads,
             head_size=head_size,
             dtype=torch.bfloat16,
         )
         kv_cache_groups = [
-            KVCacheGroupSpec(layer_names=['layer.0'],
-                             kv_cache_spec=full_attn_spec),
+            self._make_group(['layer.0'], full_attn_spec),
         ]
         page_size_bytes = full_attn_spec.page_size_bytes
         kv_cache_tensors = [
@@ -786,7 +1242,6 @@ class TestKVCacheManager:
         self.runner.vllm_config.compilation_config.static_forward_context = {}
         mock_speculative_config = MagicMock()
         mock_speculative_config.method = "eagle3"
-        mock_speculative_config.use_gemma4_mtp = MagicMock(return_value=False)
         mock_draft_model_config = MagicMock()
         mock_hf_config = MagicMock()
         mock_hf_config.num_key_value_heads = 4
@@ -796,11 +1251,14 @@ class TestKVCacheManager:
         mock_speculative_config.draft_model_config = mock_draft_model_config
         self.runner.speculative_config = mock_speculative_config
 
-        kv_cache_spec = self.runner.get_kv_cache_spec()
+        layer_configs = self.runner.get_kv_cache_layer_configs()
 
-        assert "draft_layer.0" in kv_cache_spec
-        draft_spec = kv_cache_spec["draft_layer.0"]
-        assert isinstance(draft_spec, FullAttentionSpec)
+        assert "draft_layer.0" in layer_configs
+        draft_cfg = layer_configs["draft_layer.0"]
+        assert draft_cfg.is_draft
+        assert draft_cfg.manager_cls is FullAttentionManager
+        draft_spec = draft_cfg.spec
+        assert isinstance(draft_spec, AttentionSpec)
         assert draft_spec.block_size == self.runner.vllm_config.cache_config.block_size
         assert draft_spec.num_kv_heads == common_utils.get_padded_num_heads(
             4, self.runner.mesh.shape["model"])
@@ -814,7 +1272,6 @@ class TestKVCacheManager:
         self.runner.vllm_config.compilation_config.static_forward_context = {}
         mock_speculative_config = MagicMock()
         mock_speculative_config.method = "eagle3"
-        mock_speculative_config.use_gemma4_mtp = MagicMock(return_value=False)
         mock_draft_model_config = MagicMock()
         mock_hf_config = MagicMock()
         mock_hf_config.num_key_value_heads = 4
@@ -835,19 +1292,20 @@ class TestKVCacheManager:
         mock_speculative_config.draft_model_config = mock_draft_model_config
         self.runner.speculative_config = mock_speculative_config
 
-        kv_cache_spec = self.runner.get_kv_cache_spec()
+        layer_configs = self.runner.get_kv_cache_layer_configs()
 
         # Without compilation context, it will create specs for the main model layers
         # as well as the draft model layer.
-        assert len(kv_cache_spec) > model_layers
+        assert len(layer_configs) > model_layers
 
-        assert "draft_layer.0" in kv_cache_spec
-        draft_spec = kv_cache_spec["draft_layer.0"]
-        assert isinstance(draft_spec, FullAttentionSpec)
+        assert "draft_layer.0" in layer_configs
+        draft_cfg = layer_configs["draft_layer.0"]
+        assert draft_cfg.is_draft
+        assert isinstance(draft_cfg.spec, MLAAttentionSpec)
 
         for i in range(model_layers):
-            assert f"layer.{i}" in kv_cache_spec
-            spec = kv_cache_spec[f"layer.{i}"]
+            assert f"layer.{i}" in layer_configs
+            spec = layer_configs[f"layer.{i}"].spec
             assert isinstance(spec, MLAAttentionSpec)
             assert spec.num_kv_heads == 1
 
@@ -858,9 +1316,9 @@ class TestKVCacheManager:
 
         mock_speculative_config = MagicMock()
         mock_speculative_config.method = "mtp"
-        mock_speculative_config.use_gemma4_mtp = MagicMock(return_value=True)
         mock_draft_model_config = MagicMock()
         mock_hf_config = MagicMock()
+        mock_hf_config.model_type = "gemma4_mtp"
         mock_draft_model_config.hf_config = mock_hf_config
         mock_speculative_config.draft_model_config = mock_draft_model_config
         self.runner.speculative_config = mock_speculative_config
@@ -884,15 +1342,15 @@ class TestKVCacheManager:
         # Clear any existing shared layers
         self.runner.kv_cache_manager.shared_kv_cache_layers = {}
 
-        kv_cache_spec = self.runner.get_kv_cache_spec()
+        layer_configs = self.runner.get_kv_cache_layer_configs()
 
         # Assertions
         mock_compute_map.assert_called_once_with(mock_hf_config,
                                                  mock_text_config)
 
-        # Draft layers should NOT be in kv_cache_spec because they are shared
-        assert "draft_layer.0" not in kv_cache_spec
-        assert "draft_layer.1" not in kv_cache_spec
+        # Draft layers should NOT be in layer_configs because they are shared
+        assert "draft_layer.0" not in layer_configs
+        assert "draft_layer.1" not in layer_configs
 
         # Redirects should be registered in shared_kv_cache_layers
         shared_layers = self.runner.kv_cache_manager.shared_kv_cache_layers
@@ -907,15 +1365,15 @@ class TestKVCacheManager:
         num_kv_heads = 8
         head_size = 128
         num_blocks = 100
-        full_attn_spec = FullAttentionSpec(
+        full_attn_spec = AttentionSpec(
             block_size=block_size,
             num_kv_heads=num_kv_heads,
             head_size=head_size,
             dtype=torch.bfloat16,
         )
         kv_cache_groups = [
-            KVCacheGroupSpec(layer_names=[f'layer.{i}' for i in range(10)],
-                             kv_cache_spec=full_attn_spec),
+            self._make_group([f'layer.{i}' for i in range(10)],
+                             full_attn_spec),
         ]
         page_size_bytes = full_attn_spec.page_size_bytes
         kv_cache_tensors = [
@@ -975,15 +1433,15 @@ class TestKVCacheManager:
         head_size = 128
         num_blocks = 100
         kv_packing = 2  # bf16
-        full_attn_spec = FullAttentionSpec(
+        full_attn_spec = AttentionSpec(
             block_size=block_size,
             num_kv_heads=num_kv_heads,
             head_size=head_size,
             dtype=torch.bfloat16,
         )
         kv_cache_groups = [
-            KVCacheGroupSpec(layer_names=[f'layer.{i}' for i in range(10)],
-                             kv_cache_spec=full_attn_spec),
+            self._make_group([f'layer.{i}' for i in range(10)],
+                             full_attn_spec),
         ]
         page_size_bytes = full_attn_spec.page_size_bytes
         kv_cache_tensors = [
@@ -1033,7 +1491,8 @@ class TestKVCacheManager:
         mock_attn_module = MagicMock(spec=MambaBase)
 
         mock_mamba_spec = MagicMock(spec=MambaSpec)
-        mock_attn_module.get_kv_cache_spec.return_value = mock_mamba_spec
+        mock_layer_cfg = MambaManager.layer_config(mock_mamba_spec)
+        mock_attn_module.get_kv_cache_config.return_value = mock_layer_cfg
 
         def get_layers_side_effect(vllm_config, attn_cls):
             if MambaBase in attn_cls:
@@ -1047,15 +1506,15 @@ class TestKVCacheManager:
         with patch(
                 'tpu_inference.runner.kv_cache_manager.get_layers_from_vllm_config',
                 side_effect=get_layers_side_effect):
-            kv_cache_spec = self.runner.get_kv_cache_spec()
+            layer_configs = self.runner.get_kv_cache_layer_configs()
 
-        assert len(kv_cache_spec) == 1
-        assert kv_cache_spec['layer.0'] == mock_mamba_spec
+        assert len(layer_configs) == 1
+        assert layer_configs['layer.0'] == mock_layer_cfg
 
     @pytest.mark.parametrize("flag", [False, True])
     def test_get_kv_cache_spec_gdn_runner_slot_flag(self, monkeypatch, flag):
         """SKIP_MAMBA_SCHEDULER_BLOCKS: GDN specs go to vLLM as
-        RunnerSlotMambaSpec (prefix caching off, no MTP, no KV connector)."""
+        RunnerSlotMambaManager (prefix caching off, no MTP, no KV connector)."""
         if flag:
             monkeypatch.setenv("SKIP_MAMBA_SCHEDULER_BLOCKS", "1")
         else:
@@ -1065,7 +1524,8 @@ class TestKVCacheManager:
                              block_size=1024,
                              mamba_type=MambaAttentionBackendEnum.GDN_ATTN)
         mock_gdn_module = MagicMock(spec=MambaBase)
-        mock_gdn_module.get_kv_cache_spec.return_value = gdn_spec
+        mock_gdn_module.get_kv_cache_config.return_value = (
+            MambaManager.layer_config(gdn_spec))
 
         def get_layers_side_effect(vllm_config, attn_cls):
             if MambaBase in attn_cls:
@@ -1075,16 +1535,23 @@ class TestKVCacheManager:
         self.runner.vllm_config.compilation_config.static_forward_context = {
             'layer.0': mock_gdn_module
         }
+        # Runner slots need Mamba prefix caching off. Since
+        # vllm-project/vllm#63830 that is `enable_prefix_caching`, which
+        # `CacheConfig` turns on by default.
+        set_mamba_prefix_caching(self.runner.vllm_config.cache_config, False)
 
         with patch(
                 'tpu_inference.runner.kv_cache_manager.get_layers_from_vllm_config',
                 side_effect=get_layers_side_effect):
-            kv_cache_spec = self.runner.get_kv_cache_spec()
+            layer_configs = self.runner.get_kv_cache_layer_configs()
 
-        expected_cls = RunnerSlotMambaSpec if flag else MambaSpec
-        assert type(kv_cache_spec['layer.0']) is expected_cls
+        expected_cls = RunnerSlotMambaManager if flag else MambaManager
+        assert layer_configs['layer.0'].manager_cls is expected_cls
+        assert layer_configs['layer.0'].spec == gdn_spec
 
     def test_initialize_kv_cache_mamba(self):
+        # Mamba prefix caching off (vLLM HEAD keys it on enable_prefix_caching).
+        set_mamba_prefix_caching(self.runner.cache_config, False)
         num_blocks = 100
         page_size_bytes = 16 * 1024
         layer_names = ['layer.0', 'layer.1']
@@ -1195,7 +1662,7 @@ class TestKVCacheManager:
         num_blocks = 100
         kv_packing = 2  #bf16
 
-        full_attn_spec = FullAttentionSpec(
+        full_attn_spec = AttentionSpec(
             block_size=block_size,
             num_kv_heads=num_kv_heads,
             head_size=head_size,
@@ -1203,8 +1670,7 @@ class TestKVCacheManager:
         )
         layer_names = [f'layer.{i}' for i in range(4)]
         kv_cache_groups = [
-            KVCacheGroupSpec(layer_names=layer_names,
-                             kv_cache_spec=full_attn_spec),
+            self._make_group(layer_names, full_attn_spec),
         ]
 
         page_size_bytes = full_attn_spec.page_size_bytes
@@ -1322,7 +1788,7 @@ class TestKVCacheManager:
         with patch(
                 'tpu_inference.runner.kv_cache_manager.get_layers_from_vllm_config',
                 return_value=layers):
-            kv_cache_spec = self.runner.get_kv_cache_spec()
+            layer_configs = self.runner.get_kv_cache_layer_configs()
 
             # Every layer spec (both mamba and attn) is padded to the
             # per-shared_by sum so vLLM sees a uniform page size and sizes
@@ -1330,12 +1796,12 @@ class TestKVCacheManager:
             assert self.runner.cache_config.mamba_page_size_padded == \
                 expected_uniform
 
-            mamba_spec = kv_cache_spec['linear_attn']
+            mamba_spec = layer_configs['linear_attn'].spec
             assert isinstance(mamba_spec, MambaSpec)
             assert mamba_spec.page_size_padded == expected_uniform
 
-            attn_spec = kv_cache_spec['full_attn']
-            assert isinstance(attn_spec, FullAttentionSpec)
+            attn_spec = layer_configs['full_attn'].spec
+            assert isinstance(attn_spec, AttentionSpec)
             assert attn_spec.page_size_padded == expected_uniform
             # Uniform check: vLLM would fail otherwise.
             assert attn_spec.page_size_bytes == mamba_spec.page_size_bytes
@@ -1391,13 +1857,14 @@ class TestKVCacheManager:
         with patch(
                 'tpu_inference.runner.kv_cache_manager.get_layers_from_vllm_config',
                 return_value=layers):
-            kv_cache_spec = self.runner.get_kv_cache_spec()
+            layer_configs = self.runner.get_kv_cache_layer_configs()
 
         assert self.runner.cache_config.mamba_page_size_padded == \
             expected_uniform, (
                 f"expected {expected_uniform}, "
                 f"got {self.runner.cache_config.mamba_page_size_padded}")
-        for name, spec in kv_cache_spec.items():
+        for name, cfg in layer_configs.items():
+            spec = cfg.spec
             assert spec.page_size_bytes == expected_uniform, (
                 f"layer {name} has page_size_bytes={spec.page_size_bytes} "
                 f"but expected uniform={expected_uniform}")
@@ -1424,6 +1891,8 @@ class TestKVCacheManager:
         """Without prefix caching a request needs exactly one mamba slot, so
         the pool is `max_num_reqs + 1` (the +1 is the null block) and the
         attention pool takes every byte that is left."""
+        # Mamba prefix caching off (vLLM HEAD keys it on enable_prefix_caching).
+        set_mamba_prefix_caching(self.runner.cache_config, False)
         from tpu_inference.runner.kv_cache_manager import KVCacheManager
         manager = KVCacheManager(self.runner)
         manager.use_mla = False  # divisor is computed from ATTN_DATA.
@@ -1488,6 +1957,8 @@ class TestKVCacheManager:
         size, full stop. Mamba is still sized compactly around it — its slots
         are per-request, so handing it the pinned attention count instead
         would burn HBM on slots no request can reach."""
+        # Mamba prefix caching off (vLLM HEAD keys it on enable_prefix_caching).
+        set_mamba_prefix_caching(self.runner.cache_config, False)
         from tpu_inference.runner.kv_cache_manager import KVCacheManager
         manager = KVCacheManager(self.runner)
         manager.use_mla = False
@@ -1525,7 +1996,7 @@ class TestKVCacheManager:
 
         self.runner.cache_config.gpu_memory_utilization = 1.0
         self.runner.cache_config.num_gpu_blocks_override = None
-        self.runner.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(self.runner.cache_config, True)
         self.runner.model_config.max_model_len = 2048
         self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
         self.runner.max_num_reqs = max_num_reqs
@@ -1562,7 +2033,7 @@ class TestKVCacheManager:
 
         self.runner.cache_config.gpu_memory_utilization = 1.0
         self.runner.cache_config.num_gpu_blocks_override = None
-        self.runner.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(self.runner.cache_config, True)
         self.runner.model_config.max_model_len = 2048
         self.runner.vllm_config.additional_config[
             "custom_mamba_cache_multiplier"] = multiplier
@@ -1600,7 +2071,7 @@ class TestKVCacheManager:
 
         self.runner.cache_config.gpu_memory_utilization = 1.0
         self.runner.cache_config.num_gpu_blocks_override = None
-        self.runner.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(self.runner.cache_config, True)
         self.runner.model_config.max_model_len = max_model_len
         self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
         self.runner.max_num_reqs = max_num_reqs
@@ -1654,7 +2125,7 @@ class TestKVCacheManager:
 
         self.runner.cache_config.gpu_memory_utilization = 1.0
         self.runner.cache_config.num_gpu_blocks_override = None
-        self.runner.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(self.runner.cache_config, True)
         self.runner.model_config.max_model_len = 2048
         self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
         self.runner.max_num_reqs = max_num_reqs
@@ -1685,7 +2156,7 @@ class TestKVCacheManager:
 
         self.runner.cache_config.gpu_memory_utilization = 1.0
         self.runner.cache_config.num_gpu_blocks_override = None
-        self.runner.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(self.runner.cache_config, True)
         self.runner.model_config.max_model_len = 2048
         self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
         self.runner.max_num_reqs = max_num_reqs
@@ -1720,7 +2191,7 @@ class TestKVCacheManager:
 
         self.runner.cache_config.gpu_memory_utilization = 1.0
         self.runner.cache_config.num_gpu_blocks_override = pinned_attn
-        self.runner.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(self.runner.cache_config, True)
         self.runner.model_config.max_model_len = 2048
         self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
         self.runner.max_num_reqs = max_num_reqs
@@ -1754,7 +2225,7 @@ class TestKVCacheManager:
 
         self.runner.cache_config.gpu_memory_utilization = 1.0
         self.runner.cache_config.num_gpu_blocks_override = 100_000  # huge
-        self.runner.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(self.runner.cache_config, True)
         self.runner.model_config.max_model_len = 2048
         self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
         self.runner.max_num_reqs = max_num_reqs
@@ -1777,6 +2248,8 @@ class TestKVCacheManager:
             mock_update.assert_not_called()
 
     def test_hybrid_mamba_num_blocks(self):
+        # Mamba prefix caching off (vLLM HEAD keys it on enable_prefix_caching).
+        set_mamba_prefix_caching(self.runner.cache_config, False)
         num_blocks = 100
         # The duplicate-path num_blocks calc now uses the TPU-actual
         # attention per-block size (`get_attention_page_size_bytes`) on
@@ -1809,7 +2282,7 @@ class TestKVCacheManager:
         # Total tensor size derived from sum of the unpadded Mamba page size and the Attention page size
         tensor_size = num_blocks * (mamba_unpadded_page_size + attn_page_size)
 
-        attn_spec = MagicMock(spec=FullAttentionSpec)
+        attn_spec = MagicMock(spec=AttentionSpec)
         attn_spec.block_size = attn_spec_block_size
         attn_spec.page_size_bytes = attn_page_size
         attn_spec.num_kv_heads = attn_spec_num_kv_heads
@@ -1818,9 +2291,8 @@ class TestKVCacheManager:
 
         layer_names = ['layer.0', 'layer.1']
         kv_cache_groups = [
-            KVCacheGroupSpec(layer_names=['layer.0'],
-                             kv_cache_spec=mamba_spec),
-            KVCacheGroupSpec(layer_names=['layer.1'], kv_cache_spec=attn_spec),
+            self._make_group(['layer.0'], mamba_spec),
+            self._make_group(['layer.1'], attn_spec),
         ]
         kv_cache_tensors = [
             KVCacheTensor(
@@ -1907,7 +2379,7 @@ class TestKVCacheManager:
             page_size_padded=uniform_page_size,
         )
 
-        attn_spec = MagicMock(spec=FullAttentionSpec)
+        attn_spec = MagicMock(spec=AttentionSpec)
         attn_spec.block_size = attn_spec_block_size
         attn_spec.page_size_bytes = uniform_page_size
         attn_spec.num_kv_heads = attn_spec_num_kv_heads
@@ -1924,14 +2396,10 @@ class TestKVCacheManager:
         mamba_c_names = [t[3] for t in layer_names_per_tensor]
 
         kv_cache_groups = [
-            KVCacheGroupSpec(layer_names=attn_layer_names,
-                             kv_cache_spec=attn_spec),
-            KVCacheGroupSpec(layer_names=mamba_a_names,
-                             kv_cache_spec=mamba_spec),
-            KVCacheGroupSpec(layer_names=mamba_b_names,
-                             kv_cache_spec=mamba_spec),
-            KVCacheGroupSpec(layer_names=mamba_c_names,
-                             kv_cache_spec=mamba_spec),
+            self._make_group(attn_layer_names, attn_spec),
+            self._make_group(mamba_a_names, mamba_spec),
+            self._make_group(mamba_b_names, mamba_spec),
+            self._make_group(mamba_c_names, mamba_spec),
         ]
         kv_cache_tensors = [
             KVCacheTensor(
@@ -1947,7 +2415,7 @@ class TestKVCacheManager:
             kv_cache_groups=kv_cache_groups,
         )
 
-        self.runner.vllm_config.cache_config.mamba_cache_mode = "align"
+        set_mamba_prefix_caching(self.runner.vllm_config.cache_config, True)
         self.runner.initialize_kv_cache(kv_cache_config)
 
         # 10 tensors × 4 duplicated layers = 40 caches, one per layer.
@@ -1995,29 +2463,25 @@ class TestKVCacheManager:
                                     head_size=1024,
                                     dtype=torch.uint8,
                                     tokens_per_state=128)
-        swa_spec = SlidingWindowMLASpec(block_size=128,
-                                        num_kv_heads=1,
-                                        head_size=1024,
-                                        dtype=torch.uint8,
-                                        sliding_window=4096)
-        main_state_spec = SlidingWindowMLASpec(block_size=16,
-                                               num_kv_heads=1,
-                                               head_size=2048,
-                                               dtype=torch.float32,
-                                               sliding_window=8)
-        idx_state_spec = SlidingWindowMLASpec(block_size=16,
-                                              num_kv_heads=1,
-                                              head_size=512,
-                                              dtype=torch.float32,
-                                              sliding_window=8)
+        swa_spec = MLAAttentionSpec(block_size=128,
+                                    num_kv_heads=1,
+                                    head_size=1024,
+                                    dtype=torch.uint8)
+        main_state_spec = MLAAttentionSpec(block_size=16,
+                                           num_kv_heads=1,
+                                           head_size=2048,
+                                           dtype=torch.float32)
+        idx_state_spec = MLAAttentionSpec(block_size=16,
+                                          num_kv_heads=1,
+                                          head_size=512,
+                                          dtype=torch.float32)
         # HCA states are hosted on a CSA NoPE array (131072B page), so they are
         # paged at 32 states/block -- a different (block_size, sliding_window)
         # family than the CSA/indexer states, hence their own cache group.
-        hca_state_spec = SlidingWindowMLASpec(block_size=32,
-                                              num_kv_heads=1,
-                                              head_size=1024,
-                                              dtype=torch.float32,
-                                              sliding_window=128)
+        hca_state_spec = MLAAttentionSpec(block_size=32,
+                                          num_kv_heads=1,
+                                          head_size=1024,
+                                          dtype=torch.float32)
 
         mla_specs, state_specs, hca_state_specs = {}, {}, {}
         for i in range(2):
@@ -2039,20 +2503,27 @@ class TestKVCacheManager:
         swa_specs_1 = {name: swa_spec for name in swa_names[1::2]}
 
         groups = []
-        for block_size, specs in ((1024, mla_specs), (16, state_specs),
-                                  (32, hca_state_specs), (128, swa_specs_0),
-                                  (128, swa_specs_1)):
+        for block_size, manager_cfg, specs in (
+            (1024, FullAttentionManager.config(), mla_specs),
+            (16, SlidingWindowManager.config(sliding_window=8), state_specs),
+            (32, SlidingWindowManager.config(sliding_window=128),
+             hca_state_specs),
+            (128, SlidingWindowManager.config(sliding_window=4096),
+             swa_specs_0),
+            (128, SlidingWindowManager.config(sliding_window=4096),
+             swa_specs_1),
+        ):
             groups.append(
-                KVCacheGroupSpec(layer_names=list(specs),
-                                 kv_cache_spec=UniformTypeKVCacheSpecs(
-                                     block_size=block_size,
-                                     kv_cache_specs=specs)))
+                KVCacheGroup(kv_cache_specs=specs,
+                             manager_config=manager_cfg,
+                             block_size=block_size,
+                             dcp_sharded=True))
         return groups
 
     @staticmethod
     def _ds_v4_page_bytes(groups):
         return {
-            name: group.kv_cache_spec.kv_cache_specs[name].page_size_bytes
+            name: group.kv_cache_specs[name].page_size_bytes
             for group in groups
             for name in group.layer_names
         }
@@ -2273,12 +2744,12 @@ class TestKVCacheManager:
         num_blocks = 32
         groups = self._ds_v4_groups()
         hca_group = self._ds_v4_hca_state_group(groups)
-        base_spec = hca_group.kv_cache_spec.kv_cache_specs[
+        base_spec = hca_group.kv_cache_specs[
             'model.layers.2.attn.compressor.state_cache']
-        hca_specs = dict(hca_group.kv_cache_spec.kv_cache_specs)
+        hca_specs = dict(hca_group.kv_cache_specs)
         mla_group = next(group for group in groups
                          if 'model.layers.2.attn' in group.layer_names)
-        mla_specs = dict(mla_group.kv_cache_spec.kv_cache_specs)
+        mla_specs = dict(mla_group.kv_cache_specs)
         hca_layer_spec = mla_specs['model.layers.2.attn']
         for i in (3, 4):
             mla_specs[f'model.layers.{i}.attn'] = hca_layer_spec
@@ -2287,16 +2758,16 @@ class TestKVCacheManager:
 
         rebuilt = []
         for group in groups:
-            specs = group.kv_cache_spec.kv_cache_specs
+            specs = group.kv_cache_specs
             if group is hca_group:
                 specs = hca_specs
             elif group is mla_group:
                 specs = mla_specs
             rebuilt.append(
-                KVCacheGroupSpec(layer_names=list(specs),
-                                 kv_cache_spec=UniformTypeKVCacheSpecs(
-                                     block_size=group.kv_cache_spec.block_size,
-                                     kv_cache_specs=specs)))
+                KVCacheGroup(kv_cache_specs=specs,
+                             manager_config=group.manager_config,
+                             block_size=group.block_size,
+                             dcp_sharded=group.dcp_sharded))
 
         tensors = self._ds_v4_packed_tensors(rebuilt, num_blocks)
         self._init_ds_v4(
@@ -2334,20 +2805,20 @@ class TestKVCacheManager:
         state_group = next(group for group in groups
                            if 'model.layers.0.attn.compressor.state_cache' in
                            group.layer_names)
-        merged_specs = dict(state_group.kv_cache_spec.kv_cache_specs)
-        merged_specs.update(hca_group.kv_cache_spec.kv_cache_specs)
+        merged_specs = dict(state_group.kv_cache_specs)
+        merged_specs.update(hca_group.kv_cache_specs)
 
         rebuilt = []
         for group in groups:
             if group is hca_group:
                 continue
-            specs = (merged_specs if group is state_group else
-                     group.kv_cache_spec.kv_cache_specs)
+            specs = (merged_specs
+                     if group is state_group else group.kv_cache_specs)
             rebuilt.append(
-                KVCacheGroupSpec(layer_names=list(specs),
-                                 kv_cache_spec=UniformTypeKVCacheSpecs(
-                                     block_size=group.kv_cache_spec.block_size,
-                                     kv_cache_specs=specs)))
+                KVCacheGroup(kv_cache_specs=specs,
+                             manager_config=group.manager_config,
+                             block_size=group.block_size,
+                             dcp_sharded=group.dcp_sharded))
 
         tensors = self._ds_v4_packed_tensors(rebuilt, num_blocks)
         kv_cache_config = KVCacheConfig(num_blocks=num_blocks,
@@ -2366,16 +2837,16 @@ class TestKVCacheManager:
         for group in groups:
             specs = {
                 name: spec
-                for name, spec in group.kv_cache_spec.kv_cache_specs.items()
+                for name, spec in group.kv_cache_specs.items()
                 if 'indexer.k_cache' not in name
             }
             if not specs:
                 continue
             kept_groups.append(
-                KVCacheGroupSpec(layer_names=list(specs),
-                                 kv_cache_spec=UniformTypeKVCacheSpecs(
-                                     block_size=group.kv_cache_spec.block_size,
-                                     kv_cache_specs=specs)))
+                KVCacheGroup(kv_cache_specs=specs,
+                             manager_config=group.manager_config,
+                             block_size=group.block_size,
+                             dcp_sharded=group.dcp_sharded))
         tensors = self._ds_v4_packed_tensors(kept_groups, num_blocks)
         kv_cache_config = KVCacheConfig(num_blocks=num_blocks,
                                         kv_cache_tensors=tensors,
@@ -2390,7 +2861,7 @@ class TestKVCacheManager:
         # retain their raw block size.
         mamba_spec = MagicMock(spec=MambaSpec)
         mamba_spec.block_size = 256
-        attn_spec = FullAttentionSpec(
+        attn_spec = AttentionSpec(
             block_size=256,
             num_kv_heads=4,
             head_size=128,
@@ -2400,10 +2871,8 @@ class TestKVCacheManager:
             num_blocks=100,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(layer_names=["layers.0.mamba"],
-                                 kv_cache_spec=mamba_spec),
-                KVCacheGroupSpec(layer_names=["layers.1.attn"],
-                                 kv_cache_spec=attn_spec),
+                self._make_group(["layers.0.mamba"], mamba_spec),
+                self._make_group(["layers.1.attn"], attn_spec),
             ],
         )
 
