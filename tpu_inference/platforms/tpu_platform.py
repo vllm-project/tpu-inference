@@ -636,9 +636,9 @@ class TpuPlatform(Platform):
         if cache_config.block_size % packing:
             raise ValueError(
                 f"MLA models need a block size that is a multiple of "
-                f"{packing} (MLA_KV_PACKING_SIZE); got "
-                f"--block-size {cache_config.block_size}. Pass a multiple of "
-                f"{packing} or leave --block-size unset.")
+                f"{packing} (MLA_KV_PACKING_SIZE); got block_size="
+                f"{cache_config.block_size}. Set block_size (--block-size) "
+                f"to a multiple of {packing}, or leave it unset.")
 
     @classmethod
     def validate_request(
