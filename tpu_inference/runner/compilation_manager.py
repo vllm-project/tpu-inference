@@ -486,10 +486,8 @@ class CompilationManager:
                 has_cached_kv=pcp_has_cached_kv,
                 num_reqs=pcp_num_reqs,
             )
-        # Dummy mamba_state_indices for compile-cache pre-tracing. Populate
-        # whenever the runner passes state_indices at runtime (non-align mamba
-        # mode, or align mode with spec decode scratch groups; see
-        # `_prepare_inputs`) so the cached HLO signature matches.
+        # Dummy mamba_state_indices for precompilation; must match
+        # `_prepare_inputs` so the compiled HLO signature is reused.
         if passes_mamba_state_indices(self.runner.vllm_config,
                                       self.runner.kv_cache_config):
             mamba_state_indices = device_array(self.runner.mesh,

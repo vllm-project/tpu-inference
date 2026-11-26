@@ -237,12 +237,9 @@ def compute_align_spec_state_indices(
       `n` computed tokens; at most one boundary since `q_len <=
       mamba_block_size`), its checkpoint for `b` (window position `b - n - 1`)
       is copied into the block holding tokens up to `b`, which the scheduler
-      caches once `b` is verified. Under FCFS scheduling (or the default
-      `prefix_cache_retention_interval=0`), a boundary block whose draft at `b`
-      was rejected is overwritten by the next step before any other request can
-      reuse it (with `--scheduling-policy priority` and dense mid-decode
-      retention, intra-step preemption of a just-allocated request could expose
-      the unverified block).
+      caches once `b` is verified. If the draft at `b` is rejected, the next
+      step overwrites that block before it is reused (note: priority scheduling
+      with mid-decode retention could preempt before that overwrite).
 
     All arrays are per request, flattened over DP ranks, with rank-local slot
     ids.
@@ -444,10 +441,9 @@ def resolve_gdn_state_slots(
             if mamba_read_offsets is None:
                 raise ValueError("Speculative decoding on GDN layers requires "
                                  "attn_metadata.mamba.read_offsets.")
-            # Clamp `MAMBA_READ_OFFSET_FROM_BLOCK_TABLE` (-1) to 0 and fold the
-            # checkpoint offset into `read_state_indices` (passing zero
-            # `read_offsets`, matching align mode) so both `BATCHED` verify
-            # windows and `PER_SEQ` prefill chunks resume from
+            # Fold the checkpoint offset into `read_state_indices` (clamping
+            # -1 to 0 and passing zero `read_offsets`, matching align mode) so
+            # both decode verify windows and prefill chunks resume from
             # `state_indices + offset`.
             offsets = jnp.maximum(truncate(mamba_read_offsets), 0)
             read_state_indices = jnp.minimum(state_indices + offsets, max_row)

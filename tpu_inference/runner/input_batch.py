@@ -58,10 +58,9 @@ class CachedRequestState(NewRequestData):
     # [num_prompt_tokens-1, ...]. Set to None when prefill completes.
     in_progress_prompt_logprobs_cpu: Optional[tuple] = None
     mamba_state_slot: Optional[int] = None
-    # Verify-window checkpoint offset (0..num_spec_tokens) written by the
-    # previous decode/verify step, or MAMBA_READ_OFFSET_FROM_BLOCK_TABLE (-1)
-    # before the first verify window / after a prefill chunk (in align mode:
-    # resume from the mamba block table; in none mode: clamped to 0).
+    # Last verify-window checkpoint offset (0..num_spec_tokens), or
+    # MAMBA_READ_OFFSET_FROM_BLOCK_TABLE (-1) before any verify window / after
+    # prefill (reads from block table in align mode; clamps to 0 otherwise).
     mamba_read_offset: int = MAMBA_READ_OFFSET_FROM_BLOCK_TABLE
 
     def __post_init__(self):
@@ -212,11 +211,8 @@ class InputBatch:
         max_num_reqs_per_rank = (max_num_reqs + dp_size - 1) // dp_size
         self._mamba_local_slots = (
             max_num_reqs_per_rank * self.mamba_slot_stride + 1)
-        # Rank-local id of the first group base. Slot 0 is the null block, so
-        # groups normally start at 1. Mamba prefix caching (align mode) with
-        # spec decode shares the arrays with the scheduler's block pool, so
-        # the groups then live in a scratch region at the top of each shard
-        # (see `init_mamba_pools`).
+        # Rank-local start of request slot groups: 1 normally (after null slot
+        # 0), or the top scratch region in align+spec mode (`init_mamba_pools`).
         self._mamba_first_group_local = 1
         self._free_mamba_slots_per_rank: list[list[int]] = []
         self._build_mamba_pools()
@@ -255,12 +251,10 @@ class InputBatch:
         default estimate based on max_num_reqs).
 
         Args:
-            mamba_num_blocks: Rows allocated per mamba state array, across all
-                DP ranks.
-            scratch_slots_per_rank: When non-zero (mamba prefix caching with
-                spec decode), only the top `scratch_slots_per_rank` rows of
-                each rank's shard hold the request slot groups; the rows below
-                belong to the scheduler's mamba block pool.
+            mamba_num_blocks: Total mamba state rows across all DP ranks.
+            scratch_slots_per_rank: If non-zero, reserve the top rows of each
+                rank's shard for spec-decode scratch groups and leave the lower
+                rows to the scheduler.
         """
         self._mamba_local_slots = mamba_num_blocks // self.dp_size
         if scratch_slots_per_rank > 0:

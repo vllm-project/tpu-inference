@@ -403,14 +403,9 @@ class TpuPlatform(Platform):
                 "pool is sized for resident state only. Use 'align' (the "
                 "default when prefix caching is enabled) or 'none'.")
 
-        # Hybrid (mamba/linear-attention) models support prefix caching with
-        # model-free speculative decoding (n-gram) on single-stage (PP=1)
-        # serving when USE_BATCHED_RPA_KERNEL=1 places verify windows in the
-        # decode segment: verify windows checkpoint into runner-owned scratch
-        # slots and block-boundary states are copied into the scheduler's mamba
-        # blocks. Non-last PP stages do not run token sampling to update
-        # per-request mamba_read_offset, so PP > 1, other proposers, or
-        # non-batched RPA keep prefix caching off.
+        # Hybrid models only support prefix caching + spec decode with n-gram,
+        # batched RPA (verify windows in decode segment), and PP=1 (non-last
+        # PP stages don't sample tokens to update `mamba_read_offset`).
         if mamba_prefix_caching_enabled(cache_config,
                                         vllm_config.model_config):
             speculative_config = vllm_config.speculative_config
@@ -427,9 +422,8 @@ class TpuPlatform(Platform):
                     "pipeline_parallel_size=%d).", speculative_config.method,
                     envs.USE_BATCHED_RPA_KERNEL, pp_size)
                 set_mamba_prefix_caching(cache_config, False)
-                # Intentionally override even an explicit --mamba-block-size:
-                # vLLM requires mamba_block_size == max_model_len whenever
-                # mamba prefix caching is off (one unpaged state slot per seq).
+                # Override even an explicit --mamba-block-size: vLLM requires
+                # mamba_block_size == max_model_len when prefix caching is off.
                 if getattr(cache_config, "mamba_block_size", None) is not None:
                     cache_config.mamba_block_size = (
                         vllm_config.model_config.max_model_len)
@@ -552,13 +546,9 @@ class TpuPlatform(Platform):
             "enable_continue_decode", False)
         is_pooling_model = vllm_config.model_config.runner_type == "pooling"
 
-        # N-gram speculative decoding runs its proposer on host CPU after
-        # copying sampled tokens from device, so it requires synchronous
-        # scheduling (upstream vLLM auto-enables async_scheduling by default).
-        # Also pin False when async_scheduling is still None so a later default
-        # resolution cannot re-enable it. Must run before
-        # update_vllm_config_for_dp_scheduler so DPScheduler wraps the
-        # synchronous Scheduler when DP > 1.
+        # N-gram proposals run on host CPU and require synchronous scheduling.
+        # Pin False even when None so later defaults cannot re-enable it, and
+        # run before update_vllm_config_for_dp_scheduler wraps Scheduler.
         if (scheduler_config.async_scheduling is not False
                 and vllm_config.speculative_config is not None
                 and vllm_config.speculative_config.method == "ngram"):

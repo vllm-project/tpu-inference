@@ -643,10 +643,9 @@ def _subtract_num_rejected_tokens_fn(seq_lens: jax.Array, positions: jax.Array,
 def _subtract_mamba_read_offsets_fn(mamba_read_offsets: jax.Array,
                                     num_rejected_tokens: jax.Array,
                                     subtract_indices: jax.Array) -> jax.Array:
-    """Subtract the previous step's rejected-token counts from the Mamba/GDN
-    state read offsets (async scheduling). Negative offsets
-    (`MAMBA_READ_OFFSET_FROM_BLOCK_TABLE`: resume from the mamba block table)
-    are left alone.
+    """Subtract rejected-token counts from mamba read offsets (async mode).
+
+    Negative offsets (`MAMBA_READ_OFFSET_FROM_BLOCK_TABLE`) are left unchanged.
     """
     valid = (subtract_indices >= 0) & (mamba_read_offsets >= 0)
     subtract = jnp.where(valid,
@@ -1615,12 +1614,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             if not sampled_ids:
                 continue
 
-            # If request not active in the *current* batch (e.g. finished,
-            # preempted, or temporarily unscheduled), skip input_batch updates.
-            # A paused request that is still in self.requests keeps its mamba
-            # slot and verify-window offset; subtract rejected drafts here since
-            # next step's on-device subtraction will no longer see it in
-            # _pre_async_results.
+            # Skip input_batch updates if the request left the current batch.
+            # If it is merely paused (still in self.requests), apply rejection
+            # subtraction to its saved mamba_read_offset here before
+            # _pre_async_results is replaced.
             req_id = pre_req_ids[pre_req_idx]
             if req_id not in self.input_batch.req_id_to_index:
                 if (self.speculative_config is not None
@@ -2431,9 +2428,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             # Save the previous results
             next_tokens = jax.copy_to_host_async(next_tokens)
-            # The acceptance counts are still on TPU: assume every draft is
-            # accepted here, `_prepare_inputs` subtracts the actual rejections
-            # on TPU (like `seq_lens`).
+            # Async mode: assume all drafts accepted; `_prepare_inputs`
+            # subtracts actual rejections on TPU (matching `seq_lens`).
             self._update_mamba_read_state(req_ids,
                                           scheduler_output,
                                           discard_sampled_tokens_req_indices,
@@ -2898,20 +2894,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         discard_sampled_tokens_req_indices: list[int],
         valid_sampled_token_ids: Optional[list[list[int]]],
     ) -> None:
-        """Record where each request's GDN state lands after this step.
+        """Record each request's GDN state offset for the next step.
 
-        Requests in the decode segment (`q_len <= max_decode_tokens`) ran as
-        verify windows that write one state checkpoint per window position;
-        the next step resumes from the checkpoint of the last accepted token
-        (`mamba_read_offset >= 0`). Prefill chunks write a single final state
-        (`mamba_read_offset = MAMBA_READ_OFFSET_FROM_BLOCK_TABLE`, which
-        resumes from the block table in align mode and clamps to 0 in none
-        mode).
-
-        `valid_sampled_token_ids` is None under async scheduling, where the
-        acceptance counts are still on TPU: the offsets then assume every
-        draft was accepted and `_prepare_inputs` subtracts the rejections on
-        TPU (see `_subtract_num_rejected_tokens`).
+        - Decode verify windows (`q_len <= max_decode_tokens`): checkpoint
+          offset of the last accepted token (`>= 0`).
+        - Prefill chunks: `MAMBA_READ_OFFSET_FROM_BLOCK_TABLE` (-1; reads from
+          the block table in align mode, clamps to 0 otherwise).
+        - Async mode (`valid_sampled_token_ids is None`): assumes all drafts
+          accepted; `_subtract_num_rejected_tokens` corrects on TPU next step.
         """
         if (not self.speculative_config
                 or not self.kv_cache_config.has_mamba_layers):
@@ -2944,12 +2934,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         """Apply rejection-count subtraction to seq_lens, positions, and
         mamba_read_offsets if needed.
 
-        `num_computed_tokens_cpu` was advanced on the host assuming every
-        speculatively proposed token from the previous step was accepted. Here
-        we subtract the actual rejection counts on TPU for the requests that
-        ran spec decoding in the previous step. `mamba_read_offsets` (GDN state
-        checkpoint to resume from, see `_update_mamba_read_state`) made the
-        same assumption and is corrected the same way when given.
+        `num_computed_tokens_cpu` (and `mamba_read_offsets`, when given)
+        assumed all previous-step drafts were accepted; subtract actual
+        rejection counts on TPU here.
         """
         assert self._pre_async_results is not None
         assert self._pre_async_results.spec_decode_num_rejected_tokens is not None
@@ -3322,10 +3309,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # pure-attention models, leaving the field None keeps AttentionMetadata
         # byte-identical to the pre-compact-mamba layout (so the model_fn
         # signature on those models is unchanged).
-        # In align mode (prefix caching), mamba state indices are derived on-device
-        # from the block tables, so mamba_state_indices is None -- except with
-        # spec decode, where they carry each request's verify-window scratch
-        # group base (see `uses_gdn_spec_scratch`).
+        # In align mode, state indices come from block tables (so pass None),
+        # except with spec decode where they carry each request's scratch base.
         if passes_mamba_state_indices(self.vllm_config, self.kv_cache_config):
             # Reorder mamba_state_indices per DP rank (like block_tables)
             # and convert global slot ids to rank-local indices so they

@@ -441,10 +441,8 @@ def _random_rejection_sample_with_segment(
                                                    total_tokens)
 
     # --- Step 2: Acceptance/Rejection Logic ---
-    # Guard padded (-1) draft slots emitted by `Scheduler` `pad_spec_decode`
-    # (e.g., on prefix-cache hits of length `k * block_size + 1`): JAX wraps
-    # negative indices in `take_along_axis` to `vocab_size - 1`, which could
-    # otherwise accept `-1` (`PLACEHOLDER_TOKEN_ID`) under random sampling.
+    # Reject padded (-1) draft slots from `Scheduler` `pad_spec_decode`;
+    # otherwise JAX wraps -1 to `vocab_size - 1` in `take_along_axis`.
     vocab_size = target_probs.shape[-1]
     valid_draft = (draft_token_ids >= 0) & (draft_token_ids < vocab_size)
     safe_draft_ids = jnp.where(valid_draft, draft_token_ids, 0)

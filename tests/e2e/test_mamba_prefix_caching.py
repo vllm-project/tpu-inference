@@ -96,8 +96,7 @@ def _generate(*,
 
     extra_kwargs = {}
     if check_decode_boundary and mode == "on":
-        # Dense mamba checkpoint retention, so blocks completed while decoding
-        # are cached too (vLLM's default only keeps replay boundaries).
+        # Cache blocks completed during decode (not just prefill boundaries).
         extra_kwargs["prefix_cache_retention_interval"] = None
 
     llm = LLM(
@@ -118,8 +117,7 @@ def _generate(*,
         disable_log_stats=False,  # get_metrics() needs the stat loggers
         **extra_kwargs,
     )
-    # Top-2 logprobs on the spec-decode baseline let the parent distinguish a
-    # bf16 near-tie flip from a real recurrent-state bug.
+    # Record baseline top-2 logprobs to separate bf16 near-ties from state bugs.
     need_logprobs = check_decode_boundary and mode == "off"
     greedy = SamplingParams(temperature=0.0,
                             max_tokens=32,
@@ -127,12 +125,9 @@ def _generate(*,
     outputs = [llm.generate(SHARED_PREFIX + q, greedy)[0] for q in QUESTIONS]
     block_size = llm.llm_engine.vllm_config.cache_config.block_size
     if check_decode_boundary:
-        # Reuse a mamba block checkpoint exported mid-generation by a
-        # speculative verify window: use a distinct header so block 0 cannot
-        # match any block prefilled by QUESTIONS above, stop 4 tokens short of
-        # a block boundary so block [0, block_size) is completed (and its
-        # checkpoint copied out of the runner's scratch slots) only while
-        # decoding, and extend prompt + output in a follow-up that must hit it.
+        # Exercise a block completed during speculative decode: start with a
+        # unique prefix 4 tokens short of block_size so block 0 is only filled
+        # during decode, then issue a follow-up that must hit that cached block.
         from vllm.inputs import TokensPrompt
         boundary_prefix = ("Supplement — Replication Boundary Check. " +
                            SHARED_PREFIX + QUESTIONS[0])
@@ -141,9 +136,8 @@ def _generate(*,
         short_ids = prefix_ids[:block_size - 4]
         boundary_out = llm.generate(TokensPrompt(prompt_token_ids=short_ids),
                                     greedy)[0]
-        # Pin `followup_ids` to `followup_bridge_ids` when supplied by the
-        # parent so `baseline` and `cached` run `followup_out` on the exact
-        # same prompt even if `boundary_out` flipped on a near-tie.
+        # Reuse the cached run's bridge tokens on the baseline so both compare
+        # the exact same follow-up prompt even if `boundary_out` had a near-tie.
         bridge_ids = (followup_bridge_ids if followup_bridge_ids is not None
                       else list(boundary_out.outputs[0].token_ids[:8]))
         followup_ids = (short_ids + bridge_ids +
@@ -245,10 +239,8 @@ def _verify_mamba_prefix_caching(dp_size: int = 1,
     checks that rejected drafts do not leak into the recurrent state.
     """
     check_decode_boundary = num_spec_tokens > 0
-    # Run `cached` first so `followup_out` hits the mamba block completed
-    # during `cached`'s own generation, then feed the same 8 bridge tokens into
-    # `baseline` so `followup_out` uses an identical prompt even if
-    # `boundary_out` flipped on a near-tie under speculative decoding.
+    # Run `cached` first and pass its 8 bridge tokens to `baseline` so
+    # `followup_out` sees the same prompt in both runs.
     cached = _run_case("on",
                        dp_size=dp_size,
                        multiplier=multiplier,
@@ -276,10 +268,8 @@ def _verify_mamba_prefix_caching(dp_size: int = 1,
         f"no prefix cache hits (dp={dp_size}): the shared prefix was never "
         f"reused, so this test did not exercise mamba state reuse")
     if num_spec_tokens > 0:
-        # The boundary prompt uses a distinct header (not in QUESTIONS) and
-        # stops short of the first block boundary, so it must get 0 prefill
-        # hits and the follow-up can only hit block [0, block_size) if the
-        # checkpoint written by a speculative verify window was cached.
+        # `boundary` starts with a unique prefix short of block_size (0 hits),
+        # so `followup` can only hit block 0 if decode cached the boundary state.
         block_size = cached["block_size"]
         boundary_cached = cached["num_cached_tokens"][-2]
         followup_cached = cached["num_cached_tokens"][-1]
@@ -304,10 +294,8 @@ def _verify_mamba_prefix_caching(dp_size: int = 1,
                 f"Attention pool ({attn_blocks}) must be larger than compact Mamba pool ({mamba_blocks})"
             )
             if multiplier is not None:
-                # `custom_mamba_cache_multiplier` blocks per request in the
-                # batch, plus any speculative verify-window scratch slots and
-                # the null block (less, if the joint HBM budget forced a
-                # re-split).
+                # Multiplier blocks per req + spec scratch + null block (or less
+                # if HBM budget forced a re-split).
                 scratch_blocks = (8 * (num_spec_tokens + 1)
                                   if num_spec_tokens > 0 else 0)
                 assert mamba_blocks <= multiplier * 8 + 1 + scratch_blocks
@@ -325,10 +313,8 @@ def _verify_mamba_prefix_caching(dp_size: int = 1,
         print(f"  prefix caching on:  {cached['texts'][i]!r}")
 
     if check_decode_boundary:
-        # The baseline runs without speculative decoding, whose verify
-        # windows batch tokens differently, so a near-tie (top-2 within
-        # `_NEAR_TIE_NATS` in the baseline) can legitimately flip. Anything
-        # else means the recurrent state went wrong.
+        # Spec decode batches tokens differently from baseline, so allow bf16
+        # near-ties (baseline top-2 gap < `_NEAR_TIE_NATS`) to flip.
         def is_near_tie(i: int) -> bool:
             b, c = baseline["token_ids"][i], cached["token_ids"][i]
             k = next((j for j in range(min(len(b), len(c))) if b[j] != c[j]),

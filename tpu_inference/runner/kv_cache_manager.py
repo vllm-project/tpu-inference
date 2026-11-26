@@ -122,10 +122,7 @@ class KVCacheManager:
         self.actual_mamba_num_blocks: int | None = None
 
     def scheduler_mamba_num_blocks(self, physical_num_blocks: int) -> int:
-        """Mamba blocks the scheduler may use out of `physical_num_blocks`
-        allocated rows. Align mode with spec decode keeps the top
-        `gdn_spec_scratch_slots_per_rank` rows of every DP rank's shard for
-        the runner's verify-window scratch groups."""
+        """Return scheduler-usable mamba blocks (excluding spec scratch rows)."""
         return physical_num_blocks - gdn_spec_scratch_num_blocks(
             self.runner.vllm_config, self.runner.max_num_reqs,
             self.runner.dp_size)
@@ -421,9 +418,7 @@ class KVCacheManager:
         scratch_bytes = scratch_num_blocks * mamba_bytes_per_block
         attn_bytes_per_req = attn_blocks_per_req * attn_bytes_per_block
 
-        # Minimum mamba pool: every persistent-batch slot resident (plus fixed
-        # runner verify-window scratch slots), plus the null block. Below this
-        # the runner cannot hold the active batch.
+        # Minimum mamba pool: resident slots + spec scratch rows + null block.
         min_mamba_blocks = (
             mamba_pool_size(max_num_reqs, min_blocks_per_req, divisor) +
             scratch_num_blocks)
@@ -458,9 +453,7 @@ class KVCacheManager:
             attn_num_blocks = round_down(
                 max(avail - mamba_num_blocks * mamba_bytes_per_block, 0) //
                 attn_bytes_per_block)
-            # Re-split the budget at the request count both can serve,
-            # deducting fixed runner scratch slots before dividing variable
-            # per-request scheduler checkpoints.
+            # Re-split remaining HBM (after fixed scratch rows) by servable reqs.
             if (mamba_num_blocks > min_mamba_blocks
                     and attn_num_blocks // attn_blocks_per_req
                     < (mamba_num_blocks - scratch_num_blocks) //
@@ -500,8 +493,7 @@ class KVCacheManager:
             cache_config.num_gpu_blocks_override = int(attn_num_blocks)
 
         self._mamba_num_blocks = int(mamba_num_blocks)
-        # The scheduler only sees the rows outside the runner-owned spec
-        # decode scratch region (all of them without align + spec decode).
+        # Expose only non-scratch rows to the scheduler.
         sched_mamba_num_blocks = int(mamba_num_blocks) - scratch_num_blocks
         cache_config.mamba_num_blocks = sched_mamba_num_blocks
         set_mamba_num_blocks(sched_mamba_num_blocks)
@@ -810,11 +802,8 @@ class KVCacheManager:
                         if (isinstance(params, MambaManager.Params) and
                                 uses_gdn_spec_scratch(self.runner.vllm_config)
                                 and params.num_speculative_blocks > 0):
-                            # Verify windows checkpoint into runner-owned
-                            # scratch slots, so the scheduler must not reserve
-                            # (or relocate) speculative blocks in the mamba
-                            # block table; it keeps one block per
-                            # mamba_block_size.
+                            # Verify windows use runner scratch slots, so the
+                            # scheduler does not reserve spec mamba blocks.
                             layer_cfg = dataclasses.replace(
                                 layer_cfg,
                                 manager_config=layer_cfg.manager_config.
