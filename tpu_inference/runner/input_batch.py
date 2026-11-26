@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, cast
 
 import jax
-import jax.numpy as jnp
 import numpy as np
 import torch
 from vllm.lora.request import LoRARequest
@@ -156,7 +155,6 @@ class InputBatch:
         self.has_allowed_token_ids: set[str] = set()
         # NOTE(lufang): In the mask tensor, if the corresponding token allowed,
         # the value is False. Since we use masked_fill_ to set -inf.
-        self.allowed_token_ids_mask: Optional[jax.Array] = None
         self.allowed_token_ids_mask_cpu: Optional[jax.Array] = None
 
         # req_index -> bad_words_token_ids
@@ -467,8 +465,6 @@ class InputBatch:
                 if self.allowed_token_ids_mask_cpu is None:
                     # Lazy allocation for this tensor, which can be large.
                     # False means we don't fill with -inf.
-                    self.allowed_token_ids_mask = jnp.zeros(
-                        (self.max_num_reqs, self.vocab_size), dtype=jnp.bool)
                     self.allowed_token_ids_mask_cpu = np.zeros(
                         (self.max_num_reqs, self.vocab_size), dtype=np.bool)
                 self.allowed_token_ids_mask_cpu[req_index] = True

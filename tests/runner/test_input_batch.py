@@ -768,6 +768,8 @@ def test_allowed_token_ids_add_swap_remove(input_batch: InputBatch):
 
     mask = input_batch.allowed_token_ids_mask_cpu
     assert mask.shape == (MAX_NUM_REQS, VOCAB_SIZE)
+    # Only the host-side mask is kept; nothing is allocated on device.
+    assert getattr(input_batch, "allowed_token_ids_mask", None) is None
     assert not mask[0].any()
     # True means the token is masked out.
     assert not mask[1][[1, 2, 3]].any()
