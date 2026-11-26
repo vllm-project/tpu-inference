@@ -199,6 +199,28 @@ class TestTpuPlatform:
         }):
             assert TpuPlatform.get_device_name() == "TPU"
 
+    @pytest.mark.parametrize("block_size,use_mla,arch,ok", [
+        (16, True, "DeepseekV3ForCausalLM", False),
+        (48, True, "DeepseekV3ForCausalLM", False),
+        (32, True, "DeepseekV3ForCausalLM", True),
+        (1024, True, "DeepseekV3ForCausalLM", True),
+        (16, False, "LlamaForCausalLM", True),
+        (16, True, "DeepseekV4ForCausalLM", True),
+    ])
+    def test_check_mla_block_size(self, block_size, use_mla, arch, ok):
+        from types import SimpleNamespace
+        vllm_config = SimpleNamespace(
+            cache_config=SimpleNamespace(block_size=block_size),
+            model_config=SimpleNamespace(use_mla=use_mla,
+                                         architectures=[arch]))
+        with patch.object(envs, "MLA_KV_PACKING_SIZE", 32), \
+                patch.object(envs, "MLA_TRANSPOSE_KV_CACHE", False):
+            if ok:
+                TpuPlatform._check_mla_block_size(vllm_config)
+            else:
+                with pytest.raises(ValueError, match="multiple of 32"):
+                    TpuPlatform._check_mla_block_size(vllm_config)
+
     def test_validate_request_random_seed(self):
         from vllm.sampling_params import SamplingParams, SamplingType
         params = MagicMock(spec=SamplingParams)

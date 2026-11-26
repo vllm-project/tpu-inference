@@ -481,6 +481,7 @@ class TpuPlatform(Platform):
                         )
                         cache_config.block_size = min_page_size  # type: ignore[assignment]
 
+        cls._check_mla_block_size(vllm_config)
         check_attention_backend_config(vllm_config)
 
         parallel_config = vllm_config.parallel_config
@@ -612,6 +613,32 @@ class TpuPlatform(Platform):
     def supports_v1(cls, model_config: ModelConfig) -> bool:
         # V1 support on TPU is experimental
         return True
+
+    @classmethod
+    def _check_mla_block_size(cls, vllm_config: VllmConfig) -> None:
+        """Reject MLA block sizes the MLA KV cache cannot page exactly.
+
+        The MLA cache pads each page to a multiple of MLA_KV_PACKING_SIZE
+        tokens and the MLA kernel takes its page size from the cache shape,
+        so any other block size makes the kernel address pages differently
+        from the scheduler's block table (tokens land in other blocks).
+        """
+        cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
+        if cache_config is None or model_config is None:
+            return
+        if not model_config.use_mla or envs.MLA_TRANSPOSE_KV_CACHE:
+            return
+        # DeepSeek-V4 builds its own packed cache with a different packing.
+        if "DeepseekV4ForCausalLM" in (model_config.architectures or []):
+            return
+        packing = envs.MLA_KV_PACKING_SIZE
+        if cache_config.block_size % packing:
+            raise ValueError(
+                f"MLA models need a block size that is a multiple of "
+                f"{packing} (MLA_KV_PACKING_SIZE); got "
+                f"--block-size {cache_config.block_size}. Pass a multiple of "
+                f"{packing} or leave --block-size unset.")
 
     @classmethod
     def validate_request(
