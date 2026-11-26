@@ -755,3 +755,28 @@ def test_dp_mamba_slot_groups_partitioned_by_rank(
             assert dp_spec_input_batch.is_valid_mamba_slot_base(slot)
             # The whole group fits inside this rank's shard.
             assert slot + SLOT_STRIDE - 1 < rank_base + local_slots
+
+
+def test_allowed_token_ids_add_swap_remove(input_batch: InputBatch):
+    """A request with allowed_token_ids can be added, swapped and removed."""
+    plain = create_dummy_request("plain")
+    restricted = create_dummy_request(
+        "restricted",
+        sampling_params=SamplingParams(allowed_token_ids=[1, 2, 3]))
+    input_batch.add_request(plain)
+    input_batch.add_request(restricted)
+
+    mask = input_batch.allowed_token_ids_mask_cpu
+    assert mask.shape == (MAX_NUM_REQS, VOCAB_SIZE)
+    assert not mask[0].any()
+    # True means the token is masked out.
+    assert not mask[1][[1, 2, 3]].any()
+    assert mask[1].sum() == VOCAB_SIZE - 3
+
+    input_batch.swap_states(0, 1)
+    mask = input_batch.allowed_token_ids_mask_cpu
+    assert mask[0].sum() == VOCAB_SIZE - 3
+    assert not mask[1].any()
+
+    assert input_batch.remove_request("restricted") == 0
+    assert not input_batch.allowed_token_ids_mask_cpu[0].any()
