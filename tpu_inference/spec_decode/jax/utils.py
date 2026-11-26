@@ -329,6 +329,8 @@ def process_and_extend_logits(
             top_p=top_p,
             do_sampling=tpu_sampling_metadata.do_sampling,
             logprobs=tpu_sampling_metadata.logprobs,
+            needs_top_k=tpu_sampling_metadata.needs_top_k,
+            needs_top_p=tpu_sampling_metadata.needs_top_p,
         )
         processed_target = _apply_sampling_transforms(local_target, local_meta)
         return jnp.concatenate([processed_target, local_bonus], axis=0)

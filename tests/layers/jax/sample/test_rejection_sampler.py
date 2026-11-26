@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 
 from tpu_inference.layers.jax.sample.rejection_sampler import (
-    PLACEHOLDER_TOKEN_ID, RejectionSampler)
+    PLACEHOLDER_TOKEN_ID, RejectionSampler, _compute_probs)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 
@@ -1653,3 +1653,34 @@ class TestTopKTopPSampling:
             assert len(seq_tokens) >= 0  # Should have at least empty list
             for token_id in seq_tokens:
                 assert 0 <= token_id < vocab_size  # Valid token range
+
+
+class TestComputeProbsStaticFilterFlags:
+    """`_compute_probs` skips unused top-k / top-p searches bit-exactly."""
+
+    @pytest.mark.parametrize("top_k,top_p", [
+        pytest.param([-1, 0, -1], [1.0, 1.0, 1.0], id="unfiltered"),
+        pytest.param([3, -1, 7], [1.0, 1.0, 1.0], id="only_topk"),
+        pytest.param([-1, 0, -1], [0.6, 1.0, 0.9], id="only_topp"),
+        pytest.param([3, 0, 7], [0.6, 1.0, 0.9], id="both"),
+    ])
+    def test_host_flags_bit_exact(self, top_k, top_p):
+        num_draft_tokens = jnp.array([2, 1, 3], dtype=jnp.int32)
+        logits = jax.random.normal(jax.random.PRNGKey(0),
+                                   (6, VOCAB_SIZE)) * 3.0
+
+        def metadata(needs_top_k=True, needs_top_p=True):
+            return TPUSupportedSamplingMetadata(
+                temperature=jnp.array([0.7, 1.0, 1.3], dtype=jnp.float32),
+                top_k=jnp.array(top_k, dtype=jnp.int32),
+                top_p=jnp.array(top_p, dtype=jnp.float32),
+                do_sampling=True,
+                needs_top_k=needs_top_k,
+                needs_top_p=needs_top_p,
+            )
+
+        needs = (any(k > 0 for k in top_k), any(p < 1.0 for p in top_p))
+        fn = jax.jit(_compute_probs)
+        np.testing.assert_array_equal(
+            fn(logits, num_draft_tokens, metadata(*needs)),
+            fn(logits, num_draft_tokens, metadata()))

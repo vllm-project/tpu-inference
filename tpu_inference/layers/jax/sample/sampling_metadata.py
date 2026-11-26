@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
 import functools
+import itertools
 from dataclasses import dataclass
 from typing import Optional
 
@@ -40,7 +42,7 @@ DEFAULT_SAMPLING_PARAMS = dict(
         "_cache_collision_dummy",
         "distributed_sampling_supported",
     ],
-    meta_fields=["do_sampling", "logprobs"],
+    meta_fields=["do_sampling", "logprobs", "needs_top_k", "needs_top_p"],
 )
 @dataclass
 class TPUSupportedSamplingMetadata:
@@ -54,6 +56,36 @@ class TPUSupportedSamplingMetadata:
     # set by sampling.with_distributed_sampling_support. None: compute it in
     # sample().
     distributed_sampling_supported: Optional[jnp.ndarray] = None
+    # Static (trace-time) flags: whether any request in the batch uses top-k
+    # (k > 0) / top-p (p < 1.0). When False, the corresponding full-vocab
+    # 32-step binary search is not traced at all. Computed on the host in
+    # `from_input_batch`; default True keeps the unconditional behavior.
+    needs_top_k: bool = True
+    needs_top_p: bool = True
+
+    def with_all_filters(self) -> "TPUSupportedSamplingMetadata":
+        """Returns a copy with needs_top_k = needs_top_p = True.
+
+        Use before passing to a jitted function that is only precompiled for
+        the default flags, so that the flags never trigger a recompilation.
+        """
+        if self.needs_top_k and self.needs_top_p:
+            return self
+        return dataclasses.replace(self, needs_top_k=True, needs_top_p=True)
+
+    def static_variants(self) -> list["TPUSupportedSamplingMetadata"]:
+        """Returns one copy of this metadata per static-flag specialization.
+
+        `from_input_batch` can produce any (needs_top_k, needs_top_p)
+        combination, so jitted functions that receive its output must be
+        precompiled for each of them. Greedy metadata never reads the flags.
+        """
+        if not self.do_sampling:
+            return [self]
+        return [
+            dataclasses.replace(self, needs_top_k=k, needs_top_p=p)
+            for k, p in itertools.product((True, False), repeat=2)
+        ]
 
     @classmethod
     def from_input_batch(
@@ -121,4 +153,7 @@ class TPUSupportedSamplingMetadata:
             _cache_collision_dummy=cache_collision_dummy,
             do_sampling=not input_batch.all_greedy,
             logprobs=needs_logprobs,
+            # Padded rows use top_k=0 / top_p=1.0, so they never set a flag.
+            needs_top_k=bool(np.any(top_k_tensor > 0)),
+            needs_top_p=bool(np.any(top_p_tensor < 1.0)),
         )

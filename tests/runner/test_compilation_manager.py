@@ -15,6 +15,8 @@ from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   ShardingAxisName)
 from tpu_inference.layers.jax.sample.sampling import \
     logprobs_use_processed_logits
+from tpu_inference.layers.jax.sample.sampling_metadata import \
+    TPUSupportedSamplingMetadata
 from tpu_inference.runner.compilation_manager import (CompilationManager,
                                                       _describe_signature)
 
@@ -333,7 +335,11 @@ class TestPrecompileSpecDecodeExtendLogitsDtypes:
         manager._run_compilation = record
         manager._precompile_process_and_extend_logits()
 
-        assert recorded == [(jnp.dtype(model_dtype), jnp.dtype(jnp.float32))]
+        # One compilation per static-flag specialization.
+        num_variants = len(
+            TPUSupportedSamplingMetadata(do_sampling=True).static_variants())
+        assert recorded == [(jnp.dtype(model_dtype), jnp.dtype(jnp.float32))
+                            ] * num_variants
 
     @pytest.mark.parametrize("model_dtype", [jnp.bfloat16, jnp.float32])
     def test_extend_logits_simple_uses_model_dtype_for_both_inputs(

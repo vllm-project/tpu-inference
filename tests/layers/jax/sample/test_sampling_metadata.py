@@ -379,3 +379,69 @@ def test_from_input_batch_sampling_with_logprobs(mesh: Mesh):
 
     assert metadata.do_sampling, "do_sampling should be True"
     assert metadata.logprobs, "logprobs should be True"
+
+
+@pytest.mark.parametrize(
+    "top_k,top_p,expected",
+    [
+        pytest.param([-1, 0], [1.0, 1.0], (False, False), id="unfiltered"),
+        pytest.param([-1, 0], [0.9, 1.0], (False, True), id="top_p_only"),
+        pytest.param([5, -1], [1.0, 1.0], (True, False), id="top_k_only"),
+        pytest.param([5, 0], [1.0, 0.9], (True, True), id="both"),
+    ],
+)
+def test_from_input_batch_static_filter_flags(mesh: Mesh, top_k, top_p,
+                                              expected):
+    """needs_top_k / needs_top_p are computed on the host from the batch,
+    and padded rows (top_k=0, top_p=1.0) never set them."""
+    mock_batch = MockInputBatch(
+        all_greedy=False,
+        num_reqs=2,
+        temperature_cpu=np.array([0.7, 0.8, 0.0, 0.0], dtype=np.float32),
+        top_k_cpu=np.array(top_k + [0, 0], dtype=np.int32),
+        top_p_cpu=np.array(top_p + [0.0, 0.0], dtype=np.float32),
+    )
+    metadata = TPUSupportedSamplingMetadata.from_input_batch(
+        mesh=mesh,
+        input_batch=mock_batch,
+        padded_num_reqs=4,
+        req_indices_dp={0: [0, 1]})
+    assert (metadata.needs_top_k, metadata.needs_top_p) == expected
+
+    full = metadata.with_all_filters()
+    assert (full.needs_top_k, full.needs_top_p) == (True, True)
+    assert full.top_k is metadata.top_k
+
+
+def test_static_filter_flags_are_pytree_metadata():
+    """The flags are static: they change the treedef, not the leaves."""
+    kw = dict(temperature=jnp.ones((2, )),
+              top_k=jnp.zeros((2, ), jnp.int32),
+              top_p=jnp.ones((2, )),
+              do_sampling=True)
+    a = TPUSupportedSamplingMetadata(**kw)
+    b = TPUSupportedSamplingMetadata(**kw, needs_top_k=False)
+    assert len(jax.tree.leaves(a)) == len(jax.tree.leaves(b))
+    assert jax.tree.structure(a) != jax.tree.structure(b)
+
+
+def test_static_variants():
+    """static_variants enumerates all flag specializations for sampling and
+    returns [self] for greedy."""
+    greedy = TPUSupportedSamplingMetadata(do_sampling=False)
+    assert greedy.static_variants() == [greedy]
+
+    sampling = TPUSupportedSamplingMetadata(
+        temperature=jnp.ones((2, )),
+        top_k=jnp.zeros((2, ), jnp.int32),
+        top_p=jnp.ones((2, )),
+        do_sampling=True,
+    )
+    variants = sampling.static_variants()
+    assert [(v.needs_top_k, v.needs_top_p) for v in variants] == [
+        (True, True),
+        (True, False),
+        (False, True),
+        (False, False),
+    ]
+    assert all(v.top_k is sampling.top_k for v in variants)

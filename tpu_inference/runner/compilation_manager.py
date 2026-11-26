@@ -1156,23 +1156,27 @@ class CompilationManager:
                         logprobs=logprobs)
                     allow_distributed_sampling = distributed_sampling_allowed(
                         logprobs, self.runner.model_config.logprobs_mode)
-                    self._run_compilation(
-                        f"worker{self.runner.rank} sample",
-                        sample,
-                        self.runner.rng_params_for_sampling,
-                        self.runner.mesh,
-                        logits,
-                        sampling_metadata,
-                        call_kwargs={
-                            "allow_distributed_sampling":
-                            allow_distributed_sampling
-                        },
-                        compile_only=False,
-                        num_reqs=num_reqs,
-                        do_sampling=do_sampling,
-                        logprobs=logprobs,
-                        allow_distributed_sampling=allow_distributed_sampling,
-                    )
+                    for meta in sampling_metadata.static_variants():
+                        self._run_compilation(
+                            f"worker{self.runner.rank} sample",
+                            sample,
+                            self.runner.rng_params_for_sampling,
+                            self.runner.mesh,
+                            logits,
+                            meta,
+                            call_kwargs={
+                                "allow_distributed_sampling":
+                                allow_distributed_sampling
+                            },
+                            compile_only=False,
+                            num_reqs=num_reqs,
+                            do_sampling=do_sampling,
+                            logprobs=logprobs,
+                            allow_distributed_sampling=
+                            allow_distributed_sampling,
+                            needs_top_k=meta.needs_top_k,
+                            needs_top_p=meta.needs_top_p,
+                        )
 
         self._sampling_precompiled = True
 
@@ -1360,17 +1364,20 @@ class CompilationManager:
                         (num_logits, ), jnp.int32, dp_sharding),
                 )
 
-                self._run_compilation(
-                    f"worker{self.runner.rank} _process_and_extend_logits",
-                    process_and_extend_logits,
-                    self.runner.mesh,
-                    target_logits,
-                    processed_bonus_logits,
-                    spec_decode_metadata,
-                    sampling_metadata,
-                    num_logits=num_logits,
-                    num_reqs=num_reqs,
-                )
+                for meta in sampling_metadata.static_variants():
+                    self._run_compilation(
+                        f"worker{self.runner.rank} _process_and_extend_logits",
+                        process_and_extend_logits,
+                        self.runner.mesh,
+                        target_logits,
+                        processed_bonus_logits,
+                        spec_decode_metadata,
+                        meta,
+                        num_logits=num_logits,
+                        num_reqs=num_reqs,
+                        needs_top_k=meta.needs_top_k,
+                        needs_top_p=meta.needs_top_p,
+                    )
 
     def _precompile_extend_logits_simple(self) -> None:
         logger.info(
@@ -1602,20 +1609,23 @@ class CompilationManager:
                             _cache_collision_dummy=_cache_collision_dummy,
                             do_sampling=do_sampling)
 
-                    self._run_compilation(
-                        f"worker{self.runner.rank} {compilation_name}",
-                        self.runner.rejection_sampler,
-                        draft_token_ids,
-                        num_draft_tokens,
-                        draft_probs,
-                        target_probs,
-                        bonus_token_ids,
-                        sampling_metadata,
-                        self.runner.rng_params_for_sampling,
-                        num_logits=num_logits,
-                        num_reqs=num_reqs,
-                        do_sampling=do_sampling,
-                    )
+                    for meta in sampling_metadata.static_variants():
+                        self._run_compilation(
+                            f"worker{self.runner.rank} {compilation_name}",
+                            self.runner.rejection_sampler,
+                            draft_token_ids,
+                            num_draft_tokens,
+                            draft_probs,
+                            target_probs,
+                            bonus_token_ids,
+                            meta,
+                            self.runner.rng_params_for_sampling,
+                            num_logits=num_logits,
+                            num_reqs=num_reqs,
+                            do_sampling=do_sampling,
+                            needs_top_k=meta.needs_top_k,
+                            needs_top_p=meta.needs_top_p,
+                        )
 
     def _precompile_eagle3_helpers(self) -> None:
         logger.info(

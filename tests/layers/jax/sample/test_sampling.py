@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
 from dataclasses import replace
 from unittest import mock
 
@@ -33,11 +34,12 @@ from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
 from tpu_inference.layers.jax.sample import sampling
 from tpu_inference.layers.jax.sample.sampling import (
     PromptLogprobsAsyncData, PromptLogprobsReqSnap, _apply_sampling_transforms,
-    _can_sample_distributed, _distributed_sampling_fits,
-    _distributed_topk_sample, _merge_topk_candidates, _prefiltered_top_k,
-    _shard_topk_candidates, _topk_prefilter_chunk, _topp_mask_sorted,
-    compute_logprobs, compute_prompt_logprobs, distributed_sampling_allowed,
-    gather_logprobs, sample, with_distributed_sampling_support)
+    _apply_sampling_transforms_microbatched, _can_sample_distributed,
+    _distributed_sampling_fits, _distributed_topk_sample,
+    _merge_topk_candidates, _prefiltered_top_k, _shard_topk_candidates,
+    _topk_prefilter_chunk, _topp_mask_sorted, compute_logprobs,
+    compute_prompt_logprobs, distributed_sampling_allowed, gather_logprobs,
+    sample, with_distributed_sampling_support)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 
@@ -673,6 +675,78 @@ class TestProcessedLogprobs:
 
         assert np.array_equal(processed_logits,
                               jnp.concatenate(chunk_results, axis=0))
+
+
+class TestStaticFilterFlags:
+    """`needs_top_k` / `needs_top_p` skip unused top-k / top-p searches."""
+
+    CASES = [
+        pytest.param([-1, -1, 0, -1], [1.0, 1.0, 1.0, 1.0], id="unfiltered"),
+        pytest.param([5, 10, 1, 20], [1.0, 1.0, 1.0, 1.0], id="only_topk"),
+        pytest.param([-1, -1, 0, -1], [0.5, 0.8, 0.9, 0.95], id="only_topp"),
+        pytest.param([8, 16, 4, 32], [0.7, 0.85, 0.9, 0.95], id="both"),
+        pytest.param([-1, 5, 0, 12], [1.0, 1.0, 1.0, 1.0], id="mixed_topk"),
+        pytest.param([-1, 6, 0, 10], [0.8, 1.0, 1.0, 0.7], id="mixed_both"),
+    ]
+
+    @staticmethod
+    def _metadata(top_k, top_p, needs_top_k=True, needs_top_p=True):
+        return TPUSupportedSamplingMetadata(
+            temperature=jnp.array([0.7, 1.0, 1.3, 0.5], dtype=jnp.float32),
+            top_k=jnp.array(top_k, dtype=jnp.int32),
+            top_p=jnp.array(top_p, dtype=jnp.float32),
+            do_sampling=True,
+            logprobs=False,
+            needs_top_k=needs_top_k,
+            needs_top_p=needs_top_p,
+        )
+
+    @pytest.mark.parametrize("top_k,top_p", CASES)
+    def test_host_flags_bit_exact(self, top_k, top_p):
+        """Flags computed like `from_input_batch` give identical logits to
+        always running both searches."""
+        logits = jax.random.normal(jax.random.key(42), (4, 128),
+                                   dtype=jnp.float32) * 5.0
+        logits = logits.at[0, 0].set(-jnp.inf)
+        needs = (bool(np.any(np.array(top_k) > 0)),
+                 bool(np.any(np.array(top_p) < 1.0)))
+        fn = jax.jit(_apply_sampling_transforms)
+        expected = fn(logits, self._metadata(top_k, top_p))
+        actual = fn(logits, self._metadata(top_k, top_p, *needs))
+        np.testing.assert_array_equal(actual, expected)
+
+    @pytest.mark.parametrize("needs_top_k,needs_top_p,num_searches", [
+        (True, True, 2),
+        (True, False, 1),
+        (False, True, 1),
+        (False, False, 0),
+    ])
+    def test_unused_search_not_traced(self, needs_top_k, needs_top_p,
+                                      num_searches):
+        logits = jnp.zeros((4, 64), dtype=jnp.float32)
+        meta = self._metadata([-1] * 4, [1.0] * 4, needs_top_k, needs_top_p)
+        jaxpr = jax.make_jaxpr(_apply_sampling_transforms)(logits, meta)
+        # Each binary search's 31-step `lax.fori_loop` traces to one `scan`
+        # (possibly nested inside a jit sub-jaxpr, so count on the printed
+        # form).
+        assert str(jaxpr).count("scan[") == num_searches
+
+    def test_microbatched_respects_flags(self):
+        logits = jax.random.normal(jax.random.key(23), (32, 64),
+                                   dtype=jnp.float32)
+        top_k = [-1] * 16 + [4] * 16
+        top_p = [1.0] * 32
+        full = TPUSupportedSamplingMetadata(
+            temperature=jnp.ones((32, ), dtype=jnp.float32),
+            top_k=jnp.array(top_k, dtype=jnp.int32),
+            top_p=jnp.array(top_p, dtype=jnp.float32),
+            do_sampling=True,
+            logprobs=False,
+        )
+        skip_p = dataclasses.replace(full, needs_top_p=False)
+        with mock.patch.object(envs, "SAMPLING_MICROBATCH_SIZE", 8):
+            fn = jax.jit(_apply_sampling_transforms_microbatched)
+            np.testing.assert_array_equal(fn(logits, skip_p), fn(logits, full))
 
 
 class TestComputePromptLogprobs:
