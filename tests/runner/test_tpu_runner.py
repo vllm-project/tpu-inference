@@ -1871,3 +1871,25 @@ def test_modify_prev_results_skips_request_resent_after_preemption():
     assert new_state.output_token_ids == [7, 8]
     assert runner.input_batch.token_ids_cpu[0].tolist() == [0] * 8
     assert runner.input_batch.num_tokens_no_spec[0] == 4
+
+
+@pytest.mark.parametrize("drafter", [
+    None,
+    SimpleNamespace(max_model_len=131072),
+    SimpleNamespace(),
+])
+def test_update_max_model_len(drafter):
+    """Auto-fit's smaller max_model_len also shrinks the derived block count
+    (used by disagg warmup) and the drafter's cached length."""
+    had_max_model_len = hasattr(drafter, "max_model_len")
+    runner = SimpleNamespace(max_model_len=131072,
+                             block_size=16,
+                             max_num_blocks_per_req=131072 // 16,
+                             drafter=drafter)
+    TPUModelRunner.update_max_model_len(runner, 81670)
+    assert runner.max_model_len == 81670
+    assert runner.max_num_blocks_per_req == 5105  # cdiv(81670, 16)
+    if had_max_model_len:
+        assert drafter.max_model_len == 81670
+    elif drafter is not None:
+        assert not hasattr(drafter, "max_model_len")

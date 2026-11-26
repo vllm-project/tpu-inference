@@ -378,7 +378,7 @@ class TestTPUWorker:
         worker.model_runner = MagicMock()
         run_method(worker, "update_max_model_len", (1024, ), {})
         assert worker.model_config.max_model_len == 1024
-        assert worker.model_runner.max_model_len == 1024
+        worker.model_runner.update_max_model_len.assert_called_once_with(1024)
 
     @patch('tpu_inference.worker.tpu_worker.TPUModelRunner')
     @patch('tpu_inference.worker.tpu_worker.utils')
