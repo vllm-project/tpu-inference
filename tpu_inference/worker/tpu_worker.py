@@ -290,6 +290,16 @@ class TPUWorker(WorkerBase):
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
+    def update_max_model_len(self, max_model_len: int) -> None:
+        """Apply the max_model_len chosen by `--max-model-len -1` auto-fit.
+
+        The runner keeps the buffers it sized for the larger length.
+        """
+        self.model_config.max_model_len = max_model_len
+        model_runner = getattr(self, "model_runner", None)
+        if model_runner is not None:
+            model_runner.max_model_len = max_model_len
+
     def _setup_dp_chip_isolation(self) -> None:
         """Sets libtpu env vars so the process initializes JAX on a subset of
         physical chips. Must run before JAX initializes its TPU backend.
