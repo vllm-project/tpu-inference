@@ -47,8 +47,8 @@ buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
 echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
 
 # Dev builds are experiments — they must never outrank real CI on a shared
-# queue. Default to PRIORITY_DEFAULT (1), above only the unclassed nightlies;
-# override per build with DEV_JOB_PRIORITY.
+# queue. Default to PRIORITY_DEFAULT (1), above only the unclassed nightlies
+# and kernel tuning; override per build with DEV_JOB_PRIORITY.
 JOB_PRIORITY="${DEV_JOB_PRIORITY:-$PRIORITY_DEFAULT}"
 export JOB_PRIORITY
 buildkite-agent meta-data set "JOB_PRIORITY" "$JOB_PRIORITY"
