@@ -908,42 +908,44 @@ class CompilationManager:
 
                     inputs_embeds = self._create_dummy_tensor(
                         (num_tokens, h_size), dtype, sharding=sharding)
-                if self.runner.uses_mrope:
-                    mrope_sharding = NamedSharding(
-                        self.runner.mesh,
-                        PartitionSpec(None, ShardingAxisName.ATTN_DATA))
-                    positions = self._create_dummy_tensor(
-                        (3, num_tokens), jnp.int32, sharding=mrope_sharding)
-                else:
-                    positions = self._create_dummy_tensor(
-                        (num_tokens, ), jnp.int32, sharding=input_sharding)
-                is_first_rank = self.runner.is_first_rank
-                is_last_rank = self.runner.is_last_rank
-                if not is_first_rank:
-                    hidden_states = self._create_dummy_tensor(
-                        (num_tokens, hidden_size),
-                        jnp.bfloat16,
-                        sharding=sharding)
-                    residual = self._create_dummy_tensor(
-                        (num_tokens, hidden_size),
-                        jnp.bfloat16,
-                        sharding=sharding)
-                    intermediate_tensors = JaxIntermediateTensors(
-                        tensors={
-                            "hidden_states": hidden_states,
-                            "residual": residual
-                        })
-                else:
-                    intermediate_tensors = None
-                self._precompile_backbone_helper(
-                    f"worker{self.runner.rank} backbone with embeds",
-                    input_ids=None,
-                    positions=positions,
-                    inputs_embeds=inputs_embeds,
-                    intermediate_tensors=intermediate_tensors,
-                    is_first_rank=is_first_rank,
-                    is_last_rank=is_last_rank,
-                    num_reqs=num_reqs)
+                    if self.runner.uses_mrope:
+                        mrope_sharding = NamedSharding(
+                            self.runner.mesh,
+                            PartitionSpec(None, ShardingAxisName.ATTN_DATA))
+                        positions = self._create_dummy_tensor(
+                            (3, num_tokens),
+                            jnp.int32,
+                            sharding=mrope_sharding)
+                    else:
+                        positions = self._create_dummy_tensor(
+                            (num_tokens, ), jnp.int32, sharding=input_sharding)
+                    is_first_rank = self.runner.is_first_rank
+                    is_last_rank = self.runner.is_last_rank
+                    if not is_first_rank:
+                        hidden_states = self._create_dummy_tensor(
+                            (num_tokens, hidden_size),
+                            jnp.bfloat16,
+                            sharding=sharding)
+                        residual = self._create_dummy_tensor(
+                            (num_tokens, hidden_size),
+                            jnp.bfloat16,
+                            sharding=sharding)
+                        intermediate_tensors = JaxIntermediateTensors(
+                            tensors={
+                                "hidden_states": hidden_states,
+                                "residual": residual
+                            })
+                    else:
+                        intermediate_tensors = None
+                    self._precompile_backbone_helper(
+                        f"worker{self.runner.rank} backbone with embeds",
+                        input_ids=None,
+                        positions=positions,
+                        inputs_embeds=inputs_embeds,
+                        intermediate_tensors=intermediate_tensors,
+                        is_first_rank=is_first_rank,
+                        is_last_rank=is_last_rank,
+                        num_reqs=num_reqs)
 
     def _precompile_select_from_array_helper(
         self,

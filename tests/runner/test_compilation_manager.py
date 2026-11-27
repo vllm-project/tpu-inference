@@ -348,3 +348,47 @@ class TestPrecompileSpecDecodeExtendLogitsDtypes:
         manager._precompile_extend_logits_simple()
 
         assert recorded == [(jnp.dtype(model_dtype), jnp.dtype(model_dtype))]
+
+
+class TestPrecompileBackboneWithInputsEmbeds:
+    """The multimodal (inputs_embeds) backbone warmup must cover every
+    attention num_reqs bucket, like the text-only path does."""
+
+    def _manager(self, attn_num_reqs_paddings):
+        devices = np.array(jax.devices()[:1]).reshape(
+            (1, ) * len(MESH_AXIS_NAMES))
+        manager = CompilationManager.__new__(CompilationManager)
+        manager.runner = SimpleNamespace(
+            mesh=Mesh(devices, MESH_AXIS_NAMES),
+            model_config=SimpleNamespace(get_hidden_size=lambda: 64,
+                                         dtype=jnp.bfloat16),
+            # A Deepstack vision config adds a second embeds hidden size.
+            vllm_config=SimpleNamespace(model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(vision_config=SimpleNamespace(
+                    out_hidden_size=32, deepstack_visual_indexes=[1, 2])))),
+            num_tokens_paddings=[16, 32],
+            attn_num_reqs_paddings=attn_num_reqs_paddings,
+            uses_mrope=False,
+            is_first_rank=True,
+            is_last_rank=True,
+            rank=0)
+        manager._create_dummy_tensor = (
+            lambda shape, dtype, sharding=None: SimpleNamespace(shape=shape))
+        manager._precompile_backbone_helper = mock.Mock()
+        return manager
+
+    @pytest.mark.parametrize("attn_num_reqs_paddings", [[8], [2, 4, 8]])
+    def test_one_compile_per_hidden_size_token_and_reqs_bucket(
+            self, attn_num_reqs_paddings):
+        manager = self._manager(attn_num_reqs_paddings)
+        manager._precompile_backbone_with_inputs_embeds()
+
+        calls = manager._precompile_backbone_helper.call_args_list
+        compiled = [(c.kwargs["inputs_embeds"].shape[1],
+                     c.kwargs["inputs_embeds"].shape[0],
+                     c.kwargs["positions"].shape[0], c.kwargs["num_reqs"])
+                    for c in calls]
+        # Hidden sizes: 64 (text) and 32 * (1 + 2) = 96 (Deepstack).
+        expected = [(h, t, t, r) for h in (64, 96) for t in (16, 32)
+                    for r in attn_num_reqs_paddings]
+        assert compiled == expected
