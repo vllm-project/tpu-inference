@@ -320,9 +320,7 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase, FusedMoEMethodBase):
                 w2_weight_scale=getattr(w2_scale, "value", None),
                 w2_bias=None,
             )
-        elif layer.moe_backend in [
-                MoEBackend.DENSE_MAT, MoEBackend.MEGABLX_GMM
-        ]:
+        elif layer.moe_backend == MoEBackend.DENSE_MAT:
             # router_logits is composed of weights_TX and indices_TX, so 2D in this case
             # TODO (jacobplatin/bzgoogle): we should support bias
             weights = UnfusedMoEWeights(

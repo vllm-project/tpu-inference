@@ -32,7 +32,6 @@
           "MOE_REQUANTIZE_BLOCK_SIZE": "512",
           "MOE_REQUANTIZE_WEIGHT_DTYPE": "fp4",
           "MODEL_IMPL_TYPE": "flax_nnx",
-          "USE_UNFUSED_MEGABLOCKS": "0",
           "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
           "TPU_BACKEND_TYPE": "jax",
           "VLLM_ENGINE_READY_TIMEOUT_S": "10800",

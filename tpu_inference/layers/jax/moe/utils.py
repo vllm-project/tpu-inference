@@ -21,9 +21,6 @@ from jax.experimental import xla_metadata
 from jax.sharding import Mesh
 
 from tpu_inference import envs
-from tpu_inference.kernels.megablox.gmm import gmm as megablox_gmm
-from tpu_inference.kernels.megablox.tuned_block_sizes import \
-    round_up_to_multiple_of_128_within_limit
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.logger import init_logger
@@ -202,40 +199,6 @@ def get_all_to_all_params_fn(all_shards_group_sizes,
     return input_offsets, send_sizes, output_offsets, recv_sizes
 
 
-def gmm_fn(inputs, kernel, group_sizes, tile_size, moe_backend, dtype,
-           quantized_dtype):
-    """Stateless Grouped Matrix Multiply."""
-    num_rows = inputs.shape[0]
-    pad_amount = (tile_size[0] - num_rows % tile_size[0]) % tile_size[0]
-    if pad_amount > 0:
-        inputs = jnp.pad(inputs, ((0, pad_amount), (0, 0)))
-
-    if moe_backend == MoEBackend.MEGABLX_GMM:
-        if quantized_dtype:
-            kernel_qvalue, kernel_scale = kernel
-            kernel_scale = jnp.expand_dims(kernel_scale, 2)
-        else:
-            kernel_qvalue = kernel
-            kernel_scale = None
-        m = inputs.shape[0]
-        _, k, n = kernel_qvalue.shape
-        tm = round_up_to_multiple_of_128_within_limit(m, 512)
-        tk = round_up_to_multiple_of_128_within_limit(k, 2048)
-        tn = round_up_to_multiple_of_128_within_limit(n, 2048)
-
-        # TODO (jacobplatin/bzgoogle): replace this with the DS-specific megablox
-        output = megablox_gmm(lhs=inputs,
-                              rhs=kernel_qvalue,
-                              rhs_scale=kernel_scale,
-                              group_sizes=group_sizes,
-                              preferred_element_type=dtype,
-                              tiling=(tm, tk, tn))
-
-    if pad_amount > 0:
-        output = output[:num_rows, :]
-    return output
-
-
 def get_expert_parallelism(expert_axis_name: str, mesh: Mesh) -> int:
     """
     Returns the expert parallelism number from the mesh.
@@ -271,11 +234,6 @@ def select_moe_backend(use_ep: bool) -> MoEBackend:
         if use_ep:
             logger.info_once("[MoE]: Using fused MoE EP kernel")
             return MoEBackend.FUSED_MOE
-
-    if envs.USE_UNFUSED_MEGABLOCKS:
-        logger.info_once(
-            "[MoE]: Mega Blocks is enabled for GMM in Sparse Matmul")
-        return MoEBackend.MEGABLX_GMM
 
     if use_ep:
         logger.warning_once(
