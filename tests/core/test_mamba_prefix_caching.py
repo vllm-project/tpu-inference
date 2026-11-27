@@ -48,6 +48,14 @@ def test_legacy_mode_decides(mode, expected):
                                         _model_config(True)) is expected
 
 
+@pytest.mark.parametrize("mode", ["align", "none"])
+def test_legacy_mode_disabled_when_prefix_caching_off(mode):
+    cache_config = _LegacyCacheConfig(enable_prefix_caching=False,
+                                      mamba_cache_mode=mode)
+    assert mamba_prefix_caching_enabled(cache_config,
+                                        _model_config(True)) is False
+
+
 @pytest.mark.parametrize("enable_prefix_caching, model_config, expected", [
     (True, None, True),
     (True, _model_config(True), True),

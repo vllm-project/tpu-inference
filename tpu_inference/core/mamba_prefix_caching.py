@@ -43,10 +43,10 @@ def mamba_prefix_caching_enabled(cache_config: Any,
     """
     if cache_config is None:
         return False
-    if _has_mamba_cache_mode(cache_config):
-        return cache_config.mamba_cache_mode == "align"
     if getattr(cache_config, "enable_prefix_caching", False) is not True:
         return False
+    if _has_mamba_cache_mode(cache_config):
+        return cache_config.mamba_cache_mode == "align"
     return model_config is None or getattr(model_config, "is_hybrid",
                                            False) is True
 

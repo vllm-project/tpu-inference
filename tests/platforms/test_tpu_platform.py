@@ -390,6 +390,35 @@ class TestTpuPlatform:
     @patch(
         "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
     )
+    def test_check_and_update_config_normalizes_mamba_align_without_prefix_caching(
+            self, mock_update, mock_sharding, vllm_config):
+        """mamba_cache_mode='align' with enable_prefix_caching=False must fall back to 'none'."""
+        vllm_config.parallel_config.pipeline_parallel_size = 1
+        vllm_config.scheduler_config.is_multimodal_model = False
+        vllm_config.compilation_config.mode = "dummy"
+        vllm_config.compilation_config.backend = ""
+        vllm_config.model_config.is_hybrid = True
+        vllm_config.model_config.max_model_len = 4096
+        vllm_config.cache_config.enable_prefix_caching = False
+        vllm_config.cache_config.mamba_cache_mode = "align"
+        vllm_config.cache_config.mamba_block_size = 16
+        vllm_config.cache_config.user_specified_mamba_block_size = False
+        vllm_config.speculative_config = None
+
+        TpuPlatform.check_and_update_config(vllm_config)
+
+        assert vllm_config.cache_config.enable_prefix_caching is False
+        assert vllm_config.cache_config.mamba_cache_mode == "none"
+        assert mamba_prefix_caching_enabled(vllm_config.cache_config,
+                                            vllm_config.model_config) is False
+        assert vllm_config.cache_config.mamba_block_size == 4096
+
+    @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
+           "")
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
     def test_check_and_update_config_hybrid_prefix_match_unit_raises(
             self, mock_update, mock_sharding, vllm_config):
         vllm_config.parallel_config.pipeline_parallel_size = 1
