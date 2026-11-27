@@ -445,7 +445,7 @@ def create_allocs(
         block_shape=cfgs.q_vmem_shape,
         memory_space=pltpu.VMEM,
         index_map=lambda i: (i, ),
-        pipeline_mode=pl.Buffered(buffer_count=2, use_lookahead=True),
+        pipeline_mode=pl.Buffered(buffer_count=2, use_lookahead=False),
     )
     kv_cache_alloc = bref.KVBufferedRefSeqAlongLane.input_output(
         spec=kv_cache_spec,
@@ -465,7 +465,7 @@ def create_allocs(
         spec=o_spec,
         dtype_or_type=o_hbm_ref,
         buffer_count=2,
-        use_lookahead=True,
+        use_lookahead=False,
         cfgs=cfgs,
     )
     return q_alloc, kv_cache_alloc, o_alloc

@@ -670,8 +670,7 @@ def create_allocs(
         memory_space=pltpu.VMEM,
         index_map=lambda i: (i, ),
         # Output BufferedRef is limited to buffer_count<=2 by Pallas runtime.
-        # Lookahead lets the last-step writeback overlap the compute drain.
-        pipeline_mode=pl.Buffered(buffer_count=2, use_lookahead=True),
+        pipeline_mode=pl.Buffered(buffer_count=2, use_lookahead=False),
     )
     kv_cache_alloc_cls = bref.KVBufferedRefSeqAlongLane
 
@@ -693,7 +692,7 @@ def create_allocs(
         spec=o_spec,
         dtype_or_type=o_hbm_ref,
         buffer_count=2,
-        use_lookahead=True,
+        use_lookahead=False,
         cfgs=cfgs,
     )
     return q_alloc, kv_cache_alloc, o_alloc
