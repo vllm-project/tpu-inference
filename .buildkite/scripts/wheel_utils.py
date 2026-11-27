@@ -15,16 +15,21 @@
 """Helper functions for building and publishing the release wheels.
 
 build_tpu_inference_wheel.sh and build_vllm_tpu_wheel.sh use the build
-checks. publish_wheel.sh uses the publish checks for tpu-inference and the
-combined vllm-tpu (wheel and sdist).
+checks. serve_wheels.sh and serve_and_verify.sh use the install and serve
+checks, run by the Python of the vLLM install under test (the venv the wheels
+go into, or the staged image's). publish_wheel.sh uses the publish checks for
+tpu-inference and the combined vllm-tpu (wheel and sdist).
 """
 
 import base64
+import importlib.metadata
 import json
 import os
+import socket
 import sys
 import urllib.error
 import urllib.request
+from typing import Optional
 
 from packaging.utils import (canonicalize_name, parse_sdist_filename,
                              parse_wheel_filename)
@@ -44,6 +49,137 @@ def verify_built_wheel(wheel_path: str, expected_version: str) -> None:
             file=sys.stderr,
         )
     print(f"Wheel: {name} {version}")
+
+
+def verify_installed_wheels(version: str, venv: str) -> None:
+    """Verify the venv has vllm-tpu and tpu-inference <version> and imports
+    them from itself. Run by the venv's own Python."""
+    venv = os.path.realpath(venv)
+    for dist in ("vllm-tpu", "tpu-inference"):
+        installed = importlib.metadata.version(dist)
+        if installed != version:
+            sys.exit(f"ERROR: {dist} {installed} is installed, not {version}.")
+
+    # Imported here: only the venv the wheels went into has these.
+    import vllm
+
+    import tpu_inference
+
+    for module in (vllm, tpu_inference):
+        path = os.path.realpath(module.__file__)
+        if not path.startswith(venv + os.sep):
+            sys.exit(f"ERROR: {module.__name__} is imported from {path}, "
+                     "not from the venv.")
+    print(f"vllm-tpu {version} (vLLM {vllm.__version__}), "
+          f"tpu-inference {version}, from {venv}")
+
+
+def verify_tpu_platform() -> None:
+    """Verify vLLM picks its TPU platform. Run by the Python of the vLLM
+    install under test.
+
+    Opens no TPU: vLLM picks the platform from the installed packages, and a
+    process that opened the chips right before `vllm serve` can make the
+    server's own TPU session fail to start (START_SESSION) on the CI fleet.
+    The server then shows the TPU is used by serving on it.
+    """
+    # Imported here: only the install under test has these.
+    import vllm
+    from vllm.platforms import current_platform
+
+    import tpu_inference
+
+    if not current_platform.is_tpu():
+        sys.exit(f"ERROR: vLLM picked the {current_platform.device_name} "
+                 "platform, not TPU.")
+    print(f"vLLM {vllm.__version__} from {os.path.dirname(vllm.__file__)}, "
+          f"tpu_inference from {os.path.dirname(tpu_inference.__file__)}: "
+          f"{type(current_platform).__name__}")
+
+
+def _call_server(base_url: str, path: str, body: Optional[dict] = None):
+    """GET <path> from the server, or POST <body> to it, and return the JSON
+    it answers."""
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(base_url + path,
+                                 data=data,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=300) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        sys.exit(f"ERROR: {path} answered {e.code}: "
+                 f"{e.read().decode(errors='replace')}")
+
+
+def verify_server_answers(base_url: str, model: str, out_file: str) -> None:
+    """Verify the server at <base_url> serves <model> and answers a
+    completion and a chat, and write the answers to <out_file>."""
+    served = [m["id"] for m in _call_server(base_url, "/v1/models")["data"]]
+    if model not in served:
+        sys.exit(f"ERROR: /v1/models lists {served}, not {model}.")
+
+    prompt = "The capital of France is"
+    text = _call_server(base_url, "/v1/completions", {
+        "model": model,
+        "prompt": prompt,
+        "max_tokens": 16,
+        "temperature": 0,
+    })["choices"][0]["text"]
+
+    question = "Say hello in one short sentence."
+    message = _call_server(
+        base_url, "/v1/chat/completions", {
+            "model": model,
+            "messages": [{
+                "role": "user",
+                "content": question
+            }],
+            "max_tokens": 32,
+            "temperature": 0,
+        })["choices"][0]["message"]
+    # With a reasoning parser on, the model's thinking lands in
+    # reasoning_content.
+    reply = message.get("content") or message.get("reasoning_content") or ""
+
+    lines = [
+        f"/v1/completions       {prompt!r} -> {text!r}",
+        f"/v1/chat/completions  {question!r} -> {reply!r}",
+    ]
+    print("\n".join(lines))
+    for name, answer in (("completion", text), ("chat reply", reply)):
+        if not answer.strip():
+            sys.exit(f"ERROR: the {name} is empty.")
+    with open(out_file, "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def verify_bench_result(result_file: str, out_file: str) -> None:
+    """Verify every request of a `vllm bench serve --save-result` run
+    completed, and write a one-line summary to <out_file>. vllm bench serve
+    itself only warns about failed requests, even when all of them fail, and
+    still exits 0."""
+    with open(result_file) as f:
+        result = json.load(f)
+    completed, failed = result["completed"], result["failed"]
+    wanted = result["num_prompts"]
+    if failed or completed != wanted:
+        sys.exit(f"ERROR: vllm bench serve: {completed} of {wanted} requests "
+                 f"completed, {failed} failed; the errors are above.")
+    line = (f"vllm bench serve      {completed}/{wanted} requests, "
+            f"{result['output_throughput']:.1f} output tok/s, "
+            f"mean TTFT {result['mean_ttft_ms']:.1f} ms, "
+            f"mean TPOT {result['mean_tpot_ms']:.1f} ms")
+    print(line)
+    with open(out_file, "w") as f:
+        f.write(line + "\n")
+
+
+def free_port() -> None:
+    """Print a TCP port on 127.0.0.1 that nothing listens on right now."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        print(s.getsockname()[1])
 
 
 def verify_publish_dist(dist_path: str, project: str,
@@ -163,6 +299,11 @@ def main() -> None:
 
     commands = {
         "verify_built_wheel": verify_built_wheel,
+        "verify_installed_wheels": verify_installed_wheels,
+        "verify_tpu_platform": verify_tpu_platform,
+        "verify_server_answers": verify_server_answers,
+        "verify_bench_result": verify_bench_result,
+        "free_port": free_port,
         "verify_publish_dist": verify_publish_dist,
         "fetch_oidc_audience": fetch_oidc_audience,
         "verify_gcp_oidc_token": verify_gcp_oidc_token,
