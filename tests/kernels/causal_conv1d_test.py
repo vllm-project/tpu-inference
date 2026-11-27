@@ -217,6 +217,55 @@ class CausalConv1dTest(jtu.JaxTestCase):
             dtype=jnp.bfloat16,
         )
 
+    @parameterized.named_parameters(
+        dict(testcase_name="k4_tile2", kernel_size=4, tile_size=2),
+        dict(testcase_name="k4_tile1", kernel_size=4, tile_size=1),
+        dict(testcase_name="k10_tile8", kernel_size=10, tile_size=8),
+    )
+    def test_small_tile_size_less_than_prev_kernel_size(
+            self, kernel_size: int, tile_size: int):
+        """Verify history preservation when tile_size < kernel_size - 1."""
+        num_tokens = tile_size * 3
+        dim = 128
+        q_loc = jnp.array([0, num_tokens], dtype=jnp.int32)
+        state_indices = jnp.array([1], dtype=jnp.int32)
+        distribution = jnp.array([0, 1, 1], dtype=jnp.int32)
+        has_initial_state = jnp.array([True])
+
+        key = jax.random.key(kernel_size * 10 + tile_size)
+        x = jax.random.normal(key, (num_tokens, dim), dtype=jnp.float32)
+        conv_state = jax.random.normal(key, (2, kernel_size - 1, dim),
+                                       dtype=jnp.float32)
+        conv_weight = jax.random.normal(key, (dim, 1, kernel_size),
+                                        dtype=jnp.float32)
+        conv_bias = jax.random.normal(key, (dim, ), dtype=jnp.float32)
+
+        out_ref, state_ref = reference_causal_conv1d(
+            x=x,
+            conv_state=conv_state,
+            conv_weight=conv_weight,
+            conv_bias=conv_bias,
+            query_start_loc=q_loc,
+            state_indices=state_indices,
+            distribution=distribution,
+            kernel_size=kernel_size,
+            has_initial_state=has_initial_state,
+        )
+        out, state = causal_conv1d.ragged_causal_conv1d(
+            x=jnp.copy(x),
+            conv_state=jnp.copy(conv_state),
+            conv_weight=conv_weight,
+            conv_bias=conv_bias,
+            query_start_loc=q_loc,
+            state_indices=state_indices,
+            distribution=distribution,
+            kernel_size=kernel_size,
+            has_initial_state=has_initial_state,
+            tile_size=tile_size,
+        )
+        self.assertArraysAllClose(out, out_ref, rtol=1e-4, atol=1e-4)
+        self.assertArraysAllClose(state, state_ref, rtol=1e-4, atol=1e-4)
+
 
 if __name__ == "__main__":
     absltest.main(testLoader=jtu.JaxTestLoader())
