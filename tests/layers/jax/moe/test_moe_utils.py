@@ -332,7 +332,9 @@ class TestFusedMoeGmmOnehotMasking(unittest.TestCase):
                              gs,
                              go,
                              fuse_act=None,
-                             preferred_element_type=None):
+                             preferred_element_type=None,
+                             quantize_lhs=True):
+            del quantize_lhs
             call_idx[0] += 1
             out_cols = inter_size if fuse_act is not None else hidden_size
             valid_vals = jnp.full((lhs.shape[0], out_cols),
