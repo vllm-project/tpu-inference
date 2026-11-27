@@ -56,29 +56,13 @@ from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
 from tpu_inference.layers.vllm.quantization.unquantized import (
     VllmQuantizedBf16LinearMethod, VllmUnquantizedFusedMoEMethod,
-    VllmUnquantizedLinearMethod, _load_weight_for_layer,
+    VllmUnquantizedLinearMethod, _free_torch_storage, _load_weight_for_layer,
     should_quantize_bf16_linear)
 from tpu_inference.logger import init_logger
 
 P = PartitionSpec
 
 logger = init_logger(__name__)
-
-
-# TODO: Use custom op with overriding weight loading class so we will have a better
-# and cleaner interface.
-def _free_torch_storage(tensor: Optional[torch.Tensor]) -> None:
-    """Safely frees the underlying CPU memory storage of a PyTorch tensor.
-
-    Tries `untyped_storage().resize_(0)` first, with fallback to `set_(torch.storage.UntypedStorage())`
-    for 0-dim scalars or float8 dtypes that cannot be resized in-place.
-    """
-    if tensor is None:
-        return
-    try:
-        tensor.untyped_storage().resize_(0)
-    except Exception:
-        tensor.set_(torch.storage.UntypedStorage())
 
 
 def _release_host_memory() -> None:
