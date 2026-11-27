@@ -992,3 +992,43 @@ class TestGetEosTokenId:
             get_vocab_size=lambda: 1000,
         )
         assert get_eos_token_id(cfg) == (999, )
+
+
+def test_phased_profiler_explicit_config_overrides_env(monkeypatch, tmp_path):
+    """Explicit PhasedBasedProfiler args take precedence over env vars."""
+    monkeypatch.setenv("PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR", "99")
+    monkeypatch.setenv("PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP", "50")
+    monkeypatch.setenv("PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD", "256")
+    monkeypatch.setenv("PHASED_PROFILER_TRACK_CONCURRENCY", "false")
+
+    profiler = PhasedBasedProfiler(
+        profile_dir=str(tmp_path),
+        num_steps_to_profile_for=7,
+        num_decode_steps_to_skip=3,
+        decode_kv_len_threshold=128,
+        track_concurrency=True,
+    )
+    assert profiler.num_steps_to_profile_for == 7
+    assert profiler.num_decode_steps_to_skip == 3
+    assert profiler.decode_kv_len_threshold == 128
+    assert profiler.track_concurrency is True
+
+
+def test_phased_profiler_explicit_falsy_overrides_and_type_check(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv("PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP", "50")
+    monkeypatch.setenv("PHASED_PROFILER_TRACK_CONCURRENCY", "true")
+
+    profiler = PhasedBasedProfiler(
+        profile_dir=str(tmp_path),
+        num_decode_steps_to_skip=0,
+        track_concurrency=False,
+    )
+    assert profiler.num_decode_steps_to_skip == 0
+    assert profiler.track_concurrency is False
+
+    with pytest.raises(TypeError, match="track_concurrency must be a bool"):
+        PhasedBasedProfiler(
+            profile_dir=str(tmp_path),
+            track_concurrency="false",
+        )

@@ -1039,7 +1039,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                        devices=self.devices)
 
     def _init_phased_profiling(self) -> None:
-        self.phased_profiling_dir = envs.PHASED_PROFILING_DIR
+        additional_config = (getattr(self.vllm_config, "additional_config",
+                                     None) or {})
+        phased_opts = additional_config.get("phased_profiler_options") or {}
+        if phased_opts.get("enable") is False:
+            self.phased_profiling_dir = ""
+        else:
+            self.phased_profiling_dir = (phased_opts.get("dir")
+                                         or envs.PHASED_PROFILING_DIR)
         self.phase_based_profiler = None
         if self.phased_profiling_dir:
             # Under MPMD each DP rank runs its own profiler on the same host
@@ -1049,7 +1056,21 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # overwrites another's.
             dp_rank = self.parallel_config.data_parallel_index if envs.TPU_MULTIPROCESS_DP else 0
             self.phase_based_profiler = runner_utils.PhasedBasedProfiler(
-                self.phased_profiling_dir, worker_rank=dp_rank)
+                self.phased_profiling_dir,
+                worker_rank=dp_rank,
+                num_steps_to_profile_for=phased_opts.get(
+                    "num_steps_to_profile_for"),
+                num_decode_steps_to_skip=phased_opts.get(
+                    "num_decode_steps_to_skip"),
+                decode_kv_len_threshold=phased_opts.get(
+                    "decode_kv_len_threshold"),
+                track_concurrency=phased_opts.get("track_concurrency"),
+            )
+        elif phased_opts.get("enable") is True:
+            logger.warning(
+                "Phased profiling is enabled in additional_config, but no "
+                "profile directory was specified (set 'dir' in "
+                "phased_profiler_options or PHASED_PROFILING_DIR).")
 
     def _init_aggregated_stats_logging(self) -> None:
         self.aggregated_stats_dir = envs.AGGREGATED_STATS_DIR
