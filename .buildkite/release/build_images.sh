@@ -13,10 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Build vllm/vllm-tpu from the release checkout and stage it in GAR as
-# vllm-tpu:release-<version>-build<N>. Nothing goes to Docker Hub here: the
-# publish step copies the staged image there by digest, so users get the exact
-# bytes this build made.
+# Build the release image (vllm/vllm-jax on Docker Hub) from the release
+# checkout and stage it in GAR as vllm-jax:release-<version>-build<N>. Nothing
+# goes to Docker Hub here: the publish step copies the staged image there by
+# digest, so users get the exact bytes this build made.
 #
 # Built the way the nightly image is, from the release checkout's own
 # docker/Dockerfile and vLLM pin (.buildkite/vllm_lkg.version), which belong
@@ -35,7 +35,7 @@ VLLM_COMMIT_HASH="$(tr -d '[:space:]' < .buildkite/vllm_lkg.version 2>/dev/null 
   || die ".buildkite/vllm_lkg.version does not hold a vLLM commit: '${VLLM_COMMIT_HASH}'."
 
 # Leftovers of earlier release builds that failed before their own cleanup, and
-# the build cache. Only our release-* tags: CI's vllm-tpu images and the
+# the build cache. Only our release-* tags: CI's images and the
 # agent's other images aren't ours to remove.
 echo "--- :broom: Cleaning up earlier release images and the build cache"
 docker images --filter "reference=${RELEASE_IMAGE}:${RELEASE_TAG_PREFIX}*" \

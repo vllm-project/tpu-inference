@@ -16,7 +16,7 @@
 # night and publishes the result whatever the nightly tests say. DOCKERHUB_TOKEN
 # is a cluster secret whose policy admits this pipeline on main only.
 steps:
-  - label: ":docker: Publish vllm/vllm-tpu nightly image"
+  - label: ":docker: Publish vllm/vllm-jax nightly image"
     if: build.branch == "main"
     agents:
       queue: cpu
