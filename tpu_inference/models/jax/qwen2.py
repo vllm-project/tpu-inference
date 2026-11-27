@@ -396,9 +396,16 @@ class Qwen2ForCausalLM(JaxModule, LoadableWithIterator):
         model_config = vllm_config.model_config
         if not model_config.hf_config.tie_word_embeddings:
             vocab_size = model_config.get_vocab_size()
-            hidden_size = getattr(
-                model_config.hf_config, 'hidden_size',
-                model_config.hf_config.text_config.hidden_size)
+            # transformers v5 nests language attrs under `text_config` for VL
+            # configs; a plain Qwen2Config exposes `hidden_size` directly. Using
+            # getattr(cfg, 'hidden_size', cfg.text_config.hidden_size) evaluates
+            # the default eagerly, so cfg.text_config is touched even when
+            # hidden_size exists -> AttributeError on untied-embedding Qwen2
+            # checkpoints (Qwen2.5-7B/14B/32B), which have no .text_config.
+            # Resolve the language config first (mirrors Qwen2Model above).
+            lang_config = getattr(model_config.hf_config, 'text_config',
+                                  model_config.hf_config)
+            hidden_size = lang_config.hidden_size
             self.lm_head = JaxLmHead(
                 hidden_size=hidden_size,
                 vocab_size=vocab_size,
