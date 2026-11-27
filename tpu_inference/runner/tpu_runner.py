@@ -1431,6 +1431,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def delete_kv_cache(self) -> None:
         self.kv_cache_manager.delete_kv_cache()
 
+    def update_max_model_len(self, max_model_len: int) -> None:
+        """Apply a smaller max_model_len chosen by vLLM's auto-fit.
+
+        Buffers already sized for the original length (the input batch's
+        block tables) stay as they are; only the length and the values
+        derived from it are refreshed, so warmup that iterates up to
+        `max_num_blocks_per_req` stays within the smaller KV cache.
+        """
+        self.max_model_len = max_model_len
+        self.max_num_blocks_per_req = cdiv(max_model_len, self.block_size)
+        if self.drafter is not None and hasattr(self.drafter, "max_model_len"):
+            self.drafter.max_model_len = max_model_len
+
     def reinitialize_kv_cache(self) -> None:
         self.kv_cache_manager.reinitialize_kv_cache()
         self._wire_input_batch_mamba_state(self.kv_cache_config)

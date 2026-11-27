@@ -368,6 +368,18 @@ class TestTPUWorker:
         assert worker.cache_config.num_gpu_blocks == 2048
         assert worker.cache_config.num_cpu_blocks == 1024
 
+    def test_update_max_model_len(self, mock_vllm_config):
+        """The auto-fit RPC from EngineCore reaches the worker and runner."""
+        from vllm.v1.serial_utils import run_method
+        worker = TPUWorker(vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test_method")
+        worker.model_runner = MagicMock()
+        run_method(worker, "update_max_model_len", (1024, ), {})
+        assert worker.model_config.max_model_len == 1024
+        worker.model_runner.update_max_model_len.assert_called_once_with(1024)
+
     @patch('tpu_inference.worker.tpu_worker.TPUModelRunner')
     @patch('tpu_inference.worker.tpu_worker.utils')
     @patch('tpu_inference.worker.tpu_worker.jax')
