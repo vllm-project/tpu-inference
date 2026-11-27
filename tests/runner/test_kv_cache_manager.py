@@ -2238,6 +2238,153 @@ class TestKVCacheManager:
                                                  attn_page=attn_page,
                                                  unpadded_mamba=unpadded_mamba)
 
+    def test_update_mamba_page_size_padded_dcp_uses_kv_head_axis(self):
+        """With DCP>1 (e.g. TP=8, model=4, dcp=2, num_kv_heads=4), KV heads
+        are sharded only across KV_HEAD (4), not ATTN_HEAD (8). Using ATTN_HEAD
+        double-counted DCP in get_padded_num_heads and halved available KV
+        blocks on hybrid Mamba/GDN models."""
+        from tpu_inference.layers.common.sharding import (ShardingAxisName,
+                                                          ShardingAxisNameBase)
+
+        dcp_mesh = MagicMock()
+        dcp_mesh.shape = {
+            'data': 1,
+            'attn_dp': 1,
+            'attn_dp_expert': 1,
+            'expert': 1,
+            'model': 4,
+            'dcp': 2,
+            'pcp': 1,
+        }
+        dcp_mesh.devices = np.empty((1, 1, 1, 1, 4, 2, 1), dtype=object)
+        self.runner.mesh = dcp_mesh
+        self.runner.cache_config.block_size = 128
+        self.runner.cache_config.mamba_block_size = 128
+        self.runner.kv_cache_dtype = torch.bfloat16
+        self.runner.cache_config.mamba_page_size_padded = None
+
+        class DummyMamba(MambaBase):
+
+            def __init__(self):
+                super().__init__()
+
+            def get_state_shape(self):
+                return ((3, 1280), (6, 128, 128))
+
+            def get_state_dtype(self):
+                return (torch.bfloat16, torch.float32)
+
+            @property
+            def mamba_type(self):
+                return "dummy"
+
+        layers: dict = {}
+        for i in range(48):
+            layers[f'linear_attn.{i}'] = DummyMamba()
+        for i in range(16):
+            mock_attn = MagicMock(spec=Attention)
+            mock_attn.attn_type = AttentionType.DECODER
+            mock_attn.num_kv_heads = 4
+            mock_attn.head_size = 256
+            mock_attn.sliding_window = None
+            mock_attn.kv_sharing_target_layer_name = None
+            layers[f'full_attn.{i}'] = mock_attn
+
+        mamba_unpadded = 3 * 1280 * 2 + 6 * 128 * 128 * 4
+        with patch.object(ShardingAxisName, '_cls', ShardingAxisNameBase):
+            expected_attn_page = get_attention_page_size_bytes(
+                dcp_mesh, 128, 4, 256, torch.bfloat16, False,
+                self.runner.attention_backend)
+            # Buggy ATTN_HEAD=8 would pad 4 KV heads up to 8 (2x page size).
+            buggy_attn_page = get_attention_page_size_bytes(
+                dcp_mesh, 128, 8, 256, torch.bfloat16, False,
+                self.runner.attention_backend)
+            assert buggy_attn_page == 2 * expected_attn_page
+
+            with patch.object(
+                    self.runner.kv_cache_manager,
+                    '_maybe_set_compact_mamba_num_blocks_override',
+            ) as mock_compact:
+                self.runner.kv_cache_manager.update_mamba_page_size_padded(
+                    layers)
+
+        expected_uniform = expected_attn_page + 3 * mamba_unpadded
+        assert (self.runner.cache_config.mamba_page_size_padded ==
+                expected_uniform)
+        mock_compact.assert_called_once_with(expected_attn_page,
+                                             mamba_unpadded, 16, 48)
+
+    def test_compact_mamba_override_accounts_for_kv_context_axis(self):
+        """With KV_CONTEXT>1 (e.g. dcp=2), each physical attention page spans
+        `block_size * context_cnt` tokens, so `attn_blocks_per_req` must divide
+        `max_model_len` by `block_size * context_cnt` during over-budget
+        align-mode rebalancing."""
+        from tpu_inference.layers.common.sharding import (ShardingAxisName,
+                                                          ShardingAxisNameBase)
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+
+        dcp_mesh = MagicMock()
+        dcp_mesh.shape = {
+            'data': 1,
+            'attn_dp': 1,
+            'attn_dp_expert': 1,
+            'expert': 1,
+            'model': 4,
+            'dcp': 2,
+            'pcp': 1,
+        }
+        dcp_mesh.devices = np.empty((1, 1, 1, 1, 4, 2, 1), dtype=object)
+        self.runner.mesh = dcp_mesh
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = False
+
+        # Choose tight budget in align mode so the over-budget rebalance path
+        # runs and `servable_reqs = avail // (attn_bytes_per_req + mamba_bytes_per_req)`
+        # depends directly on `attn_blocks_per_req`.
+        # With block_size=128, max_model_len=8192, dcp=2:
+        #   attn_blocks_per_req = 8192 // (128 * 2) = 32 (vs 64 without dcp).
+        # With DEFAULT_MAMBA_CACHE_MULTIPLIER=8 and total_hbm=1000 MiB:
+        #   servable_reqs = 1000 // (32 + 8) = 25 -> mamba = 201 (> floor 129).
+        block_size = 128
+        max_model_len = 8192
+        attn_page = 2**20  # 1 MiB / block / attn layer
+        unpadded_mamba = 2**20  # 1 MiB / block / mamba layer
+        num_attn_layers = 1
+        num_mamba_layers = 1
+        total_hbm = 1000 * (2**20)
+        self.runner.cache_config.block_size = block_size
+        self.runner.cache_config.gpu_memory_utilization = 1.0
+        self.runner.cache_config.num_gpu_blocks_override = None
+        self.runner.cache_config.mamba_cache_mode = "align"
+        self.runner.model_config.max_model_len = max_model_len
+        self.runner.scheduler_config = MagicMock(max_num_seqs=64)
+        self.runner.max_num_reqs = 64
+
+        with patch.object(ShardingAxisName, '_cls', ShardingAxisNameBase), \
+             patch(
+                 "tpu_inference.runner.kv_cache_manager.utils.hbm_usage_bytes",
+                 return_value=[(0, total_hbm // 8)] * 8):
+            self._run_compact_mamba_override(
+                manager,
+                attn_page=attn_page,
+                unpadded_mamba=unpadded_mamba,
+                num_attn_layers=num_attn_layers,
+                num_mamba_layers=num_mamba_layers,
+            )
+
+        from tpu_inference.runner.kv_cache_manager import (
+            DEFAULT_MAMBA_CACHE_MULTIPLIER, mamba_blocks_per_request,
+            mamba_pool_size)
+        min_b, per_req_b = mamba_blocks_per_request(self.runner.vllm_config,
+                                                    is_align_mode=True)
+        assert per_req_b == DEFAULT_MAMBA_CACHE_MULTIPLIER
+        expected_servable = total_hbm // ((32 + per_req_b) * (2**20))
+        expected_mamba = mamba_pool_size(expected_servable, per_req_b, 1)
+        assert expected_mamba > mamba_pool_size(64, min_b, 1)
+        assert manager._mamba_num_blocks == expected_mamba
+        assert (self.runner.cache_config.num_gpu_blocks_override ==
+                (total_hbm - expected_mamba * (2**20)) // attn_page)
+
     def test_get_kv_cache_spec_pure_attention_no_cache_config_updates(self):
         mock_attn = MagicMock(spec=MambaBase)
         layers = {'layer.0': mock_attn}
