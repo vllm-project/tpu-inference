@@ -11,6 +11,8 @@
 
 # CI/CD and Build Configuration
 /.buildkite/ @QiliangCui @yiw-wang @CienetStingLin @yunyao-gg @theminghuang
+# Runs with the Docker Hub token in the TPU Release Buildkite cluster.
+/.buildkite/release/ @QiliangCui @CienetStingLin @theminghuang @charlesli640
 /.github/ @QiliangCui @yiw-wang @CienetStingLin @theminghuang
 
 # Documentation
