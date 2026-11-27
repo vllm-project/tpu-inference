@@ -55,8 +55,9 @@ def set_mamba_prefix_caching(cache_config: Any, enabled: bool) -> None:
     """Sets prefix caching, and the legacy `mamba_cache_mode` if present."""
     cache_config.enable_prefix_caching = enabled
     fields = getattr(type(cache_config), "__dataclass_fields__", None)
-    if fields is None or "mamba_cache_mode" in fields:
-        # A pre-#63830 `CacheConfig`, or a duck-typed stand-in.
+    if fields is None or _has_mamba_cache_mode(cache_config):
+        # A pre-#63830 `CacheConfig`, an instance carrying the legacy
+        # attribute, or a duck-typed stand-in.
         cache_config.mamba_cache_mode = "align" if enabled else "none"
 
 
