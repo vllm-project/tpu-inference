@@ -983,6 +983,22 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                 remap.append((fused_name, shard_name, shard_id))
         return remap
 
+    def _fused_params(self, remap: list[tuple[str, str, int]]) -> dict:
+        """Parameters that packed checkpoint weights are routed into.
+
+        Only the fused targets (e.g. ``gate_up_proj``) are kept. Holding every
+        parameter for the whole load would also pin the pre-fusion MoE expert
+        weights that ``process_weights_after_loading`` replaces layer by
+        layer, so they could not be freed until loading finished, roughly
+        doubling peak HBM for MoE models.
+        """
+        fused_names = {fused_name for fused_name, _, _ in remap}
+        return {
+            name: param
+            for name, param in self.module.named_parameters()
+            if not fused_names.isdisjoint(name.split("."))
+        }
+
     def load_weights(self,
                      weights: Iterable,
                      mapper: Optional[WeightsMapper] = None,
@@ -1014,7 +1030,7 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
             # transiently doubles device HBM, so go straight to the streaming
             # recursive loader.
             return super().load_weights(weights, mapper=mapper, **kwargs)
-        params_dict = dict(self.module.named_parameters())
+        params_dict = self._fused_params(remap)
         routed_loaded: set = set()
 
         def _route(weights_iter):
