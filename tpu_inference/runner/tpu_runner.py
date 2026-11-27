@@ -1586,20 +1586,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             if not sampled_ids:
                 continue
 
-            # If request not active in the *current* batch (e.g. finished or evicted), skip it.
             req_id = pre_req_ids[pre_req_idx]
-            if req_id not in self.input_batch.req_id_to_index:
-                continue
 
-            # A request preempted and re-sent as a new request in this step
-            # (vllm-project/vllm#63373) is back in the batch, but update_states
-            # replaced its state, which is being re-prefilled from
-            # prefill_token_ids. The previous step's sampled tokens belong to
-            # the dropped state, so don't write them into the new one.
+            # Skip requests whose state update_states() dropped or replaced:
+            # finished, preempted, or preempted and re-sent as a new request
+            # in this step (vllm-project/vllm#63373). A re-sent request is
+            # re-prefilled from prefill_token_ids, so the previous step's
+            # sampled tokens belong to the dropped state.
             if self.requests.get(req_id) is not req_state:
                 continue
-
-            req_idx = self.input_batch.req_id_to_index[req_id]
 
             # Updated on previous execute
             pre_num_placeholder_tokens = 1
@@ -1607,6 +1602,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             pre_num_placeholder_tokens += len(
                 pre_scheduler_output.scheduled_spec_decode_tokens.get(
                     req_id, []))
+            assert len(
+                req_state.output_token_ids) >= pre_num_placeholder_tokens
+
+            if req_id not in self.input_batch.req_id_to_index:
+                # Still running but not scheduled in this step (e.g. a paused
+                # or 0-token step), so update_states() removed it from the
+                # persistent batch. Fix its cached output so re-adding it to
+                # the batch later does not expose placeholder tokens.
+                del req_state.output_token_ids[-pre_num_placeholder_tokens:]
+                req_state.output_token_ids.extend(sampled_ids)
+                continue
+
+            req_idx = self.input_batch.req_id_to_index[req_id]
 
             end_idx = self.input_batch.num_tokens_no_spec[req_idx]
             num_sampled_tokens = min(len(sampled_ids),

@@ -970,6 +970,44 @@ class TestDPScheduler:
 
         assert total == 8
 
+    def test_get_num_unfinished_requests_paused_all(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
+        """PAUSED_ALL reports no unfinished requests, so the engine stops
+        stepping instead of spinning on empty schedules (like vLLM's
+        Scheduler)."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+        scheduler._send_command = MagicMock()
+        scheduler._get_result = MagicMock(return_value=None)
+        scheduler.set_pause_state(PauseState.PAUSED_ALL)
+        scheduler._pending_new_requests = [MagicMock()]
+        scheduler._send_command.reset_mock()
+
+        assert scheduler.get_num_unfinished_requests() == 0
+        scheduler._send_command.assert_not_called()
+
+    def test_get_num_unfinished_requests_paused_new(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
+        """PAUSED_NEW excludes requests not yet dispatched to a rank."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+        scheduler._send_command = MagicMock()
+        scheduler._get_result = MagicMock(return_value=None)
+        scheduler.set_pause_state(PauseState.PAUSED_NEW)
+        scheduler._pending_new_requests = [MagicMock(), MagicMock()]
+
+        scheduler._get_result = MagicMock(side_effect=[5, 3])
+        assert scheduler.get_num_unfinished_requests() == 8
+
+        scheduler._get_result = MagicMock(return_value=None)
+        scheduler.set_pause_state(PauseState.UNPAUSED)
+        scheduler._get_result = MagicMock(side_effect=[5, 3])
+        assert scheduler.get_num_unfinished_requests() == 10
+
     def test_has_finished_requests(self, mock_vllm_config,
                                    mock_kv_cache_config,
                                    mock_structured_output_manager):
