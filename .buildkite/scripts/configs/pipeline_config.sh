@@ -15,6 +15,7 @@
 
 # Priority constants for pipeline jobs.
 # On-call fix > Post-merge > Pre-merge > Integration pipeline > Benchmark > Other/Default > Nightly
+# The kube nightly that owns main's results runs at Pre-merge (bootstrap.sh).
 # vllm-torchtpu uses 12 for on-call fixes too, so an on-call fix in either repo
 # runs ahead of both repos' post-merge builds on the shared TPU queues.
 export PRIORITY_ONCALL_FIX=12

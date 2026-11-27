@@ -47,13 +47,14 @@ buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
 echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
 
 # Dev builds are experiments — they must never outrank real CI on a shared
-# queue. Default to PRIORITY_DEFAULT (1); override per build with
-# DEV_JOB_PRIORITY if an experiment needs to jump ahead of nightlies only.
+# queue. Default to PRIORITY_DEFAULT (1), above only the unclassed nightlies
+# and kernel tuning; override per build with DEV_JOB_PRIORITY.
 JOB_PRIORITY="${DEV_JOB_PRIORITY:-$PRIORITY_DEFAULT}"
 export JOB_PRIORITY
 buildkite-agent meta-data set "JOB_PRIORITY" "$JOB_PRIORITY"
 # No WORKLOAD_PRIORITY either: on kube an unclassed workload is ordered at 0,
-# ahead of the nightlies and behind every other kind of build.
+# behind every kind of build that records a class, the owning nightly on main
+# included.
 echo "--- Dev build priority: ${JOB_PRIORITY}"
 
 # Which pipeline to upload.  Defaults to the demo pipeline_dev.yml; set
