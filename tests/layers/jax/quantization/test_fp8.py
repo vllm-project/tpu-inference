@@ -331,6 +331,45 @@ class TestFp8BlockwiseJaxLinear:
 
 class TestFp8TensorwiseJaxLinear:
 
+    @pytest.mark.parametrize("weight_sharding,out_features", [
+        (("model", None), 3),
+        ((None, "model"), 6),
+        ((("model", "expert"), None), 3),
+        ((None, ("model", "expert")), 6),
+        ((None, None), 3),
+    ])
+    def test_output_channel_scale_sharding(self, rngs, weight_sharding,
+                                            out_features):
+        if jax.local_device_count() < 2:
+            pytest.skip("Requires at least 2 devices")
+        mesh_shape = tuple(2 if axis == "model" else 1
+                           for axis in MESH_AXIS_NAMES)
+        mesh = Mesh(np.array(jax.local_devices()[:2]).reshape(mesh_shape),
+                    MESH_AXIS_NAMES)
+        quant_config = Fp8Config({
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+        })
+        with jax.set_mesh(mesh):
+            layer = JaxLinear(
+                16, out_features, rngs=rngs, use_bias=False,
+                quant_config=quant_config,
+                kernel_init=nnx.with_partitioning(
+                    nnx.initializers.uniform(), weight_sharding))
+            scales = np.arange(1, out_features + 1, dtype=np.float32) * 0.25
+            layer.weight.weight_loader(
+                layer.weight,
+                torch.ones((out_features, 16), dtype=torch.float8_e4m3fn))
+            layer.weight_scale.weight_loader(layer.weight_scale,
+                                              torch.from_numpy(scales))
+            expected_sharding = jax.sharding.NamedSharding(
+                mesh, jax.sharding.PartitionSpec(weight_sharding[1]))
+            assert layer.weight_scale[...].sharding.is_equivalent_to(
+                expected_sharding, ndim=1)
+            output = jax.jit(lambda x: layer(x))(
+                jnp.ones((2, 16), dtype=jnp.bfloat16))
+            np.testing.assert_allclose(output, np.tile(16 * scales, (2, 1)))
+
     def test_fp8_linear_method_create_weights(self, mesh, rngs):
         with jax.set_mesh(mesh):
             layer = JaxEinsum("ab,bc->ac", (32, 16), rngs, bias_shape=None)
