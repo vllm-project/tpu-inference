@@ -1,0 +1,42 @@
+{
+  "global_env": {
+    "GCP_PROJECT_ID": "cloud-tpu-inference-test",
+    "GCS_BUCKET": "vllm-cb-storage2",
+    "GCP_INSTANCE_ID": "vllm-bm-inst",
+    "GCP_DATABASE_ID": "vllm-bm-bk-runs"
+  },
+  "benchmark_cases": [
+    {
+      "case_name": "DeepSeek-R1-dataset_mmlu-inlen_1800-outlen_128",
+      "ci_queue": [
+        "tpu_v7x_8_queue"
+      ],
+      "env": {
+        "MODEL": "deepseek-ai/DeepSeek-R1",
+        "RUN_TYPE": "JAX_ACCURACY",
+        "MODELTAG": "NEW",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 1800,
+        "OUTPUT_LEN": 128,
+        "PREFIX_LEN": 0,
+        "MAX_NUM_SEQS": 128,
+        "MAX_NUM_BATCHED_TOKENS": 1024,
+        "MAX_MODEL_LEN": 2048,
+        "VLLM_MLA_DISABLE": "1",
+        "NEW_MODEL_DESIGN": "1",
+        "TPU_BACKEND_TYPE": "jax"
+      },
+      "client_command_options": {
+        "command_type": "lm_eval",
+        "args": {
+          "model": "deepseek-ai/DeepSeek-R1",
+          "dataset-name": "mmlu",
+          "tensor-parallel-size": {
+            "v7x-8": 8,
+            "default": 8
+          }
+        }
+      }
+    }
+  ]
+}
