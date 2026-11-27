@@ -136,6 +136,8 @@ class Llama4VisionRotaryEmbeddingTest(jtu.JaxTestCase):
         np.testing.assert_array_equal(cls_row[..., 1], 0.0)
 
     def test_patch_rows_match_hf_reference(self):
+        # Regression guard for the patch rows on their own: the CLS fix must
+        # leave them unchanged (this also passes on the pre-fix code).
         table = self._table()
         cos, sin = _hf_llama4_vision_freqs(**self.CONFIG)
         np.testing.assert_allclose(table[:-1, :, 0], cos[:-1], atol=1e-6)
