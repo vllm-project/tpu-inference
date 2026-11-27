@@ -23,7 +23,7 @@ from transformers import Qwen2Config
 from vllm.config import VllmConfig
 from vllm.transformers_utils.config import set_default_rope_theta
 
-from tpu_inference import utils
+from tpu_inference import envs, utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
@@ -239,6 +239,10 @@ class Qwen2DecoderLayer(JaxModule):
                  prefix: str = ""):
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
+        # input_layernorm only feeds the q/k/v projections and
+        # post_attention_layernorm only feeds the gate/up projections, so both
+        # may emit pre-quantized FP8 activations (USE_FUSED_RMSNORM_QUANT=1).
+        fuse_fp8_quant = envs.USE_FUSED_RMSNORM_QUANT
 
         self.input_layernorm = JaxRmsNorm(
             hidden_size,
@@ -248,6 +252,7 @@ class Qwen2DecoderLayer(JaxModule):
             rngs=rng,
             quant_config=quant_config,
             prefix=prefix + ".input_layernorm",
+            fuse_fp8_quant=fuse_fp8_quant,
         )
         self.self_attn = Qwen2Attention(config=config,
                                         dtype=dtype,
@@ -264,6 +269,7 @@ class Qwen2DecoderLayer(JaxModule):
             rngs=rng,
             quant_config=quant_config,
             prefix=prefix + ".post_attention_layernorm",
+            fuse_fp8_quant=fuse_fp8_quant,
         )
         self.mlp = Qwen2MLP(
             config=config,
