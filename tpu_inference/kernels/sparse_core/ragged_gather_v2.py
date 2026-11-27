@@ -31,13 +31,7 @@ def calculate_col_size(hidden_size: int, packing: int) -> int:
     assert sc_info is not None, "SparseCore info is missing."
     lanes = sc_info.num_lanes
 
-    match tpu_info.generation:
-        case 6:
-            target_bytes = (256 * 1024) * 0.8
-        case 7:
-            target_bytes = (512 * 1024) * 0.8
-        case _:
-            target_bytes = (128 * 1024) * 0.8
+    target_bytes = sc_info.vmem_capacity_bytes * 0.8
 
     # Calculate max safe column size based on VMEM budget and aligne to 128.
     num_buffers = 2
