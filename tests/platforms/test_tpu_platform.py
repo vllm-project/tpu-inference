@@ -146,8 +146,10 @@ class TestTpuPlatform:
         assert name in TpuPlatform.additional_env_vars
         assert name in envs.environment_variables
 
-    @pytest.mark.parametrize("name",
-                             ["USE_ROUTING_MOE", "ROUTING_MOE_REMOTE_SCATTER"])
+    @pytest.mark.parametrize("name", [
+        "USE_ROUTING_MOE", "ROUTING_MOE_REMOTE_SCATTER",
+        "ROUTING_MOE_FP8_COMBINE"
+    ])
     def test_additional_env_vars_covers_routing_moe(self, name):
         """Workers pick the MoE backend and trace the kernel, so they need
         its env vars."""
