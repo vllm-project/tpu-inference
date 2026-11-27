@@ -15,7 +15,7 @@
 # Engine-first XLA load. Each Raiden module statically links its own XLA and its
 # own copy of `xla/pjrt/proto/execute_options.proto`; whichever is dlopened first
 # wins the protobuf registry and a later one aborts the process. Must precede
-# env_override, which does `import vllm` and brings up jaxlib's XLA. All modules,
+# env_override, which sets XLA_FLAGS and other runtime environment variables. All modules,
 # not just the engine: the FFI ones are imported at module scope by tunix's
 # synchronizer, so they would otherwise land mid-run. The wheel is distributed
 # as `tpu_raiden_jax` but installs `tpu_sync`.
