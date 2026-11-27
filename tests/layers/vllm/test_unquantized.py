@@ -39,6 +39,8 @@ from vllm.model_executor.model_loader import get_model as vllm_get_model
 
 from tests.layers.common import utils as test_utils
 from tpu_inference.layers.common.moe import MoEBackend
+from tpu_inference.layers.common.process_weights.moe_weights import \
+    process_unquantized_moe_weights
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.vllm.custom_ops.fused_moe import _all_reduce_over_tp
 from tpu_inference.layers.vllm.interface.moe import FusedMoEFactory
@@ -1432,3 +1434,90 @@ def test_quantized_bf16_only_overrides_the_build_step():
             f"{name} should be inherited, not reimplemented")
     assert (VllmQuantizedBf16LinearMethod._build_linear_weights
             is not VllmUnquantizedLinearMethod._build_linear_weights)
+
+
+@pytest.mark.parametrize("use_ep", [True, False])
+@pytest.mark.parametrize("block_size", [None, 128])
+def test_fused_moe_requantize_stores_and_forwards_scales(
+        monkeypatch, request, use_ep, block_size):
+    """When MOE_REQUANTIZE_WEIGHT_DTYPE is set on an unquantized MoE layer,
+    process_unquantized_moe_weights produces w13_weight_scale and
+    w2_weight_scale; VllmUnquantizedFusedMoEMethod must store them on the layer
+    and forward them in apply_monolithic so GMM dequantizes the weights."""
+    monkeypatch.setenv("MOE_REQUANTIZE_WEIGHT_DTYPE", "int8")
+    if block_size is not None:
+        monkeypatch.setenv("MOE_REQUANTIZE_BLOCK_SIZE", str(block_size))
+    else:
+        monkeypatch.delenv("MOE_REQUANTIZE_BLOCK_SIZE", raising=False)
+    # process_unquantized_moe_weights is jax.jit'ed and reads the requantize
+    # env vars only at trace time. Clear its cache so this parametrization
+    # re-traces with its own env, and again on teardown so the int8 trace does
+    # not leak into later tests that expect bf16.
+    process_unquantized_moe_weights.clear_cache()
+    request.addfinalizer(process_unquantized_moe_weights.clear_cache)
+
+    mesh = test_utils.get_spmd_mesh(1, False)
+    torch.manual_seed(42)
+    dtype = torch.bfloat16
+    num_tokens, hidden_size, intermediate_size, num_experts, topk = (8, 256,
+                                                                     512, 8, 2)
+
+    a = torch.randn((num_tokens, hidden_size), dtype=dtype) / 10
+    w1 = torch.randn(
+        (num_experts, 2 * intermediate_size, hidden_size), dtype=dtype) / 10
+    w2 = torch.randn(
+        (num_experts, hidden_size, intermediate_size), dtype=dtype) / 10
+    score = torch.randn((num_tokens, num_experts), dtype=dtype)
+
+    engine_args = EngineArgs(
+        model="Qwen/Qwen2-1.5B-Instruct",
+        max_model_len=64,
+        max_num_batched_tokens=64,
+        max_num_seqs=4,
+    )
+    vllm_config = engine_args.create_engine_config()
+    vllm_config.model_config.dtype = dtype
+    vllm_config.parallel_config = ParallelConfig(
+        tensor_parallel_size=mesh.devices.size, enable_expert_parallel=use_ep)
+
+    quant_config = get_tpu_quantization_config(vllm_config, mesh)
+    with set_current_vllm_config(vllm_config):
+        vllm_fused_moe = FusedMoEFactory(
+            num_experts=num_experts,
+            top_k=topk,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            renormalize=False,
+            tp_size=1,
+            dp_size=1,
+            quant_config=quant_config,
+            has_bias=False,
+            activation="silu",
+        )
+        vllm_fused_moe.moe_config.moe_parallel_config.use_ep = use_ep
+    vllm_fused_moe.routed_experts.w13_weight.data = w1
+    vllm_fused_moe.routed_experts.w2_weight.data = w2
+
+    expected = test_utils.ref_moe(a, score, w1, w2, None, None,
+                                  vllm_fused_moe.routed_experts.top_k,
+                                  vllm_fused_moe.routed_experts.renormalize,
+                                  vllm_fused_moe.activation.value)
+
+    with torchax.default_env(), set_forward_context(
+            None, vllm_config), jax.set_mesh(mesh):
+        vllm_fused_moe.routed_experts.quant_method.process_weights_after_loading(
+            vllm_fused_moe.routed_experts)
+        assert vllm_fused_moe.routed_experts.w13_weight.dtype == torch.int8
+        assert vllm_fused_moe.routed_experts.w2_weight.dtype == torch.int8
+        assert vllm_fused_moe.routed_experts.w13_weight_scale is not None
+        assert vllm_fused_moe.routed_experts.w2_weight_scale is not None
+
+        jax_a = a.to('jax')
+        score_jax = score.to('jax')
+        actual = vllm_fused_moe(jax_a, score_jax)
+
+        torch.testing.assert_close(expected,
+                                   actual,
+                                   check_device=False,
+                                   atol=1e-1,
+                                   rtol=1e-1)
