@@ -795,7 +795,7 @@ def _process_quantization(file_sources):
 
 
 def update_readme(type_keys=None):
-    """Finds markers in README_dual.md and replaces content with fresh tables.
+    """Finds markers in README.md and replaces content with fresh tables.
 
     Only the tables of `type_keys` (keys of CSV_MAP: "release", "nightly") are
     rewritten: the README blocks and docs/includes snippets of the other type
