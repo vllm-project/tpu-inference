@@ -1719,9 +1719,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 out if done else None for out, done in zip(outputs, completed)
             ]
         else:
-            seq_lens_view = self.device_buffer.get_view((self.max_num_reqs, ),
-                                                        key="seq_lens")
-            seq_lens = seq_lens_view[:num_reqs]
+            # Same values _prepare_inputs writes for seq_lens. A new
+            # device_buffer view here would lie past the built layout and
+            # hold zeros or stale data, not this step's seq_lens.
+            seq_lens = (self.input_batch.num_computed_tokens_cpu[:num_reqs] +
+                        num_scheduled_tokens)
             # Call the pooler with the decoupled interface
             pooler_output = self.pooler_fn(
                 hidden_states,
