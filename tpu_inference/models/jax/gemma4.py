@@ -28,6 +28,7 @@ from tpu_inference import utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
@@ -37,6 +38,8 @@ from tpu_inference.layers.jax.linear import (JaxEinsum, JaxLinear, JaxLmHead,
 from tpu_inference.layers.jax.moe.moe import JaxRoutedExperts
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
+from tpu_inference.layers.jax.quantization.unquantized import (
+    MOE_WEIGHTS_STAGED_ON_HOST, UnquantizedFusedMoEMethod)
 from tpu_inference.layers.jax.rope_interface import (apply_rope,
                                                      normalize_rope_scaling)
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
@@ -46,7 +49,7 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (
     JaxAutoWeightsLoader, LoadableWithIterator, StandardWeightLoader,
-    load_nnx_param_from_reshaped_torch)
+    jax_array_from_reshaped_torch, load_nnx_param_from_reshaped_torch)
 
 logger = init_logger(__name__)
 
@@ -207,6 +210,42 @@ class Gemma4MoE(JaxRoutedExperts):
             for n, _ in weight_list)
 
         if is_fused:
+            if isinstance(self.quant_method,
+                          UnquantizedFusedMoEMethod) and self.moe_backend in (
+                              MoEBackend.GMM_EP, MoEBackend.GMM_TP):
+
+                def stage_weight_for_processing(param: nnx.Param, tensor,
+                                                param_name: str) -> None:
+                    # Keep the fused expert tensors off TPU until GMM
+                    # post-processing can produce the final sharded layout.
+                    jax_weight = jax_array_from_reshaped_torch(tensor)
+                    param_shape = param.get_value().shape
+                    expected_shape = (param_shape[0], param_shape[2],
+                                      param_shape[1])
+                    if tuple(jax_weight.shape) != expected_shape:
+                        raise ValueError(
+                            "Unexpected Gemma4 MoE weight shape for "
+                            f"{param_name}: {jax_weight.shape}; expected "
+                            f"{expected_shape}")
+                    param.set_metadata("_weights_to_load", [jax_weight])
+                    param.set_metadata(MOE_WEIGHTS_STAGED_ON_HOST, True)
+
+                loaded = set()
+                for name, tensor in weight_list:
+                    if name.endswith("down_proj"):
+                        stage_weight_for_processing(self.kernel_down_proj_EFD,
+                                                    tensor, name)
+                        loaded.add("kernel_down_proj_EFD")
+                    elif name.endswith("gate_up_proj"):
+                        F = tensor.shape[1] // 2
+                        stage_weight_for_processing(self.kernel_gating_EDF,
+                                                    tensor[:, :F, :], name)
+                        stage_weight_for_processing(self.kernel_up_proj_EDF,
+                                                    tensor[:, F:, :], name)
+                        loaded.add("kernel_up_proj_EDF")
+                        loaded.add("kernel_gating_EDF")
+                return loaded
+
             synthesized = []
             for name, tensor in weight_list:
                 if name.endswith("down_proj"):
