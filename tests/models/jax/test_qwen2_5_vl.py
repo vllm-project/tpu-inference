@@ -464,18 +464,81 @@ class TestQwen2_5_VLForConditionalGeneration:
         reshaped_list = model._validate_and_reshape_mm_tensor(
             data_list, "test_list")
         assert reshaped_list.shape == (5, 4)
-        assert isinstance(reshaped_list, jax.Array)
+        assert isinstance(reshaped_list, np.ndarray)
 
         data_2d = np.ones((5, 4))
         reshaped_2d = model._validate_and_reshape_mm_tensor(data_2d, "test_2d")
         assert reshaped_2d.shape == (5, 4)
+        assert isinstance(reshaped_2d, np.ndarray)
 
         data_3d = np.ones((2, 5, 4))
         reshaped_3d = model._validate_and_reshape_mm_tensor(data_3d, "test_3d")
         assert reshaped_3d.shape == (10, 4)
+        assert isinstance(reshaped_3d, np.ndarray)
+
+        jax_2d = jnp.ones((5, 4))
+        reshaped_jax = model._validate_and_reshape_mm_tensor(
+            jax_2d, "test_jax")
+        assert reshaped_jax.shape == (5, 4)
+        assert isinstance(reshaped_jax, jax.Array)
 
         with pytest.raises(ValueError, match="Incorrect type of test_invalid"):
             model._validate_and_reshape_mm_tensor("invalid", "test_invalid")
+
+    def test_get_mrope_input_positions(
+            self, model: Qwen2_5_VLForConditionalGeneration):
+        from vllm.multimodal.inputs import (MultiModalBatchedField,
+                                            MultiModalFeatureSpec,
+                                            MultiModalFieldElem,
+                                            MultiModalKwargsItem,
+                                            PlaceholderRange)
+
+        hf_config = model.config
+        vision_start = hf_config.vision_start_token_id
+        image_tok = hf_config.image_token_id
+        # spatial_merge_size = 2, so grid_thw=(1, 4, 4) -> 1 * 2 * 2 = 4 tokens
+        input_tokens = [
+            10, 11, vision_start, image_tok, image_tok, image_tok, image_tok,
+            12, 13
+        ]
+        mm_item = MultiModalKwargsItem({
+            "image_grid_thw":
+            MultiModalFieldElem(np.array([1, 4, 4], dtype=np.int64),
+                                MultiModalBatchedField())
+        })
+        mm_features = [
+            MultiModalFeatureSpec(data=mm_item,
+                                  identifier="img-1",
+                                  modality="image",
+                                  mm_position=PlaceholderRange(offset=3,
+                                                               length=4))
+        ]
+
+        llm_positions, mrope_position_delta = model.get_mrope_input_positions(
+            input_tokens, mm_features)
+
+        assert isinstance(llm_positions, np.ndarray)
+        assert isinstance(mrope_position_delta, int)
+        assert llm_positions.shape == (3, len(input_tokens))
+
+        # First 3 tokens (10, 11, vision_start): positions 0, 1, 2 across all 3 dims
+        expected_prefix = np.array([[0, 1, 2], [0, 1, 2], [0, 1, 2]],
+                                   dtype=np.int32)
+        np.testing.assert_array_equal(llm_positions[:, :3], expected_prefix)
+
+        # Next 4 image tokens (t=0, h in {0,1}, w in {0,1}) + offset 3:
+        expected_img = np.array([
+            [3, 3, 3, 3],
+            [3, 3, 4, 4],
+            [3, 4, 3, 4],
+        ],
+                                dtype=np.int32)
+        np.testing.assert_array_equal(llm_positions[:, 3:7], expected_img)
+
+        # Trailing 2 text tokens (12, 13): st_idx = 4 + 1 = 5 -> positions 5, 6
+        expected_suffix = np.array([[5, 6], [5, 6], [5, 6]], dtype=np.int32)
+        np.testing.assert_array_equal(llm_positions[:, 7:], expected_suffix)
+        assert mrope_position_delta == (6 + 1 - len(input_tokens))
 
     def test_parse_and_validate_image_input(
             self, model: Qwen2_5_VLForConditionalGeneration):
@@ -489,6 +552,7 @@ class TestQwen2_5_VLForConditionalGeneration:
         assert parsed is not None
         assert parsed['type'] == "pixel_values"
         assert parsed['pixel_values'].shape == (4, patch_dim)
+        assert isinstance(parsed['pixel_values'], np.ndarray)
         assert parsed['image_grid_thw'] == grid
 
         parsed_none = model._parse_and_validate_image_input(
@@ -516,9 +580,9 @@ class TestQwen2_5_VLForConditionalGeneration:
             self, model: Qwen2_5_VLForConditionalGeneration, mesh: Mesh):
         grid_thw = ((2, 28, 28), (2, 28, 28))
         vc = model.config.vision_config
-        num_patches = 8  # 4 per image
+        num_patches = 2 * (2 * 28 * 28)
         patch_dim = vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size
-        pixel_values = jnp.ones((num_patches, patch_dim))
+        pixel_values = np.ones((num_patches, patch_dim), dtype=np.float32)
         with jax.set_mesh(mesh):
             image_input = Qwen2_5_VLImagePixelInputs(type="pixel_values",
                                                      pixel_values=pixel_values,
@@ -528,12 +592,20 @@ class TestQwen2_5_VLForConditionalGeneration:
         mock_embeds = jnp.ones((tokens_per_image, vc.out_hidden_size))
         model.visual.return_value = mock_embeds
 
-        embeddings = model._process_image_input(image_input)
+        with patch('jax.numpy.concatenate', wraps=jnp.concatenate) as spy_concat, \
+             patch('jax.numpy.split', wraps=jnp.split) as spy_split:
+            embeddings = model._process_image_input(image_input)
+            spy_concat.assert_not_called()
+            spy_split.assert_not_called()
+
         assert isinstance(embeddings, tuple)
         assert len(embeddings) == 2
         assert embeddings[0].shape == (tokens_per_image, vc.out_hidden_size)
         assert embeddings[1].shape == (tokens_per_image, vc.out_hidden_size)
         assert model.visual.call_count == 2
+        for call in model.visual.call_args_list:
+            assert isinstance(call.args[0], jax.Array)
+            assert call.args[0].shape == (2 * 28 * 28, patch_dim)
 
     def test_embed_multimodal(self, model: Qwen2_5_VLForConditionalGeneration):
         grid_thw = ((2, 28, 28), )
@@ -643,6 +715,38 @@ class TestQwen2_5_VLForConditionalGeneration:
             mock_load_weights.assert_called_once()
             kwargs = mock_load_weights.call_args.kwargs
             assert "lm_head" not in kwargs['metadata_map'].name_map
+
+    @pytest.mark.parametrize("enable_dynamic_image_sizes", [True, False])
+    def test_precompile_vision_encoder_first_rank(
+            self, model: Qwen2_5_VLForConditionalGeneration,
+            enable_dynamic_image_sizes: bool):
+        import torch
+
+        # Simulate get_flax_model resetting vllm_config.model_config.dtype back to torch.dtype
+        model.vllm_config.model_config.dtype = torch.bfloat16
+        model.visual.dtype = jnp.bfloat16
+        model.visual.enable_dynamic_image_sizes = enable_dynamic_image_sizes
+        model.visual.encode_padded_jit = MagicMock()
+        model.visual.encode_jit = MagicMock()
+        model.vllm_config.scheduler_config.max_num_batched_tokens = 16
+        model.vllm_config.model_config.multimodal_config.mm_processor_kwargs = {
+            "size": {
+                "longest_edge": 28 * 28 * 4
+            }
+        }
+        model.vllm_config.additional_config = {
+            "vision_warmup_config": {
+                "image_shapes": [[28, 28]]
+            }
+        }
+
+        run_compilation_fn = MagicMock()
+        model.precompile_vision_encoder(run_compilation_fn)
+        assert run_compilation_fn.call_count >= 1
+        for call in run_compilation_fn.call_args_list:
+            # First tensor arg after (name, fn) should have jnp.bfloat16 dtype
+            dummy_tensor = call.args[2]
+            assert dummy_tensor.dtype == jnp.bfloat16
 
 
 class TestQwen2_5_VLPipelineParallel:
