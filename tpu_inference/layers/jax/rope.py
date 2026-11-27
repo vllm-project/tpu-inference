@@ -317,15 +317,14 @@ class Llama4VisionRotaryEmbedding(nnx.Module):
         img_idx = jnp.arange(num_patches,
                              dtype=jnp.int32).reshape(num_patches, 1)
 
-        # Add the CLS token
+        # Add the CLS token, marked with the -2 sentinel (ID_CLS_TOKEN in the
+        # HF reference) so the mask below gives it no rotation.
         img_idx = jnp.concatenate([img_idx, img_idx[:1]], axis=0)
+        img_idx = img_idx.at[-1, -1].set(-2)
 
         # Determine X and Y coordinates
         frequencies_x = img_idx % idx
         frequencies_y = img_idx // idx
-
-        frequencies_x = frequencies_x.at[-1, -1].set(-2)
-        frequencies_y = frequencies_y.at[-1, -1].set(-2)
 
         # 3. Calculate Inverse Frequencies
         freq_dim = self.hidden_size // self.num_attention_heads // 2
