@@ -25,6 +25,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 
+from tpu_inference import envs
 from tpu_inference.layers.common.process_weights.linear_weights import \
     get_model_matmul_fusion_assignment
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
@@ -135,8 +136,11 @@ class VllmQuantLinearConfig(QuantLinearConfig):
             # sharded_quantized_matmul, so the two always agree.
             return sharding if self.get_sp_token_axes(x) is not None else None
         token_num = x.shape[0]
-        # NOTE(chengjiyao): make sure the sharded token_num is larger than TPU_SECOND_LAST_MINOR
-        if token_num // self.tp_size < TPU_SECOND_LAST_MINOR:
+        # NOTE(chengjiyao): make sure the sharded token_num is at least
+        # TPU_SECOND_LAST_MINOR (or user-configured threshold).
+        min_per_shard = max(TPU_SECOND_LAST_MINOR,
+                            envs.TPU_INFERENCE_SP_MIN_TOKENS_PER_SHARD)
+        if token_num // self.tp_size < min_per_shard:
             return None
         return sharding
 
