@@ -102,8 +102,12 @@ def test_get_node_worker_id_from_metadata(mock_get_tpu_metadata):
     [
         ("v5litepod-4", 1),
         ("v6e-8", 1),
-        ("v4-8", 2),
-        ("v5p-16", 2),
+        # v4 and v5p have two TensorCores per chip, run as one Megacore device.
+        ("v4-8", 1),
+        ("v4-32", 1),
+        ("v5p-8", 1),
+        ("v5p-16", 1),
+        ("tpu7x-8", 2),
         ("unknown-type", 2)  # Default case
     ])
 @patch("tpu_inference.tpu_info.get_tpu_type")

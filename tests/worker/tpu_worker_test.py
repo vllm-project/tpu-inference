@@ -930,3 +930,38 @@ class TestTPUWorker:
             worker.bind_raiden_sync(worker_index=0)
             mock_sync_cls.assert_called_once()
             assert mock_sync_cls.call_args.kwargs["worker_index"] == 3
+
+
+class TestDPChipIsolation:
+
+    @pytest.mark.parametrize(
+        "tpu_type, total_chips, tp, dp_rank, visible_chips, bounds",
+        [
+            # v5p and v4 chips run as one Megacore JAX device each, so TP2
+            # needs two chips per DP rank.
+            ("v5p-8", 4, 2, 0, "0,1", "1,2,1"),
+            ("v5p-8", 4, 2, 1, "2,3", "1,2,1"),
+            ("v4-8", 4, 2, 1, "2,3", "1,2,1"),
+            ("v6e-8", 8, 4, 1, "4,5,6,7", "2,2,1"),
+            # v7x chips expose two JAX devices each.
+            ("tpu7x-8", 4, 2, 1, "1", "1,1,1"),
+        ])
+    def test_rank_gets_one_chip_per_jax_device(self, mock_vllm_config,
+                                               tpu_type, total_chips, tp,
+                                               dp_rank, visible_chips, bounds):
+        mock_vllm_config.sharding_config.total_devices = tp
+        mock_vllm_config.parallel_config.data_parallel_index = dp_rank
+        worker = TPUWorker.__new__(TPUWorker)
+        worker.vllm_config = mock_vllm_config
+
+        with patch("tpu_inference.tpu_info.get_ordered_chip_ids",
+                   return_value=[]), patch(
+                       "tpu_inference.tpu_info.get_tpu_type",
+                       return_value=tpu_type), patch(
+                           "tpu_inference.tpu_info.get_num_chips",
+                           return_value=total_chips), patch.dict("os.environ",
+                                                                 {},
+                                                                 clear=True):
+            worker._setup_dp_chip_isolation()
+            assert os.environ["TPU_VISIBLE_CHIPS"] == visible_chips
+            assert os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] == bounds

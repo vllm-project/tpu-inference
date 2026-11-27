@@ -76,8 +76,14 @@ def get_node_worker_id() -> int:
 
 
 def get_num_cores_per_chip() -> int:
+    """Returns the number of JAX devices per physical TPU chip.
+
+    v4 and v5p chips have two TensorCores, but JAX runs them as one Megacore
+    device, so they count as one. Callers use this before JAX initializes to
+    turn a device count into a chip count.
+    """
     tpu_type = get_tpu_type()
-    if tpu_type.startswith(("v5litepod", "v6e")):
+    if tpu_type.startswith(("v5litepod", "v6e", "v4", "v5p")):
         return 1
     return 2
 
