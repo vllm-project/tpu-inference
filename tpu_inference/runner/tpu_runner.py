@@ -1988,6 +1988,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             tokens_indices_selector,
             _,
         ) = self._prepare_inputs(scheduler_output)
+        # continue_decode fuses sampling into the on-device decode loop and is
+        # only precompiled with the default (all filters) static flags.
+        if sampling_metadata is not None:
+            sampling_metadata = sampling_metadata.with_all_filters()
 
         init_tokens = input_ids
         # Map active rows correctly across DP buckets by checking valid query locations.

@@ -120,6 +120,8 @@ class RejectionSampler:
         # `do_sampling` / `logprobs` are static (pytree meta fields)
         do_sampling = sampling_metadata.do_sampling
         logprobs = sampling_metadata.logprobs
+        needs_top_k = sampling_metadata.needs_top_k
+        needs_top_p = sampling_metadata.needs_top_p
 
         def _forward(draft_token_ids, num_draft_tokens, draft_probs,
                      target_logits, bonus_token_ids, temperature, top_k, top_p,
@@ -133,6 +135,8 @@ class RejectionSampler:
                 _cache_collision_dummy=cache_collision_dummy,
                 do_sampling=do_sampling,
                 logprobs=logprobs,
+                needs_top_k=needs_top_k,
+                needs_top_p=needs_top_p,
             )
 
             if cache_collision_dummy is not None:
@@ -299,15 +303,17 @@ def _compute_probs(
 
     # Apply top-k and top-p masking
     logits = logits.astype(jnp.float32)
-    # Only apply top-k masking if k > 0 for each token
-    should_apply_topk = jnp.expand_dims(top_k > 0, axis=-1)
-    topk_masked = topk_mask(logits, top_k, replace_val=-jnp.inf)
-    logits = jnp.where(should_apply_topk, topk_masked, logits)
+    if sampling_metadata.needs_top_k:
+        # Only apply top-k masking if k > 0 for each token
+        should_apply_topk = jnp.expand_dims(top_k > 0, axis=-1)
+        topk_masked = topk_mask(logits, top_k, replace_val=-jnp.inf)
+        logits = jnp.where(should_apply_topk, topk_masked, logits)
 
-    # Only apply top-p masking if p < 1.0 for each token
-    should_apply_topp = jnp.expand_dims(top_p < 1.0, axis=-1)
-    topp_masked = topp_mask(logits, top_p, replace_val=-jnp.inf)
-    logits = jnp.where(should_apply_topp, topp_masked, logits)
+    if sampling_metadata.needs_top_p:
+        # Only apply top-p masking if p < 1.0 for each token
+        should_apply_topp = jnp.expand_dims(top_p < 1.0, axis=-1)
+        topp_masked = topp_mask(logits, top_p, replace_val=-jnp.inf)
+        logits = jnp.where(should_apply_topp, topp_masked, logits)
 
     # Apply temperature scaling
     temperatures = jnp.expand_dims(temperatures, axis=-1)
