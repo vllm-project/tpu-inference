@@ -109,6 +109,111 @@ class UtilsTest(jtu.JaxTestCase):
                 self.assertIsInstance(result, list)
                 self.assertEqual(len(result), 2)
 
+    def test_general_device_put_multihost_non_ray_sharding(self):
+        tensor = jnp.ones((8, 8))
+        mock_sharding = mock.MagicMock(spec=NamedSharding)
+        mock_sharding.is_fully_addressable = False
+        mock_sharding.has_addressable_devices = True
+
+        with mock.patch.object(envs, 'TPU_MULTIHOST_BACKEND', ''):
+            with mock.patch('jax.make_array_from_callback') as mock_make_array:
+                mock_make_array.return_value = tensor
+                result = general_device_put(tensor, mock_sharding)
+
+                mock_make_array.assert_called_once()
+                args, kwargs = mock_make_array.call_args
+                self.assertEqual(args[0], tensor.shape)
+                self.assertEqual(args[1], mock_sharding)
+                self.assertEqual(kwargs['dtype'], tensor.dtype)
+                self.assertAllClose(result, tensor)
+
+    def test_general_device_put_multihost_prng_key(self):
+        key = jax.random.key(0)
+        mock_sharding = mock.MagicMock(spec=NamedSharding)
+        mock_sharding.is_fully_addressable = False
+        mock_sharding.has_addressable_devices = True
+
+        with mock.patch.object(envs, 'TPU_MULTIHOST_BACKEND', ''):
+            with mock.patch('jax.make_array_from_callback') as mock_make_array:
+                mock_make_array.side_effect = (
+                    lambda shape, sharding, cb, **kwargs: cb(()))
+                result = general_device_put(key, mock_sharding)
+
+                mock_make_array.assert_called_once()
+                self.assertEqual(result.shape, ())
+
+        # Also verify sharded 1D PRNGKeyArray slicing and single np.asarray caching.
+        keys = jax.random.split(key, 4)
+        with mock.patch.object(envs, 'TPU_MULTIHOST_BACKEND', ''):
+            with mock.patch('jax.make_array_from_callback') as mock_make_array:
+                mock_make_array.side_effect = (
+                    lambda shape, sharding, cb, **kwargs: cb((slice(0, 2), )))
+                result_sharded = general_device_put(keys, mock_sharding)
+                self.assertEqual(result_sharded.shape, (2, ))
+
+    def test_general_device_put_multihost_caches_host_numpy_view(self):
+        cpu_dev = jax.local_devices(backend='cpu')[0]
+        tensor = jax.device_put(
+            jnp.arange(64, dtype=jnp.float32).reshape(8, 8), cpu_dev)
+        mock_sharding = mock.MagicMock(spec=NamedSharding)
+        mock_sharding.is_fully_addressable = False
+        mock_sharding.has_addressable_devices = True
+
+        shard_indices = [
+            (slice(0, 2), slice(None)),
+            (slice(2, 4), slice(None)),
+            (slice(4, 6), slice(None)),
+            (slice(6, 8), slice(None)),
+        ]
+        real_asarray = np.asarray
+        with mock.patch.object(envs, 'TPU_MULTIHOST_BACKEND', ''):
+            with mock.patch(
+                    'tpu_inference.layers.common.utils.np.asarray',
+                    wraps=real_asarray) as mock_asarray:
+                with mock.patch(
+                        'jax.make_array_from_callback') as mock_make_array:
+                    mock_make_array.side_effect = (
+                        lambda shape, sharding, cb, **kwargs: [
+                            cb(idx) for idx in shard_indices
+                        ])
+                    shards = general_device_put(tensor, mock_sharding)
+
+                    self.assertEqual(mock_asarray.call_count, 1)
+                    self.assertEqual(len(shards), 4)
+                    for i, shard in enumerate(shards):
+                        self.assertAllClose(shard, tensor[shard_indices[i]])
+
+    def test_general_device_put_multihost_skips_numpy_copy_on_tpu_tensor(self):
+        tensor = jnp.arange(64, dtype=jnp.float32).reshape(8, 8)
+        mock_tpu_dev = mock.MagicMock()
+        mock_tpu_dev.platform = 'tpu'
+        mock_sharding = mock.MagicMock(spec=NamedSharding)
+        mock_sharding.is_fully_addressable = False
+        mock_sharding.has_addressable_devices = True
+
+        shard_indices = [
+            (slice(0, 4), slice(None)),
+            (slice(4, 8), slice(None)),
+        ]
+        with mock.patch.object(envs, 'TPU_MULTIHOST_BACKEND', ''):
+            with mock.patch.object(
+                    jax.Array, 'devices', return_value={mock_tpu_dev}):
+                with mock.patch(
+                        'tpu_inference.layers.common.utils.np.asarray'
+                ) as mock_asarray:
+                    with mock.patch(
+                            'jax.make_array_from_callback') as mock_make_array:
+                        mock_make_array.side_effect = (
+                            lambda shape, sharding, cb, **kwargs: [
+                                cb(idx) for idx in shard_indices
+                            ])
+                        shards = general_device_put(tensor, mock_sharding)
+
+                        mock_asarray.assert_not_called()
+                        self.assertEqual(len(shards), 2)
+                        for i, shard in enumerate(shards):
+                            self.assertAllClose(shard, tensor[shard_indices[i]])
+
     def test_truncate_sharded_tensor(self):
         # Shape: (2, 20), n_shards=4, so each shard has size 5 on the last dim
         t = jnp.arange(40).reshape(2, 20)
