@@ -18,6 +18,8 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 from vllm.sampling_params import SamplingParams
 
+from tpu_inference.layers.common.attention_metadata import \
+    MAMBA_READ_OFFSET_FROM_BLOCK_TABLE
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 from tpu_inference.runner.persistent_batch_manager import \
     PersistentBatchManager
@@ -208,6 +210,7 @@ class TestPersistentBatchManager(unittest.TestCase):
         )
         input_batch.has_mamba_layers = True
         input_batch.add_request(req)
+        req.mamba_read_offset = 2
         slot = int(input_batch.mamba_state_indices_cpu[0])
 
         manager = PersistentBatchManager(requests,
@@ -220,6 +223,7 @@ class TestPersistentBatchManager(unittest.TestCase):
         manager.update_states(_make_scheduler_output(), None)
 
         self.assertEqual(req.mamba_state_slot, slot)
+        self.assertEqual(req.mamba_read_offset, 2)
         self.assertFalse(
             any(slot in pool
                 for pool in input_batch._free_mamba_slots_per_rank))
@@ -237,6 +241,7 @@ class TestPersistentBatchManager(unittest.TestCase):
         )
         input_batch.has_mamba_layers = True
         input_batch.add_request(req)
+        req.mamba_read_offset = 2
         slot = int(input_batch.mamba_state_indices_cpu[0])
 
         manager = PersistentBatchManager(requests,
@@ -250,7 +255,8 @@ class TestPersistentBatchManager(unittest.TestCase):
             _make_scheduler_output(preempted_req_ids={req.req_id}), None)
 
         self.assertIsNone(req.mamba_state_slot)
-        self.assertEqual(req.mamba_read_offset, 0)
+        self.assertEqual(req.mamba_read_offset,
+                         MAMBA_READ_OFFSET_FROM_BLOCK_TABLE)
         self.assertTrue(
             any(slot in pool
                 for pool in input_batch._free_mamba_slots_per_rank))
@@ -271,6 +277,7 @@ class TestPersistentBatchManager(unittest.TestCase):
         )
         input_batch.has_mamba_layers = True
         input_batch.add_request(req)
+        req.mamba_read_offset = 2
         slot = int(input_batch.mamba_state_indices_cpu[0])
 
         manager = PersistentBatchManager(requests,
@@ -291,7 +298,8 @@ class TestPersistentBatchManager(unittest.TestCase):
             _make_scheduler_output(preempted_req_ids={req.req_id}), None)
 
         self.assertIsNone(req.mamba_state_slot)
-        self.assertEqual(req.mamba_read_offset, 0)
+        self.assertEqual(req.mamba_read_offset,
+                         MAMBA_READ_OFFSET_FROM_BLOCK_TABLE)
         self.assertTrue(
             any(slot in pool
                 for pool in input_batch._free_mamba_slots_per_rank))
@@ -309,6 +317,7 @@ class TestPersistentBatchManager(unittest.TestCase):
         )
         input_batch.has_mamba_layers = True
         input_batch.add_request(req)
+        req.mamba_read_offset = 2
         slot = int(input_batch.mamba_state_indices_cpu[0])
 
         manager = PersistentBatchManager(requests,
@@ -335,6 +344,8 @@ class TestPersistentBatchManager(unittest.TestCase):
         resumed = requests[req.req_id]
         self.assertIsNot(resumed, req)
         self.assertEqual(resumed.block_ids, [[2]])
+        self.assertEqual(resumed.mamba_read_offset,
+                         MAMBA_READ_OFFSET_FROM_BLOCK_TABLE)
         self.assertEqual(resumed.mamba_state_slot,
                          int(input_batch.mamba_state_indices_cpu[0]))
 

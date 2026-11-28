@@ -930,3 +930,36 @@ class TestTPUWorker:
             worker.bind_raiden_sync(worker_index=0)
             mock_sync_cls.assert_called_once()
             assert mock_sync_cls.call_args.kwargs["worker_index"] == 3
+
+    def test_get_mamba_num_blocks_excludes_spec_scratch_in_align_mode(
+            self, mock_vllm_config):
+        """TPUWorker.get_mamba_num_blocks returns scheduler-usable blocks
+        (excluding runner-owned speculative verify-window scratch slots)."""
+        from types import SimpleNamespace
+
+        from tpu_inference.core.mamba_prefix_caching import \
+            set_mamba_prefix_caching
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+
+        worker = TPUWorker(vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test")
+        runner = MagicMock()
+        runner.vllm_config = mock_vllm_config
+        runner.max_num_reqs = 16
+        runner.dp_size = 2
+        set_mamba_prefix_caching(mock_vllm_config.cache_config, True)
+        mock_vllm_config.speculative_config = SimpleNamespace(
+            method="ngram", num_speculative_tokens=3)
+        runner.kv_cache_manager = KVCacheManager(runner)
+        worker.model_runner = runner
+
+        assert worker.get_mamba_num_blocks() is None
+
+        runner.kv_cache_manager.actual_mamba_num_blocks = 200
+        # 8 reqs/rank * (3 + 1) = 32 scratch slots/rank -> 64 across 2 DP ranks.
+        assert worker.get_mamba_num_blocks() == 136
+
+        set_mamba_prefix_caching(mock_vllm_config.cache_config, False)
+        assert worker.get_mamba_num_blocks() == 200

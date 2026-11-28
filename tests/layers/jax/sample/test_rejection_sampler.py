@@ -1653,3 +1653,62 @@ class TestTopKTopPSampling:
             assert len(seq_tokens) >= 0  # Should have at least empty list
             for token_id in seq_tokens:
                 assert 0 <= token_id < vocab_size  # Valid token range
+
+    def test_padded_negative_draft_tokens_never_accepted_under_random_sampling(
+            self, rejection_sampler, test_helper):
+        """Padded (-1) draft slots from Scheduler `pad_spec_decode` (e.g., on
+        prefix-cache hits of length `k * block_size + 1`) must never wrap `-1`
+        to `vocab_size - 1`, accept `PLACEHOLDER_TOKEN_ID`, or zero out
+        `vocab_size - 1` during recovery sampling."""
+        vocab_size = 32
+        batch_size = 1
+        num_draft_tokens = 3
+
+        draft_token_ids = jnp.array([-1, -1, -1], dtype=jnp.int32)
+        num_draft_per_seq = jnp.array([num_draft_tokens], dtype=jnp.int32)
+        bonus_token_ids = jnp.array([7], dtype=jnp.int32)
+
+        # Put overwhelming probability mass on `vocab_size - 1` at position 0
+        # (and token 5 at position 1): without the `draft_token_ids >= 0`
+        # guard, `take_along_axis` wraps `-1` to `vocab_size - 1`, accepts `-1`
+        # at position 0, and `parse_output` drops position 0 and emits token 5.
+        target_logits = jnp.full((num_draft_tokens, vocab_size),
+                                 -50.0,
+                                 dtype=jnp.float32)
+        target_logits = target_logits.at[0, vocab_size - 1].set(50.0)
+        target_logits = target_logits.at[1, 5].set(50.0)
+        target_logits = target_logits.at[2, 6].set(50.0)
+
+        sampling_metadata = test_helper.create_sampling_metadata(
+            all_greedy=False,
+            batch_size=batch_size,
+            top_k=-1,
+            top_p=1.0,
+            temperature=1.0,
+        )
+
+        output_token_ids = rejection_sampler(
+            draft_token_ids=draft_token_ids,
+            num_draft_tokens=num_draft_per_seq,
+            draft_probs=None,
+            target_logits=target_logits,
+            bonus_token_ids=bonus_token_ids,
+            sampling_metadata=sampling_metadata,
+            key=jax.random.PRNGKey(0),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(output_token_ids),
+            [
+                vocab_size - 1, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID,
+                PLACEHOLDER_TOKEN_ID
+            ],
+        )
+
+        parsed_output = rejection_sampler.parse_output(
+            output_token_ids,
+            vocab_size=vocab_size,
+            num_draft_tokens_cpu=np.asarray(num_draft_per_seq),
+            batch_size=batch_size,
+            padded_tokens_length=num_draft_tokens,
+        )
+        assert parsed_output == [[vocab_size - 1]]

@@ -582,13 +582,17 @@ class TestHybridCoordinatorHooks:
         assert coord.mamba_num_blocks == 64
 
     def test_mamba_blocks_per_request(self):
-        """One resident slot per request outside align mode; in align mode a
-        second resident slot plus `custom_mamba_cache_multiplier` (default 8)
-        checkpoint slots, never fewer than the resident minimum."""
+        """One resident slot per speculative position outside align mode; in
+        align mode `mamba_blocks_per_request` returns the variable per-request
+        scheduler budget (`>= 2`, up to `custom_mamba_cache_multiplier`), while
+        runner-side verify-window scratch slots are sized separately via
+        `gdn_spec_scratch_slots_per_rank` / `gdn_spec_scratch_num_blocks`."""
         from tpu_inference.core.hybrid_coordinator import (
-            DEFAULT_MAMBA_CACHE_MULTIPLIER, mamba_blocks_per_request)
+            DEFAULT_MAMBA_CACHE_MULTIPLIER, gdn_spec_scratch_num_blocks,
+            gdn_spec_scratch_slots_per_rank, mamba_blocks_per_request)
 
         vllm_config = _make_mock_vllm_config(dp_size=2, max_num_seqs=8)
+        set_mamba_prefix_caching(vllm_config.cache_config, True)
         assert mamba_blocks_per_request(
             vllm_config,
             is_align_mode=True) == (2, DEFAULT_MAMBA_CACHE_MULTIPLIER)
@@ -600,9 +604,24 @@ class TestHybridCoordinatorHooks:
                                         is_align_mode=True) == (2, 3)
 
         vllm_config.speculative_config = MagicMock(num_speculative_tokens=4)
-        # Resident minimum (4 + 1 + 1 = 6) beats the multiplier of 3.
         assert mamba_blocks_per_request(vllm_config,
-                                        is_align_mode=True) == (6, 6)
+                                        is_align_mode=True) == (2, 3)
+        assert mamba_blocks_per_request(vllm_config,
+                                        is_align_mode=False) == (5, 5)
+        # 4 reqs/rank * 5 slots/req = 20 scratch slots per rank (40 total).
+        assert gdn_spec_scratch_slots_per_rank(vllm_config,
+                                               max_num_reqs=8,
+                                               dp_size=2) == 20
+        assert gdn_spec_scratch_num_blocks(vllm_config,
+                                           max_num_reqs=8,
+                                           dp_size=2) == 40
+        set_mamba_prefix_caching(vllm_config.cache_config, False)
+        assert gdn_spec_scratch_slots_per_rank(vllm_config,
+                                               max_num_reqs=8,
+                                               dp_size=2) == 0
+        assert gdn_spec_scratch_num_blocks(vllm_config,
+                                           max_num_reqs=8,
+                                           dp_size=2) == 0
 
     def test_propagate_mamba_num_blocks_publishes_worker_value(self):
         import tpu_inference.core.hybrid_coordinator as hc_mod
@@ -919,3 +938,91 @@ class TestTPUKVCacheManager:
             apply_admission_cap=True,
         ) is True
         attn_mgr.get_num_blocks_to_allocate.assert_not_called()
+
+    def test_spec_decode_caches_mamba_block_completed_by_accepted_drafts(self):
+        """A mamba block filled by accepted speculative drafts and published via
+        `Scheduler.update_from_output` (`manager.cache_blocks`) stays cached in
+        the decoupled mamba pool across the next step's `remove_skipped_blocks`
+        and is immediately reusable in that step."""
+        from vllm.sampling_params import SamplingParams
+
+        install_hybrid_coordinator_hooks()
+        set_mamba_num_blocks(20)
+        cfg = _make_mock_hybrid_kv_cache_config(num_attn_blocks=50,
+                                                mamba_num_blocks=20,
+                                                block_size=16)
+        manager = TPUKVCacheManager(
+            kv_cache_config=cfg,
+            max_model_len=1024,
+            scheduler_block_size=16,
+            hash_block_size=16,
+            enable_caching=True,
+        )
+        assert isinstance(manager.coordinator, TPUHybridKVCacheCoordinator)
+
+        def block_hasher(r: Request) -> list[BlockHash]:
+            n_full = len(r.all_token_ids) // 16
+            return [
+                BlockHash(
+                    bytes(str(tuple(r.all_token_ids[i * 16:(i + 1) * 16])),
+                          "utf-8")) for i in range(len(r.block_hashes), n_full)
+            ]
+
+        def make_req(req_id: str) -> Request:
+            r = Request(
+                request_id=req_id,
+                prompt_token_ids=list(range(14)),
+                sampling_params=SamplingParams(max_tokens=16),
+                pooling_params=None,
+                block_hasher=block_hasher,
+            )
+            r.status = RequestStatus.RUNNING
+            return r
+
+        req = make_req("req-spec-1")
+        assert manager.allocate_slots(request=req,
+                                      num_new_tokens=14) is not None
+        req.num_computed_tokens = 14
+        req.append_output_token_ids([100])  # num_tokens = 15
+        manager.cache_blocks(req, req.num_computed_tokens)
+
+        # Verify window: 1 target token + 3 n-gram drafts (`num_new_tokens=4`).
+        manager.new_step_starts()
+        assert manager.allocate_slots(request=req,
+                                      num_new_tokens=4) is not None
+        coord = manager.coordinator
+        assert len(coord.mamba_block_pool.cached_block_hash_to_block) == 0
+
+        # Drafts accepted; `Scheduler.update_from_output` publishes finalized
+        # blocks before the next step starts.
+        req.append_output_token_ids([101, 102, 103, 104])
+        req.num_computed_tokens = 18
+        assert len(req.block_hashes) == 1
+        manager.cache_blocks(req, req.num_computed_tokens)
+        assert len(coord.mamba_block_pool.cached_block_hash_to_block) == 1
+
+        # Next step: `remove_skipped_blocks` retires block 0 on `req`, while
+        # a waiting probe hits the cached block in the same step.
+        manager.new_step_starts()
+        assert manager.allocate_slots(request=req,
+                                      num_new_tokens=4) is not None
+        assert len(coord.mamba_block_pool.cached_block_hash_to_block) == 1
+
+        probe = Request(
+            request_id="req-probe",
+            prompt_token_ids=list(range(14)) + [100, 101, 999, 999],
+            sampling_params=SamplingParams(max_tokens=4),
+            pooling_params=None,
+            block_hasher=block_hasher,
+        )
+        assert probe.block_hashes[:1] == req.block_hashes[:1]
+        computed_blocks, num_hit_tokens, *_ = manager.get_computed_blocks(
+            probe)
+        assert num_hit_tokens == 16
+        assert manager.allocate_slots(
+            request=probe,
+            num_new_tokens=2,
+            num_new_computed_tokens=num_hit_tokens,
+            new_computed_blocks=computed_blocks) is not None
+        manager.free(probe)
+        manager.free(req)

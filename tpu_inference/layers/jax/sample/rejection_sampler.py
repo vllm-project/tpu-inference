@@ -441,22 +441,27 @@ def _random_rejection_sample_with_segment(
                                                    total_tokens)
 
     # --- Step 2: Acceptance/Rejection Logic ---
+    # Reject padded (-1) draft slots from `Scheduler` `pad_spec_decode`;
+    # otherwise JAX wraps -1 to `vocab_size - 1` in `take_along_axis`.
+    vocab_size = target_probs.shape[-1]
+    valid_draft = (draft_token_ids >= 0) & (draft_token_ids < vocab_size)
+    safe_draft_ids = jnp.where(valid_draft, draft_token_ids, 0)
     if draft_probs is not None:
         draft_token_probs = jnp.take_along_axis(draft_probs,
-                                                draft_token_ids[:, None],
+                                                safe_draft_ids[:, None],
                                                 axis=-1).squeeze(-1)
     else:
         draft_token_probs = 1.0
 
     target_token_probs = jnp.take_along_axis(target_probs,
-                                             draft_token_ids[:, None],
+                                             safe_draft_ids[:, None],
                                              axis=-1).squeeze(-1)
 
     uniform_probs = jax.random.uniform(uniform_key, shape=(total_tokens, ))
 
     # Acceptance condition: p_target(d) / p_draft(d) >= u
     ratio = target_token_probs / (draft_token_probs + 1e-9)
-    accepted = ratio >= uniform_probs
+    accepted = valid_draft & (ratio >= uniform_probs)
 
     # --- Step 3: Find First Rejection ---
     rejections = ~accepted

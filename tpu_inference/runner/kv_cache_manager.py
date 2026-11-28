@@ -33,6 +33,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.core.single_type_kv_cache_manager import (FullAttentionManager,
+                                                       MambaManager,
                                                        SlidingWindowManager)
 from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
                                         KVCacheLayerConfig, KVCacheSpec,
@@ -42,8 +43,9 @@ from tpu_inference import envs as tpu_envs
 from tpu_inference import utils
 from tpu_inference import utils as common_utils
 from tpu_inference.core.hybrid_coordinator import (  # noqa: F401
-    DEFAULT_MAMBA_CACHE_MULTIPLIER, is_mamba_group, mamba_blocks_per_request,
-    mamba_pool_size, set_mamba_num_blocks)
+    DEFAULT_MAMBA_CACHE_MULTIPLIER, gdn_spec_scratch_num_blocks,
+    is_mamba_group, mamba_blocks_per_request, mamba_pool_size,
+    set_mamba_num_blocks, uses_gdn_spec_scratch)
 from tpu_inference.core.mamba_prefix_caching import \
     mamba_prefix_caching_enabled
 from tpu_inference.core.runner_slot_mamba import \
@@ -118,6 +120,12 @@ class KVCacheManager:
         # `[0, max_num_reqs]`) so it stays in-bounds for the smaller arrays.
         self._mamba_num_blocks: int | None = None
         self.actual_mamba_num_blocks: int | None = None
+
+    def scheduler_mamba_num_blocks(self, physical_num_blocks: int) -> int:
+        """Return scheduler-usable mamba blocks (excluding spec scratch rows)."""
+        return physical_num_blocks - gdn_spec_scratch_num_blocks(
+            self.runner.vllm_config, self.runner.max_num_reqs,
+            self.runner.dp_size)
 
     def _create_attention_layer_config(
         self,
@@ -395,6 +403,8 @@ class KVCacheManager:
         max_num_reqs = self.runner.max_num_reqs
         min_blocks_per_req, mamba_blocks_per_req = mamba_blocks_per_request(
             self.runner.vllm_config, is_align_mode)
+        scratch_num_blocks = gdn_spec_scratch_num_blocks(
+            self.runner.vllm_config, max_num_reqs, self.runner.dp_size)
         attn_blocks_per_req = max(
             1,
             cdiv(self.runner.model_config.max_model_len,
@@ -403,15 +413,18 @@ class KVCacheManager:
         mamba_bytes_per_block = (num_mamba_layers *
                                  unpadded_mamba_page_size_bytes)
         attn_bytes_per_block = num_attn_layers * attn_page_size_bytes
-        mamba_bytes_per_req = mamba_blocks_per_req * mamba_bytes_per_block
+        sched_mamba_bytes_per_req = (mamba_blocks_per_req *
+                                     mamba_bytes_per_block)
+        scratch_bytes = scratch_num_blocks * mamba_bytes_per_block
         attn_bytes_per_req = attn_blocks_per_req * attn_bytes_per_block
 
-        # Minimum mamba pool: every persistent-batch slot resident, plus the
-        # null block. Below this the runner cannot hold the active batch.
-        min_mamba_blocks = mamba_pool_size(max_num_reqs, min_blocks_per_req,
-                                           divisor)
-        mamba_num_blocks = mamba_pool_size(max_num_reqs, mamba_blocks_per_req,
-                                           divisor)
+        # Minimum mamba pool: resident slots + spec scratch rows + null block.
+        min_mamba_blocks = (
+            mamba_pool_size(max_num_reqs, min_blocks_per_req, divisor) +
+            scratch_num_blocks)
+        mamba_num_blocks = (
+            mamba_pool_size(max_num_reqs, mamba_blocks_per_req, divisor) +
+            scratch_num_blocks)
 
         if pinned_attn_blocks is not None:
             # The attention pool size is the user's explicit choice
@@ -429,8 +442,8 @@ class KVCacheManager:
                     f"HBM under gpu_memory_utilization={gpu_mem_util:.2f}: "
                     f"attention ({pinned_attn_blocks} blocks) requires "
                     f"{attn_gib:.2f} GiB and the minimum mamba pool "
-                    f"({min_mamba_blocks} blocks, {min_blocks_per_req} per "
-                    f"request) "
+                    f"({min_mamba_blocks} blocks: {min_blocks_per_req} per "
+                    f"request + {scratch_num_blocks} scratch) "
                     f"requires {mamba_gib:.2f} GiB, together more than the "
                     f"{avail / (2**30):.2f} GiB available. Decrease "
                     f"`num_gpu_blocks_override` or `max_num_seqs`, or raise "
@@ -440,17 +453,19 @@ class KVCacheManager:
             attn_num_blocks = round_down(
                 max(avail - mamba_num_blocks * mamba_bytes_per_block, 0) //
                 attn_bytes_per_block)
-            # Re-split the budget at the request count both can serve.
+            # Re-split remaining HBM (after fixed scratch rows) by servable reqs.
             if (mamba_num_blocks > min_mamba_blocks
                     and attn_num_blocks // attn_blocks_per_req
-                    < mamba_num_blocks // mamba_blocks_per_req):
+                    < (mamba_num_blocks - scratch_num_blocks) //
+                    mamba_blocks_per_req):
                 servable_reqs = min(
                     max_num_reqs,
-                    avail // (attn_bytes_per_req + mamba_bytes_per_req))
+                    max(avail - scratch_bytes, 0) //
+                    (attn_bytes_per_req + sched_mamba_bytes_per_req))
                 mamba_num_blocks = max(
                     min_mamba_blocks,
                     mamba_pool_size(servable_reqs, mamba_blocks_per_req,
-                                    divisor))
+                                    divisor) + scratch_num_blocks)
                 attn_num_blocks = round_down(
                     max(avail - mamba_num_blocks * mamba_bytes_per_block, 0) //
                     attn_bytes_per_block)
@@ -467,7 +482,8 @@ class KVCacheManager:
                     f"gpu_memory_utilization={gpu_mem_util:.2f}: the mamba "
                     f"pool needs {mamba_num_blocks} blocks "
                     f"({min_blocks_per_req} per request x "
-                    f"{max_num_reqs} requests) across {num_mamba_layers} "
+                    f"{max_num_reqs} requests + {scratch_num_blocks} scratch) "
+                    f"across {num_mamba_layers} "
                     f"layers at {unpadded_mamba_page_size_bytes} B/block, "
                     f"which leaves nothing of the {avail / (2**30):.2f} GiB "
                     f"available for attention. That is already the minimum "
@@ -477,29 +493,32 @@ class KVCacheManager:
             cache_config.num_gpu_blocks_override = int(attn_num_blocks)
 
         self._mamba_num_blocks = int(mamba_num_blocks)
-        cache_config.mamba_num_blocks = int(mamba_num_blocks)
-        set_mamba_num_blocks(int(mamba_num_blocks))
+        # Expose only non-scratch rows to the scheduler.
+        sched_mamba_num_blocks = int(mamba_num_blocks) - scratch_num_blocks
+        cache_config.mamba_num_blocks = sched_mamba_num_blocks
+        set_mamba_num_blocks(sched_mamba_num_blocks)
 
         attn_bytes = num_attn_layers * attn_num_blocks * attn_page_size_bytes
         mamba_bytes = (num_mamba_layers * mamba_num_blocks *
                        unpadded_mamba_page_size_bytes)
         attn_reqs = attn_num_blocks // attn_blocks_per_req
-        mamba_reqs = mamba_num_blocks // mamba_blocks_per_req
+        mamba_reqs = sched_mamba_num_blocks // mamba_blocks_per_req
         logger.info(
             "Compact-mamba KV cache%s: num_gpu_blocks_override=%d (attn%s), "
-            "_mamba_num_blocks=%d (%d blocks/request). HBM split: attn=%d "
-            "layers x %d blocks x %d B = %.2f GiB; mamba=%d layers x %d slots "
-            "x %d B = %.2f GiB; total=%.2f GiB / avail=%.2f GiB. At "
-            "max_model_len=%d that backs %d concurrent requests on the "
-            "attention side (%d blocks each) and %d on the mamba side, out of "
-            "max_num_reqs=%d.", " (align mode)" if is_align_mode else "",
-            attn_num_blocks,
+            "_mamba_num_blocks=%d (%d blocks/request + %d scratch). "
+            "HBM split: attn=%d layers x %d blocks x %d B = %.2f GiB; "
+            "mamba=%d layers x %d slots x %d B = %.2f GiB; "
+            "total=%.2f GiB / avail=%.2f GiB. At max_model_len=%d that backs "
+            "%d concurrent requests on the attention side (%d blocks each) "
+            "and %d on the mamba side, out of max_num_reqs=%d.",
+            " (align mode)" if is_align_mode else "", attn_num_blocks,
             ", user-pinned" if pinned_attn_blocks is not None else "",
-            mamba_num_blocks, mamba_blocks_per_req, num_attn_layers,
-            attn_num_blocks, attn_page_size_bytes, attn_bytes / (2**30),
-            num_mamba_layers, mamba_num_blocks, unpadded_mamba_page_size_bytes,
-            mamba_bytes / (2**30), (attn_bytes + mamba_bytes) / (2**30),
-            avail / (2**30), self.runner.model_config.max_model_len, attn_reqs,
+            mamba_num_blocks, mamba_blocks_per_req, scratch_num_blocks,
+            num_attn_layers, attn_num_blocks, attn_page_size_bytes,
+            attn_bytes / (2**30), num_mamba_layers, mamba_num_blocks,
+            unpadded_mamba_page_size_bytes, mamba_bytes / (2**30),
+            (attn_bytes + mamba_bytes) / (2**30), avail / (2**30),
+            self.runner.model_config.max_model_len, attn_reqs,
             attn_blocks_per_req, mamba_reqs, max_num_reqs)
 
     def _maybe_pad_pages_for_mixed_head_dims(
@@ -779,6 +798,17 @@ class KVCacheManager:
                     layer_cfg = attn_module.get_kv_cache_config(
                         self.runner.vllm_config)
                     if layer_cfg is not None:
+                        params = layer_cfg.manager_config.params
+                        if (isinstance(params, MambaManager.Params) and
+                                uses_gdn_spec_scratch(self.runner.vllm_config)
+                                and params.num_speculative_blocks > 0):
+                            # Verify windows use runner scratch slots, so the
+                            # scheduler does not reserve spec mamba blocks.
+                            layer_cfg = dataclasses.replace(
+                                layer_cfg,
+                                manager_config=layer_cfg.manager_config.
+                                replace_params(num_speculative_blocks=0),
+                            )
                         if is_draft:
                             layer_cfg = dataclasses.replace(layer_cfg,
                                                             is_draft=True)
@@ -1021,12 +1051,12 @@ class KVCacheManager:
                         tensor_num_blocks = kv_cache_tensor.size // page_size_bytes
                     alloc_per_layer = False
 
-            # num_blocks must be a multiple of the sharding divisor
-            tensor_num_blocks = (tensor_num_blocks // divisor) * divisor
             if self.runner.cache_config.num_gpu_blocks_override is not None:
                 tensor_num_blocks = min(
                     tensor_num_blocks,
                     self.runner.cache_config.num_gpu_blocks_override)
+            # num_blocks must be a multiple of the sharding divisor
+            tensor_num_blocks = (tensor_num_blocks // divisor) * divisor
 
             if self._mamba_num_blocks is not None:
                 mamba_num_blocks = self._mamba_num_blocks
@@ -1048,9 +1078,15 @@ class KVCacheManager:
                     "mamba_num_blocks to %d (max_num_reqs=%d, "
                     "spec_stride=%d, divisor=%d).", mamba_num_blocks,
                     self.runner.max_num_reqs, mamba_slot_stride, divisor)
-            if self.actual_mamba_num_blocks is None:
-                self.actual_mamba_num_blocks = mamba_num_blocks
-            kv_cache_config.mamba_num_blocks = int(mamba_num_blocks)
+            if kv_cache_config.has_mamba_layers or duplicate_shared_layers:
+                if self.actual_mamba_num_blocks is None:
+                    self.actual_mamba_num_blocks = mamba_num_blocks
+                sched_mamba_num_blocks = self.scheduler_mamba_num_blocks(
+                    int(mamba_num_blocks))
+                kv_cache_config.mamba_num_blocks = sched_mamba_num_blocks
+                self.runner.cache_config.mamba_num_blocks = (
+                    sched_mamba_num_blocks)
+                set_mamba_num_blocks(sched_mamba_num_blocks)
 
             offset = getattr(kv_cache_tensor, 'offset', 0)
             layer_stride = getattr(kv_cache_tensor, 'layer_stride', 0)

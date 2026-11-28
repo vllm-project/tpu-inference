@@ -130,19 +130,13 @@ class PersistentBatchManager:
         removed_req_indices: list[int] = []
         for req_id in scheduler_output.finished_req_ids:
             req_index = self.input_batch.remove_request(req_id)
+            req_state = finished_req_states.get(req_id)
             if req_index is not None:
-                req_state = finished_req_states.get(req_id)
-                if req_state is not None:
-                    req_state.mamba_state_slot = None
-                    req_state.mamba_read_offset = 0
                 removed_req_indices.append(req_index)
-            else:
-                req_state = finished_req_states.get(req_id)
-                if req_state is not None:
-                    self.input_batch.release_mamba_slot(
-                        req_state.mamba_state_slot)
-                    req_state.mamba_state_slot = None
-                    req_state.mamba_read_offset = 0
+            elif req_state is not None:
+                self.input_batch.release_mamba_slot(req_state.mamba_state_slot)
+            if req_state is not None:
+                req_state.reset_mamba_state()
 
         # Free the cached encoder outputs.
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
@@ -182,8 +176,7 @@ class PersistentBatchManager:
             if req_state is None:
                 continue
             self.input_batch.release_mamba_slot(req_state.mamba_state_slot)
-            req_state.mamba_state_slot = None
-            req_state.mamba_read_offset = 0
+            req_state.reset_mamba_state()
 
         # Usually re-sent requests are not present in the persistent batch.
         # Forced preemption can make one still appear there; clear it first so
@@ -201,8 +194,7 @@ class PersistentBatchManager:
                 req_state = self.requests.get(req_id)
                 if reset_mamba_slot:
                     if req_state is not None:
-                        req_state.mamba_state_slot = None
-                        req_state.mamba_read_offset = 0
+                        req_state.reset_mamba_state()
                 else:
                     self.requests[req_id].mamba_state_slot = int(
                         self.input_batch.mamba_state_indices_cpu[req_index])

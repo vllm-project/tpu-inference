@@ -237,10 +237,9 @@ def compute_align_spec_state_indices(
       `n` computed tokens; at most one boundary since `q_len <=
       mamba_block_size`), its checkpoint for `b` (window position `b - n - 1`)
       is copied into the block holding tokens up to `b`, which the scheduler
-      caches once `b` is verified. The copy happens whether or not the drafts
-      past `b` are later accepted: the block is only cached after a later step
-      verified `b`, and the last window that covers `b` is always the one
-      whose accepted tokens reach it.
+      caches once `b` is verified. If the draft at `b` is rejected, the next
+      step overwrites that block before it is reused (note: priority scheduling
+      with mid-decode retention could preempt before that overwrite).
 
     All arrays are per request, flattened over DP ranks, with rank-local slot
     ids.
@@ -436,15 +435,20 @@ def resolve_gdn_state_slots(
                 "Mamba non-align mode requires attn_metadata.mamba.state_indices."
             )
         state_indices = truncate(mamba_state_indices)
+        read_state_indices = state_indices
         read_offsets = None
         if num_spec_tokens > 0:
             if mamba_read_offsets is None:
                 raise ValueError("Speculative decoding on GDN layers requires "
                                  "attn_metadata.mamba.read_offsets.")
-            # Clamp `MAMBA_READ_OFFSET_FROM_BLOCK_TABLE` (-1) to 0 so requests
-            # without a prior verify window resume from `state_indices + 0`.
-            read_offsets = jnp.maximum(truncate(mamba_read_offsets), 0)
-        return GDNStateSlots(state_indices, state_indices, read_offsets,
+            # Fold the checkpoint offset into `read_state_indices` (clamping
+            # -1 to 0 and passing zero `read_offsets`, matching align mode) so
+            # both decode verify windows and prefill chunks resume from
+            # `state_indices + offset`.
+            offsets = jnp.maximum(truncate(mamba_read_offsets), 0)
+            read_state_indices = jnp.minimum(state_indices + offsets, max_row)
+            read_offsets = jnp.zeros_like(state_indices)
+        return GDNStateSlots(state_indices, read_state_indices, read_offsets,
                              num_spec_tokens, None)
 
     max_num_reqs_per_dp = attn_metadata.seq_lens.shape[0] // dp_size

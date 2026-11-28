@@ -326,9 +326,10 @@ def test_resolve_gdn_state_slots_dp_align_spec():
 
 
 def test_resolve_gdn_state_slots_non_align_forwards_and_clamps_read_offsets():
-    """In non-align mode (mamba_block_size=0), positive read_offsets are
-    forwarded directly while MAMBA_READ_OFFSET_FROM_BLOCK_TABLE (-1) clamps to
-    0 so the request reads its base slot."""
+    """In non-align mode (mamba_block_size=0), positive read_offsets are folded
+    into read_state_indices (with zero read_offsets) so both BATCHED and
+    PER_SEQ GDN tiles resume from `state_indices + offset`, while
+    MAMBA_READ_OFFSET_FROM_BLOCK_TABLE (-1) clamps to 0."""
     md = AttentionMetadata(
         input_positions=jnp.zeros(8, dtype=jnp.int32),
         seq_lens=jnp.array([20, 16], dtype=jnp.int32),
@@ -352,8 +353,8 @@ def test_resolve_gdn_state_slots_non_align_forwards_and_clamps_read_offsets():
         num_spec_tokens=3,
     )
     assert slots.state_indices.tolist() == [5, 9]
-    assert slots.read_state_indices.tolist() == [5, 9]
-    assert slots.read_offsets.tolist() == [2, 0]
+    assert slots.read_state_indices.tolist() == [7, 9]
+    assert slots.read_offsets.tolist() == [0, 0]
     assert slots.num_spec_tokens == 3
     assert slots.boundary_copies is None
 

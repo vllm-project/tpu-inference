@@ -63,6 +63,10 @@ _GLOBAL_MAMBA_NUM_BLOCKS: int | None = None
 # leaves behind for later requests to resume from. Override per-run with
 # `--additional-config '{"custom_mamba_cache_multiplier": N}'`.
 DEFAULT_MAMBA_CACHE_MULTIPLIER = 8
+# Minimum scheduler mamba blocks per request in align mode (read + write block).
+MIN_ALIGN_MAMBA_BLOCKS_PER_REQ = 2
+# Minimum scheduler mamba blocks per DP rank (null block + 1 active request).
+MIN_ALIGN_MAMBA_SCHED_BLOCKS_PER_RANK = 1 + MIN_ALIGN_MAMBA_BLOCKS_PER_REQ
 
 
 def set_mamba_num_blocks(num_blocks: int) -> None:
@@ -76,26 +80,72 @@ def get_mamba_num_blocks() -> int | None:
     return _GLOBAL_MAMBA_NUM_BLOCKS
 
 
+def uses_gdn_spec_scratch(vllm_config: Any) -> bool:
+    """Return whether align-mode spec decode uses runner-owned scratch slots.
+
+    Assumes the model has mamba/GDN layers (caller should check
+    `kv_cache_config.has_mamba_layers` or `isinstance(layer, MambaBase)`).
+    """
+    cache_config = vllm_config.cache_config
+    spec_config = vllm_config.speculative_config
+    return (mamba_prefix_caching_enabled(cache_config)
+            and spec_config is not None
+            and spec_config.num_speculative_tokens > 0)
+
+
+def passes_mamba_state_indices(vllm_config: Any, kv_cache_config: Any) -> bool:
+    """Return whether the runner passes `attn_metadata.mamba.state_indices`.
+
+    True for non-align mamba models and for align-mode spec decode (where it
+    carries scratch group bases). Shared by precompilation and `_prepare_inputs`
+    so their HLO signatures match.
+    """
+    if not kv_cache_config.has_mamba_layers:
+        return False
+    return (not mamba_prefix_caching_enabled(vllm_config.cache_config)
+            or uses_gdn_spec_scratch(vllm_config))
+
+
+def gdn_spec_scratch_slots_per_rank(vllm_config: Any, max_num_reqs: int,
+                                    dp_size: int) -> int:
+    """Return runner-owned spec-decode scratch rows per DP rank, or 0."""
+    if not uses_gdn_spec_scratch(vllm_config):
+        return 0
+    num_spec = vllm_config.speculative_config.num_speculative_tokens
+    dp_size = max(dp_size, 1)
+    max_num_reqs_per_rank = (max_num_reqs + dp_size - 1) // dp_size
+    return max_num_reqs_per_rank * (num_spec + 1)
+
+
+def gdn_spec_scratch_num_blocks(vllm_config: Any, max_num_reqs: int,
+                                dp_size: int) -> int:
+    """Return total spec-decode scratch rows reserved across all DP ranks."""
+    dp_size = max(dp_size, 1)
+    return gdn_spec_scratch_slots_per_rank(vllm_config, max_num_reqs,
+                                           dp_size) * dp_size
+
+
 def mamba_blocks_per_request(vllm_config: Any,
                              is_align_mode: bool) -> tuple[int, int]:
-    """Return `(min_blocks_per_req, blocks_per_req)` for the compact mamba pool.
+    """Return `(min_blocks_per_req, blocks_per_req)` for the scheduler pool.
 
-    Every request keeps one resident slot per speculative position
-    (`num_spec + 1`), plus one more in align mode for the state it generates
-    from. Align mode also reserves `custom_mamba_cache_multiplier` (default
-    `DEFAULT_MAMBA_CACHE_MULTIPLIER`) slots per request for prefix
-    checkpoints, never fewer than the resident minimum.
+    Excludes fixed spec-decode scratch rows in align mode (see
+    `gdn_spec_scratch_num_blocks`). Outside align mode each request needs
+    `num_spec + 1` resident slots. In align mode each request needs at least
+    `MIN_ALIGN_MAMBA_BLOCKS_PER_REQ` blocks and reserves up to
+    `custom_mamba_cache_multiplier` (default `DEFAULT_MAMBA_CACHE_MULTIPLIER`)
+    for cached prefix checkpoints.
     """
-    num_spec = 0
-    if vllm_config.speculative_config is not None:
-        num_spec = vllm_config.speculative_config.num_speculative_tokens
-    min_blocks_per_req = num_spec + 1 + (1 if is_align_mode else 0)
     if not is_align_mode:
-        return min_blocks_per_req, min_blocks_per_req
+        num_spec = (vllm_config.speculative_config.num_speculative_tokens
+                    if vllm_config.speculative_config is not None else 0)
+        stride = num_spec + 1
+        return stride, stride
     multiplier = int(
         vllm_config.additional_config.get("custom_mamba_cache_multiplier",
                                           DEFAULT_MAMBA_CACHE_MULTIPLIER))
-    return min_blocks_per_req, max(multiplier, min_blocks_per_req)
+    return (MIN_ALIGN_MAMBA_BLOCKS_PER_REQ,
+            max(multiplier, MIN_ALIGN_MAMBA_BLOCKS_PER_REQ))
 
 
 def mamba_pool_size(max_num_reqs: int, blocks_per_req: int,

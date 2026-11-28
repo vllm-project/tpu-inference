@@ -47,14 +47,17 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 import tpu_inference.envs as envs
 from tpu_inference import utils as common_utils
+from tpu_inference.core.hybrid_coordinator import (
+    gdn_spec_scratch_slots_per_rank, passes_mamba_state_indices,
+    uses_gdn_spec_scratch)
 from tpu_inference.core.mamba_prefix_caching import \
     mamba_prefix_caching_enabled
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_backend import (
     HostStepInputs, attention_backend_name, create_attention_backend)
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, GroupedAttentionMetadata, MambaMetadata,
-    SharedAttentionMetadata)
+    MAMBA_READ_OFFSET_FROM_BLOCK_TABLE, AttentionMetadata,
+    GroupedAttentionMetadata, MambaMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   MESH_AXIS_NAMES_2D,
                                                   ShardingAxisName,
@@ -634,6 +637,21 @@ def _subtract_num_rejected_tokens_fn(seq_lens: jax.Array, positions: jax.Array,
         pos_subtract = jnp.expand_dims(pos_subtract, axis=0)
     positions = positions - pos_subtract
     return seq_lens, positions
+
+
+@jax.jit
+def _subtract_mamba_read_offsets_fn(mamba_read_offsets: jax.Array,
+                                    num_rejected_tokens: jax.Array,
+                                    subtract_indices: jax.Array) -> jax.Array:
+    """Subtract rejected-token counts from mamba read offsets (async mode).
+
+    Negative offsets (`MAMBA_READ_OFFSET_FROM_BLOCK_TABLE`) are left unchanged.
+    """
+    valid = (subtract_indices >= 0) & (mamba_read_offsets >= 0)
+    subtract = jnp.where(valid,
+                         num_rejected_tokens[jnp.maximum(subtract_indices,
+                                                         0)], 0)
+    return mamba_read_offsets - subtract.astype(mamba_read_offsets.dtype)
 
 
 def _jax_logprobs_materialize(
@@ -1424,9 +1442,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _wire_input_batch_mamba_state(self,
                                       kv_cache_config: KVCacheConfig) -> None:
         self.input_batch.has_mamba_layers = kv_cache_config.has_mamba_layers
+        if (kv_cache_config.has_mamba_layers
+                and uses_gdn_spec_scratch(self.vllm_config)):
+            num_spec_tokens = self.speculative_config.num_speculative_tokens
+            if self.input_batch.max_decode_tokens < num_spec_tokens + 1:
+                raise ValueError(
+                    "Speculative decoding with linear-attention (GDN/mamba) "
+                    "prefix caching requires USE_BATCHED_RPA_KERNEL=1 so "
+                    "verify windows run in the decode segment.")
         if self.kv_cache_manager.actual_mamba_num_blocks is not None:
             self.input_batch.init_mamba_pools(
-                self.kv_cache_manager.actual_mamba_num_blocks)
+                self.kv_cache_manager.actual_mamba_num_blocks,
+                scratch_slots_per_rank=gdn_spec_scratch_slots_per_rank(
+                    self.vllm_config, self.max_num_reqs, self.dp_size))
 
     def delete_kv_cache(self) -> None:
         self.kv_cache_manager.delete_kv_cache()
@@ -1586,9 +1614,22 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             if not sampled_ids:
                 continue
 
-            # If request not active in the *current* batch (e.g. finished or evicted), skip it.
+            # Skip input_batch updates if the request left the current batch.
+            # If it is merely paused (still in self.requests), apply rejection
+            # subtraction to its saved mamba_read_offset here before
+            # _pre_async_results is replaced.
             req_id = pre_req_ids[pre_req_idx]
             if req_id not in self.input_batch.req_id_to_index:
+                if (self.speculative_config is not None
+                        and pre_scheduler_output is not None
+                        and req_state is self.requests.get(req_id)
+                        and req_state.mamba_read_offset >= 0):
+                    num_drafts = len(
+                        pre_scheduler_output.scheduled_spec_decode_tokens.get(
+                            req_id, ()))
+                    if num_drafts > 0:
+                        req_state.mamba_read_offset -= (num_drafts + 1 -
+                                                        len(sampled_ids))
                 continue
 
             # A request preempted and re-sent as a new request in this step
@@ -2387,6 +2428,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             # Save the previous results
             next_tokens = jax.copy_to_host_async(next_tokens)
+            # Async mode: assume all drafts accepted; `_prepare_inputs`
+            # subtracts actual rejections on TPU (matching `seq_lens`).
+            self._update_mamba_read_state(req_ids,
+                                          scheduler_output,
+                                          discard_sampled_tokens_req_indices,
+                                          valid_sampled_token_ids=None)
             self._pre_async_results = AsyncPreResults(
                 req_ids=req_ids,
                 next_tokens=next_tokens,
@@ -2439,27 +2486,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self, spec_decode_metadata, next_tokens, logits_indices_selector,
             discard_sampled_tokens_req_indices, num_reqs)
 
-        if self.speculative_config and self.kv_cache_config.has_mamba_layers:
-            raw_max_decode = getattr(self.input_batch, "max_decode_tokens",
-                                     None)
-            max_decode_tokens = (raw_max_decode if isinstance(
-                raw_max_decode,
-                int) else self.speculative_config.num_speculative_tokens + 1)
-            discard_set = set(discard_sampled_tokens_req_indices)
-            for req_idx, req_id in enumerate(req_ids):
-                req_state = self.requests[req_id]
-                q_len = scheduler_output.num_scheduled_tokens[req_id]
-                if q_len <= max_decode_tokens:
-                    num_drafts = len(
-                        scheduler_output.scheduled_spec_decode_tokens.get(
-                            req_id, ()))
-                    num_sampled = len(valid_sampled_token_ids[req_idx])
-                    num_rejected = (0 if
-                                    (req_idx in discard_set or num_drafts == 0)
-                                    else num_drafts + 1 - num_sampled)
-                    req_state.mamba_read_offset = q_len - 1 - num_rejected
-                else:
-                    req_state.mamba_read_offset = 0
+        self._update_mamba_read_state(req_ids, scheduler_output,
+                                      discard_sampled_tokens_req_indices,
+                                      valid_sampled_token_ids)
 
         # Append sampled tokens
         for req_idx, req_state, _ in request_seq_lens:
@@ -2858,14 +2887,56 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 next_tokens_in_tpu, placeholder_num)
         return input
 
-    def _subtract_num_rejected_tokens(self, seq_lens, positions, req_ids_dp,
-                                      scheduled_tokens_per_dp_rank):
-        """Apply rejection-count subtraction to seq_lens and positions if needed.
+    def _update_mamba_read_state(
+        self,
+        req_ids: list[str],
+        scheduler_output: "VllmSchedulerOutput",
+        discard_sampled_tokens_req_indices: list[int],
+        valid_sampled_token_ids: Optional[list[list[int]]],
+    ) -> None:
+        """Record each request's GDN state offset for the next step.
 
-        `num_computed_tokens_cpu` was advanced on the host assuming every
-        speculatively proposed token from the previous step was accepted. Here
-        we subtract the actual rejection counts on TPU for the requests that
-        ran spec decoding in the previous step.
+        - Decode verify windows (`q_len <= max_decode_tokens`): checkpoint
+          offset of the last accepted token (`>= 0`).
+        - Prefill chunks: `MAMBA_READ_OFFSET_FROM_BLOCK_TABLE` (-1; reads from
+          the block table in align mode, clamps to 0 otherwise).
+        - Async mode (`valid_sampled_token_ids is None`): assumes all drafts
+          accepted; `_subtract_num_rejected_tokens` corrects on TPU next step.
+        """
+        if (not self.speculative_config
+                or not self.kv_cache_config.has_mamba_layers):
+            return
+        max_decode_tokens = self.input_batch.max_decode_tokens
+        discard_set = set(discard_sampled_tokens_req_indices)
+        for req_idx, req_id in enumerate(req_ids):
+            req_state = self.requests[req_id]
+            q_len = scheduler_output.num_scheduled_tokens[req_id]
+            if q_len <= max_decode_tokens:
+                num_drafts = len(
+                    scheduler_output.scheduled_spec_decode_tokens.get(
+                        req_id, ()))
+                num_rejected = 0
+                if (valid_sampled_token_ids is not None
+                        and req_idx not in discard_set and num_drafts > 0):
+                    num_rejected = (num_drafts + 1 -
+                                    len(valid_sampled_token_ids[req_idx]))
+                req_state.mamba_read_offset = q_len - 1 - num_rejected
+            else:
+                req_state.mamba_read_offset = (
+                    MAMBA_READ_OFFSET_FROM_BLOCK_TABLE)
+
+    def _subtract_num_rejected_tokens(self,
+                                      seq_lens,
+                                      positions,
+                                      req_ids_dp,
+                                      scheduled_tokens_per_dp_rank,
+                                      mamba_read_offsets=None):
+        """Apply rejection-count subtraction to seq_lens, positions, and
+        mamba_read_offsets if needed.
+
+        `num_computed_tokens_cpu` (and `mamba_read_offsets`, when given)
+        assumed all previous-step drafts were accepted; subtract actual
+        rejection counts on TPU here.
         """
         assert self._pre_async_results is not None
         assert self._pre_async_results.spec_decode_num_rejected_tokens is not None
@@ -2903,7 +2974,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 seq_lens, positions,
                 self._pre_async_results.spec_decode_num_rejected_tokens,
                 seq_lens_subtract_indices, positions_subtract_indices)
-        return seq_lens, positions
+            if mamba_read_offsets is not None:
+                mamba_read_offsets = _subtract_mamba_read_offsets_fn(
+                    mamba_read_offsets,
+                    self._pre_async_results.spec_decode_num_rejected_tokens,
+                    seq_lens_subtract_indices)
+        return seq_lens, positions, mamba_read_offsets
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -3233,10 +3309,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # pure-attention models, leaving the field None keeps AttentionMetadata
         # byte-identical to the pre-compact-mamba layout (so the model_fn
         # signature on those models is unchanged).
-        # In align mode (prefix caching), mamba state indices are derived on-device
-        # from the block tables, so mamba_state_indices is None.
-        if (self.kv_cache_config.has_mamba_layers
-                and not mamba_prefix_caching_enabled(self.cache_config)):
+        # In align mode, state indices come from block tables (so pass None),
+        # except with spec decode where they carry each request's scratch base.
+        if passes_mamba_state_indices(self.vllm_config, self.kv_cache_config):
             # Reorder mamba_state_indices per DP rank (like block_tables)
             # and convert global slot ids to rank-local indices so they
             # index correctly into the per-rank shard of the mamba state.
@@ -3296,8 +3371,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # proposed tokens from the previous step were accepted. Subtract the
         # actual rejection counts from `seq_lens` and `positions` on TPU.
         if self.speculative_config and self.scheduler_config.async_scheduling and self._pre_async_results is not None:
-            seq_lens, positions = self._subtract_num_rejected_tokens(
-                seq_lens, positions, req_ids_dp, scheduled_tokens_per_dp_rank)
+            seq_lens, positions, mamba_read_offsets = (
+                self._subtract_num_rejected_tokens(
+                    seq_lens,
+                    positions,
+                    req_ids_dp,
+                    scheduled_tokens_per_dp_rank,
+                    mamba_read_offsets=mamba_read_offsets))
 
         dcp_enabled = bool(
             hasattr(self, 'mesh') and self.mesh is not None

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import jax.numpy as jnp
@@ -340,8 +341,8 @@ class TestTpuPlatform:
         # output, so the DP size has to come from the patched manager.
         mock_sharding.from_vllm_config.return_value.total_dp_size = (
             2 if unsupported == "dp" else 1)
-        vllm_config.speculative_config = (object()
-                                          if unsupported == "spec" else None)
+        vllm_config.speculative_config = (SimpleNamespace(
+            method="eagle3") if unsupported == "spec" else None)
         vllm_config.additional_config = {
             "enable_continue_decode": unsupported == "continue_decode"
         }
@@ -566,6 +567,115 @@ class TestTpuPlatform:
         ):
             TpuPlatform.update_block_size_for_backend(vllm_config)
 
+    @patch(
+        "tpu_inference.core.hybrid_coordinator.maybe_install_hybrid_coordinator_hooks"
+    )
+    def test_update_block_size_for_backend_align_hooks_and_spec_limit(
+            self, mock_maybe_install, vllm_config):
+        """update_block_size_for_backend syncs mamba_block_size, installs
+        hybrid coordinator hooks inside spawned EngineCoreProc, and rejects
+        num_speculative_tokens >= block_size."""
+        vllm_config.cache_config.block_size = 16
+        vllm_config.cache_config.mamba_block_size = 32
+        vllm_config.model_config.is_hybrid = True
+        set_mamba_prefix_caching(vllm_config.cache_config, True)
+        vllm_config.cache_config.prefix_match_unit = None
+
+        TpuPlatform.update_block_size_for_backend(vllm_config)
+        assert vllm_config.cache_config.mamba_block_size == 16
+        mock_maybe_install.assert_called_once_with(vllm_config)
+
+        vllm_config.speculative_config = SimpleNamespace(
+            method="ngram", num_speculative_tokens=16)
+        with pytest.raises(
+                ValueError,
+                match=r"num_speculative_tokens \(16\) < mamba_block_size \(16\)"
+        ):
+            TpuPlatform.update_block_size_for_backend(vllm_config)
+
+    @pytest.mark.parametrize(
+        "method,batched_rpa,pp_size,expect_align",
+        [
+            ("ngram", True, 1, True),
+            ("ngram", False, 1, False),
+            ("eagle3", True, 1, False),
+            ("ngram", True, 2, False),
+        ],
+    )
+    @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
+           "")
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    @patch(
+        "tpu_inference.core.hybrid_coordinator.install_hybrid_coordinator_hooks"
+    )
+    def test_align_mode_kept_for_ngram_spec_decode_disabled_for_others(
+            self, mock_install_hooks, mock_dp_update, mock_sharding,
+            vllm_config, method, batched_rpa, pp_size, expect_align):
+        """Mamba prefix caching (align mode) is supported with n-gram spec
+        decode on PP=1 when USE_BATCHED_RPA_KERNEL=1, and disabled otherwise."""
+        vllm_config.model_config.is_hybrid = True
+        vllm_config.model_config.max_model_len = 2048
+        vllm_config.parallel_config.pipeline_parallel_size = pp_size
+        set_mamba_prefix_caching(vllm_config.cache_config, True)
+        vllm_config.cache_config.mamba_block_size = 16
+        vllm_config.cache_config.prefix_match_unit = None
+        vllm_config.speculative_config = SimpleNamespace(
+            method=method, num_speculative_tokens=3)
+
+        with patch(
+                "tpu_inference.executors.multiproc_executor.MultiprocExecutor"
+        ), patch(
+                "tpu_inference.platforms.tpu_platform.envs.USE_BATCHED_RPA_KERNEL",
+                batched_rpa):
+            TpuPlatform.check_and_update_config(vllm_config)
+
+        assert vllm_config.cache_config.enable_prefix_caching is expect_align
+        assert mamba_prefix_caching_enabled(
+            vllm_config.cache_config, vllm_config.model_config) is expect_align
+        if expect_align:
+            assert vllm_config.cache_config.mamba_block_size == 16
+            mock_install_hooks.assert_called_once_with(vllm_config)
+        else:
+            assert vllm_config.cache_config.mamba_block_size == 2048
+            mock_install_hooks.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "initial_async,method,expect_async",
+        [
+            (True, "ngram", False),
+            (None, "ngram", False),
+            (True, "eagle3", True),
+            (True, None, True),
+        ],
+    )
+    @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
+           "")
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    def test_ngram_spec_decode_disables_async_scheduling_before_dp_scheduler(
+            self, mock_sharding, vllm_config, initial_async, method,
+            expect_async):
+        """N-gram proposer runs synchronously on host CPU, so async_scheduling
+        must be disabled before DPScheduler selects its per-rank scheduler."""
+        from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+        from vllm.v1.core.sched.scheduler import Scheduler
+
+        mock_sharding.from_vllm_config.return_value.total_dp_size = 2
+        set_mamba_prefix_caching(vllm_config.cache_config, False)
+        vllm_config.scheduler_config.async_scheduling = initial_async
+        vllm_config.scheduler_config.scheduler_cls = None
+        vllm_config.speculative_config = (SimpleNamespace(
+            method=method, num_speculative_tokens=3)
+                                          if method is not None else None)
+
+        TpuPlatform.check_and_update_config(vllm_config)
+        assert vllm_config.scheduler_config.async_scheduling is expect_async
+        expected_cls = AsyncScheduler if expect_async else Scheduler
+        assert (vllm_config.scheduler_config._original_scheduler_cls
+                is expected_cls)
+
     def test_check_and_update_config_mla_checks(self):
         vllm_config = MagicMock()
         vllm_config.model_config.use_mla = True
@@ -789,7 +899,7 @@ class TestTpuPlatform:
              "continue_decode is not supported with pipeline parallelism"),
             (1, "pooling", False, None,
              "continue_decode is not supported for pooling models"),
-            (1, "generate", False, object(),
+            (1, "generate", False, SimpleNamespace(method="eagle3"),
              "continue_decode is not supported with speculative decoding"),
         ],
     )

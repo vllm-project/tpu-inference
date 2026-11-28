@@ -553,8 +553,10 @@ class TestVllmGatedDeltaNetAttention:
 
         assert mock_run_jax.call_count == 1
         call_kwargs = mock_run_jax.call_args[1]
+        np.testing.assert_array_equal(
+            np.array(call_kwargs["read_state_indices"]), [6, 9])
         np.testing.assert_array_equal(np.array(call_kwargs["read_offsets"]),
-                                      [2, 1])
+                                      [0, 0])
         assert call_kwargs["num_spec_tokens"] == 3
 
     @patch(
