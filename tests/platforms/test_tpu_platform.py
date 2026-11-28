@@ -199,6 +199,86 @@ class TestTpuPlatform:
         }):
             assert TpuPlatform.get_device_name() == "TPU"
 
+    @pytest.mark.parametrize(
+        "block_size,use_mla,arch,packing,transpose,ok",
+        [
+            (16, True, "DeepseekV3ForCausalLM", 32, False, False),
+            (48, True, "DeepseekV3ForCausalLM", 32, False, False),
+            (32, True, "DeepseekV3ForCausalLM", 32, False, True),
+            (1024, True, "DeepseekV3ForCausalLM", 32, False, True),
+            (16, False, "LlamaForCausalLM", 32, False, True),
+            (16, True, "DeepseekV4ForCausalLM", 32, False, True),
+            # The transposed MLA cache has no packing padding.
+            (16, True, "DeepseekV3ForCausalLM", 32, True, True),
+            # A non-default MLA_KV_PACKING_SIZE is honored.
+            (16, True, "DeepseekV3ForCausalLM", 16, False, True),
+            (24, True, "DeepseekV3ForCausalLM", 16, False, False),
+        ])
+    def test_check_mla_block_size(self, block_size, use_mla, arch, packing,
+                                  transpose, ok):
+        from types import SimpleNamespace
+        vllm_config = SimpleNamespace(
+            cache_config=SimpleNamespace(block_size=block_size),
+            model_config=SimpleNamespace(use_mla=use_mla,
+                                         architectures=[arch]))
+        with patch.object(envs, "MLA_KV_PACKING_SIZE", packing), \
+                patch.object(envs, "MLA_TRANSPOSE_KV_CACHE", transpose):
+            if ok:
+                TpuPlatform._check_mla_block_size(vllm_config)
+            else:
+                with pytest.raises(ValueError, match=f"multiple of {packing}"):
+                    TpuPlatform._check_mla_block_size(vllm_config)
+
+    @pytest.mark.parametrize("user_block_size,expected", [
+        (None, 1024),
+        (16, None),
+    ])
+    @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
+           "")
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    def test_check_and_update_config_mla_block_size(self, mock_update,
+                                                    mock_sharding, vllm_config,
+                                                    user_block_size, expected):
+        """An unset block size gets the MLA page size (1024) before the
+        packing check runs, so it passes even when the incoming default is
+        not a multiple of the packing; a user-specified 16 is rejected."""
+        if user_block_size is None:
+            cache_config = CacheConfig(gpu_memory_utilization=0.9)
+            # Not user-specified, but not a multiple of 32 either, so the
+            # check only passes if it runs after the MLA page-size override.
+            cache_config.block_size = 16
+        else:
+            cache_config = CacheConfig(block_size=user_block_size,
+                                       gpu_memory_utilization=0.9)
+        assert cache_config.user_specified_block_size == (user_block_size
+                                                          is not None)
+        vllm_config.cache_config = cache_config
+        vllm_config.model_config.use_mla = True
+        vllm_config.model_config.architectures = ["DeepseekV3ForCausalLM"]
+        vllm_config.model_config.max_model_len = 4096
+        vllm_config.additional_config = {
+            "sharding": {
+                "sharding_strategy": {
+                    "enable_dp_attention": True
+                }
+            }
+        }
+        vllm_config.compilation_config.mode = "dummy"
+        vllm_config.compilation_config.backend = ""
+        with patch("tpu_inference.envs.NEW_MODEL_DESIGN", True), \
+                patch.object(envs, "MLA_KV_PACKING_SIZE", 32), \
+                patch.object(envs, "MLA_TRANSPOSE_KV_CACHE", False):
+            if expected is None:
+                with pytest.raises(ValueError,
+                                   match=r"Set block_size \(--block-size\)"):
+                    TpuPlatform.check_and_update_config(vllm_config)
+            else:
+                TpuPlatform.check_and_update_config(vllm_config)
+                assert vllm_config.cache_config.block_size == expected
+
     def test_validate_request_random_seed(self):
         from vllm.sampling_params import SamplingParams, SamplingType
         params = MagicMock(spec=SamplingParams)
