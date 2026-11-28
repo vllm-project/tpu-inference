@@ -27,6 +27,13 @@ def test_prompts():
         "What is the capital of Australia?",
         "What is the largest planet in our solar system?",
         "Who developed the theory of general relativity?",
+        # Include a longer prompt (> max_num_batched_tokens=128 when batched
+        # with the preceding prompts) so multi-step chunked prefill is
+        # exercised across PP stages.
+        ("Explain in detail the history of artificial intelligence from the "
+         "1950s Dartmouth workshop through expert systems, statistical "
+         "machine learning, deep neural networks, and modern transformer "
+         "architectures, including key milestones and researchers: "),
     ]
 
 
@@ -63,7 +70,6 @@ def _run_inference_with_config(model_name: str,
         max_num_seqs=16,
         enable_prefix_caching=enable_prefix_caching,
         kv_cache_dtype=kv_cache_dtype,
-        async_scheduling=False,
         enable_expert_parallel=enable_expert_parallel,
     )
 
@@ -260,7 +266,7 @@ def test_pipeline_parallelism_jax_model_correctness(
     os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '0'
 
     # Use a smaller subset of prompts for correctness testing
-    small_prompts = test_prompts[:10]
+    small_prompts = test_prompts[:11]
 
     # Run baseline (no PP)
     baseline_outputs = _run_inference_with_config(
@@ -271,7 +277,7 @@ def test_pipeline_parallelism_jax_model_correctness(
         pipeline_parallel_size=1,
     )
 
-    # Run with model data parallelism and async scheduling
+    # Run with pipeline parallelism
     pp_outputs = _run_inference_with_config(
         model_name=model_name,
         test_prompts=small_prompts,
