@@ -403,6 +403,26 @@ class TpuPlatform(Platform):
                 "pool is sized for resident state only. Use 'align' (the "
                 "default when prefix caching is enabled) or 'none'.")
 
+        # In align mode without prefix caching, TPUHybridKVCacheCoordinator is
+        # not installed (it requires enable_prefix_caching=True), so vLLM's
+        # scheduler would allocate mamba block ids from the unified attention
+        # pool while the TPU runner sized a smaller compact mamba pool — any
+        # block id past the mamba pool size would then be silently clamped to
+        # the last slot and corrupt concurrent requests' recurrent state.
+        if (cache_config and getattr(cache_config, "mamba_cache_mode", "none")
+                == "align" and getattr(cache_config, "enable_prefix_caching",
+                                       False) is not True):
+            logger.warning(
+                "[tpu_platform] Ignoring mamba_cache_mode='align' because "
+                "enable_prefix_caching is disabled; normalizing to "
+                "mamba_cache_mode='none'.")
+            set_mamba_prefix_caching(cache_config, False)
+            if (getattr(cache_config, "mamba_block_size", None) is not None
+                    and not getattr(cache_config,
+                                    "user_specified_mamba_block_size", False)):
+                cache_config.mamba_block_size = (
+                    vllm_config.model_config.max_model_len)
+
         # Hybrid (mamba/linear-attention) models cannot use prefix caching with
         # speculative decoding because verify windows need consecutive state slots.
         if mamba_prefix_caching_enabled(cache_config,
