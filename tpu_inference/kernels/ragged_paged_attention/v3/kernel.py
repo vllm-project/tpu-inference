@@ -1505,10 +1505,15 @@ def get_default_block_sizes(
     pages_per_seq,
     *,
     case: RpaCase = RpaCase.MIXED,
+    sliding_window: int | None = None,
 ):
     """Get (bq, bkv_sz, bq_csz, bkv_csz) by some heuristic formulas.
 
     Note the default block sizes are not necessarily optimal.
+
+    sliding_window only affects the DECODE case: the kv block is capped at the
+    page-aligned window so the kernel's skip of blocks before the window has
+    blocks to skip. See the comment before the return below.
     """
     tpu_version = get_tpu_version()
 
@@ -1551,6 +1556,18 @@ def get_default_block_sizes(
                 bkv_csz = min(512, align_to(max_kv // 2, page_size))
         case _:
             raise NotImplementedError(f"Unsupported {tpu_version=}.")
+
+    if sliding_window is not None and case == RpaCase.DECODE:
+        # The kernel skips the kv blocks that lie entirely before the window
+        # (cur_seq_start_bkv_idx), so the skip is only as fine as bkv_sz. The
+        # DECODE size above targets 16 MiB per block and is usually larger than
+        # max_kv, i.e. the whole context is one block and nothing is skipped
+        # (#2103). Cap the block at the window so a sequence reads at most two
+        # blocks. Full attention keeps the large block: a small block only adds
+        # per-block overhead when there is nothing to skip.
+        bkv_cap = align_to(sliding_window, page_size)
+        bkv_sz = min(bkv_sz, bkv_cap)
+        bkv_csz = min(bkv_csz, bkv_cap)
 
     return {
         "bq_sz": max(1, bq_sz),
@@ -1894,6 +1911,7 @@ def ragged_paged_attention(
                 max_num_seqs,
                 pages_per_seq,
                 case=case,
+                sliding_window=sliding_window,
             )
         return {
             "bq_sz": block_sizes[0],
