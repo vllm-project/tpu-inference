@@ -331,16 +331,17 @@ def test_from_input_batch_with_logprobs(mesh: Mesh):
     )
     assert metadata_with.logprobs, "logprobs should be True when max_num_logprobs > 0"
 
-    # Case 2: Logprobs are not requested (max_num_logprobs is 0)
+    # Case 2: Only the sampled token's logprob is requested
+    # (max_num_logprobs is 0, e.g. logprobs=0)
     mock_batch_id_logprobs_zero = MockInputBatch(all_greedy=True,
                                                  max_num_logprobs=0)
-    metadata_without_zero = TPUSupportedSamplingMetadata.from_input_batch(
+    metadata_with_zero = TPUSupportedSamplingMetadata.from_input_batch(
         mesh=mesh,
         input_batch=mock_batch_id_logprobs_zero,
         padded_num_reqs=4,
         req_indices_dp=req_indices_dp,
     )
-    assert not metadata_without_zero.logprobs, "logprobs should be False when max_num_logprobs is 0"
+    assert metadata_with_zero.logprobs, "logprobs should be True when max_num_logprobs is 0"
 
     # Case 3: Logprobs are not requested (max_num_logprobs is None)
     mock_batch_id_logprobs_none = MockInputBatch(all_greedy=True,
@@ -379,3 +380,29 @@ def test_from_input_batch_sampling_with_logprobs(mesh: Mesh):
 
     assert metadata.do_sampling, "do_sampling should be True"
     assert metadata.logprobs, "logprobs should be True"
+
+
+def test_from_input_batch_sampling_with_zero_logprobs(mesh: Mesh):
+    """
+    Tests that logprobs=0 on a sampling batch still enables logprobs, so the
+    sampled token's logprob is returned.
+    """
+    num_reqs = 2
+    padded_num_reqs = 4
+    mock_batch = MockInputBatch(
+        all_greedy=False,
+        num_reqs=num_reqs,
+        temperature_cpu=np.full((padded_num_reqs, ), 0.7, dtype=np.float32),
+        top_k_cpu=np.zeros((padded_num_reqs, ), dtype=np.int32),
+        top_p_cpu=np.ones((padded_num_reqs, ), dtype=np.float32),
+        max_num_logprobs=0,
+    )
+
+    metadata = TPUSupportedSamplingMetadata.from_input_batch(
+        mesh=mesh,
+        input_batch=mock_batch,
+        padded_num_reqs=padded_num_reqs,
+        req_indices_dp={0: [0, 1]})
+
+    assert metadata.do_sampling, "do_sampling should be True"
+    assert metadata.logprobs, "logprobs should be True when max_num_logprobs is 0"
