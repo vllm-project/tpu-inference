@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, cast
 
 import jax
-import jax.numpy as jnp
 import numpy as np
 import torch
 from vllm.lora.request import LoRARequest
@@ -156,7 +155,6 @@ class InputBatch:
         self.has_allowed_token_ids: set[str] = set()
         # NOTE(lufang): In the mask tensor, if the corresponding token allowed,
         # the value is False. Since we use masked_fill_ to set -inf.
-        self.allowed_token_ids_mask: Optional[jax.Array] = None
         self.allowed_token_ids_mask_cpu: Optional[jax.Array] = None
 
         # req_index -> bad_words_token_ids
@@ -467,11 +465,8 @@ class InputBatch:
                 if self.allowed_token_ids_mask_cpu is None:
                     # Lazy allocation for this tensor, which can be large.
                     # False means we don't fill with -inf.
-                    self.allowed_token_ids_mask = jnp.zeros(self.max_num_reqs,
-                                                            self.vocab_size,
-                                                            dtype=jnp.bool)
                     self.allowed_token_ids_mask_cpu = np.zeros(
-                        self.max_num_reqs, self.vocab_size, dtype=np.bool)
+                        (self.max_num_reqs, self.vocab_size), dtype=np.bool)
                 self.allowed_token_ids_mask_cpu[req_index] = True
                 # False means we don't fill with -inf.
                 self.allowed_token_ids_mask_cpu[req_index][
@@ -558,7 +553,7 @@ class InputBatch:
         self.has_allowed_token_ids.discard(req_id)
         if self.allowed_token_ids_mask_cpu is not None:
             # False means we don't fill with -inf.
-            self.allowed_token_ids_mask_cpu[req_index].fill_(False)
+            self.allowed_token_ids_mask_cpu[req_index].fill(False)
         self.bad_words_token_ids.pop(req_index, None)
         return req_index
 
@@ -602,10 +597,9 @@ class InputBatch:
             self.logit_bias[i2], self.logit_bias[i1]
 
         if self.allowed_token_ids_mask_cpu is not None:
-            self.allowed_token_ids_mask_cpu[i1], \
-                self.allowed_token_ids_mask_cpu[i2] =\
-                self.allowed_token_ids_mask_cpu[i2], \
-                    self.allowed_token_ids_mask_cpu[i1]
+            # Fancy indexing copies; a tuple swap of row views would not.
+            self.allowed_token_ids_mask_cpu[[i1, i2]] = \
+                self.allowed_token_ids_mask_cpu[[i2, i1]]
         self.block_table.swap_row(i1, i2)
         # The mamba state slot id is per-request and must follow the swap.
         self.mamba_state_indices_cpu[i1], self.mamba_state_indices_cpu[i2] = (
