@@ -1698,6 +1698,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             for req_id in self.input_batch.req_ids[:num_reqs]
         ],
                                         dtype=np.int32)
+        # This step's seq_lens: the same values _prepare_inputs writes. Use
+        # these rather than a new device_buffer view, which would lie past
+        # the built layout and hold zeros or stale data.
+        seq_lens = (self.input_batch.num_computed_tokens_cpu[:num_reqs] +
+                    num_scheduled_tokens)
 
         if getattr(self.pooler_fn, "pools_device_logits", False):
             if logits_indices_selector is not None:
@@ -1710,18 +1715,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 logits = self.compute_logits_fn(self.state_leaves, rows)
             outputs = self.pooler_fn(logits, pooling_metadata)
             # Complete only requests whose full prompt has been processed
-            # (chunked prefill). The buffer's seq_lens view is not the
-            # region written by _prepare_inputs.
-            completed = (self.input_batch.num_computed_tokens_cpu[:num_reqs] +
-                         num_scheduled_tokens
-                         >= self.input_batch.num_prompt_tokens[:num_reqs])
+            # (chunked prefill).
+            prompt_lens = self.input_batch.num_prompt_tokens[:num_reqs]
+            completed = seq_lens >= prompt_lens
             pooler_output = [
                 out if done else None for out, done in zip(outputs, completed)
             ]
         else:
-            seq_lens_view = self.device_buffer.get_view((self.max_num_reqs, ),
-                                                        key="seq_lens")
-            seq_lens = seq_lens_view[:num_reqs]
             # Call the pooler with the decoupled interface
             pooler_output = self.pooler_fn(
                 hidden_states,
