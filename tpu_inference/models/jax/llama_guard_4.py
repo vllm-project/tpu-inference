@@ -254,7 +254,7 @@ class LlamaGuard4WeightLoader(BaseWeightLoader):
                 layer_name = ".".join([str(s) for s in path])
                 self.pp_missing_layers.append(layer_name)
 
-        with jax.default_device(jax.devices("cpu")[0]):
+        with jax.default_device(jax.local_devices(backend="cpu")[0]):
             for loaded_name, loaded_weight in self.get_weights_iterator():
                 if self.is_runai_streamer:
                     if torchax is not None:
